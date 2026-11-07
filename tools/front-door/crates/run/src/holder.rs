@@ -37,6 +37,9 @@ pub struct RootSeed {
 pub struct HostLaunchContext {
     pub configuration_root: PathBuf,
     pub cwd: PathBuf,
+    /// Host-owned graph origin, independent of the provider's selected checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_directory: Option<PathBuf>,
     pub executables: std::collections::BTreeMap<String, PathBuf>,
     /// Original host search directories for providers unavailable during handoff.
     #[serde(default)]
@@ -69,6 +72,7 @@ impl HostLaunchContext {
         Self {
             configuration_root: configuration_root.into(),
             cwd: cwd.into(),
+            graph_directory: None,
             executables: Default::default(),
             executable_search_path: std::env::var_os("PATH")
                 .map(|path| {
@@ -2488,6 +2492,7 @@ mod disk_admission_tests {
             attempt_id: AttemptId::from_bytes([4; 16]),
             host_delivery: None,
             launch: Some(HostLaunchContext {
+                graph_directory: None,
                 configuration_root: temp.path().into(),
                 cwd: temp.path().into(),
                 executables: Default::default(),

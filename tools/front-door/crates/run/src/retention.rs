@@ -230,7 +230,48 @@ impl RunStore {
                 let continuing: bool = self.db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
                     [&id], |row| row.get(0))?;
-                let reservations = self.writer_registry.join("worktrees").join(project);
+                // Host retention spans attribution projects. Verify the sealed
+                // request against its own indexed run before following a writer's
+                // persisted source-project custody namespace.
+                let custody_project =
+                    match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)?
+                    {
+                        Some(raw) => {
+                            let indexed: Vec<u8> = self.db.query_row(
+                                "SELECT record FROM runs WHERE id=?1 AND project=?2",
+                                rusqlite::params![
+                                    record.run_id.to_string(),
+                                    record.project_id.to_string()
+                                ],
+                                |row| row.get(0),
+                            )?;
+                            let indexed: RunRecord = crate::db::decode(&indexed)?;
+                            let digest =
+                                provenant_records::stored_record_digest("run-request", 1, &raw)?;
+                            if indexed.run_id != record.run_id
+                                || indexed.project_id != record.project_id
+                                || indexed.request_digest != digest
+                            {
+                                return Err(RunError::Validation("retention request identity"));
+                            }
+                            let request: CanonicalRequest = crate::db::decode(&raw)?;
+                            request
+                                .tasks
+                                .iter()
+                                .find(|task| task.task_id == record.task_id)
+                                .and_then(|task| task.writer.as_ref())
+                                .map(|writer| {
+                                    crate::writer::writer_project_id(writer, record.project_id)
+                                })
+                                .transpose()?
+                                .unwrap_or(record.project_id)
+                        }
+                        None => return Err(RunError::Validation("retention request unavailable")),
+                    };
+                let reservations = self
+                    .writer_registry
+                    .join("worktrees")
+                    .join(custody_project.to_string());
                 match Directory::open_anchor(&reservations) {
                     Ok(directory) => {
                         let listing =

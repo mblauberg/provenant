@@ -1,6 +1,6 @@
 //! Version-one command transport facts, shared by CLI and MCP edges.
-use serde::Serialize;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Ok,
@@ -18,7 +18,7 @@ pub enum Outcome {
     /// not a failure: the caller polls or waits again.
     Waiting,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandError {
     pub code: String,
     pub message: String,
@@ -42,7 +42,7 @@ impl Outcome {
         Self::Waiting,
     ];
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResult<T> {
     pub schema_version: u64,
     pub command: String,

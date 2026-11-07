@@ -1082,6 +1082,28 @@ fn read_output(
     attempt: AttemptId,
     peer: Peer,
 ) -> Result<(Value, String), Fail> {
+    let window = Window::new(Duration::from_secs(30));
+    read_output_with(command, host, attempt, |input| {
+        match peer.call_within(
+            host,
+            PeerAction::Output {
+                extra: Default::default(),
+                input,
+            },
+            window.next()?,
+        )? {
+            PeerResult::Output { data, .. } => Ok(data),
+            _ => Err(corrupt()),
+        }
+    })
+}
+
+pub(super) fn read_output_with(
+    command: &Output,
+    host: HostId,
+    attempt: AttemptId,
+    mut read: impl FnMut(OutputInput) -> Result<OutputResult, Fail>,
+) -> Result<(Value, String), Fail> {
     if command.path {
         return Err(unsupported("--path"));
     }
@@ -1096,7 +1118,7 @@ fn read_output(
     if command.trace {
         return Err(unsupported("--trace"));
     }
-    let input = OutputInput::Read {
+    let chunk = read(OutputInput::Read {
         extra: Default::default(),
         target: AttemptTarget {
             extra: Default::default(),
@@ -1106,22 +1128,7 @@ fn read_output(
         part,
         offset: command.offset,
         max_bytes: command.max_bytes,
-    };
-    let window = Window::new(Duration::from_secs(30));
-    let PeerResult::Output {
-        data: chunk,
-        extra: _,
-    } = peer.call_within(
-        host,
-        PeerAction::Output {
-            extra: Default::default(),
-            input,
-        },
-        window.next()?,
-    )?
-    else {
-        return Err(corrupt());
-    };
+    })?;
     let fallback = match &chunk {
         OutputResult::Chunk { extra, .. } if matches!(command.part, Part::Result) => extra
             .get(super::output::PLANNER_FALLBACK_KEY)
@@ -1142,20 +1149,7 @@ fn read_output(
                 offset,
                 max_bytes: command.max_bytes,
             };
-            match peer.call_within(
-                host,
-                PeerAction::Output {
-                    extra: Default::default(),
-                    input,
-                },
-                window.next()?,
-            )? {
-                PeerResult::Output {
-                    data: chunk,
-                    extra: _,
-                } => Ok(chunk),
-                _ => Err(corrupt()),
-            }
+            read(input)
         })?
     } else {
         chunk

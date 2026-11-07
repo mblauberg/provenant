@@ -893,6 +893,13 @@ pub(crate) fn valid_identifier(value: &str) -> bool {
 /// Why a node's attempt spec cannot launch through the graph, if it cannot.
 /// Worktree creation is owned by the graph, not an individual attempt.
 fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
+    if spec.directory.as_ref().is_some_and(|directory| {
+        directory.len() > 4096
+            || directory.contains('\0')
+            || !std::path::Path::new(directory).is_absolute()
+    }) {
+        return Some("invalid attempt directory");
+    }
     if let Some(new) = &spec.new_worktree {
         if node.access != AccessMode::WorktreeWrite {
             return Some("new worktree requires a writer");

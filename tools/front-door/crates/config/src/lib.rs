@@ -60,8 +60,8 @@ pub use migrate::{MigrateReport, Migration, migrate};
 pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
-    lookup_project, registered_gc_project_selection, registered_gc_projects, registered_projects,
-    transient_location,
+    lookup_project, lookup_project_at_state, registered_gc_project_selection,
+    registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
 pub use schema::{Layer, Schema, SchemaField, apply_patch, schema};

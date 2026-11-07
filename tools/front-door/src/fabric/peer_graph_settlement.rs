@@ -674,7 +674,8 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
         graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
     }
     fixture.settled.launch = Some(provenant_run::HostLaunchContext {
-        configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+        graph_directory: None,
+            configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
         executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
         cargo_build_jobs: None, fixture_state_write: false,
     });
@@ -746,7 +747,8 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
     assert!(!reads.is_empty());
     assert!(reads.iter().all(|id| id == "owner"), "{reads:?}");
     fixture.settled.launch = Some(provenant_run::HostLaunchContext {
-        configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+        graph_directory: None,
+            configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
         executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
         cargo_build_jobs: None, fixture_state_write: false,
     });
@@ -798,6 +800,7 @@ fn incorrect_graph_hints_defer_owning_graph_to_tick() -> Result<(), Box<dyn std:
             if id == "wrong" { run.checkpoint.nodes[0].state = graph::NodeState::Succeeded; journal.save(&run.checkpoint)?; }
         }
         fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            graph_directory: None,
             configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
             executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
             cargo_build_jobs: None, fixture_state_write: false,

@@ -1302,19 +1302,36 @@ input. The set is fixed at entry and excludes the caller and its ancestors.
 
 ## Nested submission
 
-Nested submission uses a dedicated store under the submitting attempt,
-selected by `PROVENANT_RUN_STATE_DIR`; identity and config stay on the
-original root. The host launches only accepted operations, under the rules
-in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
-Claude and Codex lanes expose the host-selected `provenant` on their private
-`PATH`. Its launcher pins the original home, configuration root, child Run
-store and parent attempt context even when a provider scrubs shell variables.
-A lane can submit `provenant run --mode read-only` and read its child's
-`provenant output` through the existing child-store grants.
-- Why: a lane must not reach the parent's database or other runs.
-- Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`
-- Test: `crates/providers/src/lane.rs::tests::lane_path_pins_provenant_and_child_context_after_shell_scrubbing`
-- Owner: `crates/run/src/plan.rs`
+A lane's `run` adds a child to its host-owned graph through the attempt-bound
+relay. Children share graph budget, cancellation and trace; attached live
+children are cancelled when the parent settles. Use `--wait` to collect them
+before exiting, or explicitly detach work that should outlive its parent.
+
+`status`, `output` and `output --trace` inside a lane use the same relay. The
+host resolves the caller from its custody-bound attempt, accepts only targets
+in that graph, and invokes the ordinary readers. With no target, `status`
+selects the caller's graph. Node and attempt selectors from child launch
+receipts work without journal or credential grants in the lane. Output ranges
+remain bounded; `--to` writes returned bytes in the lane. `--path` cannot grant
+access to a host artefact and is refused with a content-reading remedy.
+
+A child can select another project with `--project`, including a writer in
+that project's registered worktree. The graph retains parent attribution while
+writer locks, retained import fences and recovery use the selected project's
+custody namespace. A host-owned `writer-projects/<parent>/<source>/` reference
+lets recovery inspect those exact namespaces without scanning unrelated projects.
+Legacy records retain their original custody namespace. Changing provider cwd
+never changes which graph its attempt-bound relay serves.
+
+The host preserves typed admission causes in refusals so the caller can repair
+its launch request. Credential roots, state roots and overlapping worktree
+write roots retain the ordinary launch protections.
+- Why: any agent must be able to launch children and collect their results and
+  failure causes without gaining direct access to host journals or credentials.
+- Test: `crates/fabric-runtime/src/graph/relay_tests.rs`;
+  `src/fabric/lane_read_tests.rs`;
+  `src/fabric/interface.rs::tests::explicit_writer_children_use_their_selected_project_custody`
+- Owner: `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/unified.rs`
 
 ## Not provided
 

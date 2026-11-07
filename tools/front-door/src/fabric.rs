@@ -3,10 +3,12 @@ mod graph_human;
 mod graph_inputs;
 mod graph_status;
 mod interface;
+#[cfg(test)]
+mod lane_read_tests;
 mod unified;
 pub(crate) use unified::{
-    GraphCommand, append_graph_status, read_status_rows, target_text, unified_graph_command,
-    unified_graph_output, unified_graph_steer, unified_graph_trace,
+    GraphCommand, append_graph_status, read_lane_graph, read_status_rows, target_text,
+    unified_graph_command, unified_graph_output, unified_graph_steer, unified_graph_trace,
 };
 mod graph_document;
 pub(crate) mod landing;

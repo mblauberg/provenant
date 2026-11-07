@@ -51,8 +51,9 @@ verification also uses the host because it requires an OS lock.
 Relay frames obey configured input byte/depth limits, absolute I/O deadlines
 and cancellation. After admission the caller confirms its remaining budget
 before the host executes; an abandoned queued request cannot mutate later.
-The relay excludes landing mutations, inbox writes, chair writes, graphs and
-execution. CLI coordination mutations, including `fabric ... send`, still refuse inside lanes. Peer ingress
+Graph frames also admit children and read the calling attempt's graph through
+host-owned services; the lane never opens graph journals. The relay excludes
+landing mutations, inbox writes and chair writes. CLI coordination mutations, including `fabric ... send`, still refuse inside lanes. Peer ingress
 and `peer-agent` remain unavailable to lanes. The socket is removed on normal
 teardown; on restart, a stale socket directory is removed only if it is a real directory owned by the current user with mode 0700.
 - Why: a lane must not forge records that the host or another agent trusts.

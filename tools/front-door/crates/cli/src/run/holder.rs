@@ -92,11 +92,21 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
 
 pub(crate) type GraphWake = dyn Fn(&run::HolderContext, &str) -> Result<(), String> + Send + Sync;
 
+pub(crate) type GraphRead = dyn Fn(
+        &run::HolderContext,
+        serde_json::Value,
+        &provenant_core::CancelToken,
+        std::time::Duration,
+    ) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>
+    + Send
+    + Sync;
+
 /// Wrap Run's holder without moving provider launch into Fabric or supervisor.
 /// Graph submissions use the host relay while the guardian drains output.
 pub struct HostHolder<'a> {
     inner: &'a dyn Holder,
     graph_wake: Option<Arc<GraphWake>>,
+    graph_read: Option<Arc<GraphRead>>,
     stdout_frames: QuotaFrames,
     stderr_frames: QuotaFrames,
     fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
@@ -108,6 +118,7 @@ impl<'a> HostHolder<'a> {
         Self {
             inner,
             graph_wake: None,
+            graph_read: None,
             stdout_frames: QuotaFrames {
                 evidence: evidence.clone(),
                 ..Default::default()
@@ -127,6 +138,22 @@ impl<'a> HostHolder<'a> {
         wake: impl Fn(&run::HolderContext, &str) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         self.graph_wake = Some(Arc::new(wake));
+        self
+    }
+    /// Supply the composition edge's ordinary graph readers to the host relay.
+    pub fn with_graph_read(
+        mut self,
+        read: impl Fn(
+            &run::HolderContext,
+            serde_json::Value,
+            &provenant_core::CancelToken,
+            std::time::Duration,
+        ) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.graph_read = Some(Arc::new(read));
         self
     }
     /// Live stdout lifecycle evidence, bound during admission before spawn.
@@ -207,7 +234,8 @@ impl Holder for HostHolder<'_> {
             );
             inputs.state_dir = Some(launch.configuration_root.clone());
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let ctx = crate::fabric::Context::open(roots, &context.roots.home, &launch.cwd)?;
+            let directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
+            let ctx = crate::fabric::Context::open(roots, &context.roots.home, directory)?;
             if ctx.identity.project != context.project_id {
                 return Err("Fabric custody project mismatch".into());
             }
@@ -278,8 +306,12 @@ impl Holder for HostHolder<'_> {
             .fabric_relay
             .lock()
             .map_err(|_| custody::CustodyError::InvalidRecord)? = Some(
-            provider::start_fabric_relay(&context, self.graph_wake.clone())
-                .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?,
+            provider::start_fabric_relay(
+                &context,
+                self.graph_wake.clone(),
+                self.graph_read.clone(),
+            )
+            .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?,
         );
         Ok(())
     }

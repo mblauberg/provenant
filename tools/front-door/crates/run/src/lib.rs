@@ -67,8 +67,8 @@ pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,
 };
 pub use writer::{
-    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, prepare_writer_with_facts,
-    resolve_reader_source, resolve_writer, resolve_writer_proposal,
+    LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer, prepare_writer,
+    prepare_writer_with_facts, resolve_reader_source, resolve_writer, resolve_writer_proposal,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
