@@ -64,6 +64,7 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
+        git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
         terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
         host: String => string();
@@ -170,6 +171,8 @@ pub struct LaneProjectionFacts {
     pub cache_read_share: Option<f64>,
     pub provider_seconds: Option<f64>,
     pub host: Option<String>,
+    pub git_import_head: Option<String>,
+    pub retained_git_objects: Option<crate::StructuredPathWire>,
 }
 
 fn project_route(route: Option<&crate::run::RouteRecord>) -> Value {
@@ -215,7 +218,7 @@ impl LaneRow {
             .cloud_observation
             .0
             .map(|cloud| cloud.state().to_owned());
-        let state = cloud_state.clone().unwrap_or(state);
+        let mut state = cloud_state.clone().unwrap_or(state);
         // Settlement reasons are closed, locally recorded facts, unlike the
         // terminal state's free text, which can contain provider output.
         if let Some(reason) = lane.settlement_reason
@@ -260,6 +263,37 @@ impl LaneRow {
                 "the lane outcome is uncertain; inspect status for operation {} before retrying",
                 lane.operation_id
             ));
+        }
+        let git_import_failure =
+            lane.settlement_receipts
+                .as_ref()
+                .and_then(|receipts| match &receipts.git_import {
+                    crate::run::EffectDisposition::Failed {
+                        reason,
+                        retryable: false,
+                    } if matches!(lane.state, AttemptState::Terminal { .. }) => Some(reason),
+                    _ => None,
+                });
+        if let Some(reason) = git_import_failure {
+            state = "failed".into();
+            let mut detail = format!(
+                "lane Git import failed: {}; the lane's commits may not have reached its branch",
+                crate::diagnostic::safe_text(reason)
+            );
+            if let Some(head) = &facts.git_import_head {
+                detail.push_str(&format!("; head commit {head}"));
+            }
+            if let Some(objects) = facts
+                .retained_git_objects
+                .as_ref()
+                .and_then(|path| path.to_path_buf().ok())
+            {
+                detail.push_str(&format!(
+                    "; retained objects at {}",
+                    crate::diagnostic::safe_text(&objects.display().to_string())
+                ));
+            }
+            terminal_reason = Some(detail);
         }
         let (exit_code, finished_at) = match &lane.state {
             AttemptState::Terminal {
@@ -333,12 +367,27 @@ impl LaneRow {
                 .superseded_by
                 .or(lane.superseded_by)
                 .map(|id| id.to_string()),
-            cause: lane.settlement_reason,
-            terminal_cause: match &lane.state {
-                AttemptState::Terminal { extra, .. } => extra
-                    .get("terminal_cause")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                _ => None,
+            git_import_failure: git_import_failure.map(|reason| {
+                json!({
+                    "reason": crate::diagnostic::safe_text(reason),
+                    "head": facts.git_import_head,
+                    "retained_objects": facts.retained_git_objects,
+                })
+            }),
+            cause: if git_import_failure.is_some() {
+                Some(crate::run::SettlementReason::Failed)
+            } else {
+                lane.settlement_reason
+            },
+            terminal_cause: if git_import_failure.is_some() {
+                Some(crate::run::TerminalCause::SettlementFailure)
+            } else {
+                match &lane.state {
+                    AttemptState::Terminal { extra, .. } => extra
+                        .get("terminal_cause")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                    _ => None,
+                }
             },
             state,
             exit_code,

@@ -149,7 +149,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 )
                 .1
             } else {
-                compact_status(&rows, &waits, now)
+                compact_status(&rows, &waits, now, session.context.state_root.as_path())
             };
 
             let (mut data, _) = render_lanes(
@@ -654,6 +654,7 @@ pub(super) struct LaneLine {
     reason: String,
     provider_error: Option<String>,
     result_path: Option<String>,
+    git_import_failure: Option<String>,
 }
 
 /// Needs action (0), still moving (1), or finished well (2).
@@ -725,6 +726,11 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
     let mut summary = crate::Summary::new(headline, rows, next);
     for lane in listed.iter().take(crate::limits::SUMMARY_ROWS) {
         if lane.state == "failed" {
+            if let Some(reason) = &lane.git_import_failure {
+                summary
+                    .lines
+                    .push(format!("  {}", plain_text(reason, usize::MAX)));
+            }
             if let Some(error) = &lane.provider_error {
                 summary.lines.push(format!(
                     "  provider error {}: {}",
@@ -781,6 +787,10 @@ pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             }),
                         provider_error: row["provider_error"].as_str().map(str::to_owned),
                         result_path: structured_path_text(&row["result_path"]),
+                        git_import_failure: row
+                            .get("git_import_failure")
+                            .and_then(|_| row["reason"].as_str())
+                            .map(str::to_owned),
                     })
                 })
                 .collect()
@@ -813,6 +823,7 @@ pub(super) fn compact_status(
     rows: &[run::AttemptRecord],
     waits: &[run::LaneWait],
     now: WallTime,
+    root: &Path,
 ) -> String {
     if rows.is_empty() {
         return "no lanes\n".into();
@@ -820,8 +831,21 @@ pub(super) fn compact_status(
     rows.iter()
         .map(|lane| {
             let id = lane.attempt_id.to_string();
-            let (_, reason) = provenant_records::wire::LaneRow::state_and_label(&lane.state);
-            let state = lane_display_state(lane);
+            let (_, mut reason) = provenant_records::wire::LaneRow::state_and_label(&lane.state);
+            let mut state = lane_display_state(lane);
+            if lane.settlement_receipts.as_ref().is_some_and(|receipts| {
+                matches!(
+                    receipts.git_import,
+                    run::EffectDisposition::Failed {
+                        retryable: false,
+                        ..
+                    }
+                )
+            }) {
+                let projected = project_lane(lane, waits, root, Some(now), true);
+                state = projected.state;
+                reason = projected.reason;
+            }
             let model = lane
                 .applied_route
                 .as_ref()
@@ -1069,10 +1093,30 @@ pub fn project_lane(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
+    let retained = (observe_host
+        && lane.settlement_receipts.as_ref().is_some_and(|receipts| {
+            matches!(
+                receipts.git_import,
+                run::EffectDisposition::Failed {
+                    retryable: false,
+                    ..
+                }
+            )
+        }))
+    .then(|| run::retained_git(root, lane).ok())
+    .flatten();
     let mut projected = provenant_records::wire::LaneRow::project(
         lane,
         provenant_records::wire::LaneProjectionFacts {
             superseded_by: lane.superseded_by,
+            git_import_head: retained
+                .as_ref()
+                .and_then(|git| git.head)
+                .or(lane.head)
+                .map(|head| head.to_string()),
+            retained_git_objects: retained
+                .and_then(|git| git.objects)
+                .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             waiting_for,
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
@@ -1137,7 +1181,9 @@ pub(super) fn render_lanes_with_view(
             let route_text = plain_text(&route, usize::MAX);
             let full = state_and_reason(&lane.state).1;
             let label = provenant_records::wire::LaneRow::state_and_label(&lane.state).1;
-            let reason = if label != full {
+            let reason = if projected.git_import_failure.is_some() {
+                projected.reason.clone()
+            } else if label != full {
                 label
             } else {
                 projected.reason.clone()

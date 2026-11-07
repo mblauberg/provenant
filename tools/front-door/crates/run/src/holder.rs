@@ -338,6 +338,30 @@ pub(crate) fn object_import_refused(
     Ok(Some(refusal.reason))
 }
 
+/// Recovery coordinates for a lane whose Git import failed. The objects stay
+/// private: their presence is not a certificate that they can be published.
+pub struct RetainedGit {
+    pub head: Option<provenant_core::GitOid>,
+    pub objects: Option<PathBuf>,
+}
+
+/// Read retained recovery coordinates without attempting Git import or cleanup.
+pub fn retained_git(root: &std::path::Path, record: &AttemptRecord) -> Result<RetainedGit> {
+    let attempt = Directory::open_anchor(&root.join(format!(
+        "runs/{}/attempts/{}",
+        record.run_id, record.attempt_id
+    )))?;
+    let head = crate::settlement::pinned_head(&attempt, RunStore::scope(record))
+        .ok()
+        .flatten()
+        .or(record.head);
+    let objects = crate::objects::bound_source(&attempt)
+        .ok()
+        .flatten()
+        .and_then(|source| source.objects.current_path().ok());
+    Ok(RetainedGit { head, objects })
+}
+
 impl provenant_supervisor::Holder for RunHolder<'_> {
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
         let (context, store) =
@@ -506,6 +530,7 @@ impl RunStore {
         recovery
             .prepare_settlement()
             .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        self.settle_failed_import(&self.record(id, call)?, attempt, &recovery, call)?;
         let finished = self.finish_in_custody(
             id,
             attempt,
@@ -647,7 +672,8 @@ impl RunStore {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = call(&clock, &cancel)?;
-        if !self.import_release_permitted(&self.record(recovery.scope().attempt, &call)?, &call)? {
+        let record = self.record(recovery.scope().attempt, &call)?;
+        if !self.import_release_permitted(&record, &call)? {
             return Err(RunError::Validation("writer import remains unresolved"));
         }
         if object_import_refused(attempt, recovery.scope())?.is_some() {
@@ -657,9 +683,19 @@ impl RunStore {
                 .verify_settlement(attempt)
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
             crate::settlement::complete(attempt, recovery.scope())?;
-            return recovery
+            let id = recovery.scope().attempt;
+            recovery
                 .release_preserving_private(commit)
-                .map_err(|error| RunError::Io(std::io::Error::other(error)));
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+            self.record_effect(
+                id,
+                record.generation,
+                SettlementEffect::CleanupCustodyRelease,
+                EffectDisposition::Done,
+                &call,
+            )?;
+            // The preserved private Git is evidence, not temporary cleanup debt.
+            return self.set_temporary_retained(id, false, &call);
         }
         crate::settlement::complete(attempt, recovery.scope())?;
         crate::writer::settle_launch_staging(attempt)?;
@@ -801,6 +837,79 @@ impl RunStore {
         })
     }
 
+    /// Reconcile a failed import as a final failure once custody proves that
+    /// the guardian is gone. Never rewrite its sealed terminal decision.
+    pub(crate) fn settle_failed_import(
+        &self,
+        record: &AttemptRecord,
+        attempt: &Directory,
+        recovery: &custody::Recovery,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let Some(receipts) = &record.settlement_receipts else {
+            return Ok(());
+        };
+        let EffectDisposition::Failed { reason, retryable } = &receipts.git_import else {
+            return Ok(());
+        };
+        if !retryable && object_import_refused(attempt, Self::scope(record))?.is_none() {
+            return Ok(());
+        }
+        if recovery.scope() != Self::scope(record)
+            || recovery.observe() != custody::RecoveryState::Absent
+        {
+            return Err(RunError::Validation(
+                "failed import requires absent writer custody",
+            ));
+        }
+        // Exclude an active settlement driver even if it has dropped custody.
+        let _driver = attempt.try_lock(
+            std::ffi::OsStr::new("settlement-driver.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        self.refuse_pending_import(record, attempt, reason, call)?;
+        // Refusal finishes automatic settlement. Keep any distinct manifest or
+        // delivery failure as a final receipt, rather than retrying it forever.
+        let manifest = match &receipts.manifest_conflict {
+            EffectDisposition::Pending => EffectDisposition::Done,
+            EffectDisposition::Failed { reason, .. } => EffectDisposition::Failed {
+                reason: reason.clone(),
+                retryable: false,
+            },
+            disposition => disposition.clone(),
+        };
+        self.record_effect(
+            record.attempt_id,
+            record.generation,
+            SettlementEffect::ManifestConflict,
+            manifest,
+            call,
+        )?;
+        let delivery = match &receipts.delivery {
+            EffectDisposition::Pending => EffectDisposition::Failed {
+                reason: "delivery withheld because lane Git import failed".into(),
+                retryable: false,
+            },
+            EffectDisposition::Failed { reason, .. } => EffectDisposition::Failed {
+                reason: reason.clone(),
+                retryable: false,
+            },
+            EffectDisposition::Cancelled { reason, .. } => EffectDisposition::Cancelled {
+                reason: reason.clone(),
+                retryable: false,
+            },
+            disposition => disposition.clone(),
+        };
+        self.record_effect(
+            record.attempt_id,
+            record.generation,
+            SettlementEffect::Delivery,
+            delivery,
+            call,
+        )?;
+        Ok(())
+    }
+
     fn refuse_pending_import(
         &self,
         record: &AttemptRecord,
@@ -815,7 +924,9 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("pending import lacks writer"))?;
-        seal_import_refusal(attempt, Self::scope(record), &writer.worktree, reason)?;
+        let reason = object_import_refused(attempt, Self::scope(record))?
+            .unwrap_or_else(|| reason.to_owned());
+        seal_import_refusal(attempt, Self::scope(record), &writer.worktree, &reason)?;
         self.record_effect(
             record.attempt_id,
             record.generation,
@@ -860,7 +971,14 @@ impl RunStore {
         let Some(receipts) = current.settlement_receipts else {
             return Ok(());
         };
-        if !matches!(receipts.manifest_conflict, EffectDisposition::Done) {
+        if matches!(
+            receipts.manifest_conflict,
+            EffectDisposition::Pending
+                | EffectDisposition::Failed {
+                    retryable: true,
+                    ..
+                }
+        ) {
             let manifest = (|| -> Result<()> {
                 let archive =
                     crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
@@ -1513,7 +1631,8 @@ impl RunStore {
                             decoded.outcome,
                             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
                         ) {
-                            decoded.outcome = Outcome::Unsettled;
+                            decoded.outcome = Outcome::Failed;
+                            decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
                         }
                         let reason = match decoded.reason.take() {
                             Some(reason) => {
@@ -3456,6 +3575,12 @@ mod writer_recovery_tests {
     }
 
     #[test]
+    fn reconcile_settles_failed_import_once_and_keeps_evidence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["reconcile_failed", "reconcile_new", "reconcile_reboot"])
+    }
+
+    #[test]
     fn retained_import_excludes_writer_after_lock_release()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         settlement_fault_modes(&["release_boundary"])
@@ -3516,6 +3641,58 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
+            let retained_commit = if mode.starts_with("reconcile_") {
+                // Make a real commit that exists only in the lane's private objects.
+                let tree = crate::objects::command(
+                    &git,
+                    launch.worktree.repo().common_git_dir(),
+                    launch.worktree.path(),
+                    &[
+                        "rev-parse".into(),
+                        format!("{}^{{tree}}", launch.base).into(),
+                    ],
+                    None,
+                )?;
+                let tree = std::str::from_utf8(&tree)?.trim();
+                let raw = crate::objects::execute_bounded(
+                    &git,
+                    &candidate.join("git-common"),
+                    launch.worktree.path(),
+                    &[
+                        "-c".into(),
+                        "user.name=Fixture".into(),
+                        "-c".into(),
+                        "user.email=fixture@example.invalid".into(),
+                        "commit-tree".into(),
+                        tree.into(),
+                        "-p".into(),
+                        launch.base.to_string().into(),
+                        "-m".into(),
+                        "Retained lane commit".into(),
+                    ],
+                    None,
+                    crate::objects::Execution {
+                        object_directory: Some(&candidate.join("git-objects")),
+                        alternate_directory: Some(
+                            &launch.worktree.repo().common_git_dir().join("objects"),
+                        ),
+                        ..Default::default()
+                    },
+                )?;
+                let head = provenant_core::GitOid::parse(std::str::from_utf8(&raw)?.trim())?;
+                std::fs::write(
+                    candidate.join("git-common").join(launch.branch.as_str()),
+                    format!("{head}\n"),
+                )?;
+                let oid = head.to_string();
+                let path = candidate
+                    .join("git-objects")
+                    .join(&oid[..2])
+                    .join(&oid[2..]);
+                Some((head, path.clone(), std::fs::read(path)?))
+            } else {
+                None
+            };
             let mut published_head = None;
             if mode.starts_with("publish_") {
                 fixture.commit(&fixture.writer.worktree, "Lane head")?;
@@ -3586,10 +3763,53 @@ mod writer_recovery_tests {
                     RECORD_LIMIT,
                 )?;
             }
+            if mode == "reconcile_new" {
+                drop(recovery);
+                crate::writer::FAIL_IMPORT.with(|fault| fault.set(true));
+                let found = store.reconcile_with_observer(
+                    run.run_id,
+                    &providers,
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver,
+                );
+                crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
+                assert!(found?.contains(&(id, crate::Reconciled::Finished)));
+                assert!(
+                    matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
+                    EffectDisposition::Failed { retryable: false, ref reason }
+                    if reason.contains("injected Git import failure"))
+                );
+                assert!(store.writer_fences()?.is_empty());
+                let (_, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
+                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    launch.base
+                );
+                assert!(
+                    store
+                        .reconcile_with_observer(
+                            run.run_id,
+                            &providers,
+                            &call,
+                            &provenant_supervisor::census::SystemProcessObserver
+                        )?
+                        .is_empty()
+                );
+                continue;
+            }
             crate::writer::FAIL_IMPORT.with(|fault| {
                 fault.set(matches!(
                     mode,
-                    "normal" | "release_boundary" | "archived_fault"
+                    "normal"
+                        | "release_boundary"
+                        | "archived_fault"
+                        | "reconcile_failed"
+                        | "reconcile_reboot"
                 ))
             });
             let first = store.finish_in_custody(
@@ -3697,6 +3917,19 @@ mod writer_recovery_tests {
             let decision = read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
                 .ok_or("sealed decision")?;
             assert!(!store.writer_fences()?.is_empty());
+            if mode == "reconcile_failed" {
+                // A held custody lock must leave the receipt retryable.
+                store.reconcile_with_observer(
+                    run.run_id,
+                    &providers,
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver,
+                )?;
+                assert_eq!(
+                    store.record(id, &call)?.settlement_receipts,
+                    first.record.settlement_receipts
+                );
+            }
             assert!(
                 store.settle_recovered(&attempt, recovery).is_err(),
                 "unresolved import cannot release"
@@ -3733,6 +3966,138 @@ mod writer_recovery_tests {
                     .is_err(),
                 "retained reservation excludes competing writer"
             );
+            if matches!(mode, "reconcile_failed" | "reconcile_reboot") {
+                struct Reboot;
+                impl provenant_supervisor::census::ProcessObserver for Reboot {
+                    fn boot_identity(
+                        &self,
+                    ) -> std::result::Result<String, provenant_supervisor::census::CensusError>
+                    {
+                        Ok("darwin:11111111-1111-1111-1111-111111111111".into())
+                    }
+                    fn observe(&self, _: i64) -> provenant_supervisor::census::ProcessObservation {
+                        provenant_supervisor::census::ProcessObservation::Absent
+                    }
+                    fn census(
+                        &self,
+                        _: usize,
+                    ) -> std::result::Result<
+                        provenant_supervisor::census::Census,
+                        provenant_supervisor::census::CensusError,
+                    > {
+                        unreachable!("reboot proof needs only the boot identity")
+                    }
+                }
+                let observer: &dyn provenant_supervisor::census::ProcessObserver =
+                    if mode == "reconcile_reboot" {
+                        // A real bound reservation survives the failed import;
+                        // only its boot changes, as across a machine restart.
+                        let reservation = store
+                            .writer_fences()?
+                            .into_iter()
+                            .find(|fence| fence.scope == scope)
+                            .ok_or("retained fence")?
+                            .reservation;
+                        let mut value: serde_json::Value =
+                            serde_json::from_slice(&std::fs::read(&reservation)?)?;
+                        value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
+                        std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+                        &Reboot
+                    } else {
+                        &provenant_supervisor::census::SystemProcessObserver
+                    };
+                let sealed = read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?;
+                let result = read_sealed(&attempt, "result.md", RESULT_LIMIT)?;
+                let retained = std::fs::read(candidate.join("git-common/HEAD"))?;
+                drop(store);
+                let store = RunStore::open(&execution, &call)?;
+                let name = OsStr::new("settlement-progress.json");
+                let mut journal: serde_json::Value =
+                    crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
+                journal["retry_after_ms"] = 0.into();
+                attempt
+                    .atomic_write(
+                        name,
+                        ".retry-fixture-",
+                        &crate::db::bytes(&journal)?,
+                        provenant_os::fs::PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+                // Settle while the public queuing pass is still running. Its
+                // earlier error snapshot must disappear from the final report.
+                let found = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                    let found = store
+                        .reconcile_with_observer(run.run_id, &providers, &call, observer)
+                        .expect("recovery");
+                    assert!(
+                        found.contains(&(id, crate::Reconciled::Finished)),
+                        "{found:?}"
+                    );
+                    Ok(())
+                })?;
+                assert!(found.is_empty(), "{found:?}");
+                if mode == "reconcile_reboot" {
+                    let cleanup = crate::controls::REBOOT_TEMPORARY_CLEANUP
+                        .with(|result| result.borrow_mut().take());
+                    assert_eq!(cleanup, Some(Ok(None)));
+                }
+                assert!(
+                    matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
+                    EffectDisposition::Failed { retryable: false, ref reason }
+                    if reason.contains("injected Git import failure"))
+                );
+                assert!(store.writer_fences()?.is_empty());
+                assert_eq!(
+                    read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?,
+                    sealed
+                );
+                assert_eq!(std::fs::read(candidate.join("git-common/HEAD"))?, retained);
+                assert_eq!(read_sealed(&attempt, "result.md", RESULT_LIMIT)?, result);
+                let (head, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
+                let recovery_info =
+                    retained_git(execution.state_root.as_path(), &store.record(id, &call)?)?;
+                assert_eq!(recovery_info.head, Some(*head));
+                assert_eq!(recovery_info.objects, Some(candidate.join("git-objects")));
+                // Age well past ordinary collection; refused-import evidence stays.
+                store.gc_provider_state(
+                    &store.root,
+                    1,
+                    clock
+                        .wall_now()?
+                        .checked_add(provenant_core::DurationMicros::from_seconds(90 * 86_400)?)?,
+                    false,
+                    &call,
+                )?;
+                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    launch.base
+                );
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        &format!("refs/provenant/lane-base/{id}")
+                    )?,
+                    launch.base
+                );
+
+                assert!(
+                    store
+                        .reconcile_with_observer(
+                            run.run_id,
+                            &providers,
+                            &call,
+                            &provenant_supervisor::census::SystemProcessObserver,
+                        )?
+                        .is_empty()
+                );
+                continue;
+            }
             let mut advanced_tip = None;
             if let Some(head) = published_head {
                 let journal: serde_json::Value = crate::db::decode(
@@ -3782,16 +4147,30 @@ mod writer_recovery_tests {
                         &call,
                         &provenant_supervisor::census::SystemProcessObserver,
                     )?;
-                    let json = serde_json::to_value(&found)?;
                     assert!(
-                        json.to_string().contains("lane Git import failed"),
-                        "{json}"
+                        found.contains(&(id, crate::Reconciled::Finished)),
+                        "{found:?}"
                     );
-                    let journal: serde_json::Value =
-                        crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
+                    assert!(
+                        matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
+                        EffectDisposition::Failed { retryable: false, ref reason }
+                        if reason.contains("lane Git import failed"))
+                    );
+                    assert!(store.writer_fences()?.is_empty());
                     assert_eq!(
-                        journal["blocking_reason"],
-                        "invalid run record: lane Git import failed"
+                        read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+                        decision
+                    );
+                    assert!(candidate.join("git-common/HEAD").is_file());
+                    assert!(
+                        store
+                            .reconcile_with_observer(
+                                run.run_id,
+                                &providers,
+                                &call,
+                                &provenant_supervisor::census::SystemProcessObserver
+                            )?
+                            .is_empty()
                     );
                     continue;
                 }
@@ -4054,7 +4433,7 @@ mod writer_recovery_tests {
                 assert!(matches!(
                     finished.record.state,
                     AttemptState::Terminal {
-                        outcome: Outcome::Unsettled,
+                        outcome: Outcome::Failed,
                         ..
                     }
                 ));
@@ -4072,7 +4451,7 @@ mod writer_recovery_tests {
                 assert!(matches!(
                     finished.record.state,
                     AttemptState::Terminal {
-                        outcome: Outcome::Unsettled,
+                        outcome: Outcome::Failed,
                         ..
                     }
                 ));

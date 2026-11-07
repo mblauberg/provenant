@@ -1060,7 +1060,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
     use provenant_os::fs::{Directory, LockMode, PublishMode};
     use provenant_supervisor::custody::{self, Scope};
     use std::ffi::OsStr;
-    for import_done in [false, true] {
+    for (import_done, settle_failed) in [(false, true), (false, false), (true, false)] {
         let reason = if import_done {
             "r".repeat(4096)
         } else {
@@ -1199,7 +1199,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         ".test-",
                         &serde_json::to_vec(&json!({
                             "schema_version":1, "scope":scope, "phase":phase, "attempts":1,
-                            "head":null, "base":null, "owner":null, "blocking_reason":blocker
+                            "head": if settle_failed { Some("a".repeat(40)) } else { None }, "base":null, "owner":null, "blocking_reason":blocker
                         }))?,
                         PublishMode::Replace,
                     )?
@@ -1220,6 +1220,128 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     };
                     Ok(command)
                 };
+                if settle_failed {
+                    attempt.atomic_write(OsStr::new("launch.json"), ".test-",
+                        &serde_json::to_vec(&json!({"schema_version":1,"scope":scope,"requester":session.context.actor_id}))?,
+                        PublishMode::NoReplace)?.require_durable()?;
+                    std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-objects"))?;
+                    std::fs::write(
+                        attempt_path.join("tmp/candidate-0/git-objects/evidence"),
+                        b"retained objects",
+                    )?;
+                    attempt
+                        .atomic_write(
+                            OsStr::new("writer-objects.json"),
+                            ".test-",
+                            &serde_json::to_vec(
+                                &json!({"schema_version":1,"candidate":"candidate-0"}),
+                            )?,
+                            PublishMode::NoReplace,
+                        )?
+                        .require_durable()?;
+                    drop(recovery);
+                    let found = session.store.reconcile_for_fixture(
+                        input.run_id,
+                        &Registry::default(),
+                        &call,
+                    )?;
+                    let record = session.store.record(id, &call)?;
+                    assert!(
+                        matches!(record.settlement_receipts.unwrap().git_import,
+                        run::EffectDisposition::Failed { retryable: false, ref reason }
+                        if reason == blocker),
+                        "{found:?}"
+                    );
+                    for command in ["status", "output"] {
+                        let crate::ParseOutcome::Invocation(inv) = crate::parse(
+                            [command.to_owned(), id.to_string(), "--full".into()]
+                                .into_iter()
+                                .map(std::ffi::OsString::from),
+                        ) else {
+                            return Err("parse lane read".into());
+                        };
+                        let reply = match inv.command {
+                            crate::Command::Status(command) => status(command, true, edge),
+                            crate::Command::Output(command) => output(command, edge),
+                            _ => return Err("lane read command".into()),
+                        };
+                        assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
+                        let row = if command == "status" {
+                            &reply.result.data["rows"][0]
+                        } else {
+                            &reply.result.data
+                        };
+                        assert_eq!(row["state"], "failed");
+                        assert_eq!(row["git_import_failure"]["reason"], blocker);
+                        assert_eq!(row["git_import_failure"]["head"], "a".repeat(40));
+                        assert_eq!(
+                            row["git_import_failure"]["retained_objects"],
+                            json!(provenant_records::StructuredPathWire::from_path(
+                                &attempt_path.join("tmp/candidate-0/git-objects")
+                            )?)
+                        );
+                        let summary = reply
+                            .summary
+                            .as_ref()
+                            .map(|summary| summary.lines.join("\n"))
+                            .unwrap_or_default();
+                        let mut rendered = Vec::new();
+                        crate::render(
+                            &reply.result,
+                            inv.globals.render_mode(
+                                &reply.human,
+                                reply.read_only,
+                                reply.summary.as_ref(),
+                            ),
+                            &mut rendered,
+                        )?;
+                        let rendered = String::from_utf8(rendered)?;
+                        if command == "output" {
+                            assert_eq!(
+                                reply.result.data["bytes"]["data"],
+                                "retained provider evidence"
+                            );
+                        }
+                        for text in [&reply.human, &summary, &rendered] {
+                            assert!(
+                                text.contains("commits may not have reached its branch"),
+                                "{command}: {text}"
+                            );
+                            assert!(text.contains(&"a".repeat(40)), "{command}: {text}");
+                            assert!(text.contains("git-objects"), "{command}: {text}");
+                        }
+                    }
+                    assert_eq!(
+                        std::fs::read(attempt_path.join("tmp/candidate-0/git-objects/evidence"))?,
+                        b"retained objects"
+                    );
+                    assert_eq!(
+                        std::fs::read(attempt_path.join("tmp/candidate-0/git-common/evidence"))?,
+                        b"private objects"
+                    );
+                    session.store.drain_reactions(
+                        input.run_id,
+                        &clock,
+                        &cancel,
+                        &mut |receipt, _| {
+                            receipt.graph_done = true;
+                            receipt.notice_done = true;
+                            receipt.log_done = true;
+                            Ok(())
+                        },
+                    )?;
+                    let reported = reconcile(
+                        parse(&["reconcile", "--id", &input.run_id.to_string(), "--json"])?,
+                        edge,
+                    );
+                    assert_eq!(reported.result.status, Status::Ok, "{}", reported.human);
+                    assert!(
+                        reported.result.data["runs"][0]["attempts"]
+                            .as_array()
+                            .is_none_or(Vec::is_empty)
+                    );
+                    return Ok(());
+                }
                 let driver =
                     attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
                 let run_id = input.run_id.to_string();
