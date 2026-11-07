@@ -239,6 +239,14 @@ mod tests {
             .unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         };
+        let write_delivery = |checkpoint: serde_json::Value, delivery: Option<&str>| {
+            let mut envelope = serde_json::json!({"checkpoint": checkpoint, "incompatible": true});
+            if let Some(delivery) = delivery {
+                envelope["execution"]["document"]["delivery"] = delivery.into();
+            }
+            std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
         for checkpoint in [
             serde_json::json!({"cancelled":true,"nodes":[{"state":"running"}],"asks":[{"closed":false}]}),
             serde_json::json!({"nodes":[{"state":"succeeded"},{"state":"failed"},{"state":"blocked"},{"state":"skipped"}],"asks":[{"closed":true}]}),
@@ -275,6 +283,41 @@ mod tests {
             assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
             assert!(pending_guard(&state).is_err());
         }
+        write_delivery(
+            serde_json::json!({"cancelled":false,"delivered":false,"nodes":[{"state":"succeeded"}]}),
+            Some("pr"),
+        );
+        assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
+        assert!(pending_guard(&state).is_err());
+
+        write_delivery(
+            serde_json::json!({"cancelled":false,"delivered":true,"nodes":[{"state":"succeeded"}]}),
+            Some("pr"),
+        );
+        assert!(pending_findings(&state, false).unwrap().is_empty());
+        assert!(pending_guard(&state).is_ok());
+
+        write_delivery(
+            serde_json::json!({"cancelled":true,"delivered":false,"nodes":[{"state":"running"}]}),
+            Some("pr"),
+        );
+        assert!(pending_findings(&state, false).unwrap().is_empty());
+        assert!(pending_guard(&state).is_ok());
+
+        write_delivery(
+            serde_json::json!({"cancelled":false,"nodes":[{"state":"succeeded"}],"asks":[{"resolved":true,"closed":false}]}),
+            Some("pr"),
+        );
+        assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
+        assert!(pending_guard(&state).is_err());
+
+        write_delivery(
+            serde_json::json!({"cancelled":false,"nodes":[{"state":"succeeded"}]}),
+            None,
+        );
+        assert!(pending_findings(&state, false).unwrap().is_empty());
+        assert!(pending_guard(&state).is_ok());
+
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
         assert!(pending_guard(&state).is_err());

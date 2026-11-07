@@ -1010,7 +1010,23 @@ fn checkpoint_json_settled(bytes: &[u8]) -> bool {
                 .all(|ask| ask.get("closed") == Some(&serde_json::Value::Bool(true)))
         }),
     };
-    terminal && asks_closed
+    if !terminal || !asks_closed {
+        return false;
+    }
+    let pr_delivery_pending = value
+        .pointer("/execution/document/delivery")
+        .and_then(serde_json::Value::as_str)
+        == Some("pr")
+        && checkpoint.get("delivered") != Some(&serde_json::Value::Bool(true))
+        && checkpoint
+            .get("nodes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|nodes| {
+                nodes.iter().all(|node| {
+                    node.get("state").and_then(serde_json::Value::as_str) == Some("succeeded")
+                })
+            });
+    !pr_delivery_pending
 }
 
 pub(super) fn load_checkpoint(
