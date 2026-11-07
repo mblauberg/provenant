@@ -667,6 +667,79 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
+/// Exercise the public writer command from each invocation directory.
+fn writer_cli_launches_from_its_worktree_cwd() -> Result {
+    let native_available = graph_fixture_available()?;
+    for location in ["worktree", "subdirectory", "primary"] {
+        let mut rig = policy_codex_fixture()?;
+        let cleanup = rig.process_cleanup();
+        fs::write(
+            rig.state.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+            fs::write(rig.project.join(name), "original instructions\n")?;
+        }
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "-qm", "instructions"],
+            vec![
+                "worktree",
+                "add",
+                "-qb",
+                "writer-cwd",
+                ".worktrees/writer-cwd",
+            ],
+        ] {
+            let output = rig.execute(&git, &args, None)?;
+            assert_eq!(code(&output), 0, "{output:?}");
+        }
+        let tree = rig.project.join(".worktrees/writer-cwd");
+        fs::create_dir_all(tree.join("nested/directory"))?;
+        // TestRig uses project as the child's cwd; PROVENANT_ROOT selects assets.
+        rig.project = match location {
+            "worktree" => tree.clone(),
+            "subdirectory" => tree.join("nested/directory"),
+            _ => rig.project.clone(),
+        };
+        let output = rig.command(&[
+            "run",
+            "fixture writer shell",
+            "--tier",
+            "junior",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            tree.to_str().ok_or("tree")?,
+            "--wait=30s",
+            "--json",
+        ])?;
+        let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let node = &response["data"]["checkpoint"]["nodes"][0];
+        assert!(
+            node["attempts"][0]["attempt_ref"].is_string(),
+            "{location}: {response}; {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        // Admission is checked on every host. Native execution is also checked
+        // when the sandbox probe succeeds (CI requires that probe on macOS).
+        if !native_available {
+            continue;
+        }
+        assert_eq!(code(&output), 0, "{location}: {response}");
+        assert_eq!(node["state"], "succeeded", "{location}: {response}");
+        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+            assert_eq!(
+                fs::read_to_string(tree.join(name))?,
+                "edited by lane shell\n"
+            );
+        }
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
 fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     let rig = policy_codex_fixture()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
@@ -3496,6 +3569,10 @@ fn main() -> ExitCode {
             (
                 "uncatalogued_cli_model_launches_and_surfaces_provider_failure",
                 uncatalogued_cli_model_launches_and_surfaces_provider_failure,
+            ),
+            (
+                "writer_cli_launches_from_its_worktree_cwd",
+                writer_cli_launches_from_its_worktree_cwd,
             ),
             (
                 "remote_only_writer_cli_starts_at_remote_tip",

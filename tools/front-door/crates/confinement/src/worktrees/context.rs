@@ -79,7 +79,10 @@ pub fn with_context_using_workers_and_facts<T>(
     )?;
     let executor = SystemExecutor::new(1).map_err(|_| WorktreeError::InvalidRequest)?;
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
-    let selected = runtime.open_repo(&executor, project, budget, cancel)?;
+    let selected = runtime
+        .project_location(&executor, project, budget, cancel)?
+        .repository
+        .ok_or(WorktreeError::InvalidRequest)?;
     let primary = selected
         .common_git_dir()
         .parent()
