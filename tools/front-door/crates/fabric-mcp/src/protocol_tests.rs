@@ -60,7 +60,18 @@ fn published_legacy_initialisation_and_modern_discovery() {
             let Action::Reply(reply) = action else {
                 panic!("expected reply")
             };
-            assert_eq!(reply, pair["response"]);
+            // Fixtures carry a placeholder so a release bump does not edit them.
+            let mut expected = pair["response"].clone();
+            for pointer in [
+                "/result/serverInfo/version",
+                "/result/_meta/io.modelcontextprotocol~1serverInfo/version",
+            ] {
+                if let Some(version) = expected.pointer_mut(pointer) {
+                    assert_eq!(version, "CURRENT");
+                    *version = json!(env!("CARGO_PKG_VERSION"));
+                }
+            }
+            assert_eq!(reply, expected);
         }
         assert_eq!(protocol.modern(), modern);
     }

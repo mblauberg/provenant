@@ -101,10 +101,28 @@ impl JournalError {
     }
 }
 
+/// Guidance for an unreadable checkpoint, with any recovery its error allows.
+pub fn unreadable_graph_explanation(graph_id: &str, error: &JournalError) -> String {
+    let guidance = unreadable_graph_guidance(graph_id);
+    match error {
+        JournalError::RetiredLoopCheckpoint => format!(
+            "{guidance} This graph predates node asks: to finish it instead, use the previous release."
+        ),
+        _ => guidance,
+    }
+}
+
 /// A tick notice already recorded in the dedicated unreadable marker.
 #[derive(Debug, Error)]
-#[error("graph checkpoint is unreadable; inspect it or cancel it to retire the record: {0}")]
-pub struct UnreadableCheckpointNotice(pub JournalError);
+#[error("{}", unreadable_graph_guidance(.0))]
+pub struct UnreadableCheckpointNotice(pub String);
+
+/// Guidance for a graph whose checkpoint cannot be interpreted.
+pub fn unreadable_graph_guidance(graph_id: &str) -> String {
+    format!(
+        "Graph {graph_id} state is unreadable. From the project and state directory that own it, run `provenant stop -- {graph_id}` to remove its record from the listing. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
+    )
+}
 
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
 /// graph writers; all filesystem access after open is descriptor-relative.
@@ -645,7 +663,7 @@ impl FileJournal {
                     digest.as_bytes(),
                     PublishMode::Replace,
                 );
-                Err(UnreadableCheckpointNotice(error).into())
+                Err(UnreadableCheckpointNotice(graph_id.to_owned()).into())
             }
             Err(error) => Err(error.into()),
         }

@@ -37,12 +37,19 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
     // The fixture edits without committing: no plain success, and the dirty
     // path is named for the chair.
     assert_terminal_outcome(&first_terminal, provenant_run::Outcome::Uncommitted)?;
-    assert!(matches!(
-        &first_terminal.state,
-        provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
-            if reason.contains("uncommitted edits") && reason.contains("AGENTS.md")
-    ));
-    assert_eq!(fs::read(path.join("AGENTS.md"))?, b"writer instructions\n");
+    assert!(
+        matches!(
+            &first_terminal.state,
+            provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
+                if reason.contains("uncommitted edits") && reason.contains("AGENTS.md")
+        ),
+        "{:?}",
+        first_terminal.state
+    );
+    assert_eq!(
+        fs::read(path.join("AGENTS.md"))?,
+        b"writer instructions, edited\n"
+    );
     assert_eq!(
         fs::read_to_string(path.join("writer-edited"))?,
         "writer fixture completed"

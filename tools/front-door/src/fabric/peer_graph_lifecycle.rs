@@ -456,11 +456,13 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
         assert_eq!(status.status, GraphStatus::Paused);
         let explanation = status.advance_error.unwrap();
         assert!(explanation.contains(id), "{explanation}");
-        assert!(explanation.contains(&format!("provenant stop {id}")), "{explanation}");
+        assert!(explanation.contains(&format!("provenant stop -- {id}")), "{explanation}");
+        assert!(explanation.contains("Other graphs"), "{explanation}");
         if id == "g-test" {
             assert!(explanation.contains("predates node asks"), "{explanation}");
             assert!(explanation.contains("previous release"), "{explanation}");
         }
+        assert!(!explanation.contains("invalid json"), "{explanation}");
         let retired = factory.graph(
             GraphInput::Cancel {
                 extra: Default::default(),
