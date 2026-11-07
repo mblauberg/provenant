@@ -89,7 +89,7 @@ pub fn serve(
         .ok_or_else(not_a_node)?
         .document;
     // Finish provisioning fenced by an earlier crashed call before anything else.
-    recover_provisioning(context, &mut journal, &mut checkpoint, cancel)?;
+    recover_provisioning(context, &mut journal, &mut checkpoint, budget, cancel)?;
     // A settled parent or superseded attempt may only replay an earlier receipt.
     let live = relay::parent_of_attempt(&checkpoint, &reference).map(str::to_owned);
     let parent = match (&live, &op) {
@@ -212,10 +212,10 @@ pub fn serve(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 journal.save(&checkpoint).map_err(journal_error)?;
-                provision_child(context, path, &source, cancel)?;
+                provision_child(context, path, &source, budget, cancel)?;
                 relay::clear_provisioning(&mut checkpoint, &receipt.node);
             }
-            provision_added_writers(context, &mut journal, &mut checkpoint, &[], cancel)?;
+            provision_added_writers(context, &mut journal, &mut checkpoint, &[], budget, cancel)?;
             serde_json::to_value(receipt)?
         }
         RelayOp::Edit { id, patch } => {
@@ -270,6 +270,7 @@ pub fn serve(
                 &mut journal,
                 &mut checkpoint,
                 &admitted.added,
+                budget,
                 cancel,
             )?;
             json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
@@ -339,6 +340,7 @@ fn provision_added_writers(
     journal: &mut FileJournal,
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     added: &[String],
+    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     use provenant_fabric_runtime::graph::{AccessMode, SourceBinding};
@@ -412,7 +414,7 @@ fn provision_added_writers(
     }
     if !relay::pending_provisioning(checkpoint).is_empty() {
         journal.save(checkpoint).map_err(journal_error)?;
-        recover_provisioning(context, journal, checkpoint, cancel)?;
+        recover_provisioning(context, journal, checkpoint, budget, cancel)?;
     }
     Ok(())
 }
@@ -422,6 +424,7 @@ fn recover_provisioning(
     context: &Context,
     journal: &mut FileJournal,
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     let pending = relay::pending_provisioning(checkpoint);
@@ -429,7 +432,7 @@ fn recover_provisioning(
         return Ok(());
     }
     for (node, path, source) in pending {
-        provision_child(context, &path, &source, cancel)?;
+        provision_child(context, &path, &source, budget, cancel)?;
         relay::clear_provisioning(checkpoint, &node);
     }
     journal.save(checkpoint).map_err(journal_error)
@@ -577,12 +580,13 @@ pub fn provision_child(
     context: &Context,
     path: &str,
     source: &str,
+    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     let branch = path
         .strip_prefix(".worktrees/")
         .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
-    provision_writer(context, path, branch, source, cancel)
+    provision_writer(context, path, branch, source, budget, cancel)
 }
 
 /// Provision a graph-owned writer at its checkpointed source commit.
@@ -591,9 +595,10 @@ pub fn provision_writer(
     path: &str,
     branch: &str,
     source: &str,
+    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    provision_writer_checked(context, path, branch, source, cancel)
+    provision_writer_checked(context, path, branch, source, budget, cancel)
         .map_err(|error| refused("writer_worktree", error.to_string()))
 }
 
@@ -603,6 +608,7 @@ pub fn provision_writer_checked(
     path: &str,
     branch: &str,
     source: &str,
+    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
@@ -612,7 +618,13 @@ pub fn provision_writer_checked(
         &context.cwd,
         &provenant_os::clock::SystemClock::new(),
         cancel,
-        |worktree_context| provision_in_context(worktree_context, path, branch, source, cancel),
+        |worktree_context| {
+            let worktree_context = worktrees::WorktreeContext {
+                lock_budget: budget,
+                ..*worktree_context
+            };
+            provision_in_context(&worktree_context, path, branch, source, cancel)
+        },
     )
 }
 
@@ -1046,6 +1058,7 @@ mod provisioning_tests {
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let context = Context::open(roots, &home, &project)?;
         let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(provenant_os::clock::SystemClock.mono_now(), 55)?;
         // Explicit top-level writer branches use the same managed path rules
         // as worktree creation, preserving slashes in the Git branch itself.
         provision_writer(
@@ -1053,6 +1066,7 @@ mod provisioning_tests {
             ".worktrees/topic-fix",
             "topic/fix",
             &source,
+            budget,
             &cancel,
         )?;
         let branch = provenant_os::fixture::git_command()
@@ -1062,10 +1076,18 @@ mod provisioning_tests {
         assert!(branch.status.success());
         assert_eq!(String::from_utf8(branch.stdout)?.trim(), "topic/fix");
         assert!(
-            provision_writer(&context, ".worktrees/topic-fix", "other", &source, &cancel).is_err()
+            provision_writer(
+                &context,
+                ".worktrees/topic-fix",
+                "other",
+                &source,
+                budget,
+                &cancel
+            )
+            .is_err()
         );
         let path = ".worktrees/graph-parent--child";
-        provision_child(&context, path, &source, &cancel)?;
+        provision_child(&context, path, &source, budget, &cancel)?;
         let output = provenant_os::fixture::git_command()
             .current_dir(project.join(path))
             .args(["rev-parse", "HEAD"])
@@ -1620,7 +1642,7 @@ mod provisioning_tests {
             &clock,
         )?;
         let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
-        recover_provisioning(&context, &mut journal, &mut reloaded, &cancel)?;
+        recover_provisioning(&context, &mut journal, &mut reloaded, budget, &cancel)?;
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         assert!(relay::pending_provisioning(&reloaded).is_empty());
         let saved = journal.load("g-crash")?.expect("checkpoint");
@@ -1641,7 +1663,7 @@ mod provisioning_tests {
             &clock,
         )?;
         let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
-        recover_provisioning(&context, &mut journal, &mut reloaded, &cancel)?;
+        recover_provisioning(&context, &mut journal, &mut reloaded, budget, &cancel)?;
         assert_eq!(git(&["worktree", "list", "--porcelain"])?, before);
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         let saved = journal.load("g-crash")?.expect("checkpoint");
