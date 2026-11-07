@@ -160,14 +160,14 @@ Exceptions are host-derived typed grants, never optional configuration:
    and exact account file (`XDG_DATA_HOME/opencode/auth.json`, default
    `H/.local/share/opencode/auth.json`) as a fixture-backed authentication
    mechanism with read-only grants. Other adapters receive neither root.
-2. **Writer publishing.** Only a writer with publishing authority and effective
-   open network may read `H/.config/gh` and
-   `H/Library/Application Support/GitHub CLI` (and host-resolved locations).
-   They stay immutable. Close the current exception that lets network-open
-   read-only profiles read these stores: network reach is not publishing
-   authority, and [ADR 0035](0035-four-hard-boundaries-and-flexible-everything-else.md)
-   reserves GitHub credentials to authorised publishing lanes. A profile's
-   explicit credential denial still wins over publishing.
+2. **GitHub CLI access.** A lane with effective open network may read
+   `H/.config/gh` and `H/Library/Application Support/GitHub CLI` (and
+   host-resolved locations), read-only lanes included: the owner wants lanes to
+   read issues and pull requests through `gh`, and the steward template depends
+   on it. These stores stay immutable. The token this exposes can also write to
+   GitHub, so a read-only lane is read-only on this host, not on GitHub; the owner
+   accepts that. A profile's explicit credential denial still wins, and a lane
+   without open network gets no access.
 3. **Attempt-private state.** Grant read/write only to this attempt's disposable
    scratch and retained provider state, normally
    `S/runs/<run>/attempts/<attempt>/tmp/candidate-<n>` and
@@ -242,9 +242,10 @@ The renderer slice must pass these checks before flipping the default:
   compilation), relocated/unselected identities, real keychains and state
   roots remains unreadable/immutable with open optional policy, broad ordinary
   grants and attempted optional overrides. Selected authentication refresh,
-  publishing, prompt/inputs, relay, immutable release and standalone package
-  exceptions work without exposing siblings. Read-only plus open network must
-  fail GitHub-store reads; publishing-disabled/local-network writers fail too.
+  GitHub CLI, prompt/inputs, relay, immutable release and standalone package
+  exceptions work without exposing siblings. Open-network lanes, read-only ones
+  included, can run `gh`; local-network lanes and explicit denials fail
+  GitHub-store reads.
   Cursor, OpenCode and read-only Claude must complete ordinary runs and resume using relocated
   attempt-private stores, with model observation following the private database;
   shared host state remains immutable. OpenCode's typed selected-auth store
