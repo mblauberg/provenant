@@ -1017,15 +1017,7 @@ fn checkpoint_json_settled(bytes: &[u8]) -> bool {
         .pointer("/execution/document/delivery")
         .and_then(serde_json::Value::as_str)
         == Some("pr")
-        && checkpoint.get("delivered") != Some(&serde_json::Value::Bool(true))
-        && checkpoint
-            .get("nodes")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|nodes| {
-                nodes.iter().all(|node| {
-                    node.get("state").and_then(serde_json::Value::as_str) == Some("succeeded")
-                })
-            });
+        && checkpoint.get("delivered") != Some(&serde_json::Value::Bool(true));
     !pr_delivery_pending
 }
 

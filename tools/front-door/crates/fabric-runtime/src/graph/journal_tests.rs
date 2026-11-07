@@ -790,8 +790,9 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let fixture: StoredCheckpoint =
+    let mut fixture: StoredCheckpoint =
         serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Running;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
@@ -840,6 +841,42 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     );
     std::fs::write(&path, b"{} ").unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+}
+#[test]
+fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    fixture.execution.document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    fixture.checkpoint.nodes[0].state = NodeState::Skipped;
+    fixture.checkpoint.delivered = false;
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    let path = base
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    checkpoint["digest"] = "sha256:bad".into();
+    std::fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_none()
+    );
 }
 #[test]
 fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
