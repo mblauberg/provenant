@@ -161,6 +161,135 @@ pub(super) fn second_writer_is_refused_while_first_holds_the_worktree() -> Resul
     Ok(())
 }
 
+pub(super) fn writer_settlement_merges_upstream_advance() -> Result {
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    let rig = repository()?;
+    ok(
+        &rig,
+        &["worktree", "create", "writer", "--base", "HEAD", "--json"],
+    )?;
+    let path = rig.project.join(".worktrees/writer");
+    let (roots, context) = writer_context(&rig)?;
+    let cleanup = writer_process_cleanup(&context);
+    let store = open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
+    let prepared = writer_run(
+        writer,
+        "upstream-settlement",
+        101,
+        "merge upstream and writer changes",
+    )?;
+    let attempt = prepared.attempts[0].attempt_id;
+    let record = store.create(&prepared, &call)?;
+
+    // Advance origin/main after the writer worktree exists.
+    git(&rig, &["checkout", "-qb", "upstream"])?;
+    fs::write(rig.project.join("upstream.txt"), b"upstream change")?;
+    git(&rig, &["add", "upstream.txt"])?;
+    git(&rig, &["commit", "-qm", "Upstream change"])?;
+    git(&rig, &["update-ref", "refs/remotes/origin/main", "HEAD"])?;
+    git(
+        &rig,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )?;
+    git(&rig, &["checkout", "-q", "main"])?;
+
+    let release = path.join(".writer-fixture-release");
+    let _release_on_drop = ReleaseOnDrop(release.clone());
+    let provider = WriterProvider {
+        state: context.state_root.as_path().to_owned(),
+        home: fs::canonicalize(&rig.home)?,
+        project: context.project_id,
+        mode: "hold",
+    };
+    let holder = holder_context(&rig, &roots, &context);
+    let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+    assert!(
+        matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
+        "{started:?}"
+    );
+    let ready = path.join(".writer-fixture-ready");
+    provenant_test_support::wait_for(
+        &format!("writer hold: {}", ready.display()),
+        Duration::from_secs(8),
+        || ready.exists(),
+        |exists| *exists,
+    )?;
+
+    let scratch = context
+        .state_root
+        .as_path()
+        .join("runs")
+        .join(record.run_id.to_string())
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("tmp/candidate-0");
+    let lane = |args: &[&str]| lane_git(&rig, &scratch, &path, args);
+    fs::write(path.join("writer.txt"), b"writer change")?;
+    lane(&["add", "writer.txt"])?;
+    lane(&["commit", "-qm", "Writer change"])?;
+    lane(&["merge", "--no-edit", "origin/main"])?;
+    let lane_head = lane(&["rev-parse", "HEAD"])?;
+
+    fs::write(&release, b"release")?;
+    let terminal = await_terminal(&store, attempt, &call)?;
+    let value = serde_json::to_value(&terminal)?;
+    let progress = fs::read_to_string(
+        scratch
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("attempt directory")?
+            .join("settlement-progress.json"),
+    )
+    .unwrap_or_else(|error| error.to_string());
+    let diagnostics = format!(
+        "settled record reason: {:?}; settlement progress: {progress}",
+        value["state"]["reason"]
+    );
+    assert_eq!(
+        value["state"]["outcome"], "succeeded",
+        "unexpected writer terminal record: {value:#}; {diagnostics}"
+    );
+    assert_eq!(value["head"], lane_head, "{diagnostics}");
+    assert_eq!(
+        git(
+            &rig,
+            &[
+                "-C",
+                path.to_str().ok_or("worktree path")?,
+                "rev-parse",
+                "HEAD",
+            ],
+        )?,
+        lane_head,
+        "{diagnostics}"
+    );
+    assert!(path.join("upstream.txt").is_file(), "{diagnostics}");
+    assert_eq!(
+        fs::read(path.join("upstream.txt"))?,
+        b"upstream change",
+        "{diagnostics}"
+    );
+    assert!(path.join("writer.txt").is_file(), "{diagnostics}");
+    assert_eq!(
+        fs::read(path.join("writer.txt"))?,
+        b"writer change",
+        "{diagnostics}"
+    );
+    wait_for_writer_release(&store)?;
+    cleanup.disarm();
+    Ok(())
+}
+
 pub(super) fn writer_terminal_refuses_sequencer_state() -> Result {
     if !writer_backend_available()? {
         return Ok(());
