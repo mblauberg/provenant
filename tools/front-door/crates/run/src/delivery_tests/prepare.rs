@@ -758,17 +758,11 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     input.request.tasks[0].deliver = Some(request.clone());
     store.create(&input, &call)?;
     let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
-    let receipt = deliver_once(&host, &writer, &request, &attempt, "fixture receipt")?;
-    assert!(
-        matches!(
-            receipt.state,
-            WriterDeliveryState::Failed {
-                stage: WriterDeliveryStage::Push,
-                ..
-            }
-        ),
-        "{receipt:?}"
-    );
+    assert!(matches!(
+        deliver_once(&host, &writer, &request, &attempt, "fixture receipt"),
+        Err(RunError::Delivery(WriterDeliveryStage::Push))
+    ));
+    assert!(artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.is_none());
     assert!(
         git(&lane, &["ls-remote", "origin", "refs/heads/published/lane"])?
             .starts_with(elsewhere.as_str())

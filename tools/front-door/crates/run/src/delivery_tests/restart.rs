@@ -6,7 +6,11 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
     for mode in [
         "pending",
         "retryable",
-        "uncertain",
+        "uncertain_absent",
+        "uncertain_present",
+        "uncertain_other",
+        "ambiguous_error",
+        "uncertain_binding_mismatch",
         "cancelled",
         "late_cancel",
         "failed_legacy",
@@ -17,8 +21,16 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         "writer_busy",
         "effects_busy",
     ] {
-        let fixture = PrepareFixture::new()?;
+        let mut fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
+        if mode == "ambiguous_error" {
+            let git = provenant_os::git::git_executable().ok_or("git")?;
+            let wrapper = fixture.root.join("ambiguous-git");
+            fixture.executable(&wrapper, &format!("#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = push ]; then '{}' \"$@\" || exit $?; exit 1; fi\ndone\nexec '{}' \"$@\"\n", git.display(), git.display()))?;
+            fixture
+                .environment
+                .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+        }
         let host = fixture.prepare()?;
         let base = host.head(&fixture.writer)?;
         fixture.commit(&fixture.writer.worktree, "writer change")?;
@@ -40,7 +52,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         driver.advance(crate::settlement::Phase::Record)?;
         drop(driver);
         host.seal_launch_binding(&attempt, scope)?;
-        if mode == "binding_mismatch" {
+        if matches!(mode, "binding_mismatch" | "uncertain_binding_mismatch") {
             let other = fixture.root.join("other.git");
             fixture.git(&["init", "--bare", "-q", other.to_str().ok_or("other")?])?;
             fixture.git(&[
@@ -105,7 +117,27 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let record = store.publish_terminal(id, 1, &publication, &observed, &call)?;
         let decision =
             artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap();
-        if mode == "uncertain" {
+        if mode.starts_with("uncertain_") {
+            if matches!(mode, "uncertain_present" | "uncertain_other") {
+                let remote_head = if mode == "uncertain_present" {
+                    head
+                } else {
+                    base
+                };
+                fixture.lane_git(&[
+                    "push",
+                    "origin",
+                    &format!("{remote_head}:refs/heads/{}", fixture.request.branch),
+                ])?;
+            }
+            let hook = fixture.root.join("remote.git/hooks/pre-receive");
+            fixture.executable(
+                &hook,
+                &format!(
+                    "#!/bin/sh\nprintf 'push\\n' >> '{}'\n",
+                    fixture.root.join("pushes").display()
+                ),
+            )?;
             artifacts::seal(
                 &attempt,
                 "delivery-started.json",
@@ -123,6 +155,26 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 })?,
                 RECORD_LIMIT,
             )?;
+        } else if mode == "ambiguous_error" {
+            let hook = fixture.root.join("remote.git/hooks/pre-receive");
+            fixture.executable(
+                &hook,
+                &format!(
+                    "#!/bin/sh\nprintf 'push\\n' >> '{}'\n",
+                    fixture.root.join("pushes").display()
+                ),
+            )?;
+            assert!(matches!(
+                deliver_once(
+                    &host,
+                    &fixture.writer,
+                    &fixture.request,
+                    &attempt,
+                    &format!("Run {}\nAttempt {id}", input.run_id)
+                ),
+                Err(RunError::Delivery(WriterDeliveryStage::Push))
+            ));
+            assert!(artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.is_none());
         } else if mode == "definite_failed" {
             artifacts::seal(
                 &attempt,
@@ -221,7 +273,15 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let receipts = recovered.settlement_receipts.unwrap();
         if matches!(
             mode,
-            "pending" | "retryable" | "late_cancel" | "writer_busy" | "effects_busy"
+            "pending"
+                | "retryable"
+                | "late_cancel"
+                | "writer_busy"
+                | "effects_busy"
+                | "uncertain_absent"
+                | "uncertain_present"
+                | "uncertain_other"
+                | "ambiguous_error"
         ) {
             assert!(
                 matches!(receipts.delivery, EffectDisposition::Done),
@@ -238,6 +298,38 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 "--verify",
                 &format!("refs/heads/{}", fixture.request.branch),
             ])?;
+            if mode.starts_with("uncertain_") || mode == "ambiguous_error" {
+                let receipt = artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
+                    .ok_or("receipt")?;
+                let receipt: WriterDeliveryReceipt = db::decode(&receipt)?;
+                assert_eq!(receipt.head, Some(head));
+                assert!(matches!(
+                    receipt.state,
+                    WriterDeliveryState::Delivered { .. }
+                ));
+                let calls = std::cell::Cell::new((0, 0));
+                let mut react = |reaction: &mut Reaction, _: &mut crate::reactions::Saver<'_>| {
+                    let (graph, notice) = calls.get();
+                    calls.set((
+                        graph + usize::from(!reaction.graph_done),
+                        notice + usize::from(!reaction.notice_done),
+                    ));
+                    reaction.graph_done = true;
+                    reaction.notice_done = true;
+                    reaction.log_done = true;
+                    Ok(())
+                };
+                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                assert_eq!(calls.get(), (1, 1));
+                let pushes =
+                    std::fs::read_to_string(fixture.root.join("pushes")).unwrap_or_default();
+                assert_eq!(
+                    pushes.lines().count(),
+                    usize::from(mode != "uncertain_present")
+                );
+            }
         } else if mode.ends_with("_legacy") {
             assert!(matches!(receipts.delivery, EffectDisposition::Done));
             assert!(
@@ -292,14 +384,11 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     panic!("{mode}: {receipts:?}");
                 };
                 assert!(!retryable, "{mode}: {reason}");
-                // Only a start marker without a result is uncertain.
-                assert_eq!(
-                    reason.contains("uncertain"),
-                    mode == "uncertain",
-                    "{reason}"
-                );
+                assert!(!reason.contains("uncertain"), "{reason}");
                 match mode {
-                    "binding_mismatch" => assert!(reason.contains("launch binding"), "{reason}"),
+                    "binding_mismatch" | "uncertain_binding_mismatch" => {
+                        assert!(reason.contains("launch binding"), "{reason}")
+                    }
                     "head_mismatch" => assert!(reason.contains("sealed delivery head"), "{reason}"),
                     "definite_failed" => assert!(reason.contains("Push"), "{reason}"),
                     _ => {}

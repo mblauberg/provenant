@@ -962,18 +962,11 @@ impl RunStore {
                     _ => {
                         let host = crate::HostDeliveryContext::capture()
                             .with_repo_facts(self.repo_facts());
-                        let evidence = [
-                            "delivery.json",
-                            "delivery-started.json",
-                            "delivery-cancelled.json",
-                        ]
-                        .iter()
-                        .try_fold(
-                            false,
-                            |found, name| -> Result<bool> {
+                        let evidence = ["delivery.json", "delivery-cancelled.json"]
+                            .iter()
+                            .try_fold(false, |found, name| -> Result<bool> {
                                 Ok(found || read_sealed(attempt, name, RECORD_LIMIT)?.is_some())
-                            },
-                        )?;
+                            })?;
                         if evidence {
                             Ok(host)
                         } else {
