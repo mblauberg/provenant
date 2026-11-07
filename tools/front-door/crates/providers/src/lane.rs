@@ -175,7 +175,11 @@ impl crate::LaunchSpec {
                 .push(("GH_CONFIG_DIR".into(), root.as_os_str().to_owned()));
             root
         } else {
-            home.join(".config/gh")
+            self.env
+                .iter()
+                .find(|(key, _)| key == "GH_CONFIG_DIR")
+                .map(|(_, value)| PathBuf::from(value))
+                .unwrap_or_else(|| home.join(".config/gh"))
         };
         let gh_config = shell_quote(&text(&gh_config_root)?);
         let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
@@ -1808,11 +1812,12 @@ mod tests {
         for path in [&home, &scratch] {
             fs::create_dir_all(path)?;
         }
-        fs::create_dir_all(home.join(".config/gh"))?;
+        let gh_store = root.join("relocated gh fixture's directory");
+        fs::create_dir_all(&gh_store)?;
         // This synthetic login stays outside the run files, like the real one.
         let token = format!("ghp_{}", "f".repeat(36));
         fs::write(
-            home.join(".config/gh/hosts.yml"),
+            gh_store.join("hosts.yml"),
             format!("username=fixture\npassword={token}\n"),
         )?;
         let gh = root.join("gh fixture's executable");
@@ -1820,7 +1825,7 @@ mod tests {
             &gh,
             format!(
                 "#!/bin/sh\n[ \"$GH_CONFIG_DIR\" = {} ] || exit 1\ncase \"$*\" in\n    'auth git-credential get') cat \"$GH_CONFIG_DIR/hosts.yml\" ;;\n    'pr create'|'pr comment'|'pr view'|'pr checks') printf 'fixture pr\\n' ;;\n    *) exit 1 ;;\nesac\n",
-                shell_quote(home.join(".config/gh").to_str().ok_or("home path")?),
+                shell_quote(gh_store.to_str().ok_or("gh store path")?),
             ),
         )?;
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
@@ -1876,6 +1881,8 @@ mod tests {
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
         input.provenant.git = &git;
         let mut spec = Codex.prepare(input)?;
+        spec.env
+            .push(("GH_CONFIG_DIR".into(), gh_store.as_os_str().to_owned()));
         spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
         // Apply only the generated publishing setup; adapter-specific auth
         // setup belongs to the existing provider tests.

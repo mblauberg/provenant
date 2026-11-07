@@ -92,6 +92,8 @@
 (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
 (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
 (deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc"))
+(deny mach-lookup (global-name-prefix "com.apple.securityd") (global-name-prefix "com.apple.security.cloudkeychain") (global-name-prefix "com.apple.keychainsharing"))
+(deny mach-lookup (global-name-prefix "com.apple.SecurityServer"))
 (deny process-exec (literal "/usr/bin/security"))
 (deny mach-lookup (global-name "com.apple.SecurityServer"))
 (allow file-read* (subpath "/fixture/home/.cursor/chats"))

@@ -226,8 +226,12 @@ const HOST_MEMORY_PROBE: &str = r#"
 #include <util.h>
 
 static const char *keychain_services[] = {
-    "com.apple.SecurityServer", "com.apple.securityd", "com.apple.securityd.xpc"
+    "com.apple.SecurityServer", "com.apple.securityd", "com.apple.securityd.xpc",
+    "com.apple.securityd.systemkeychain", "com.apple.securityd.ckks",
+    "com.apple.securityd.general", "com.apple.securityd.aps", "com.apple.securitydservice",
+    "com.apple.security.cloudkeychainproxy3", "com.apple.keychainsharingmessagingd"
 };
+static const unsigned KEYCHAIN_SERVICE_COUNT = sizeof(keychain_services) / sizeof(keychain_services[0]);
 
 int main(int argc, char **argv) {
     if (argc == 5 && strcmp(argv[1], "clone") == 0) {
@@ -310,7 +314,7 @@ int main(int argc, char **argv) {
             if (!baseline) failed = 1;
         }
         unsigned available = (unsigned)strtoul(argv[4], NULL, 10);
-        for (unsigned i = 0; i < 3; ++i) {
+        for (unsigned i = 0; i < KEYCHAIN_SERVICE_COUNT; ++i) {
             mach_port_t service = MACH_PORT_NULL;
             kern_return_t found = bootstrap_look_up(bootstrap_port, keychain_services[i], &service);
             printf("keychain %s baseline_available=%d result=%d\n",
@@ -344,7 +348,7 @@ int main(int argc, char **argv) {
     }
     close(ready[0]);
     unsigned available = 0;
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < KEYCHAIN_SERVICE_COUNT; ++i) {
         mach_port_t service = MACH_PORT_NULL;
         if (bootstrap_look_up(bootstrap_port, keychain_services[i], &service) == KERN_SUCCESS) {
             available |= 1u << i;

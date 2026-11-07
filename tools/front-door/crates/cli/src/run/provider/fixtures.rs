@@ -26,6 +26,7 @@ pub fn writer_fixture_plan(
     let request = confinement_request(
         project,
         ConfinementRoots {
+            host_roots: None,
             cwd,
             home,
             state,

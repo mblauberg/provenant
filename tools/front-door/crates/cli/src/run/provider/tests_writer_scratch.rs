@@ -1459,6 +1459,7 @@ printf 'agy 1.0.0\n'
     let request = confinement_request(
         project_a,
         ConfinementRoots {
+            host_roots: None,
             cwd: &project,
             home: &home,
             state: Path::new("/fixture-host-state"),

@@ -1746,6 +1746,7 @@ pub(super) fn prepare_candidates(
         match confinement_request(
             project_id,
             ConfinementRoots {
+                host_roots: Some(roots),
                 cwd: &cwd,
                 home: &home,
                 state: roots.state.as_path(),
@@ -2429,6 +2430,7 @@ pub(super) fn prepare_candidates(
         let (mut plan, observed_head, repository, worktree_gitdir) = match confinement_request(
             project_id,
             ConfinementRoots {
+                host_roots: Some(roots),
                 cwd: &cwd,
                 home: &home,
                 state: roots.state.as_path(),
@@ -2742,7 +2744,14 @@ pub(super) fn prepare_candidates(
         {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
-            super::gh_auth::inject(&executor, gh, &home, cancel, &mut spec.env);
+            super::gh_auth::inject(
+                &executor,
+                gh,
+                &home,
+                &|key| host_provider_var(registry, key),
+                cancel,
+                &mut spec.env,
+            );
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
@@ -2944,7 +2953,14 @@ pub(super) fn prepare_candidates(
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
             if reader_gh {
-                super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+                super::gh_auth::inject(
+                    &executor,
+                    &gh,
+                    &home,
+                    &|key| host_provider_var(registry, key),
+                    cancel,
+                    &mut spec.env,
+                );
             }
             if adapter_spec.is_some_and(|spec| {
                 spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)

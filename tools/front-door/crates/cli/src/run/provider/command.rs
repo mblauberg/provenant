@@ -122,6 +122,7 @@ pub(super) fn prepare_command(
     let request = confinement_request(
         project,
         ConfinementRoots {
+            host_roots: Some(roots),
             cwd: &cwd,
             home: &home,
             state: roots.state.as_path(),

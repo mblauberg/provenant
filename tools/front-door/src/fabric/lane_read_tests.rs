@@ -696,16 +696,42 @@ fn native_lane(
     let grant = |path, scope| PathGrant { path, scope };
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let git = std::fs::canonicalize(provenant_os::git::git_executable().ok_or("Git unavailable")?)?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let lookup = |name: &str| {
+        rig.env
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    };
+    let mut credentials = host_credential_roots(lookup);
+    let accounts: provenant_providers::accounts::Settings =
+        provenant_config::read_domain(roots.state.as_path(), "accounts")?;
+    credentials.extend(
+        accounts
+            .entries
+            .values()
+            .flat_map(|entry| std::iter::once(&entry.directory).chain(&entry.directories))
+            .filter(|path| path.as_path() != rig.home)
+            .map(|path| grant(path.clone(), PathScope::Subtree)),
+    );
+    let github: Vec<_> = host_github_roots(lookup)
+        .into_iter()
+        .map(|path| grant(path, PathScope::Subtree))
+        .collect();
+    let mandatory =
+        MandatoryRoots::for_host(&roots, &rig.home, &rig.project, &credentials, &github, &[])?;
+    let mut policy = provenant_confinement::run_config::RunConfig::read(roots.state.as_path())?
+        .policy_for_launch(roots.state.as_path(), mandatory);
+    policy.resolve_optional_aliases(resolve_boundary_path)?;
     let plan = PlanPermissions {
-        policy: None,
+        policy: Some(policy),
         read_only: None,
         mode: AccessMode::ReadOnly,
         scratch: grant(scratch, PathScope::Subtree),
         private_state: None,
-        read_roots: vec![
-            grant(rig.project.clone(), PathScope::Subtree),
-            grant(rig.state.clone(), PathScope::Subtree),
-        ],
+        read_roots: vec![grant(rig.project.clone(), PathScope::Subtree)],
         protected_roots: Vec::new(),
         secret_roots: vec![grant(rig.state.join("fabric/graphs"), PathScope::Subtree)],
         selected_authentication: None,

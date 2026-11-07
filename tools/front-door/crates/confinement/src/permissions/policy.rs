@@ -2,11 +2,13 @@
 //!
 //! Host settings can add denials only. Mandatory roots come from the host's
 //! verified launch context and have no deserialisable override surface.
+mod host;
 use super::validation::{
     CREDENTIAL_DIRECTORIES, NESTED_CREDENTIAL_DIRECTORIES, PROVIDER_CREDENTIAL_DIRECTORIES,
     profile_path_representable, refuses_lane_root, validate_absolute,
 };
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
+pub use host::{host_credential_roots, host_github_roots};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -179,7 +181,10 @@ impl MandatoryRoots {
     /// Only host-prepared prompt, input, skill and immutable release paths.
     pub fn add_state_read(&mut self, root: PathGrant) -> Result<(), PermissionError> {
         root.validate()?;
-        if root.path == self.state.path || self.state.path.starts_with(&root.path) {
+        if std::iter::once(&self.state)
+            .chain(&self.state_aliases)
+            .any(|state| state.path == root.path || state.path.starts_with(&root.path))
+        {
             return Err(PermissionError::ProtectedOverlap);
         }
         self.state_reads.push(root);
@@ -504,6 +509,38 @@ impl HostPolicySettings {
 #[cfg(test)]
 mod boundary_resolution_tests {
     use super::*;
+
+    #[test]
+    fn typed_state_reads_cannot_open_an_entire_secondary_host_store() -> Result<(), PermissionError>
+    {
+        let mut roots = MandatoryRoots::new(
+            Path::new("/fixture/home"),
+            Path::new("/fixture/state"),
+            Path::new("/fixture/source"),
+        )?;
+        roots.add_state_alias(PathGrant {
+            path: "/fixture/secondary/state".into(),
+            scope: PathScope::Subtree,
+        })?;
+        for path in [
+            "/fixture/state",
+            "/fixture/secondary/state",
+            "/fixture/secondary",
+        ] {
+            assert!(matches!(
+                roots.add_state_read(PathGrant {
+                    path: path.into(),
+                    scope: PathScope::Subtree
+                }),
+                Err(PermissionError::ProtectedOverlap)
+            ));
+        }
+        roots.add_state_read(PathGrant {
+            path: "/fixture/secondary/state/prompt.md".into(),
+            scope: PathScope::Exact,
+        })?;
+        Ok(())
+    }
 
     #[test]
     fn boundary_resolution_refuses_dangling_links_but_keeps_absent_roots()

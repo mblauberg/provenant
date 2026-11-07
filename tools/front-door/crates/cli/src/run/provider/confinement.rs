@@ -44,6 +44,7 @@ pub fn graph_node_inputs_directory(
 }
 
 pub(super) struct ConfinementRoots<'a> {
+    pub(super) host_roots: Option<&'a provenant_core::Roots>,
     pub(super) cwd: &'a Path,
     pub(super) home: &'a Path,
     pub(super) state: &'a Path,
@@ -201,49 +202,32 @@ pub(super) fn confinement_request(
         path: path.to_owned(),
         scope: PathScope::Subtree,
     };
-    let mut mandatory = provenant_confinement::permissions::MandatoryRoots::new(
+    let fixture_roots;
+    let host_roots = match roots.host_roots {
+        Some(host) => host,
+        None => {
+            let mut inputs =
+                provenant_core::RootInputs::new(roots.home.to_owned(), roots.cwd.to_owned());
+            inputs.state_dir = Some(roots.state.to_owned());
+            fixture_roots = inputs
+                .resolve(&provenant_os::fs::SystemPathResolver)
+                .map_err(|_| {
+                    provenant_confinement::permissions::PermissionError::AnchorMismatchAt {
+                        path: roots.state.to_owned(),
+                        stage: "host state root binding",
+                    }
+                })?;
+            &fixture_roots
+        }
+    };
+    let mut mandatory = provenant_confinement::permissions::MandatoryRoots::for_host(
+        host_roots,
         roots.home,
-        roots.state,
         roots.cwd,
+        roots.credential_roots,
+        roots.github_roots,
+        roots.protected_worktrees,
     )?;
-    for credential in roots.credential_roots {
-        mandatory.add_credentials(credential.clone())?;
-    }
-    for credential in mandatory.credentials().to_vec() {
-        let alias = resolve_policy_path(&credential.path)?;
-        if alias != credential.path {
-            mandatory.add_credentials_alias(
-                &credential,
-                PathGrant {
-                    path: alias,
-                    scope: credential.scope,
-                },
-            )?;
-        }
-    }
-    let state_alias = resolve_policy_path(roots.state)?;
-    if state_alias != roots.state {
-        mandatory.add_state_alias(grant(&state_alias))?;
-    }
-    let source_alias = resolve_policy_path(roots.cwd)?;
-    if source_alias != roots.cwd {
-        mandatory.add_source_alias(grant(&source_alias))?;
-    }
-    for path in roots.protected_worktrees {
-        mandatory.add_protected(path.clone())?;
-    }
-    for root in roots.github_roots {
-        mandatory.add_github(root.clone())?;
-    }
-    for root in mandatory.github().to_vec() {
-        let alias = resolve_policy_path(&root.path)?;
-        if alias != root.path {
-            mandatory.add_github(PathGrant {
-                path: alias,
-                scope: root.scope,
-            })?;
-        }
-    }
     for path in roots
         .prompt_file
         .into_iter()
@@ -366,52 +350,6 @@ pub(super) fn protected_worktrees(
                 .map_err(|error| error.to_string())?,
         );
     }
-    // The selected repository's Git list does not cover another project's
-    // active or retained lanes. Only host registrations supply those paths;
-    // no unrelated filesystem repositories are discovered.
-    for binding in
-        provenant_config::registered_projects(roots).map_err(|error| error.to_string())?
-    {
-        let common = binding.common_dir();
-        let git = common.file_name() == Some(std::ffi::OsStr::new(".git"))
-            || (common.join("HEAD").is_file() && common.join("objects").is_dir());
-        if git {
-            paths.push(common.to_owned());
-            let project_state = roots
-                .state
-                .as_path()
-                .join("worktrees")
-                .join(binding.project_id().to_string());
-            let custody_slots = match Directory::open_anchor(&project_state) {
-                Ok(directory) => {
-                    let listing =
-                        provenant_supervisor::custody::list_writer_reservations(&directory)
-                            .map_err(|error| error.to_string())?;
-                    if !listing.issues.is_empty() {
-                        return Err("registered writer custody inventory is incomplete".into());
-                    }
-                    listing
-                        .reservations
-                        .iter()
-                        .map(|reservation| {
-                            reservation
-                                .custody_directory()
-                                .map(Path::to_owned)
-                                .ok_or_else(|| {
-                                    "registered writer custody slot is invalid".to_owned()
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                }
-                Err(error) if error.is_not_found() => Vec::new(),
-                Err(error) => return Err(error.to_string()),
-            };
-            paths.extend(
-                provenant_confinement::worktrees::owned_worktree_paths(common, &custody_slots)
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-    }
     let mut protected = Vec::new();
     for path in paths {
         let alias = resolve_policy_path(&path).map_err(|error| error.to_string())?;
@@ -448,34 +386,25 @@ pub(super) fn credential_roots(
         .filter(|path| path.as_path() != home)
         .cloned()
         .collect();
-    match registry.host {
-        Some(host) => {
-            paths.extend(host.credential_roots.iter().cloned());
-            paths.extend(host.default_account_directories.values().cloned());
-        }
-        None => paths.extend(run::HostLaunchContext::credential_roots()),
-    }
-    // Agy's isolated homes have concrete directory names, never a wildcard
-    // grant. Merely listing home does not open an isolated home's contents.
-    for entry in std::fs::read_dir(home).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(".agy-"))
-        {
-            paths.push(entry.path());
-        }
+    if let Some(host) = registry.host {
+        paths.extend(host.default_account_directories.values().cloned());
     }
     paths.sort();
     paths.dedup();
-    Ok(paths
+    let mut grants: Vec<_> = paths
         .into_iter()
         .map(|path| PathGrant {
             path,
             scope: PathScope::Subtree,
         })
-        .collect())
+        .collect();
+    grants.extend(
+        registry
+            .host
+            .map(|host| host.credential_roots.clone())
+            .unwrap_or_else(run::HostLaunchContext::credential_roots),
+    );
+    Ok(grants)
 }
 
 pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
@@ -492,6 +421,9 @@ pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
 }
 
 pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<std::ffi::OsString> {
+    if name == "SSH_AUTH_SOCK" {
+        return None;
+    }
     if let Some(host) = registry.host
         && matches!(
             name,

@@ -670,6 +670,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
             let plan = ConfinedPlan::new(confinement_request(
                 prior.project_id,
                 ConfinementRoots {
+                    host_roots: None,
                     cwd: &cwd,
                     home: &home,
                     state: Path::new("/fixture-host-state"),

@@ -715,8 +715,14 @@ fn render_profile_with_limit(
                         && !root.path.starts_with(home.join("Library/Keychains"))
                 })
         });
-    source.push_str("(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n");
-    if !keychain {
+    source.push_str(concat!(
+        "(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n",
+        "(deny mach-lookup (global-name-prefix \"com.apple.securityd\") (global-name-prefix \"com.apple.security.cloudkeychain\") (global-name-prefix \"com.apple.keychainsharing\"))\n",
+    ));
+    if keychain {
+        source.push_str("(deny mach-lookup (require-all (global-name-prefix \"com.apple.SecurityServer\") (require-not (global-name \"com.apple.SecurityServer\"))))\n");
+    } else {
+        source.push_str("(deny mach-lookup (global-name-prefix \"com.apple.SecurityServer\"))\n");
         source.push_str(concat!(
             "(deny process-exec (literal \"/usr/bin/security\"))\n",
             "(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n",
@@ -1116,7 +1122,10 @@ fn push_boundaries(
     // Authentication and gh retain their typed read exceptions when the host
     // stores an identity below S. No credential root may open S or its parent.
     for grant in &credential_reads {
-        if mandatory.state().path.starts_with(&grant.path) {
+        if std::iter::once(mandatory.state())
+            .chain(mandatory.state_aliases())
+            .any(|root| root.path.starts_with(&grant.path))
+        {
             return Err(PermissionError::ProtectedOverlap);
         }
     }

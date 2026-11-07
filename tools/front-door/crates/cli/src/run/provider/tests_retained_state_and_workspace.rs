@@ -128,6 +128,7 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
     let request = confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
+            host_roots: None,
             cwd: &source,
             home: &root,
             state: Path::new("/fixture-host-state"),
@@ -192,6 +193,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
             let request = confinement_request(
                 ProjectId::from_bytes([1; 16]),
                 ConfinementRoots {
+                    host_roots: None,
                     cwd: &source,
                     home: &home,
                     state: &state,
@@ -272,7 +274,10 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         &root.join("source"),
         "/usr/bin/git".into(),
     );
-    host.credential_roots = vec![root.join("relocated-xdg/opencode")];
+    host.credential_roots = vec![
+        PathGrant { path: root.join("relocated-xdg/opencode"), scope: PathScope::Subtree },
+        PathGrant { path: root.join("agent/socket"), scope: PathScope::Exact },
+    ];
     host.default_account_directories = [("codex".into(), root.join("default-codex"))].into();
     host.provider_path_environment = [(
         "XDG_DATA_HOME".into(),
@@ -287,8 +292,9 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         ..Default::default()
     };
     let inventory = credential_roots(&registry, &home, &settings)?;
+    assert!(inventory.contains(&PathGrant { path: root.join("agent/socket"), scope: PathScope::Exact }));
+    assert!(!inventory.iter().any(|entry| entry.path == root.join("agent")));
     for path in [
-        home.join(".agy-unselected"),
         root.join("registered"),
         root.join("other-registration"),
         root.join("default-codex"),
@@ -301,6 +307,13 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         Some(root.join("relocated-xdg").into_os_string())
     );
     assert_eq!(host_provider_var(&registry, "GH_CONFIG_DIR"), None);
+    assert_eq!(host_provider_var(&registry, "SSH_AUTH_SOCK"), None);
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), root.join("source"));
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host(&roots, &home, &root.join("source"), &inventory, &[], &[])?;
+    assert!(mandatory.credentials().iter().any(|entry| entry.path == home.join(".agy-unselected")));
+
     Ok(())
 }
 
@@ -339,7 +352,10 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     std::fs::write(unowned.join("gitdir"), format!("{}\n", root.join("unowned/.git").display()))?;
     let registry = Registry { roots: Some(&roots), ..Default::default() };
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let protected = protected_worktrees(&registry, &source, &git)?;
+    let selected = protected_worktrees(&registry, &source, &git)?;
+    let inventory_for = |source: &Path| provenant_confinement::permissions::MandatoryRoots::for_host(&roots, &home, source, &[], &[], &selected);
+    let inventory = inventory_for(&source)?;
+    let protected = inventory.protected().to_vec();
     assert!(protected.iter().any(|root| root.path == foreign));
     assert!(protected.iter().any(|root| root.path == foreign_common));
     assert!(!protected.iter().any(|entry| entry.path == root.join("unowned")));
@@ -347,10 +363,11 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     // when it has no lane-provenance marker. Empty retired slots grant none.
     let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(&root.join("unowned")));
     assert!(provenant_confinement::worktrees::owned_worktree_paths(&foreign_common, &[custody_slot])?.contains(&root.join("unowned")));
-    assert!(!protected_worktrees(&registry, &foreign, &git)?.iter().any(|entry| entry.path == foreign));
+    assert!(!inventory_for(&foreign)?.protected().iter().any(|entry| entry.path == foreign));
     let request = confinement_request(
         ProjectId::from_bytes([8; 16]),
         ConfinementRoots {
+            host_roots: None,
             cwd: &source, home: &home, state: &state, credential_roots: &[], github_roots: &[],
             protected_worktrees: &protected, scratch: &root.join("scratch"),
             private_state: &root.join("private"), assets: &root.join("assets"), prompt_file: None,
@@ -364,7 +381,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     assert!(mandatory.validate_extra_write(&PathGrant { path: root.join("external-owned-checkout-other"), scope: PathScope::Subtree }).is_ok());
     // A checkout pruned after ownership was recorded is still denied by name.
     std::fs::remove_dir(&foreign)?;
-    assert!(protected_worktrees(&registry, &source, &git)?.iter().any(|root| root.path == foreign));
+    assert!(inventory_for(&source)?.protected().iter().any(|root| root.path == foreign));
     Ok(())
 }
 
@@ -379,6 +396,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     let plan = ConfinedPlan::new(confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
+            host_roots: None,
             cwd: Path::new("/project"),
             home: Path::new("/home/user"),
             state: Path::new("/fixture-host-state"),
@@ -466,6 +484,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
     let request = confinement_request(
         ProjectId::parse("0123456789abcdef0123456789abcdef")?,
         ConfinementRoots {
+            host_roots: None,
             cwd: Path::new("/project"),
             home: Path::new("/home/user"),
             state: Path::new("/fixture-host-state"),
@@ -509,6 +528,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
         let request = confinement_request(
             ProjectId::parse("0123456789abcdef0123456789abcdef")?,
             ConfinementRoots {
+                host_roots: None,
                 cwd,
                 home,
                 state: Path::new("/fixture-host-state"),

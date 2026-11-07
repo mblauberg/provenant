@@ -7,13 +7,43 @@ pub(super) fn inject(
     executor: &dyn Executor,
     gh: &Path,
     home: &Path,
+    host_paths: &impl Fn(&str) -> Option<OsString>,
     cancel: &provenant_core::CancelToken,
     environment: &mut Vec<(OsString, OsString)>,
 ) {
-    if let Some(token) = token(executor, gh, home, cancel, std::env::var_os("GH_TOKEN")) {
+    let config = config_directory(home, host_paths);
+    if !environment.iter().any(|(key, _)| key == "GH_CONFIG_DIR") {
+        environment.push(("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()));
+    }
+    if let Some(token) = token(
+        executor,
+        gh,
+        home,
+        &config,
+        cancel,
+        std::env::var_os("GH_TOKEN"),
+    ) {
         environment.retain(|(key, _)| key != "GH_TOKEN");
         environment.push(("GH_TOKEN".into(), token));
     }
+}
+
+/// Resolve only host-sealed paths. A guardian has cleared its ambient
+/// environment; the lane's private HOME cannot select the host login store.
+fn config_directory(
+    home: &Path,
+    host_paths: &impl Fn(&str) -> Option<OsString>,
+) -> std::path::PathBuf {
+    host_paths("GH_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            host_paths("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join("gh"))
+        })
+        .unwrap_or_else(|| home.join(".config/gh"))
 }
 
 /// Codex removes *TOKEN* by default. Override that filter only within the
@@ -51,6 +81,7 @@ fn token(
     executor: &dyn Executor,
     gh: &Path,
     home: &Path,
+    config: &Path,
     cancel: &provenant_core::CancelToken,
     host_token: Option<OsString>,
 ) -> Option<OsString> {
@@ -63,13 +94,20 @@ fn token(
     }
     let argv = [gh.as_os_str().to_owned(), "auth".into(), "token".into()];
     let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
+    let host_environment = [
+        ("HOME".into(), home.as_os_str().to_owned()),
+        ("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("GH_PROMPT_DISABLED".into(), "1".into()),
+    ];
+    options.env = Some(&host_environment);
     options.cancel = Some(cancel);
     options.process_group = true;
     options.cleanup_process_group = true;
     options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
     options.stderr = StreamPolicy::Discard;
-    // Inherit the host's ordinary gh configuration and keychain session.
-    // A missing login does not prevent a lane doing other read-only work.
+    // The selected store and host home survive a cleared guardian environment.
+    // A missing login does not prevent other ordinary lane work.
     let result = executor.execute(options).ok()?;
     if result.termination != Termination::Exit(0)
         || result.cancelled
@@ -119,6 +157,26 @@ mod tests {
     }
 
     #[test]
+    fn sealed_gh_paths_select_the_host_store_after_environment_clearing() {
+        let home = Path::new("/fixture/home");
+        let host = |key: &str| match key {
+            "GH_CONFIG_DIR" => Some("/fixture/relocated-gh".into()),
+            "XDG_CONFIG_HOME" => Some("/fixture/xdg".into()),
+            _ => None,
+        };
+        assert_eq!(
+            config_directory(home, &host),
+            Path::new("/fixture/relocated-gh")
+        );
+        assert_eq!(
+            config_directory(home, &|key| (key == "XDG_CONFIG_HOME")
+                .then(|| "/fixture/xdg".into())),
+            Path::new("/fixture/xdg/gh")
+        );
+        assert_eq!(config_directory(home, &|_| None), home.join(".config/gh"));
+    }
+
+    #[test]
     fn host_gh_login_is_captured_only_in_memory_and_failures_are_ignored() {
         struct Login(bool);
         impl Executor for Login {
@@ -127,10 +185,10 @@ mod tests {
                     options.argv,
                     ["/fixture/gh", "auth", "token"].map(OsString::from)
                 );
-                assert!(
-                    options.env.is_none(),
-                    "host login discovery must be inherited"
-                );
+                let env = options.env.expect("host login paths must be explicit");
+                assert!(env.contains(&("HOME".into(), "/fixture/home".into())));
+                assert!(env.contains(&("GH_CONFIG_DIR".into(), "/fixture/relocated-gh".into())));
+                assert!(!env.iter().any(|(name, _)| name == "GH_TOKEN"));
                 assert!(matches!(
                     options.stdout,
                     StreamPolicy::Capture { limit: 16384 }
@@ -158,6 +216,7 @@ mod tests {
                 &Login(true),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
+                Path::new("/fixture/relocated-gh"),
                 &cancel,
                 None
             ),
@@ -168,6 +227,7 @@ mod tests {
                 &Login(false),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
+                Path::new("/fixture/relocated-gh"),
                 &cancel,
                 None
             ),

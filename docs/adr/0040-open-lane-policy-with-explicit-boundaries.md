@@ -112,9 +112,11 @@ immutable and hidden under the same rule.
 The host also adds every registered provider identity directory, each isolated
 Agy home (including each actual `H/.agy-*` directory name), and relocated
 credential stores resolved from configured Codex/Claude homes and XDG roots.
-This includes unselected accounts. The host supplies the resolved directories
-with `MandatoryRoots::add_credentials`; no wildcard or credential-content read
-is required to inventory their names. Selected credential files outside the
+This includes unselected accounts. The absolute host `SSH_AUTH_SOCK` is an exact
+mandatory credential/socket root, including its canonical alias; there is no
+lane SSH-agent exception. The host supplies resolved directories and exact
+credential endpoints through the shared `MandatoryRoots` inventory; no wildcard
+or credential-content read is required to inventory their names. Selected credential files outside the
 standard roots must be added too. The registry and provider setup own those
 concrete paths; optional host settings cannot remove them. The host must retain
 its credential discovery/selection checks, including keychain-service checks,

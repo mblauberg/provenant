@@ -812,6 +812,10 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
         path: "/fixture/relocated/unselected".into(),
         scope: PathScope::Subtree,
     })?;
+    mandatory.add_credentials(PathGrant {
+        path: "/fixture/agent.sock".into(),
+        scope: PathScope::Exact,
+    })?;
     mandatory.add_git(PathGrant {
         path: "/fixture/host-git".into(),
         scope: PathScope::Subtree,
@@ -838,6 +842,7 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
     let rendered = render(&grants)?;
     assert!(rendered.starts_with("(version 1)\n(allow default)\n"));
     assert!(rendered.contains("(deny file-link)"));
+    assert!(rendered.contains("(deny network-outbound (require-all (remote unix-socket (path-literal \"/fixture/agent.sock\"))))"));
     let last_ordinary_write = rendered
         .find("(allow file-write* (subpath \"/fixture/home\"))")
         .expect("broad ordinary grant");
@@ -1027,7 +1032,21 @@ fn keychain_ipc_requires_the_selected_isolated_typed_mechanism() -> Result<(), P
             source.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"),
             !permitted
         );
-        assert!(source.contains("(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))"));
+        assert_eq!(
+            source.contains("(require-not (global-name \"com.apple.SecurityServer\"))"),
+            permitted
+        );
+        for prefix in [
+            "com.apple.securityd",
+            "com.apple.security.cloudkeychain",
+            "com.apple.keychainsharing",
+            "com.apple.SecurityServer",
+        ] {
+            assert!(
+                source.contains(&format!("(global-name-prefix \"{prefix}\")")),
+                "mandatory keychain IPC prefix {prefix}"
+            );
+        }
     }
     Ok(())
 }

@@ -204,6 +204,12 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         path: unselected.clone(),
         scope: PathScope::Subtree,
     })?;
+    // The sealed host inventory also covers agent sockets outside home/state.
+    let ssh_agent_socket = root.join("synthetic-agent.sock");
+    mandatory.add_credentials(PathGrant {
+        path: ssh_agent_socket.clone(),
+        scope: PathScope::Exact,
+    })?;
     for identity in ["selected", "unselected"] {
         mandatory.add_credentials(PathGrant {
             path: state.join("identities").join(identity).join(".codex"),
@@ -421,6 +427,59 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         executor.execute(options).expect("bounded sandbox child")
     };
     let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
+    let connect = |sbpl: &str, socket: &Path| {
+        run_in(
+            sbpl,
+            &executables[6],
+            &[
+                Path::new("-MIO::Socket::UNIX"),
+                Path::new("-e"),
+                Path::new("IO::Socket::UNIX->new(Peer => $ARGV[0]) or die \"connect: $!\\n\""),
+                socket,
+            ],
+        )
+    };
+    let mut socket_profiles = Vec::new();
+    for writer in [false, true] {
+        let open_plan = PlanPermissions {
+            network: NetworkAccess::Open,
+            mode: if writer {
+                plan.mode.clone()
+            } else {
+                AccessMode::ReadOnly
+            },
+            ..plan.clone()
+        };
+        let open_anchors = Anchors {
+            worktree: writer.then_some((&linked, &selected_ref)),
+            ..anchors
+        };
+        let open_sbpl = String::from_utf8(
+            backend
+                .compile(&open_plan, &profile, &open_anchors)?
+                .profile,
+        )?;
+        socket_profiles.push((writer, open_sbpl));
+    }
+    // The named credential socket is absent when both profiles compile.
+    let _ssh_listener = std::os::unix::net::UnixListener::bind(&ssh_agent_socket)?;
+    let ordinary_socket = root.join("ordinary.sock");
+    let _ordinary_listener = std::os::unix::net::UnixListener::bind(&ordinary_socket)?;
+    for socket in [&ssh_agent_socket, &ordinary_socket] {
+        std::os::unix::net::UnixStream::connect(socket)?;
+    }
+    for (writer, open_sbpl) in socket_profiles {
+        let ordinary = connect(&open_sbpl, &ordinary_socket);
+        assert!(
+            successful_probe(&ordinary),
+            "writer={writer}: ambient Unix socket: {ordinary:?}"
+        );
+        let credential = connect(&open_sbpl, &ssh_agent_socket);
+        assert!(
+            denied_probe(&credential),
+            "writer={writer}: exact SSH_AUTH_SOCK credential boundary: {credential:?}"
+        );
+    }
     let clone_helper = super::process_info::compile_native_boundary_helper(&executor, &scratch)?;
     let clone_source = root.join("ambient-clone-source");
     let clone_baseline = root.join("ambient-clone-baseline");
@@ -515,6 +574,10 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     // Inventory names compiled while absent must remain protected if the host
     // creates them later. Read/write/exec and resolved symlink names all agree.
     for (index, credential) in mandatory.credentials().iter().enumerate() {
+        if credential.path == ssh_agent_socket {
+            // The actual socket and IPC refusal are probed separately below.
+            continue;
+        }
         let file = match credential.scope {
             PathScope::Exact => {
                 std::fs::create_dir_all(credential.path.parent().ok_or("credential parent")?)?;
@@ -783,18 +846,6 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let peer_socket = agent.join("peer.sock");
     let _peer_listener = std::os::unix::net::UnixListener::bind(&peer_socket)?;
     std::os::unix::net::UnixStream::connect(&peer_socket)?;
-    let connect = |sbpl: &str, socket: &Path| {
-        run_in(
-            sbpl,
-            &executables[6],
-            &[
-                Path::new("-MIO::Socket::UNIX"),
-                Path::new("-e"),
-                Path::new("IO::Socket::UNIX->new(Peer => $ARGV[0]) or die \"connect: $!\\n\""),
-                socket,
-            ],
-        )
-    };
     let system_socket = Path::new("/private/var/run/mDNSResponder");
     for (name, sbpl) in [("writer", &sbpl), ("read-only", &read_only_sbpl)] {
         let outcome = connect(sbpl, system_socket);
