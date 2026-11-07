@@ -46,7 +46,10 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
         "{:?}",
         first_terminal.state
     );
-    assert_eq!(fs::read(path.join("AGENTS.md"))?, b"writer instructions\n");
+    assert_eq!(
+        fs::read(path.join("AGENTS.md"))?,
+        b"writer instructions, edited\n"
+    );
     assert_eq!(
         fs::read_to_string(path.join("writer-edited"))?,
         "writer fixture completed"

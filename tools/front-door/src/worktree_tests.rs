@@ -1055,7 +1055,9 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
     match mode {
         "edit" => {}
         "instruction-edit" => {
-            fs::write(worktree.join("AGENTS.md"), b"writer instructions\n")?;
+            // A different size from the baseline: Git can miss a same-size
+            // edit made within the checkout's timestamp granularity.
+            fs::write(worktree.join("AGENTS.md"), b"writer instructions, edited\n")?;
         }
         "control" => {
             for name in [
