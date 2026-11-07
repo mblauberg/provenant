@@ -223,7 +223,17 @@ impl Factory {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
         if !path.starts_with(&self.cwd) {
-            return Err(FacadeError::ConfinementRefused { resource: None });
+            // A submission from a subdirectory is materialised in the enclosing
+            // checkout's scratch. Only that graph directory may sit outside cwd.
+            let checkout = self
+                .graph_checkout()
+                .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+            let graphs =
+                provenant_os::fs::canonicalize(&checkout.join(".provenant/scratch/graphs"))
+                    .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+            if path.parent() != Some(graphs.as_path()) {
+                return Err(FacadeError::ConfinementRefused { resource: None });
+            }
         }
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
             .and_then(|mut file| {
@@ -285,7 +295,8 @@ impl Factory {
         // Then a document path: any path-shaped selector, or a bare name of an
         // existing file in the working directory or the scratch graphs directory.
         let path = Path::new(selector);
-        let scratch = self.cwd.join(".provenant/scratch/graphs").join(path);
+        let checkout = self.graph_checkout().map_err(|_| refused())?;
+        let scratch = checkout.join(".provenant/scratch/graphs").join(path);
         let local = self.cwd.join(path);
         if path.is_absolute()
             || selector.contains(['/', '\\'])
@@ -328,7 +339,7 @@ impl Factory {
     ) -> Result<Vec<provenant_fabric_runtime::graph::GraphDocument>, provenant_os::fs::FsError>
     {
         let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
-            provenant_os::fs::Directory::open_anchor(&self.cwd)?,
+            provenant_os::fs::Directory::open_anchor(&self.graph_checkout()?)?,
             |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
         )?;
         let prefix = hash.to_ascii_lowercase();
@@ -946,21 +957,34 @@ impl Factory {
         Ok(graph_snapshot(checkpoint))
     }
 
+    fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
+        provenant_os::git::repository_path(&self.cwd, provenant_os::git::RepositoryPath::Toplevel)
+            .map_err(|source| provenant_os::fs::FsError::Io {
+                operation: "locate graph checkout",
+                path: self.cwd.clone(),
+                source,
+            })
+    }
+
     pub(crate) fn prepare_scratch(
         &self,
         cancel: &CancelToken,
         budget: WaitBudget,
     ) -> Result<PathBuf, provenant_confinement::worktrees::WorktreeError> {
+        // Scratch belongs to the selected checkout, even when the command was
+        // invoked from one of its subdirectories. Keep self.cwd unchanged for
+        // relative launch arguments and the persisted execution directory.
+        let checkout = self.graph_checkout()?;
         provenant_confinement::worktrees::with_context(
             &self.context.roots,
             &self.home,
-            &self.cwd,
+            &checkout,
             &self.clock,
             cancel,
             |context| {
                 let repo = context.utility.open_repo(
                     context.executor,
-                    &self.cwd,
+                    &checkout,
                     context.utility_budget,
                     cancel,
                 )?;
