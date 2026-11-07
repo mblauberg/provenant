@@ -905,13 +905,12 @@ pub fn wait_for_children(
     cancel: &CancelToken,
     within: std::time::Duration,
 ) -> Result<Value, ServiceError> {
+    let clock = provenant_os::clock::SystemClock::new();
+    let started = clock.mono_now();
     while_waiting(cancel, within, || {
-        poll_children(
-            cancel,
-            within,
-            &provenant_os::clock::SystemClock::new(),
-            |remaining| from_lane(&RelayOp::Children, cancel, remaining),
-        )
+        poll_children(cancel, within, &clock, started, |remaining| {
+            from_lane(&RelayOp::Children, cancel, remaining)
+        })
     })
 }
 
@@ -919,9 +918,9 @@ fn poll_children(
     cancel: &CancelToken,
     within: std::time::Duration,
     clock: &dyn Clock,
+    started: provenant_core::MonoTime,
     mut poll: impl FnMut(std::time::Duration) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
-    let started = clock.mono_now();
     loop {
         if cancel.is_cancelled() {
             return Err(refused("cancelled", "child wait cancelled"));
@@ -980,14 +979,26 @@ pub fn while_waiting<T>(
     within: std::time::Duration,
     wait: impl FnOnce() -> Result<T, ServiceError>,
 ) -> Result<T, ServiceError> {
+    let started = std::time::Instant::now();
     with_waiting(
         |waiting| {
             let cleanup = CancelToken::new();
             wait_for_admission(|| {
+                // Yield retries share the observation deadline. Reclaiming the
+                // parent's slot is mandatory cleanup with its own allowance.
+                let remaining = if waiting {
+                    let remaining = within.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        return Err(refused("timeout", "child wait timed out"));
+                    }
+                    remaining
+                } else {
+                    within
+                };
                 from_lane(
                     &RelayOp::Wait { waiting },
                     if waiting { cancel } else { &cleanup },
-                    within,
+                    remaining,
                 )
             })
         },
@@ -1148,6 +1159,7 @@ mod child_wait_tests {
                         &cancel,
                         std::time::Duration::from_secs(2),
                         &provenant_os::clock::SystemClock::new(),
+                        provenant_os::clock::SystemClock.mono_now(),
                         |_| {
                             polls += 1;
                             if cancelled {
@@ -1180,18 +1192,35 @@ mod child_wait_tests {
         );
         assert!(result.is_err());
         assert_eq!(frames, [true, false]);
+        // Time spent yielding the slot consumes the same settlement deadline.
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0).unwrap(),
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let started = clock.mono_now();
+        frames.clear();
         let result = with_waiting(
-            |_| Ok(()),
+            |waiting| {
+                frames.push(waiting);
+                if waiting {
+                    clock
+                        .wait_until(provenant_core::MonoTime::from_micros(2_000_000))
+                        .unwrap();
+                }
+                Ok(())
+            },
             || {
                 poll_children(
                     &CancelToken::new(),
-                    std::time::Duration::ZERO,
-                    &provenant_os::clock::SystemClock::new(),
-                    |_| panic!("expired"),
+                    std::time::Duration::from_secs(1),
+                    &clock,
+                    started,
+                    |_| panic!("must not poll after yield consumed the deadline"),
                 )
             },
         );
         assert!(matches!(result, Err(ServiceError::Cli { code, .. }) if code == "timeout"));
+        assert_eq!(frames, [true, false]);
     }
 }
 
