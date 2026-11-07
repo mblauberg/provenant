@@ -1119,7 +1119,7 @@ impl Factory {
         let run = self.graph_with_scratch(
             GraphInput::Run {
                 extra: Default::default(),
-                document: path,
+                document: path.clone(),
             },
             budget,
             cancel,
@@ -1129,7 +1129,7 @@ impl Factory {
                 .and_then(Value::as_u64)
                 .map(|_| budget),
         )?;
-        let run = self.wait_document(run, input, budget, cancel)?;
+        let run = self.wait_document(run, input, budget, cancel, &path, &scratch)?;
         let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
             && run.status == GraphStatus::Pending
             && !cancel.is_cancelled();
@@ -1380,6 +1380,8 @@ impl Factory {
         input: &Value,
         budget: WaitBudget,
         cancel: &CancelToken,
+        document: &Path,
+        scratch: &Path,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) else {
             return Ok(run);
@@ -1392,13 +1394,42 @@ impl Factory {
             .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .cap_at(deadline);
         wait_submission(run, wait, &self.clock, &self.backoff, cancel, |id| {
-            self.graph(
+            let observed = self.graph(
                 GraphInput::Status {
                     extra: Default::default(),
                     id: id.to_owned(),
                 },
                 budget,
                 cancel,
+            )?;
+            // A waited submission owns admission progress. Status itself remains
+            // read-only; only a due launch retry is advanced under the journal lock.
+            let now = self.clock.wall_now().ok();
+            let due = observed.checkpoint.nodes.iter().any(|node| {
+                node.launch_retry
+                    .as_ref()
+                    .and_then(|retry| retry.wake_at)
+                    .zip(now)
+                    .is_some_and(|(wake, now)| now >= wake)
+            });
+            if !due {
+                return Ok(observed);
+            }
+            let retry_budget = if budget.remaining(self.clock.mono_now()).as_micros() == 0 {
+                WaitBudget::cli(self.clock.mono_now(), 5)
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
+            } else {
+                budget
+            };
+            self.graph_with_scratch(
+                GraphInput::Run {
+                    extra: Default::default(),
+                    document: document.to_owned(),
+                },
+                retry_budget,
+                cancel,
+                Some(scratch),
+                None,
             )
         })
     }

@@ -1103,7 +1103,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let effective = provenant_run::AdmissionPolicy::resolve_timeout(None, configured);
         Some(self.admission_timeout.map_or(effective.seconds, |limit| {
             let micros = limit.remaining(self.factory.clock.mono_now()).as_micros();
-            effective.seconds.min(micros.div_ceil(1_000_000))
+            effective.seconds.min(micros / 1_000_000)
         }))
     }
     type Error = FacadeError;
