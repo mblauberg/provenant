@@ -181,3 +181,17 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.lane.overrides]]
 filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Three isolated credential layouts each run real writer preparation. Retain
+# every layout and assertion while allowing their combined time on shared hosts.
+[[profile.default.overrides]]
+filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.lane.overrides]]
+filter = 'package(=provenant-cli) & test(=run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory)'
+slow-timeout = { period = "30s", terminate-after = 4 }
