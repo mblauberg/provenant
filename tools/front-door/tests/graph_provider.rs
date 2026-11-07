@@ -1502,6 +1502,135 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
     Ok(())
 }
 
+fn writer_registry_fixture() -> Result<TestRig> {
+    let rig = policy_codex_fixture()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&seeded), 0, "{seeded:?}");
+    Ok(rig)
+}
+
+/// Admission must survive repository-wide contention even without native execution.
+fn simultaneous_writer_launches_create_attempts() -> Result {
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+    let barrier = std::sync::Barrier::new(6);
+    std::thread::scope(|scope| -> Result {
+        let mut launches = Vec::new();
+        for index in 0..6 {
+            let barrier = &barrier;
+            let rig = &rig;
+            launches.push(scope.spawn(move || {
+                barrier.wait();
+                std::process::Command::new(binary)
+                    .current_dir(&rig.project)
+                    .env_clear()
+                    .envs(rig.env.iter().cloned())
+                    .arg("--state-dir")
+                    .arg(&rig.state)
+                    .args([
+                        "run",
+                        "fixture writer",
+                        "--tier",
+                        "junior",
+                        "--mode",
+                        "worktree-write",
+                        "--branch",
+                        &format!("parallel-{index}"),
+                        "--base",
+                        "HEAD",
+                        "--wait=55s",
+                        "--json",
+                    ])
+                    .output()
+            }));
+        }
+        for launch in launches {
+            let output = launch.join().map_err(|_| "launch thread panicked")??;
+            let response: Value = serde_json::from_slice(&output.stdout)?;
+            assert!(
+                response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+                    .is_string(),
+                "{response}; {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    })
+}
+
+/// A held registry consumes the launch budget, then reports a typed CLI error.
+fn writer_registry_timeout_is_bounded_and_reported() -> Result {
+    use provenant_core::{Clock, RootInputs, WaitBudget};
+    use provenant_os::{
+        clock::SystemClock,
+        fs::{Directory, LockMode, SystemPathResolver},
+    };
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
+    )?;
+    let registry = rig
+        .state
+        .join("worktrees")
+        .join(binding.project_id().to_string());
+    fs::create_dir_all(&registry)?;
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
+    let directory = Directory::open_anchor(&registry)?;
+    let clock = SystemClock;
+    let _held = directory.lock(
+        std::ffi::OsStr::new("worktrees.lock"),
+        LockMode::Exclusive,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &provenant_core::CancelToken::new(),
+        &clock,
+    )?;
+    let start = std::time::Instant::now();
+    let output = rig.command(&[
+        "run",
+        "fixture writer",
+        "--tier",
+        "junior",
+        "--mode",
+        "worktree-write",
+        "--branch",
+        "blocked-writer",
+        "--base",
+        "HEAD",
+        "--wait=1s",
+        "--json",
+    ])?;
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(15),
+        "launch exceeded its bounded wait"
+    );
+    assert_ne!(code(&output), 0, "{output:?}");
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["error"]["code"], "writer_lock_busy", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("bounded wait")),
+        "{response}"
+    );
+    assert_eq!(
+        response["data"]["checkpoint"]["nodes"][0]["attempts"],
+        json!([]),
+        "{response}"
+    );
+    Ok(())
+}
+
 /// A quota refusal with no generated work redraws the same alias in the graph.
 fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Result {
     if !graph_fixture_available()? {
@@ -3569,6 +3698,14 @@ fn main() -> ExitCode {
     } else {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "writer_registry_timeout_is_bounded_and_reported",
+                writer_registry_timeout_is_bounded_and_reported,
+            ),
+            (
+                "simultaneous_writer_launches_create_attempts",
+                simultaneous_writer_launches_create_attempts,
+            ),
             (
                 "simultaneous_first_launches_pass_cutover_guard",
                 simultaneous_first_launches_pass_cutover_guard,

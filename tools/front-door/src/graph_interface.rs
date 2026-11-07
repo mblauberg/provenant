@@ -112,8 +112,30 @@ fn invoke(
     match result {
         Ok(data) => {
             let human = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
+            let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            if command == "run"
+                && matches!(result.status, Outcome::Failed | Outcome::Refused)
+                && let Some(node) = result.data["checkpoint"]["nodes"]
+                    .as_array()
+                    .and_then(|nodes| nodes.iter().find(|node| node["advance_error"].is_string()))
+            {
+                result.error = Some(provenant_records::CommandError {
+                    code: node["advance_owner_code"]
+                        .as_str()
+                        .or_else(|| node["advance_error_code"].as_str())
+                        .unwrap_or("launch_failed")
+                        .into(),
+                    message: node["advance_error"]
+                        .as_str()
+                        .unwrap_or("launch failed")
+                        .into(),
+                    diagnostic: None,
+                    cause: None,
+                    repair: None,
+                });
+            }
             crate::emit(
-                &CommandResult::new(command, response_outcome(command, &data), data),
+                &result,
                 globals,
                 &human,
                 matches!(command, "templates" | "status" | "stats"),

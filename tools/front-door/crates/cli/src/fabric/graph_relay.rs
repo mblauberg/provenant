@@ -593,8 +593,16 @@ pub fn provision_writer(
     source: &str,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    provision_writer_checked(context, path, branch, source, cancel)
-        .map_err(|error| refused("writer_worktree", error.to_string()))
+    provision_writer_checked(
+        context,
+        path,
+        branch,
+        source,
+        WaitBudget::cli(provenant_os::clock::SystemClock.mono_now(), 55)
+            .map_err(|_| refused("invalid_input", "invalid writer wait budget"))?,
+        cancel,
+    )
+    .map_err(|error| refused("writer_worktree", error.to_string()))
 }
 
 /// Preserve the typed worktree failure for the graph launch owner.
@@ -603,6 +611,7 @@ pub fn provision_writer_checked(
     path: &str,
     branch: &str,
     source: &str,
+    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
@@ -612,7 +621,13 @@ pub fn provision_writer_checked(
         &context.cwd,
         &provenant_os::clock::SystemClock::new(),
         cancel,
-        |worktree_context| provision_in_context(worktree_context, path, branch, source, cancel),
+        |worktree_context| {
+            let worktree_context = worktrees::WorktreeContext {
+                lock_budget: budget,
+                ..*worktree_context
+            };
+            provision_in_context(&worktree_context, path, branch, source, cancel)
+        },
     )
 }
 

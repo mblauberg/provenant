@@ -1401,6 +1401,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             path,
             branch,
             base,
+            self.budget,
             self.cancel,
         )
         .map_err(|error| run_error(error.into()))?;

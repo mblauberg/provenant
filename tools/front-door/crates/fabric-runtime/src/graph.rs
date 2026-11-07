@@ -2099,6 +2099,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 &node.id,
                                 &next_attempt::writer_binding_reason(&node.id, &error),
                             );
+                            checkpoint.nodes[node_index].advance_owner_code =
+                                Some(next_attempt::launch_diagnostic(&error).code);
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
