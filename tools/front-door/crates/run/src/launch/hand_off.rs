@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_UNCERTAIN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn typed_local(phase: &str, error: &RunError) -> HandOff {
     if let RunError::Admission(error) = error
         && let Some(fact) = error.resource_fact()
@@ -206,6 +211,11 @@ impl RunStore {
                 .map_err(crate::writer::WriterCustodyError::Admission),
         }
         .map_err(|error| custody_refusal(error, writer_path))?;
+        // Simulate a lost guardian acknowledgement after custody was reserved.
+        #[cfg(test)]
+        if TEST_UNCERTAIN_HANDOFF.with(|fault| fault.replace(false)) {
+            return Err(HandOff::Uncertain("injected lost acknowledgement".into()));
+        }
         // Once custody is acquired, every local preparation failure must
         // withdraw it before fallback can consider another candidate.
         macro_rules! local_or_withdraw {
@@ -986,6 +996,106 @@ mod tests {
             &store.attempt_dir(record.run_id, id, false)?,
             RunStore::scope(&record),
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn uncertain_handoff_retains_attempt_route_and_does_not_launch_again()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let acquisitions = std::cell::Cell::new(0);
+        let acquire = |directory, scope, binding| {
+            acquisitions.set(acquisitions.get() + 1);
+            custody::acquire_writer(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )
+        };
+        TEST_UNCERTAIN_HANDOFF.with(|fault| fault.set(true));
+        let start = || {
+            store.start_inner(
+                request.run_id,
+                &crate::dispatch_tests::Ready,
+                &|_, _| Ok(Vec::new()),
+                &acquire,
+                None,
+                &call,
+            )
+        };
+        assert!(
+            matches!(start()?.as_slice(), [Started::Unknown { attempt, error }] if *attempt == request.attempts[0].attempt_id && error.contains("lost acknowledgement"))
+        );
+        let operation = store
+            .operation(&request.operation_id, &call)?
+            .ok_or("operation")?;
+        assert_eq!(operation.state, OperationState::LaunchUnknown);
+        let record = store.record(request.attempts[0].attempt_id, &call)?;
+        assert!(matches!(record.state, AttemptState::Starting { .. }));
+        let recorded_route = record.resolved_route.as_ref().ok_or("resolved route")?;
+        assert_eq!(recorded_route.provider, route().provider);
+        assert_eq!(recorded_route.model, route().model);
+        assert_eq!(recorded_route.effort, route().effort);
+        assert!(custody::reservation_present(
+            &store.attempt_dir(request.run_id, record.attempt_id, false)?,
+            RunStore::scope(&record)
+        )?);
+        assert!(start()?.is_empty());
+        assert_eq!(acquisitions.get(), 1);
+        assert_eq!(store.record(record.attempt_id, &call)?, record);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_local_handoff_withdrawal_keeps_starting_record_and_reservation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let id = request.attempts[0].attempt_id;
+        let record = store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let directory = store.attempt_dir(record.run_id, id, false)?;
+        let scope = RunStore::scope(&record);
+        let lease = custody::acquire_writer(
+            directory.try_clone()?,
+            scope,
+            custody::WriterBinding::read_only(),
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let before = store.record(id, &call)?;
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_withdraw BEFORE UPDATE ON attempts BEGIN SELECT RAISE(ABORT, 'fixture withdrawal write'); END;")?;
+        let result = store.withdraw(
+            id,
+            before.state.clone(),
+            Outcome::Rejected,
+            "local handoff failed",
+            call.clock.wall_now()?,
+            &call,
+        );
+        assert!(matches!(result, Err(RunError::Sqlite(_))));
+        assert_eq!(store.record(id, &call)?, before);
+        assert!(custody::reservation_present(&directory, scope)?);
+        drop(lease);
         Ok(())
     }
 

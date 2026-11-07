@@ -57,6 +57,7 @@ mod graph_writer_admission_tests {
         errors: std::collections::VecDeque<WorktreeError>,
         calls: usize,
         now: Option<provenant_core::WallTime>,
+        admission_seconds: Option<u64>,
     }
 
     impl provenant_fabric_runtime::graph::AttemptOwner for MockWriterOwner {
@@ -71,7 +72,14 @@ mod graph_writer_admission_tests {
         }
 
         fn admission_timeout_seconds(&self) -> Option<u64> {
-            Some(3600)
+            Some(self.admission_seconds.unwrap_or(3600))
+        }
+
+        fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
+            provenant_fabric_runtime::graph::LaunchRetryPolicy {
+                limit: 20,
+                ..Default::default()
+            }
         }
 
         fn observe_or_start(
@@ -170,6 +178,7 @@ mod graph_writer_admission_tests {
             errors: std::collections::VecDeque::from([lock_timeout]),
             calls: 0,
             now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
+            admission_seconds: None,
         };
         let mut journal = MemoryJournal::default();
 
@@ -350,6 +359,7 @@ mod graph_writer_admission_tests {
                 errors: std::collections::VecDeque::from([non_transient]),
                 calls: 0,
                 now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
+                admission_seconds: None,
             };
             let mut journal = MemoryJournal::default();
 
@@ -359,6 +369,38 @@ mod graph_writer_admission_tests {
             assert!(result.checkpoint.nodes[0].launch_retry.is_none());
             assert_eq!(owner.calls, 1);
         }
+    }
+
+    #[test]
+    fn writer_lock_deadline_retains_the_cause_in_cli_status() {
+        use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"lock-deadline", "nodes":[{
+                "id":"writer", "access":"worktree_write", "worktree":"lane",
+                "prompt":"write code", "route":{"adapter":"mock","model":"mock-model"}
+            }]
+        })).unwrap();
+        let mut owner = MockWriterOwner {
+            errors: std::iter::repeat_with(|| WorktreeError::LockBusy).take(8).collect(),
+            calls: 0,
+            now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
+            admission_seconds: Some(60),
+        };
+        let mut journal = MemoryJournal::default();
+        for seconds in [0, 5, 15, 35] {
+            owner.now = Some(provenant_core::WallTime::from_micros(seconds * 1_000_000).unwrap());
+            let pending = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
+        }
+        owner.now = Some(provenant_core::WallTime::from_micros(60_000_000).unwrap());
+        let blocked = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(blocked.checkpoint.nodes[0].state, NodeState::Blocked);
+        let target = super::unified::GraphTarget { graph: "lock-deadline".into(), node: None, attempt: None };
+        let rows = super::unified::status_rows(&blocked, &target);
+        let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
+        assert_eq!(node["cause_code"], "writer_lock_busy");
+        assert!(node["next"].as_str().unwrap().contains("writer lock"));
+        assert_eq!(owner.calls, 4, "no new admission after the deadline");
     }
 
     #[test]

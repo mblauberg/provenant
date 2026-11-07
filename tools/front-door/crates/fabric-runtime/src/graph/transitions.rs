@@ -189,6 +189,9 @@ pub(super) fn apply_attempt_observation(
         // Any observation answers the stopped launch, so its wait
         // is over and the checkpoint wake no longer owes it.
         retry_was_pending = progress.launch_retry.take().is_some();
+        if retry_was_pending {
+            progress.advance_owner_code = None;
+        }
         match observation {
             AttemptObservation::Pending { attempt_ref } => {
                 apply_pending_observation(attempt, &mut progress.state, attempt_ref);

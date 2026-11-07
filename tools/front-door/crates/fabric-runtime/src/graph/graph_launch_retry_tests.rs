@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
+    use crate::coordination::facade::FacadeError;
+    #[derive(Default)]
+    struct UncertainOwner {
+        calls: Vec<(AttemptKey, GraphRoute)>,
+        guardians: usize,
+        now: Option<provenant_core::WallTime>,
+    }
+    impl AttemptOwner for UncertainOwner {
+        type Error = FacadeError;
+        fn actor(&self) -> String { "actor".into() }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> { self.now }
+        fn observe_or_start(
+            &mut self, key: &AttemptKey, _: NodeInput<'_>, route: &GraphRoute,
+            _: AccessMode, _: Option<&str>, _: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            self.calls.push((key.clone(), route.clone()));
+            if self.calls.len() == 1 {
+                self.guardians += 1;
+                Err(FacadeError::LaunchUnknown {
+                    operation_id: provenant_core::OperationId::parse("uncertain-operation").unwrap(),
+                })
+            } else {
+                assert_eq!(self.calls[0], self.calls[self.calls.len() - 1]);
+                Ok(terminal(AttemptOutcome::Succeeded))
+            }
+        }
+    }
+    let mut task = node("one", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("fallback")]);
+    let document = graph(vec![task]);
+    let mut owner = UncertainOwner { now: Some(at(0)), ..Default::default() };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(pending.checkpoint.nodes[0].advance_owner_code.as_deref(), Some("LAUNCH_UNKNOWN"));
+    assert_eq!(pending.checkpoint.nodes[0].attempts.len(), 1);
+    owner.now = Some(at(5));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.guardians, 1);
+}
+
+#[test]
 fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
     #[derive(Default)]
     struct FailingJournal {
@@ -261,9 +308,11 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
     let pending = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
     assert_eq!(retry_of(&pending.checkpoint).wake_at, Some(at(5)));
+    assert_eq!(pending.checkpoint.nodes[0].advance_owner_code.as_deref(), Some("writer_lock_busy"));
     owner.now = Some(at(5));
     let completed = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(completed.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(completed.checkpoint.nodes[0].advance_owner_code, None);
     assert_eq!(completed.checkpoint.nodes[0].attempts.len(), 1);
     assert_eq!(owner.calls.len(), 2);
     assert_eq!(owner.calls[0], owner.calls[1]);
