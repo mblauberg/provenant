@@ -591,6 +591,31 @@ fn fetch_tracking_ref(
 pub fn review_merge_base(git: &Path, cwd: &Path, head: &str) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
     let env = repository_environment(&executor, git, cwd)?;
+    // A merge commit represents the changes introduced relative to its first
+    // parent, even when the default branch already contains the merge itself.
+    let (parents, timed_out) = read_git_with_env(
+        &executor,
+        git,
+        cwd,
+        &["rev-list", "--parents", "-n", "1", head],
+        4096,
+        &env,
+    )
+    .map_err(|_| RunError::Validation("cannot inspect review head; supply --base"))?;
+    if timed_out || parents.truncated {
+        return Err(RunError::Validation(
+            "cannot inspect review head; supply --base",
+        ));
+    }
+    let parents = std::str::from_utf8(&parents.bytes).map_err(execution_error)?;
+    let ids: Vec<_> = parents.split_whitespace().collect();
+    if ids.len() >= 3
+        && ids
+            .iter()
+            .all(|id| provenant_core::GitOid::parse(id).is_ok())
+    {
+        return Ok(ids[1].to_owned());
+    }
     let default = resolve(&executor, git, cwd, "refs/remotes/origin/HEAD", &env).map_err(|_| {
         RunError::Validation("cannot resolve origin's default branch; supply --base")
     })?;
@@ -1289,6 +1314,44 @@ mod tests {
     fn git(executor: &SystemExecutor, binary: &Path, cwd: &Path, args: &[&str]) -> TestResult {
         let _ = (executor, binary);
         provenant_os::fixture::run_git(cwd, args)?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_merge_head_uses_first_parent() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let git_path = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let executor = SystemExecutor::new(1)?;
+        git(&executor, &git_path, root, &["init", "-q"])?;
+        git(
+            &executor,
+            &git_path,
+            root,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        git(
+            &executor,
+            &git_path,
+            root,
+            &["config", "user.name", "Fixture"],
+        )?;
+        std::fs::write(root.join("base"), "base")?;
+        git(&executor, &git_path, root, &["add", "."])?;
+        git(&executor, &git_path, root, &["commit", "-qm", "base"])?;
+        git(&executor, &git_path, root, &["checkout", "-qb", "side"])?;
+        std::fs::write(root.join("side"), "side")?;
+        git(&executor, &git_path, root, &["add", "."])?;
+        git(&executor, &git_path, root, &["commit", "-qm", "side"])?;
+        git(&executor, &git_path, root, &["checkout", "-q", "-"])?;
+        git(
+            &executor,
+            &git_path,
+            root,
+            &["merge", "--no-ff", "-qm", "merge", "side"],
+        )?;
+        let first = resolve_git_base(&git_path, root, "HEAD^1")?;
+        assert_eq!(review_merge_base(&git_path, root, "HEAD")?, first);
         Ok(())
     }
 

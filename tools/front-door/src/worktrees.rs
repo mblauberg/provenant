@@ -1229,6 +1229,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .wall_now()
         .map(|now| i128::from(now.as_micros()) * 1_000)
         .map_err(|_| Error::Budget)?;
+    crate::staging_gc::collect(
+        roots.state.as_path(),
+        now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000,
+        command.dry_run,
+    )?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
