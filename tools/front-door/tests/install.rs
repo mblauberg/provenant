@@ -2095,6 +2095,7 @@ esac
     assert_eq!(code(&direct), 2, "{direct:?}");
     assert_eq!(fs::read(&checkpoint_path)?, old_checkpoint);
     let output = String::from_utf8(direct.stdout.bytes)?;
+    assert!(!output.contains("child-lane"), "{output}");
     for expected in [
         "old-pending-fixture",
         "finish or cancel it with the previous release before upgrading",
@@ -2105,6 +2106,7 @@ esac
     }
     let stopped = rig.command(&["upgrade", "--json"])?;
     let stopped_value: serde_json::Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+    assert!(!stopped_value.to_string().contains("child-lane"));
     assert_eq!(
         stopped_value["data"][0]["success"], false,
         "{stopped_value}"

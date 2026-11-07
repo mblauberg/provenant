@@ -287,6 +287,15 @@ mod tests {
             b"broken checkpoint",
         )?;
         assert!(live_graph_children(state, project, "host/parent-attempt").is_err());
+        std::fs::write(
+            state
+                .as_path()
+                .join("fabric/graphs")
+                .join(project.to_string())
+                .join("graph-custody.json"),
+            br#"{"checkpoint":{"nodes":[{"state":"succeeded"}]}}"#,
+        )?;
+        assert!(!live_graph_children(state, project, "host/parent-attempt")?);
         Ok(())
     }
 
