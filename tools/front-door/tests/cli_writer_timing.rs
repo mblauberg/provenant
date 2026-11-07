@@ -181,7 +181,9 @@ fn run_wait_reports_the_held_registry_lock() -> Result {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Measure the real CLI process against its wait budget.
 fn run_wait_refuses_a_held_writer_without_retry() -> Result {
+    use std::time::{Duration, Instant};
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     assert_eq!(
@@ -222,13 +224,18 @@ fn run_wait_refuses_a_held_writer_without_retry() -> Result {
             }]
         }))?,
     )?;
+    let started = Instant::now();
     let output = rig.command(&[
         "run",
         "--file",
         document.to_str().ok_or("document")?,
-        "--wait=10s",
+        "--wait=30s",
         "--json",
     ])?;
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "live writer refusal consumed the wait budget"
+    );
     let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_ne!(code(&output), 0, "{value}");
     let node = &value["data"]["checkpoint"]["nodes"][0];
