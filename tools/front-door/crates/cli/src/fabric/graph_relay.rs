@@ -1784,7 +1784,8 @@ mod provisioning_tests {
                 serve(&host, "caller", arguments, budget, cancel, &clock)
             },
         )?;
-        let request = |id: &str| json!({"op":"add","id":id,"use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":id});
+        // Disjoint scopes keep these independent children in separate checkouts.
+        let request = |id: &str| json!({"op":"add","id":id,"use":"implement","brief":"Write","writer":true,"write_scope":[format!("src/{id}")],"idempotency_key":id});
         let held = directory.lock(
             std::ffi::OsStr::new("worktrees.lock"),
             LockMode::Exclusive,
