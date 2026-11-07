@@ -202,6 +202,36 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
 }
 
 #[test]
+fn account_quota_is_unavailable_inside_a_lane() -> Result {
+    let mut rig = quota_rig()?;
+    rig.env
+        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+
+    for args in [&["quota"][..], &["quota", "--json"]] {
+        let output = rig.command(args)?;
+        assert_ne!(code(&output), 0, "{args:?}");
+        if args.len() == 1 {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout.bytes),
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            assert!(text.contains("QUOTA_UNAVAILABLE_IN_LANE"), "{text}");
+            assert!(text.contains("unavailable inside a lane"), "{text}");
+            assert!(text.contains("chair's session"), "{text}");
+        } else {
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+            assert_eq!(report["error"]["code"], "QUOTA_UNAVAILABLE_IN_LANE");
+            assert!(report["error"]["message"].as_str().is_some_and(|message| {
+                message.contains("unavailable inside a lane") && message.contains("chair's session")
+            }));
+        }
+    }
+    assert!(!rig.state.join("quota").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
     let rig = quota_rig()?;
     std::fs::write(rig.state.join("readiness"), b"blocked directory")?;
