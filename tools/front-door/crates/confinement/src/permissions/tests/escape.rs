@@ -63,6 +63,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&provider_state, std::fs::Permissions::from_mode(0o700))?;
     }
     let protected_parent = root.join("protected-parent");
     let protected = protected_parent.join("protected");
@@ -121,10 +122,6 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
 
     let profile = ProviderProfile {
         spec: ProviderProfileSpec {
-            state_writes: vec![PathGrant {
-                path: provider_state.clone(),
-                scope: PathScope::Subtree,
-            }],
             deny_keychain_access: true,
             allow_process_fork: true,
             allow_database_ipc: true,

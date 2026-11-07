@@ -424,6 +424,7 @@ fn prepare(
                     mechanism: "login".into(),
                     roots: authentication_roots,
                     in_place_writes: Vec::new(),
+                    keychain: None,
                 }],
                 tool_exec_roots,
                 discovery_reads: input
