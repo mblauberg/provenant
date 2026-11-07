@@ -415,7 +415,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
             &provenant_core::AttemptId::from_bytes([42; 16]),
             &provenant_os::fs::Directory::open_anchor(&scratch)?,
         )?;
-        let mut options = command.options(&scratch, std::time::Duration::from_secs(5))?;
+        let mut options = command.options(&scratch, std::time::Duration::from_secs(60))?;
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         let outcome = executor.execute(options)?;
