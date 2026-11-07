@@ -3654,31 +3654,30 @@ mod writer_recovery_tests {
                     None,
                 )?;
                 let tree = std::str::from_utf8(&tree)?.trim();
-                let raw = crate::objects::execute_bounded(
-                    &git,
-                    &candidate.join("git-common"),
-                    launch.worktree.path(),
-                    &[
-                        "-c".into(),
-                        "user.name=Fixture".into(),
-                        "-c".into(),
-                        "user.email=fixture@example.invalid".into(),
-                        "commit-tree".into(),
-                        tree.into(),
-                        "-p".into(),
-                        launch.base.to_string().into(),
-                        "-m".into(),
-                        "Retained lane commit".into(),
-                    ],
-                    None,
-                    crate::objects::Execution {
-                        object_directory: Some(&candidate.join("git-objects")),
-                        alternate_directory: Some(
-                            &launch.worktree.repo().common_git_dir().join("objects"),
-                        ),
-                        ..Default::default()
-                    },
-                )?;
+                let output = provenant_os::fixture::git_command_at(&git)
+                    .arg("--git-dir")
+                    .arg(candidate.join("git-common"))
+                    .args([
+                        "commit-tree",
+                        tree,
+                        "-p",
+                        &launch.base.to_string(),
+                        "-m",
+                        "Retained lane commit",
+                    ])
+                    .current_dir(launch.worktree.path())
+                    .env("GIT_OBJECT_DIRECTORY", candidate.join("git-objects"))
+                    .env(
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                        launch.worktree.repo().common_git_dir().join("objects"),
+                    )
+                    .output()?;
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let raw = output.stdout;
                 let head = provenant_core::GitOid::parse(std::str::from_utf8(&raw)?.trim())?;
                 std::fs::write(
                     candidate.join("git-common").join(launch.branch.as_str()),
