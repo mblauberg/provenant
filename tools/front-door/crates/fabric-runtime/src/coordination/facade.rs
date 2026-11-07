@@ -688,7 +688,7 @@ impl FacadeError {
                 }
                 projected = projected.next("wait for the current writer or lock holder to finish");
             }
-            Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer registry lock holder to finish, then retry"),
+            Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
             Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),

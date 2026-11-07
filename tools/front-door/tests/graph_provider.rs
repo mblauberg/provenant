@@ -1610,9 +1610,14 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         "--wait=1s",
         "--json",
     ])?;
+    let elapsed = start.elapsed();
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(15),
-        "launch exceeded its bounded wait"
+        elapsed >= std::time::Duration::from_secs(1),
+        "launch did not wait for the held registry: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "launch exceeded its one-second wait budget: {elapsed:?}"
     );
     assert_ne!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
