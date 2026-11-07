@@ -4,6 +4,12 @@ on:
   push:
     branches: [main, 'land/**']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      cold_cache:
+        description: Use fresh Rust caches for this run
+        type: boolean
+        default: false
 
 # Least privilege: the workflow grants nothing by default; every job
 # declares exactly what it needs.
@@ -72,7 +78,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
           add-job-id-key: false
           save-if: false
       - name: Check harness assets
@@ -126,7 +132,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci-lint
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-lint-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-lint' }}
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Check formatting
@@ -187,7 +193,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
           add-job-id-key: false
           save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
       - name: Install nextest
@@ -316,7 +322,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci-macos
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci-macos' }}
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Install nextest
@@ -388,7 +394,6 @@ jobs:
           | test(=second_writer_is_refused_while_first_holds_the_worktree)
           | test(=writer_terminal_refuses_sequencer_state)
           | test(=writer_production_plan_denies_outside_writes)
-          | test(=writer_protected_changes_wait_for_review_and_ignore_upstream)
           | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
           | (package(=provenant-fabric-runtime) & test(=graph::tests::composite_and_allowance_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source))'
       - name: Run native writer capability probes

@@ -3896,6 +3896,7 @@ fn raw_submission_preserves_raw_reporting_label() {
     patch::submission(&mut document, "raw-reporting", &plans::generous()).unwrap();
     assert_eq!(document.nodes[0].extra["template"], "raw");
     assert_eq!(document.extra["submission_patch"]["nodes"][0]["use"], "raw");
+    assert_eq!(document.extra["submission_patch"]["nodes"][0]["extensions"]["template"], "raw");
 }
 
 #[test]

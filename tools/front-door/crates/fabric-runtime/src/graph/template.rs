@@ -19,6 +19,162 @@ const ITEM: &str = "item";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
+/// Ask the compiled schema whether a field is recognised, independently of its
+/// authored value (which may still contain parameter placeholders). Null either
+/// decodes as a known optional field or fails its known type; an unknown field
+/// instead survives in `extra`.
+fn compiled_field(field: &str) -> bool {
+    let mut probe = serde_json::json!({"id":"probe", "access":"read_only"});
+    probe[field] = Value::Null;
+    match serde_json::from_value::<GraphNode>(probe) {
+        Ok(node) => !node.extra.contains_key(field),
+        Err(_) => true,
+    }
+}
+
+fn check_extensions(node: &Map<String, Value>) -> Result<(), String> {
+    if let Some(extensions) = node.get("extensions") {
+        let fields = extensions
+            .as_object()
+            .ok_or("node extensions must be a table")?;
+        for field in fields.keys() {
+            if compiled_field(field) || template_syntax(field) || field == "extensions" {
+                return Err(format!("reserved node field {field} in extensions"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn flatten_extensions(node: &mut Map<String, Value>) -> Result<(), String> {
+    check_extensions(node)?;
+    if let Some(extensions) = node.remove("extensions") {
+        node.extend(
+            extensions
+                .as_object()
+                .ok_or("node extensions must be a table")?
+                .clone(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate supplied document metadata before lowering an authored document.
+pub fn validate_document_schema_version(document: &Value) -> Result<(), String> {
+    if let Some(version) = document.get("schema_version")
+        && !matches!(version.as_u64(), Some(1 | 2))
+    {
+        return Err("schema_version must be the integer 1 or 2".into());
+    }
+    Ok(())
+}
+
+/// Validate and remove graph-document controls before checking a shorthand node.
+pub fn separate_document_fields(node: &mut Value) -> Result<(), String> {
+    validate_document_schema_version(node)?;
+    if let Some(fields) = node.as_object_mut() {
+        for key in [
+            "schema_version",
+            "graph_id",
+            "templates",
+            "integration_branch",
+            "limits",
+            "delivery",
+            "review_base",
+            "context",
+            "decision_session",
+            "review",
+            "retry",
+            "exclude",
+            "network",
+            "capability",
+            "no_capability",
+        ] {
+            fields.remove(key);
+        }
+    }
+    Ok(())
+}
+
+fn template_syntax(field: &str) -> bool {
+    matches!(
+        field,
+        "use" | "with" | "over" | "repeat" | "after" | "tier" | "min_ok" | "reduce_verdict"
+    )
+}
+
+fn check_authored_fields(
+    node: &Map<String, Value>,
+    stage: &str,
+    instance: bool,
+) -> Result<(), String> {
+    check_extensions(node).map_err(|error| format!("node {stage}: {error}"))?;
+    for field in node.keys() {
+        // This control selects findings collection for review-panel instances.
+        if field != "extensions"
+            && !matches!(field.as_str(), "after" | "tier")
+            && !(instance && (template_syntax(field) || field == "repair_panel"))
+            && !compiled_field(field)
+        {
+            return Err(format!("node {stage}: unknown field {field}"));
+        }
+    }
+    for (container, members) in [("composite", "nodes"), ("loop", "body")] {
+        if let Some(children) = node
+            .get(container)
+            .and_then(|value| value.get(members))
+            .and_then(Value::as_array)
+        {
+            for child in children {
+                let fields = child.as_object().ok_or("template node must be a table")?;
+                let stage = fields.get("id").and_then(Value::as_str).unwrap_or(stage);
+                check_authored_fields(fields, stage, true)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Turn an already compiled node back into authored input without presenting
+/// retained provenance or runtime metadata as undeclared node fields.
+pub(super) fn preserve_compiled_metadata(node: &mut Value) -> Result<(), String> {
+    for pointer in ["/composite/nodes", "/loop/body"] {
+        if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            for child in children {
+                preserve_compiled_metadata(child)?;
+            }
+        }
+    }
+    let fields = node
+        .as_object_mut()
+        .ok_or("compiled node must be a table")?;
+    let metadata: Map<String, Value> = fields
+        .iter()
+        .filter(|(field, _)| !compiled_field(field))
+        .map(|(field, value)| (field.clone(), value.clone()))
+        .collect();
+    for field in metadata.keys() {
+        fields.remove(field);
+    }
+    if !metadata.is_empty() {
+        fields.insert("extensions".into(), Value::Object(metadata));
+    }
+    Ok(())
+}
+
+fn merge_node_fields(base: &mut Map<String, Value>, own: &Map<String, Value>) {
+    for (key, value) in own {
+        if key == "extensions"
+            && let Some(inherited) = base.get_mut(key).and_then(Value::as_object_mut)
+            && let Some(entries) = value.as_object()
+        {
+            inherited.extend(entries.clone());
+        } else {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 #[path = "template_composites.rs"]
 mod composites;
 
@@ -163,11 +319,23 @@ pub(super) fn review_node(node: &PlannedNode) -> bool {
         })
 }
 
+/// Optional compiler behaviour declared by a composite template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositeBehaviour {
+    #[serde(rename = "panel")]
+    ReviewPanel,
+    Repair,
+    ReviewRepair,
+}
+
 /// One template document. A leaf sets `brief` (and usually `tier`); a
 /// composite sets `nodes`. Nodes stay JSON until their parameters are bound,
 /// because a typed list field such as `write_scope` may be one `${scope}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composite_behaviour: Option<CompositeBehaviour>,
     /// Top-level run identity. Unspecified templates start fresh work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<SubmissionIdentity>,
@@ -303,6 +471,9 @@ impl Template {
     /// read root drawn from a closed string enum.
     pub fn check_authority(&self) -> Result<(), String> {
         fn check_node(template: &Template, node: &Value) -> Result<(), String> {
+            if let Some(fields) = node.as_object() {
+                check_extensions(fields)?;
+            }
             for key in [
                 "kind",
                 "access",
@@ -422,6 +593,7 @@ impl Template {
     /// A flavour over its base: set fields win, parameters and leaf fields merge.
     fn flavour(mut base: Self, own: &Self) -> Self {
         base.extra.extend(own.extra.clone());
+        base.composite_behaviour = own.composite_behaviour.or(base.composite_behaviour);
         base.review = own.review.or(base.review);
         base.identity = own.identity.or(base.identity);
         base.name = own.name.clone().or(base.name);
@@ -434,7 +606,7 @@ impl Template {
             base.outputs = own.outputs.clone();
         }
         base.kind = own.kind.or(base.kind);
-        base.node.extend(own.node.clone());
+        merge_node_fields(&mut base.node, &own.node);
         if own.is_composite() {
             base.nodes = own.nodes.clone();
             base.exports = own.exports.clone();
@@ -736,6 +908,16 @@ impl<'a> Compiler<'a> {
             ));
         }
         let object = raw.as_object().ok_or("template node must be a table")?;
+        if object.contains_key("use") || !stack.is_empty() {
+            check_authored_fields(
+                object,
+                object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>"),
+                true,
+            )?;
+        }
         if let Some(over) = object.get("over") {
             return self.lower_over(object, &interpolate(over, bindings)?, bindings, stack);
         }
@@ -748,6 +930,15 @@ impl<'a> Compiler<'a> {
                 interpolate(value, bindings)?
             };
             node.insert(key.clone(), value);
+        }
+        if object.contains_key("use") || !stack.is_empty() {
+            check_authored_fields(
+                &node,
+                node.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>"),
+                true,
+            )?;
         }
         if let Some(repeat) = node.remove("repeat") {
             return self.lower_repeat(node, repeat, stack);
@@ -800,7 +991,7 @@ impl<'a> Compiler<'a> {
             if let Some(item) = bindings.get(ITEM) {
                 parameters.entry(ITEM).or_insert_with(|| item.clone());
             }
-            if name == "review-repair"
+            if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair)
                 && with.get("lenses").is_none()
                 && let Some(lenses) = self.resolvers.get("review-panel")
             {
@@ -871,7 +1062,11 @@ impl<'a> Compiler<'a> {
         let mut ids = BTreeSet::new();
         let mut children = Vec::with_capacity(items.len());
         let panel_routes = if over.as_str() == Some("@review-panel")
-            && copy.get("use").and_then(Value::as_str) == Some("review")
+            && copy
+                .get("use")
+                .and_then(Value::as_str)
+                .and_then(|name| self.library.resolve(name).ok())
+                .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens))
         {
             self.resolvers.get("review-panel-routes")
         } else {
@@ -992,8 +1187,13 @@ impl<'a> Compiler<'a> {
         let repeat: Repeat =
             serde_json::from_value(repeat).map_err(|error| format!("invalid repeat: {error}"))?;
         let review_repair = repeat.review_repair
-            || (node.get("use").and_then(Value::as_str) == Some("repair")
-                && self.library.layer("repair") == Some(Layer::Bundled));
+            || node
+                .get("use")
+                .and_then(Value::as_str)
+                .and_then(|name| self.library.resolve(name).ok())
+                .is_some_and(|template| {
+                    template.composite_behaviour == Some(CompositeBehaviour::Repair)
+                });
         let mut boundary = Map::new();
         for key in [
             "id",
@@ -1042,6 +1242,12 @@ impl<'a> Compiler<'a> {
         parameters: &Map<String, Value>,
         stack: &mut Vec<String>,
     ) -> Result<Value, String> {
+        let stage = overrides
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        check_authored_fields(&template.node, stage, false)?;
+        check_authored_fields(&overrides, stage, true)?;
         if template.is_composite() {
             if let Some(key) = ["brief", "goal", "prompt", "tier", "route", "routes"]
                 .into_iter()
@@ -1059,9 +1265,7 @@ impl<'a> Compiler<'a> {
             for member in &template.nodes {
                 children.push(self.lower_in(member, parameters, stack)?);
             }
-            let bundled = self.library.layer(name) == Some(Layer::Bundled);
-            if bundled
-                && name == "review-panel"
+            if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel)
                 && overrides.get("repair_panel") == Some(&Value::Bool(true))
             {
                 // Findings are a completed review, not an unavailable reviewer.
@@ -1087,8 +1291,7 @@ impl<'a> Compiler<'a> {
                 }
             }
 
-            if bundled
-                && name == "repair"
+            if template.composite_behaviour == Some(CompositeBehaviour::Repair)
                 && parameters.get("writer").and_then(Value::as_str) == Some("")
             {
                 // A standalone or integration repair has no PR writer to continue.
@@ -1096,19 +1299,41 @@ impl<'a> Compiler<'a> {
                     fix.remove("continues");
                 }
             }
-            if bundled
-                && name == "repair"
+            if template.composite_behaviour == Some(CompositeBehaviour::Repair)
                 && let Some(branch) = parameters
                     .get("integration_branch")
                     .and_then(Value::as_str)
                     .filter(|branch| !branch.is_empty())
             {
-                children[0]["delivery"] = Value::String(format!("integrate:{branch}"));
+                let fix = children
+                    .first_mut()
+                    .and_then(Value::as_object_mut)
+                    .ok_or("repair behaviour requires a writer node")?;
+                fix.insert(
+                    "delivery".into(),
+                    Value::String(format!("integrate:{branch}")),
+                );
             }
-            if bundled && name == "review-repair" {
+            if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair) {
                 // Bind a host-authored slice to the same literal write authority.
                 // The read-only continuation planner cannot invent writer authority.
-                let mut fix = children[0]["loop"]["body"][0].clone();
+                let mut fix = children
+                    .first()
+                    .and_then(|node| node.pointer("/loop/body/0"))
+                    .filter(|node| node.is_object())
+                    .cloned()
+                    .ok_or("review_repair behaviour requires a loop with a writer node")?;
+                let continuation = children
+                    .get_mut(2)
+                    .and_then(Value::as_object_mut)
+                    .ok_or("review_repair behaviour requires a continuation planner at node 3")?;
+                let plan = continuation.entry("plan").or_insert(Value::Null);
+                if plan.is_null() {
+                    *plan = Value::Object(Map::new());
+                }
+                if !plan.is_object() {
+                    return Err("review_repair continuation plan must be a table".into());
+                }
                 fix["id"] = Value::String("fix".into());
                 fix.as_object_mut()
                     .ok_or("repair writer must be a node")?
@@ -1127,14 +1352,18 @@ impl<'a> Compiler<'a> {
                 fix.as_object_mut()
                     .ok_or("repair writer must be a node")?
                     .remove("id");
+                // Re-authoring a compiled writer must retain its provenance as
+                // explicit metadata, rather than as unknown authored fields.
+                preserve_compiled_metadata(&mut fix)?;
                 children[2]["plan"]["max_nodes"] = serde_json::json!(32);
                 children[2]["plan"]["patterns"] = serde_json::json!([{
                     "name": "repair-slice", "brief": prompt, "access": access, "node": fix
                 }]);
                 children[2]["plan"]["wire_exports"] = Value::Bool(true);
                 let mut resolvers = self.resolvers.clone();
-                let lenses = parameters["lenses"]
-                    .as_array()
+                let lenses = parameters
+                    .get("lenses")
+                    .and_then(Value::as_array)
                     .ok_or("repair lenses must be a list")?
                     .iter()
                     .map(|value| {
@@ -1180,7 +1409,7 @@ impl<'a> Compiler<'a> {
             boundary.insert("access".into(), Value::String("read_only".into()));
             boundary.insert("composite".into(), Value::Object(composite));
             boundary.extend(overrides);
-            return self.finish_shallow(boundary);
+            return self.finish(boundary, stack);
         }
         if overrides.contains_key("min_ok") {
             return Err(format!(
@@ -1191,6 +1420,7 @@ impl<'a> Compiler<'a> {
         for (key, value) in &template.node {
             leaf.insert(key.clone(), interpolate(value, parameters)?);
         }
+        check_authored_fields(&leaf, stage, false)?;
         if let Some(brief) = &template.brief {
             leaf.insert(
                 "prompt".into(),
@@ -1227,13 +1457,14 @@ impl<'a> Compiler<'a> {
         if overrides.contains_key("route") || overrides.contains_key("routes") {
             leaf.remove("tier");
         }
-        leaf.extend(overrides);
+        merge_node_fields(&mut leaf, &overrides);
         if template.brief.is_some()
             && !leaf.contains_key("acceptance_checks")
             && let Some(brief) = leaf.get("prompt").cloned()
         {
             leaf.insert("acceptance_checks".into(), Value::Array(vec![brief]));
         }
+        flatten_extensions(&mut leaf)?;
         if let Some(review) = template.review {
             review.apply(&mut leaf);
         }
@@ -1268,6 +1499,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn finish_shallow(&self, mut node: Map<String, Value>) -> Result<Value, String> {
+        flatten_extensions(&mut node)?;
         if let Some(after) = node.remove("after") {
             let after = after.as_array().ok_or("`after` must be a list")?;
             let depends = node
@@ -1303,9 +1535,17 @@ impl<'a> Compiler<'a> {
 /// Raw passthrough nodes (as presets lower them) stay byte-identical.
 fn needs_lowering(node: &Value) -> bool {
     node.as_object().is_some_and(|object| {
-        ["use", "over", "repeat", "after", "tier", "with"]
-            .iter()
-            .any(|key| object.contains_key(*key))
+        [
+            "use",
+            "over",
+            "repeat",
+            "after",
+            "tier",
+            "with",
+            "extensions",
+        ]
+        .iter()
+        .any(|key| object.contains_key(*key))
             || object
                 .get("composite")
                 .and_then(|spec| spec.get("nodes"))

@@ -1,6 +1,7 @@
 # Composite nodes share the leaf template schema. This catalogue is separate
 # so leaf briefs and composite topology have independent owners.
 [review-panel]
+composite_behaviour = "panel"
 doc = "Review through a host-selected topology and lenses."
 exports = [{ node = "selected", outputs = ["result", "findings", "verdict"] }]
 nodes = [
@@ -194,13 +195,14 @@ nodes = [
 ]
 
 [review-repair]
+composite_behaviour = "review_repair"
 doc = "Bounded repairs followed by principal scoping when the design cannot close review."
 exports = [{ node = "cycles", outputs = ["result"] }, { node = "continue", outputs = ["result"] }]
 nodes = [
   { id = "cycles", use = "repair", repeat = { until = "accepted", max_rounds = "${max_repair_cycles}", review_repair = true }, on_fail = "design", with = { worktree = "${worktree}", write_scope = "${write_scope}", writer = "${writer}", integration_branch = "${integration_branch}", lenses = "${lenses}" } },
   { id = "design", use = "design", after = ["cycles"], inputs = [{ node = "cycles", outputs = ["result", "findings"] }], brief = "Read only. Diagnose the concrete design defect or recurring finding. Return the root constraint, two or three options with trade-offs and migration implications, the smallest viable slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the smallest slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority." },
   { id = "continue", use = "plan", after = ["design", "scope-approved"], inputs = [{ node = "design", outputs = ["result"] }], brief = "Turn the principal's smallest viable slice into a graph patch. Continue delivery using the authorised repair-slice template after the host scope gate. Owner approval does not expand the supplied literal write authority. Re-plan the full panel with @review-panel when risk tier or scope grows. Run verification and independent review of the new head. Keep all writes inside the supplied literal scope. Do not start another three-cycle review repair loop." },
-  { id = "scope", kind = "decide", access = "read_only", after = ["design"], repair_scope_gate = true, decide = { question = "Approve the principal's changed scope or one-way door? Read the principal design report before deciding. Approval does not expand the graph's literal write authority.", options = [{ id = "approve", label = "Approve the proposed slice" }, { id = "hold", label = "Hold for a revised design" }] } },
+  { id = "scope", kind = "decide", access = "read_only", after = ["design"], extensions = { repair_scope_gate = true }, decide = { question = "Approve the principal's changed scope or one-way door? Read the principal design report before deciding. Approval does not expand the graph's literal write authority.", options = [{ id = "approve", label = "Approve the proposed slice" }, { id = "hold", label = "Hold for a revised design" }] } },
   { id = "scope-approved", kind = "gate", access = "read_only", after = ["scope"], inputs = [{ node = "scope", outputs = ["verdict"] }], condition = { type = "verdict", expected = "approve", threshold = "all" } },
 ]
 [review-repair.parameters]

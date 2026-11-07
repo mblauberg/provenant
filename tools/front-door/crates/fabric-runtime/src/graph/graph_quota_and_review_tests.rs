@@ -146,7 +146,7 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
             compiler
                 .compile(&serde_json::json!({
                     "id": format!("review-{index}"), "use": "review",
-                    "source": {"type":"commit", "commit":subject}, "review_base":base
+                    "source": {"type":"commit", "commit":subject}, "extensions":{"review_base":base}
                 }))
                 .unwrap()
         })

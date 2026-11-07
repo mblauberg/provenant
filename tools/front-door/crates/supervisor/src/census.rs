@@ -125,6 +125,8 @@ pub enum ProcessObservation {
 
 #[derive(Debug, Error)]
 pub enum CensusError {
+    #[error("process census deadline expired or was cancelled")]
+    Interrupted,
     #[error("census bound must be between 1 and {MAX_CENSUS_ENTRIES}")]
     InvalidBound,
     #[error("process census record is malformed or inconsistent")]
@@ -545,6 +547,22 @@ pub trait ProcessObserver {
         self.observe(pid)
     }
     fn census(&self, max_entries: usize) -> Result<Census, CensusError>;
+    /// Cooperatively bound acquisition, checking between native process reads.
+    fn census_while(
+        &self,
+        max_entries: usize,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<Census, CensusError> {
+        if !keep_going() {
+            return Err(CensusError::Interrupted);
+        }
+        let census = self.census(max_entries)?;
+        if !keep_going() {
+            return Err(CensusError::Interrupted);
+        }
+        Ok(census)
+    }
+
     /// A scoped live-history observation. `None` requests the full census.
     /// This is never evidence that the host census is complete.
     fn live_census(

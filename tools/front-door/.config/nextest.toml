@@ -84,6 +84,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Six real writer launches queue on one registry lock and each settles a fixture
+# provider, which takes about 30 seconds on a developer Mac.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_create_attempts)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_create_attempts)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # These graph fixtures perform durable settlement and, for paging, repeatedly
 # read a large checkpoint. The eight-lane fixture also serialises and checks a
 # large graph and its stored prompts. Allow for shared-runner contention.

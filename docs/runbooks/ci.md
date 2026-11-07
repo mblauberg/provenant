@@ -122,3 +122,5 @@ has an open issue, an owner and an expiry within 30 days. CI validates each
 entry against `cargo nextest list`, excludes quarantined tests from the
 blocking partitions, then runs them in an advisory step that reports their
 result. Remove the entry in the PR that fixes the test.
+
+To measure a cold run, dispatch the CI workflow on the desired branch with `cold_cache` set to `true` (for example, `gh workflow run ci.yml --ref BRANCH -f cold_cache=true`). The run uses fresh Rust cache keys without deleting existing caches.

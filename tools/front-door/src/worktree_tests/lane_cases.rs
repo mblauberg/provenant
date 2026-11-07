@@ -1035,7 +1035,7 @@ if (process.argv[2] === 'child') {
             (
                 "git commit",
                 concat!(
-                    "set -eu; git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe; ",
+                    "set -eu; git commit -q --allow-empty -m probe; ",
                     "test \"$(command -v git)\" = \"$(cd \"$TMPDIR\" && pwd -P)/bin/git\"; ",
                     "git --version; git status --porcelain"
                 ),
@@ -1115,7 +1115,14 @@ if (process.argv[2] === 'child') {
             let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
             options.process_group = true;
             options.cleanup_process_group = true;
-            options.env = Some(&tool_env);
+            let mut cell_env = tool_env.clone();
+            if name == "git commit" {
+                for (key, value) in provenant_os::fixture::fixture_git_settings() {
+                    cell_env.retain(|(existing, _)| existing != &key);
+                    cell_env.push((key, value));
+                }
+            }
+            options.env = Some(&cell_env);
             let output = match executor.execute(options) {
                 Ok(output) => output,
                 Err(error) => {

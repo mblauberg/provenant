@@ -31,6 +31,53 @@ pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
     }
 }
 
+/// The caller owns retry pacing and its deadline. Take one agreeing snapshot
+/// pair, without the ordinary per-process backoff, polling between descriptors.
+pub(crate) fn occupancy_while(
+    pid: i32,
+    keep_going: &dyn Fn() -> bool,
+) -> crate::pid::OccupancyObservation {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if !keep_going() {
+            return crate::pid::OccupancyObservation::default();
+        }
+        #[cfg(target_os = "linux")]
+        if linux_holds_nothing(pid) {
+            return crate::pid::OccupancyObservation {
+                paths: Vec::new(),
+                complete: keep_going(),
+                gap: None,
+            };
+        }
+        let first = occupancy_snapshot_while(pid, keep_going);
+        let second = occupancy_snapshot_while(pid, keep_going);
+        let mut observation = merge_snapshots(first, second);
+        if !keep_going() {
+            observation.complete = false;
+            observation.gap = Some(crate::pid::OccupancyGap::Unobserved);
+        }
+        observation
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (pid, keep_going);
+        crate::pid::OccupancyObservation::default()
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn bounded_occupancy_stops_during_descriptor_scan() {
+    let polls = std::cell::Cell::new(0);
+    let observed = occupancy_while(std::process::id() as i32, &|| {
+        polls.set(polls.get() + 1);
+        polls.get() <= 2
+    });
+    assert!(!observed.complete);
+    assert_eq!(observed.gap, Some(crate::pid::OccupancyGap::Unobserved));
+}
+
 /// A process that has just exec'd opens and closes descriptors while its
 /// runtime starts. That is churn, not a failure: observe again a bounded
 /// number of times. Every attempt still needs two agreeing snapshots, and a
@@ -163,14 +210,23 @@ pub(crate) fn kernel_thread(pid: i32) -> bool {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
+    occupancy_snapshot_while(pid, &|| true)
+}
+
+#[cfg(target_os = "linux")]
+fn occupancy_snapshot_while(pid: i32, keep_going: &dyn Fn() -> bool) -> OccupancySnapshot {
     use crate::pid::OccupancyGap;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
     const DELETED: &[u8] = b" (deleted)";
     let mut snapshot = OccupancySnapshot::default();
+    if !keep_going() {
+        snapshot.note(crate::pid::OccupancyGap::Unobserved);
+        return snapshot;
+    }
     let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
     let record = |label: i64, link: &std::path::Path, snapshot: &mut OccupancySnapshot| {
         let target = std::fs::read_link(link).ok();
@@ -214,6 +270,9 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         for entry in
             std::fs::read_dir(proc.join("fd")).map_err(|_| OccupancyGap::DescriptorsUnavailable)?
         {
+            if !keep_going() {
+                return Err(OccupancyGap::Unobserved);
+            }
             if names.len() == OCCUPANCY_LIMIT {
                 return Err(OccupancyGap::LimitExceeded);
             }
@@ -235,6 +294,10 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
                 snapshot.note(OccupancyGap::ExecutableUnavailable);
             }
             for name in &names {
+                if !keep_going() {
+                    snapshot.note(OccupancyGap::Unobserved);
+                    return snapshot;
+                }
                 let Some(fd) = name.to_str().and_then(|text| text.parse::<i64>().ok()) else {
                     snapshot.note(OccupancyGap::DescriptorsUnavailable);
                     continue;
@@ -318,7 +381,7 @@ fn darwin_clear_errno() {
 }
 
 #[cfg(target_os = "macos")]
-fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
+fn occupancy_snapshot_while(pid: i32, keep_going: &dyn Fn() -> bool) -> OccupancySnapshot {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
@@ -380,6 +443,10 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         Ok(values)
     };
     let mut snapshot = OccupancySnapshot::default();
+    if !keep_going() {
+        snapshot.note(crate::pid::OccupancyGap::Unobserved);
+        return snapshot;
+    }
     match darwin_executable_lookup(pid) {
         Ok(path) => {
             let metadata = std::fs::metadata(&path).map(|meta| (meta.dev(), meta.ino()));
@@ -419,6 +486,10 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         }
     };
     for (fd, kind) in &before {
+        if !keep_going() {
+            snapshot.note(crate::pid::OccupancyGap::Unobserved);
+            return snapshot;
+        }
         if *kind != FDTYPE_VNODE {
             // Sockets, pipes, kqueues and shared memory carry no file location.
             if !LOCATIONLESS.contains(kind) {

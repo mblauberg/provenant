@@ -808,7 +808,7 @@ pub fn submission(
     for (index, node) in document.nodes.iter().enumerate() {
         let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
         // Snapshot compiled nodes without inheriting dotted template behaviour
-        // a second time. The raw `template` field retains their provenance.
+        // a second time. Explicit extensions retain their provenance.
         let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
         let name = if original.contains('.') {
             format!("submission-node-{index}")
@@ -845,6 +845,7 @@ pub fn submission(
             supplied.insert(name.clone(), value.clone());
         }
         patch.templates.insert(name.clone(), template);
+        template::preserve_compiled_metadata(&mut raw).map_err(PatchError::invalid)?;
         raw["use"] = Value::String(name);
         raw["with"] = Value::Object(supplied);
         patch.nodes.push(raw);
