@@ -56,11 +56,9 @@ impossible, style that lint covers, and scope growth. A structural alternative
 blocks only when tied to a defect. A file over 1,000 lines is a prompt to look
 for a cohesion defect, not a finding.
 
-The template engine owns the findings and verdict contract.
-The author marks each
-finding accepted, rejected (with evidence) or deferred. A separate writer repairs
-accepted findings; the lenses that raised them re-review the delta. Follow the
-HARNESS repair and redesign loop. `clean` is a valid verdict.
+The `review` template supplies the findings and verdict protocol. Use its
+evidence to judge whether the review supports acceptance; `clean` is valid when
+the rubric finds no blocking defect.
 
 ## What a clean verdict proves
 
