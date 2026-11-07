@@ -5,6 +5,13 @@ use relay::{
 use serde_json::{Value, json};
 
 fn live(limits: Option<Value>) -> (GraphDocument, GraphCheckpoint) {
+    live_with_session(limits, None)
+}
+
+fn live_with_session(
+    limits: Option<Value>,
+    session: Option<&str>,
+) -> (GraphDocument, GraphCheckpoint) {
     let mut document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"live", "nodes":[
             {"id":"a", "access":"read_only", "prompt":"Start", "route":{"alias":"senior"}},
@@ -13,6 +20,7 @@ fn live(limits: Option<Value>) -> (GraphDocument, GraphCheckpoint) {
     }))
     .unwrap();
     document.limits = limits;
+    document.decision_session = session.map(str::to_owned);
     let mut owner = FakeOwner::default();
     owner.observations.push_back(AttemptObservation::Pending {
         attempt_ref: Some("attempt-a".into()),
@@ -265,6 +273,90 @@ fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
     .unwrap_err();
     assert_eq!(error.code, "child_depth", "{}", error.message);
     assert!(error.message.contains("limits.child_depth=2"));
+}
+
+/// Small: admitting a child preserves the graph's decision owner; a child
+/// without an explicit inbox must ask the same chair as its parent graph.
+#[test]
+fn child_decision_inherits_the_graph_chair_session() {
+    let (document, mut checkpoint) = live_with_session(None, Some("parent-chair"));
+    let mut request = child("choose", "child-decision");
+    request.launch = Some(relay::ChildLaunch {
+        templates: Default::default(),
+        node: json!({
+            "id":"choose", "kind":"decide", "access":"read_only",
+            "decide":{"question":"Continue the child?", "options":[
+                {"id":"continue", "label":"Continue"},
+                {"id":"hold", "label":"Hold"}
+            ]}
+        }),
+    });
+    let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("attempt-a".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.checkpoint.graph_id, receipt.graph_id);
+    assert_eq!(progress(&waiting.checkpoint, &receipt.node).state, NodeState::Running);
+    let ask = waiting
+        .checkpoint
+        .asks
+        .iter()
+        .find(|ask| ask.node.as_deref() == Some(receipt.node.as_str()))
+        .unwrap();
+    assert_eq!(ask.kind, AskKind::Decide);
+    assert_eq!(ask.session, "parent-chair");
+    assert_eq!(owner.calls.len(), 1, "only the existing parent runs an agent");
+    assert_eq!(owner.calls[0].0.node_id, "a");
+}
+
+/// Small: a refused child cannot consume a revision or leave a partial node or
+/// receipt that would turn a corrected relay request into an idempotency clash.
+#[test]
+fn child_admission_refusals_leave_the_graph_unchanged() {
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        journal: None,
+        library: &library,
+        resolvers: &resolvers,
+        scan: &patch::scan_for_secrets,
+        limits: &limits,
+    };
+    for (parent, request, expected) in [
+        ("missing", child("child", "unknown-parent"), "invalid"),
+        ("b", child("child", "settled-parent"), "parent_settled"),
+        ("a", child("child", "depth-limit"), "child_depth"),
+        ("a", {
+            let mut request = child("reader", "scoped-reader");
+            request.write_scope = vec!["src".into()];
+            request
+        }, "invalid"),
+        ("a", {
+            let mut request = child("secret", "secret-child");
+            request.brief = "Use sk-abcdefghijklmnopqrstuvwx".into();
+            request
+        }, "secret"),
+    ] {
+        let (document, mut checkpoint) = live((expected == "child_depth").then(|| json!({"child_depth":0})));
+        let before = checkpoint.clone();
+        let error = relay::admit_child_bound(
+            &mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint },
+            parent,
+            &request,
+            &context,
+            Some(("parent-branch", "1111111111111111111111111111111111111111")),
+        ).unwrap_err();
+        assert_eq!(error.code, expected, "{}", request.idempotency_key);
+        assert_eq!(checkpoint, before, "{}", request.idempotency_key);
+        assert_eq!(patch::revision(&checkpoint), 0);
+    }
 }
 
 #[test]

@@ -465,6 +465,38 @@ impl Factory {
                         disk: None,
                         fact: None,
                     })?;
+                // A new writer does not exist until the kernel has journalled
+                // its provisioning intent. Check its declared branch here;
+                // provisioning still verifies the actual checkout at launch.
+                let writer_branch = |node: &provenant_fabric_runtime::graph::GraphNode,
+                                     path: &str|
+                 -> Result<String, FacadeError> {
+                    if let Some(new) = node
+                        .attempt
+                        .as_ref()
+                        .and_then(|spec| spec.new_worktree.as_ref())
+                    {
+                        return Ok(new.branch.clone());
+                    }
+                    let writer = provenant_run::resolve_writer(
+                        self.context.roots.state.as_path(),
+                        &self.cwd,
+                        Path::new(path),
+                    )
+                    .map_err(run_error)?;
+                    let writer = provenant_run::prepare_writer_with_facts(
+                        &writer,
+                        self.context.roots.state.as_path(),
+                        self.context.identity.project,
+                        &facts,
+                    )
+                    .map_err(run_error)?;
+                    Ok(writer
+                        .branch
+                        .as_str()
+                        .trim_start_matches("refs/heads/")
+                        .to_owned())
+                };
                 for node in &expanded.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                         &node.delivery
@@ -481,22 +513,9 @@ impl Factory {
                             .worktree
                             .as_deref()
                             .ok_or(FacadeError::InvalidInput { detail: None })?;
-                        let writer = provenant_run::resolve_writer(
-                            self.context.roots.state.as_path(),
-                            &self.cwd,
-                            Path::new(path),
-                        )
-                        .map_err(run_error)?;
-                        let writer = provenant_run::prepare_writer_with_facts(
-                            &writer,
-                            self.context.roots.state.as_path(),
-                            self.context.identity.project,
-                            &facts,
-                        )
-                        .map_err(run_error)?;
                         provenant_run::HostDeliveryContext::check_delivery_branch(
                             &self.cwd,
-                            writer.branch.as_str().trim_start_matches("refs/heads/"),
+                            &writer_branch(node, path)?,
                         )
                         .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
                     }
@@ -508,29 +527,15 @@ impl Factory {
                             &node.delivery
                         && !target.starts_with("origin/")
                         && let Some(path) = node.worktree.as_deref()
+                        && writer_branch(node, path)? == *target
                     {
-                        let writer = provenant_run::resolve_writer(
-                            self.context.roots.state.as_path(),
-                            &self.cwd,
-                            Path::new(path),
-                        )
-                        .map_err(run_error)?;
-                        let writer = provenant_run::prepare_writer_with_facts(
-                            &writer,
-                            self.context.roots.state.as_path(),
-                            self.context.identity.project,
-                            &facts,
-                        )
-                        .map_err(run_error)?;
-                        if writer.branch.as_str().trim_start_matches("refs/heads/") == target {
-                            return Err(FacadeError::DispatchRefused {
-                                fact: None,
-                                disk: None,
-                                reason: format!(
-                                    "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
-                                ),
-                            });
-                        }
+                        return Err(FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason: format!(
+                                "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
+                            ),
+                        });
                     }
                 }
                 Some(document)

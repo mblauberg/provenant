@@ -750,64 +750,194 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
     if host_test("fabric::peer_tests::peer_graph_lifecycle::graph_run_controls_reach_the_sealed_attempt")? {
         return Ok(());
     }
-    let rig = crate::worktree_tests::repository()?;
-    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
-    let factory = Factory {
-        context: Context::open(roots, &rig.home, &rig.project)?,
-        project_attribution: false,
-        clock: SystemClock,
-        backoff: ThreadPause,
-        executor: SystemExecutor::new(1)?,
-        home: rig.home.clone(),
-        cwd: rig.project.clone(),
-        assets: rig.project.clone(),
-        host_launch: None,
-        mcp_project: None,
-        workers: &FreeWorkers,
-    };
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let input = serde_json::json!({
-        "op":"run", "brief":"Inspect the parser", "model":"fixture/model",
-        "effort":"high", "account":"fixture-account", "host":"local",
-        "operation_id":"graph-run-controls",
-        "set":{
-            "attempt.build_heavy":true,
-            "attempt.confidential":true,
-            "attempt.provider_timeout":42
+    use provenant_records::run::DeliveryMode;
+    for (writer, new_worktree, delivery_mode) in [
+        (false, false, None),
+        (true, false, Some(DeliveryMode::Integrate("controls-integration".into()))),
+        (true, true, Some(DeliveryMode::Integrate("controls-integration".into()))),
+        (true, true, Some(DeliveryMode::Push)),
+    ] {
+        let rig = crate::worktree_tests::repository()?;
+        crate::worktree_tests::git(&rig, &["branch", "controls-integration"])?;
+        crate::worktree_tests::git(&rig, &["remote", "add", "origin", rig.project.to_str().ok_or("project path")?])?;
+        let write_root = rig.root.join("extra-write");
+        std::fs::create_dir(&write_root)?;
+        let write_root = write_root.canonicalize()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut input = serde_json::json!({
+            "op":"run", "brief":"Inspect the parser", "model":"fixture/model",
+            "effort":"high", "account":"fixture-account", "host":"local",
+            "operation_id":"graph-run-controls",
+            "document":{"use":"task", "limits":{"concurrency":3}},
+            "set":{
+                "attempt.build_heavy":true,
+                "attempt.confidential":true,
+                "attempt.provider_timeout":42,
+                "attempt.capabilities":["postgres"],
+                "attempt.write_roots":[write_root]
+            }
+        });
+        if writer {
+            // An ordinary custom task leaf exercises writer delivery while
+            // retaining the graph document's separate delivery policy.
+            input["document"]["templates"] = serde_json::json!({"task":{
+                "brief":"Do the work", "tier":"senior", "access":"worktree_write",
+                "node":{"delivery":delivery_mode}
+            }});
+            if new_worktree {
+                input["branch"] = serde_json::json!("controls-writer");
+                input["base"] = serde_json::json!("HEAD");
+            } else {
+                use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeContext};
+                let info = worktrees::with_context(
+                    &factory.context.roots, &rig.home, &rig.project, &factory.clock, &cancel,
+                    |context| worktrees::create(
+                        &WorktreeContext { workers: &FreeWorkers, ..*context },
+                        WorktreeCreate { branch: "controls-writer".into(), base: Some("HEAD".into()) },
+                        &cancel,
+                    ),
+                )?;
+                input["worktree"] = serde_json::json!(info.path);
+            }
+            input["write_scope"] = serde_json::json!(["src"]);
         }
-    });
-    let preview = factory.graph_document({
-        let mut preview = input.clone();
-        preview["explain"] = serde_json::json!(true);
-        preview
-    }, budget, &cancel)?;
-    assert_eq!(preview["document"]["graph_id"], "g-e813e34cbb5c0bf4b1ee8313250533");
-    let node = &preview["document"]["nodes"][0];
-    assert_eq!(node["attempt"]["host"], "local");
-    assert_eq!(node["attempt"]["build_heavy"], true);
-    assert_eq!(node["attempt"]["confidential"], true);
-    assert_eq!(node["attempt"]["provider_timeout"], 42);
-    let launched = factory.graph_document(input.clone(), budget, &cancel)?;
-    let key = serde_json::from_value(launched["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone())?;
-    let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
-    let store = owner.store(&cancel)?;
-    let call = owner.call(&cancel);
-    let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?
-        .ok_or("launch operation missing")?;
-    let request = store.request(operation.run_id, &call)?;
-    let task = request.tasks.first().ok_or("sealed task missing")?;
-    assert_eq!(task.route, serde_json::from_value(serde_json::json!({
-        "kind":"model", "provider":"fixture", "model":"fixture/model", "effort":"high"
-    }))?);
-    assert_eq!(task.account.as_deref(), Some("fixture-account"));
-    assert!(task.build_heavy);
-    assert_eq!(task.provider_timeout_seconds, 42);
-    assert_eq!(task.profile.extra.get("confidential"), Some(&serde_json::json!(true)));
-    let replay = factory.graph_document(input, budget, &cancel)?;
-    let replay_key = serde_json::from_value(replay["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone())?;
-    let replay_operation = store.operation(&graph_operation("graph-attempt-operation", &replay_key)?, &call)?
-        .ok_or("replayed operation missing")?;
-    assert_eq!(replay_operation.run_id, operation.run_id);
+        let preview = factory.graph_document({
+            let mut preview = input.clone();
+            preview["explain"] = serde_json::json!(true);
+            preview
+        }, budget, &cancel).map_err(|error| format!("preview controls (writer={writer}, new={new_worktree}, delivery={delivery_mode:?}): {error:?}"))?;
+        assert_eq!(preview["document"]["graph_id"], "g-e813e34cbb5c0bf4b1ee8313250533");
+        assert_eq!(preview["document"]["limits"]["concurrency"], 3);
+        let node = &preview["document"]["nodes"][0];
+        assert_eq!(node["attempt"]["host"], "local");
+        assert_eq!(node["attempt"]["build_heavy"], true);
+        assert_eq!(node["attempt"]["confidential"], true);
+        assert_eq!(node["attempt"]["provider_timeout"], 42);
+        let launched = factory.graph_document(input.clone(), budget, &cancel)
+            .map_err(|error| format!("launch controls (writer={writer}, new={new_worktree}, delivery={delivery_mode:?}): {error:?}"))?;
+        let attempt = &launched["checkpoint"]["nodes"][0]["attempts"][0];
+        let reference = attempt["attempt_ref"].as_str().ok_or("local attempt reference missing")?;
+        let (host, attempt_id) = reference.split_once('/').ok_or("host-qualified reference missing")?;
+        assert_eq!(host, factory.context.identity.host.to_string());
+        let key = serde_json::from_value(attempt["key"].clone())?;
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        let store = owner.store(&cancel)?;
+        let call = owner.call(&cancel);
+        let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?
+            .ok_or("launch operation missing")?;
+        let execution = provenant_fabric_runtime::graph::FileJournal::execution(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            launched["checkpoint"]["graph_id"].as_str().ok_or("graph ID missing")?,
+        )?.ok_or("sealed graph execution missing")?;
+        assert_eq!(execution.document.limits.as_ref().and_then(|limits| limits["concurrency"].as_u64()), Some(3));
+        let record = store.record(attempt_id.parse()?, &call)?;
+        assert_eq!(record.run_id, operation.run_id);
+        let request = store.request(operation.run_id, &call)?;
+        // The graph schedules up to its requested concurrency; each node
+        // seals one provider process in a one-task run.
+        assert_eq!(request.concurrency, 1);
+        let task = request.tasks.first().ok_or("sealed task missing")?;
+        assert_eq!(task.route, serde_json::from_value(serde_json::json!({
+            "kind":"model", "provider":"fixture", "model":"fixture/model", "effort":"high"
+        }))?);
+        assert_eq!(task.account.as_deref(), Some("fixture-account"));
+        assert!(task.build_heavy);
+        assert_eq!(task.provider_timeout_seconds, 42);
+        assert_eq!(task.profile.extra.get("confidential"), Some(&serde_json::json!(true)));
+        assert!(task.access.database_ipc, "the explicit postgres capability reaches admission");
+        assert_eq!(task.access.write_roots, [write_root]);
+        if writer {
+            let writer = task.writer.as_ref().ok_or("sealed writer missing")?;
+            assert_eq!(writer.worktree, rig.project.join(".worktrees/controls-writer").canonicalize()?);
+            assert_eq!(writer.project, rig.project.canonicalize()?);
+            let delivery = task.deliver.as_ref().ok_or("sealed delivery missing")?;
+            assert_eq!(Some(&delivery.mode), delivery_mode.as_ref());
+            assert_eq!(delivery.branch, if delivery_mode == Some(DeliveryMode::Push) {
+                "controls-writer"
+            } else {
+                "controls-integration"
+            });
+        } else {
+            assert!(task.writer.is_none());
+            assert!(task.deliver.is_none());
+        }
+        let replay = factory.graph_document(input, budget, &cancel)?;
+        let replay_key = serde_json::from_value(replay["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone())?;
+        let replay_operation = store.operation(&graph_operation("graph-attempt-operation", &replay_key)?, &call)?
+            .ok_or("replayed operation missing")?;
+        assert_eq!(replay_operation.run_id, operation.run_id);
+    }
     Ok(())
 }
+
+#[test]
+fn new_writer_delivery_refusals_precede_worktree_provisioning()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::peer_graph_lifecycle::new_writer_delivery_refusals_precede_worktree_provisioning")? {
+        return Ok(());
+    }
+    for protected in [false, true] {
+        let rig = crate::worktree_tests::repository()?;
+        crate::worktree_tests::git(&rig, &["remote", "add", "origin", rig.project.to_str().ok_or("project path")?])?;
+        // Use a non-main default branch to exercise configured protection.
+        crate::worktree_tests::git(&rig, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/protected-writer"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let branch = if protected { "protected-writer" } else { "controls-writer" };
+        let delivery = if protected { "push" } else { "integrate:controls-writer" };
+        let input = serde_json::json!({
+            "op":"run", "brief":"Inspect the parser", "model":"fixture/model",
+            "branch":branch, "base":"HEAD", "write_scope":["src"],
+            "operation_id":"refused-writer-delivery",
+            "document":{"use":"task", "templates":{"task":{
+                "brief":"Do the work", "tier":"senior", "access":"worktree_write",
+                "node":{"delivery":delivery}
+            }}}
+        });
+        let error = factory.graph_document(input, budget, &cancel)
+            .err().ok_or("unsafe new writer delivery was admitted")?;
+        if protected {
+            assert!(matches!(error, FacadeError::ConfinementRefused { .. }), "{error:?}");
+        } else {
+            assert!(matches!(error, FacadeError::DispatchRefused { .. }), "{error:?}");
+        }
+        assert!(!rig.project.join(format!(".worktrees/{branch}")).exists());
+        assert!(provenant_fabric_runtime::graph::FileJournal::graph_ids(
+            &roots.state, factory.context.identity.project,
+        )?.is_empty(), "refusal must precede the first checkpoint");
+        assert!(!roots.state.as_path().join("run.sqlite3").exists(),
+            "refusal must precede attempt admission");
+    }
+    Ok(())
+}
+
