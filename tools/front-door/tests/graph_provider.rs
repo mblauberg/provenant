@@ -1455,7 +1455,7 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
     let _cleanup = rig.process_cleanup();
     fs::write(
         rig.home.join(".claude-pro/.credentials.json"),
-        br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4102444800000}}"#,
+        br#"{"claudeAiOauth":{"accessToken":"credential-sentinel-2719-violet-fox","expiresAt":4102444800000}}"#,
     )?;
     writeln!(
         OpenOptions::new()
@@ -1497,6 +1497,7 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
         assert!(output.status.success(), "{text}");
         let result: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(result["data"]["status"], "complete", "{result}");
+        assert_eq!(result["data"]["outcome"], "succeeded", "{result}");
     }
     Ok(())
 }
