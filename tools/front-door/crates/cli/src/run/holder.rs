@@ -385,6 +385,50 @@ mod tests {
         std::process::exit(0);
     }
 
+    #[test]
+    fn recovery_publishes_sealed_quota_evidence_once() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let attempt = state.join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&attempt)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let observed = SystemClock::new().unix_seconds();
+        QuotaEvidence {
+            pool: Some("opencode-free".into()),
+            observed,
+            resets: Some(observed + 60),
+            shared: true,
+        }
+        .write(&Directory::open_anchor(&attempt)?)?;
+        assert!(crate::quota::read_cache_at(&state)?.is_empty());
+        let provider_state = attempt.join("provider-state");
+        let route = quota_test_route();
+        let decode = || {
+            run::Providers::decode_captures(
+                &Registry::default(),
+                &route,
+                b"",
+                b"",
+                &super::super::tests::clean_exit(),
+                &provider_state,
+                None,
+            )
+        };
+        assert_eq!(decode()?.outcome, run::Outcome::QuotaLimited);
+        let path = state.join("quota/key/opencode.json");
+        let before = std::fs::read(&path)?;
+        let records = crate::quota::read_cache_at(&state)?;
+        assert_eq!(records[0].refusals[0].observed_unix_seconds, observed);
+        assert_eq!(
+            records[0].refusals[0].resets_unix_seconds,
+            Some(observed + 60)
+        );
+        assert_eq!(decode()?.outcome, run::Outcome::QuotaLimited);
+        assert_eq!(std::fs::read(path)?, before);
+        Ok(())
+    }
+
     fn quota_test_route() -> run::RouteRecord {
         run::RouteRecord {
             provider: Some("opencode".into()),
