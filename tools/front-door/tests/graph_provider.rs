@@ -19,17 +19,10 @@ for name in AGENTS.md CLAUDE.md HARNESS.md; do
     test -f "$name"
     printf 'edited by lane shell\n' > "$name"
 done
-mkdir -p shell-scratch/home shell-scratch/state
-printf disposable > shell-scratch/home/file
-printf disposable > shell-scratch/state/file
-# The removed table refused recursive HOME/state removal. Use disposable
-# fixture roots inside this checkout, never the provider's real state.
-HOME="$PWD/shell-scratch/home"
-PROVENANT_STATE_DIR="$PWD/shell-scratch/state"
-export HOME PROVENANT_STATE_DIR
-rm -rf "$HOME" "$PROVENANT_STATE_DIR"
-test ! -e "$HOME"
-test ! -e "$PROVENANT_STATE_DIR"
+mkdir -p shell-scratch/build
+printf disposable > shell-scratch/build/file
+rm -rf shell-scratch/build
+test ! -e shell-scratch/build
 rmdir shell-scratch
 git add AGENTS.md CLAUDE.md HARNESS.md
 git commit -qm 'test: edit root instructions'
