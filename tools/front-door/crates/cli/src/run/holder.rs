@@ -234,7 +234,8 @@ impl Holder for HostHolder<'_> {
             );
             inputs.state_dir = Some(launch.configuration_root.clone());
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let ctx = crate::fabric::Context::open(roots, &context.roots.home, &launch.cwd)?;
+            let directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
+            let ctx = crate::fabric::Context::open(roots, &context.roots.home, directory)?;
             if ctx.identity.project != context.project_id {
                 return Err("Fabric custody project mismatch".into());
             }

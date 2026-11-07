@@ -1108,10 +1108,16 @@ impl BinaryRunOwner<'_> {
         }
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
-        let mut host_launch = self.factory.host_launch.clone();
-        if let Some(host) = &mut host_launch {
-            host.cwd = launch_directory.clone();
-        }
+        let mut host_launch = match &self.factory.host_launch {
+            Some(host) => host.clone(),
+            None => super::settlement::recovery_launch(
+                self.factory.context.roots.state.as_path(),
+                &self.factory.cwd,
+            )
+            .map_err(|_| FacadeError::io("resolve host graph launch context"))?,
+        };
+        host_launch.graph_directory = Some(self.factory.cwd.clone());
+        host_launch.cwd = launch_directory.clone();
         let submission = self.with_edge(|edge| {
             let selected_edge = provenant_cli::run::Edge {
                 roots: edge.roots,
@@ -1130,7 +1136,7 @@ impl BinaryRunOwner<'_> {
                     knobs,
                 },
                 &call,
-                host_launch.as_ref(),
+                Some(&host_launch),
                 Some(
                     std::time::Instant::now()
                         + std::time::Duration::from_micros(

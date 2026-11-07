@@ -459,8 +459,8 @@ budget and cancellation; a waiting parent yields its concurrency slot.
 
 Children may be writers with their own registered worktree or a checkout
 provisioned by the host. A child's roots and capabilities need not be a subset
-of the parent's. Selecting a scratch repository with `--project` preserves the
-read-only child's working directory. Ordinary launch policy still refuses
+of the parent's. Selecting a repository with `--project` preserves the child's working
+directory; a writer uses that repository's registered worktree and custody. Ordinary launch policy still refuses
 credential roots, state roots and write roots overlapping the worktree. A
 refusal carries a safe cause and a repair the caller can act on.
 

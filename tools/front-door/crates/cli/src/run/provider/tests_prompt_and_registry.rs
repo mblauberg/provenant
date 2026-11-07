@@ -266,7 +266,8 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     let temp = tempfile::tempdir()?;
     let executable = temp.path().join("cursor-agent");
     let host = run::HostLaunchContext {
-        configuration_root: temp.path().into(),
+        graph_directory: None,
+            configuration_root: temp.path().into(),
         cwd: temp.path().into(),
         executables: Default::default(),
         executable_search_path: vec![temp.path().into()],

@@ -74,6 +74,7 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     let mut nested = context.clone();
     nested.roots.state_root = state.join("children/child");
     nested.launch = Some(run::HostLaunchContext {
+        graph_directory: None,
         configuration_root: state.clone(),
         cwd: temp.path().join("checkout"),
         executables: Default::default(),

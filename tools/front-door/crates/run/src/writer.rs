@@ -502,8 +502,6 @@ fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
     .map_err(error("parse writer branch", Some(&head_path)))
 }
 
-/// Reopen the persisted scope and verify current Git worktree membership.
-/// The subsequent supervisor writer flock supplies exclusion.
 /// Persisted source-project custody binding. Older requests keep their original
 /// attribution namespace during recovery.
 pub(crate) fn writer_project_id(
@@ -535,6 +533,8 @@ impl crate::RunStore {
     }
 }
 
+/// Reopen the persisted scope and verify current Git worktree membership.
+/// The subsequent supervisor writer flock supplies exclusion.
 pub fn prepare_writer(
     request: &WriterRequest,
     state: &Path,
@@ -2632,6 +2632,104 @@ mod custody_admission_tests {
     use crate::tests::{call, clock, context};
     use provenant_core::{AttemptId, RunId};
     use provenant_supervisor::custody::{self, Scope};
+
+    #[test]
+    fn foreign_writer_recovery_is_scoped_but_admission_keeps_predecessor_fences()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let store = crate::RunStore::open(&context, &call)?;
+        let source_project = ProjectId::from_bytes([99; 16]);
+        let root = context.state_root.as_path();
+        let refs = root
+            .join("writer-projects")
+            .join(context.project_id.to_string())
+            .join(source_project.to_string());
+        std::fs::create_dir_all(&refs)?;
+        let slot = root
+            .join("worktrees")
+            .join(source_project.to_string())
+            .join("shared");
+        std::fs::create_dir_all(&slot)?;
+        let predecessor = Scope {
+            run: RunId::from_bytes([81; 16]),
+            attempt: AttemptId::from_bytes([82; 16]),
+            generation: 1,
+        };
+        let lease = custody::acquire_writer(
+            Directory::open_anchor(&slot)?,
+            predecessor,
+            WriterBinding::read_only(),
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let evidence = Directory::open_anchor(&slot.join(predecessor.attempt.to_string()))?;
+        crate::artifacts::seal(
+            &evidence,
+            "import-retained.json",
+            &crate::db::bytes(&ImportFence {
+                schema_version: 1,
+                scope: predecessor,
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
+        drop(lease);
+        assert!(store.writer_fence_listing()?.reservations.is_empty());
+        let all = store.writer_fence_listing_for_admission(true)?;
+        assert!(
+            all.reservations
+                .iter()
+                .any(|fence| fence.scope == predecessor)
+        );
+        let next = Scope {
+            run: RunId::from_bytes([83; 16]),
+            attempt: AttemptId::from_bytes([84; 16]),
+            generation: 1,
+        };
+        let refused = store.acquire_writer_fenced(
+            Directory::open_anchor(&slot)?,
+            next,
+            WriterBinding::read_only(),
+            &|directory, scope, binding| {
+                custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            &call,
+        );
+        assert!(
+            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {run, attempt})) if run == predecessor.run && attempt == predecessor.attempt)
+        );
+        assert!(custody::reservation_present(
+            &Directory::open_anchor(&slot)?,
+            predecessor
+        )?);
+        assert!(!custody::reservation_present(
+            &Directory::open_anchor(&slot)?,
+            next
+        )?);
+        let writer = WriterRequest {
+            extra: [("custody_project".into(), serde_json::json!(source_project))].into(),
+            project: temp.path().join("source"),
+            worktree: temp.path().join("checkout"),
+        };
+        assert_eq!(
+            store.writer_slot(&writer, context.project_id)?,
+            root.join("worktrees")
+                .join(source_project.to_string())
+                .join(worktrees::state_dir_name(&writer.worktree))
+        );
+        Ok(())
+    }
 
     #[test]
     fn failed_admission_withdrawal_retains_a_protected_error()

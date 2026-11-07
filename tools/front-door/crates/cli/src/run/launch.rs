@@ -432,6 +432,7 @@ pub(super) fn launch_on_host_with_wait(
     let host = match host {
         Some(host) => host.clone(),
         None => run::HostLaunchContext {
+            graph_directory: None,
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
             executables: std::collections::BTreeMap::new(),

@@ -91,13 +91,7 @@ pub(crate) fn start_fabric_relay(
     let roots = inputs
         .resolve(&provenant_os::fs::SystemPathResolver)
         .map_err(|e| e.to_string())?;
-    let graph_directory = crate::fabric::graph_relay::execution_directory(
-        &roots,
-        context.project_id,
-        context.attempt_id,
-    )
-    .map_err(|error| error.to_string())?;
-    let relay_cwd = graph_directory.as_deref().unwrap_or(&launch.cwd);
+    let relay_cwd = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
     let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, relay_cwd)
         .map_err(|e| e.to_string())?;
     if ctx.identity.project != context.project_id {

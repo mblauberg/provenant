@@ -84,31 +84,6 @@ fn journal_error<E>(_: E) -> ServiceError {
     ServiceError::Facade(FacadeError::io("access graph journal"))
 }
 
-/// Recover the graph's host-owned directory when a provider runs in another project.
-pub fn execution_directory(
-    roots: &provenant_core::Roots,
-    project: provenant_core::ProjectId,
-    attempt: provenant_core::AttemptId,
-) -> Result<Option<std::path::PathBuf>, ServiceError> {
-    let Some(host) = provenant_config::lookup_host(roots).map_err(journal_error)? else {
-        return Ok(None);
-    };
-    let reference = format!("{host}/{attempt}");
-    for id in FileJournal::graph_ids(&roots.state, project).map_err(journal_error)? {
-        let Some(checkpoint) = FileJournal::read_status_checkpoint(&roots.state, project, &id)
-            .map_err(journal_error)?
-        else {
-            continue;
-        };
-        if relay::historical_parent_of_attempt(&checkpoint, &reference).is_some() {
-            return FileJournal::execution(&roots.state, project, &id)
-                .map_err(journal_error)
-                .map(|execution| execution.map(|execution| execution.directory));
-        }
-    }
-    Ok(None)
-}
-
 /// Serve one graph frame for `attempt` on this host.
 pub fn serve(
     context: &Context,

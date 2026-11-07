@@ -3047,13 +3047,46 @@ mod tests {
         fn exercise(mut input: Value, count: usize, disjoint: bool) -> Result {
             let rig = TestRig::new()?;
             crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "source"])?;
-            let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+            let mut source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
             let branch = crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?;
             let factory = factory(&rig)?;
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-            let explicit_checkout = input["worktree"] == "$registered";
-            if explicit_checkout {
+            let foreign_checkout = input["worktree"] == "$foreign";
+            let explicit_checkout = foreign_checkout || input["worktree"] == "$registered";
+            if foreign_checkout {
+                let selected = rig.root.join("foreign-project");
+                std::fs::create_dir_all(&selected)?;
+                for args in [
+                    vec!["init", "-q"],
+                    vec!["commit", "--allow-empty", "-qm", "foreign source"],
+                ] {
+                    let result = provenant_os::fixture::git_command()
+                        .current_dir(&selected)
+                        .args(args)
+                        .output()?;
+                    assert!(
+                        result.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                }
+                let result = provenant_os::fixture::git_command()
+                    .current_dir(&selected)
+                    .args(["rev-parse", "HEAD"])
+                    .output()?;
+                assert!(result.status.success());
+                source = String::from_utf8(result.stdout)?.trim().to_owned();
+                let selected_context =
+                    Context::open(factory.context.roots.clone(), &rig.home, &selected)?;
+                provenant_cli::fabric::graph_relay::provision_child(
+                    &selected_context,
+                    ".worktrees/explicit-child",
+                    &source,
+                    &cancel,
+                )?;
+                input["worktree"] = json!(selected.join(".worktrees/explicit-child"));
+            } else if explicit_checkout {
                 provenant_cli::fabric::graph_relay::provision_child(
                     &factory.context,
                     ".worktrees/explicit-child",
@@ -3160,6 +3193,77 @@ mod tests {
                         crate::worktree_tests::git(&rig, &["-C", path, "rev-parse", "HEAD"])?,
                         source
                     );
+                    let mut owner = BoundGraphOwner {
+                        admission_timeout: None,
+                        launch_warnings: Vec::new(),
+                        repo_facts: Default::default(),
+                        factory: &factory,
+                        integration_base: None,
+                        integration_branch: None,
+                        network: None,
+                        capability_overrides: Default::default(),
+                        exclude: Vec::new(),
+                        budget,
+                        cancel: &cancel,
+                        prices: None,
+                        tick: false,
+                    };
+                    let bound =
+                        provenant_fabric_runtime::graph::AttemptOwner::bind_writer_worktree(
+                            &mut owner, path,
+                        )?
+                        .ok_or("writer binding")?;
+                    assert_eq!(bound.head, source);
+                    if foreign_checkout {
+                        let state = factory.context.roots.state.as_path();
+                        let request =
+                            provenant_run::resolve_writer(state, Path::new(path), Path::new(path))?;
+                        let selected: provenant_core::ProjectId = serde_json::from_value(
+                            request
+                                .extra
+                                .get("custody_project")
+                                .cloned()
+                                .ok_or("custody project")?,
+                        )?;
+                        assert_ne!(selected, factory.context.identity.project);
+                        let name =
+                            provenant_confinement::worktrees::state_dir_name(Path::new(path));
+                        assert!(
+                            state
+                                .join("worktrees")
+                                .join(selected.to_string())
+                                .join(&name)
+                                .is_dir()
+                        );
+                        assert!(
+                            !state
+                                .join("worktrees")
+                                .join(factory.context.identity.project.to_string())
+                                .join(&name)
+                                .exists()
+                        );
+                        assert!(
+                            state
+                                .join("writer-projects")
+                                .join(factory.context.identity.project.to_string())
+                                .join(selected.to_string())
+                                .is_dir()
+                        );
+                        let mut forged = request;
+                        forged.extra.insert(
+                            "custody_project".into(),
+                            json!(factory.context.identity.project),
+                        );
+                        assert!(
+                            provenant_run::prepare_writer(
+                                &forged,
+                                state,
+                                factory.context.identity.project
+                            )
+                            .is_err()
+                        );
+                    }
+
                     assert_eq!(
                         writer.delivery,
                         (!explicit_checkout).then(|| {
@@ -3179,6 +3283,11 @@ mod tests {
             Ok(())
         }
         for (input, count, disjoint) in [
+            (
+                json!({"op":"run", "brief":"Write in a selected scratch project", "access":"worktree_write", "worktree":"$foreign"}),
+                1,
+                false,
+            ),
             (
                 json!({"op":"run", "brief":"Write from the plain CLI controls", "access":"worktree_write", "worktree":"$registered"}),
                 1,

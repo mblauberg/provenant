@@ -35,7 +35,9 @@ The receipt records the resolved `adapter/model@effort`. Inside a worker, `run -
 to the same graph, sharing budget, stopping and trace. From inside a lane,
 `status` reads that graph; `output CHILD` and `output CHILD --trace` collect a
 child's result, failure cause and timeline through the host relay. Use IDs from
-the launch receipt. The lane needs no journal or credential access. Attached live children are
+the launch receipt. The lane needs no journal or credential access. A child may
+select another project with `--project`; register writer worktrees in that
+project first. Credential and state roots remain refused. Attached live children are
 cancelled when their parent settles, including a successful exit. Use `--wait`
 to collect their completion before exiting, or explicitly detach a child that
 should outlive its parent. Any agent may return a patch; started attempts stay immutable.

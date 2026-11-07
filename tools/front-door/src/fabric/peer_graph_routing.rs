@@ -33,6 +33,7 @@ fn unmatched_settlement_hints_wait_for_tick() -> Result<(), Box<dyn std::error::
             graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
         }
         fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            graph_directory: None,
             configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
             executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
             cargo_build_jobs: None, fixture_state_write: false,
@@ -171,7 +172,8 @@ fn settlement_without_hint_does_not_advance_unrelated_graphs()
             .ok_or("settlement should fail")?
             .to_string();
     fixture.settled.launch = Some(provenant_run::HostLaunchContext {
-        configuration_root: fixture.rig.state.clone(),
+        graph_directory: None,
+            configuration_root: fixture.rig.state.clone(),
         cwd: fixture.rig.project.clone(),
         executables: Default::default(),
         executable_search_path: Vec::new(),

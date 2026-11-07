@@ -1307,6 +1307,14 @@ receipts work without journal or credential grants in the lane. Output ranges
 remain bounded; `--to` writes returned bytes in the lane. `--path` cannot grant
 access to a host artefact and is refused with a content-reading remedy.
 
+A child can select another project with `--project`, including a writer in
+that project's registered worktree. The graph retains parent attribution while
+writer locks, retained import fences and recovery use the selected project's
+custody namespace. A host-owned `writer-projects/<parent>/<source>/` reference
+lets recovery inspect those exact namespaces without scanning unrelated projects.
+Legacy records retain their original custody namespace. Changing provider cwd
+never changes which graph its attempt-bound relay serves.
+
 The host preserves typed admission causes in refusals so the caller can repair
 its launch request. Credential roots, state roots and overlapping worktree
 write roots retain the ordinary launch protections.

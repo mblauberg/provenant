@@ -1611,13 +1611,8 @@ pub(crate) fn read_lane_graph(
             &holder.roots.checkout,
             launch.configuration_root.clone(),
         )?;
-        let graph_directory = provenant_cli::fabric::graph_relay::execution_directory(
-            &roots,
-            holder.project_id,
-            holder.attempt_id,
-        )?;
-        let graph_directory = graph_directory.unwrap_or_else(|| launch.cwd.clone());
-        let context = Context::open_inspection(roots, &holder.roots.home, &graph_directory)?;
+        let graph_directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
+        let context = Context::open_inspection(roots, &holder.roots.home, graph_directory)?;
         if context.identity.project != holder.project_id {
             return Err("host graph project mismatch".into());
         }
@@ -1628,7 +1623,7 @@ pub(crate) fn read_lane_graph(
             backoff: ThreadPause,
             executor: SystemExecutor::new(4)?,
             home: holder.roots.home.clone(),
-            cwd: graph_directory,
+            cwd: graph_directory.to_path_buf(),
             assets: holder.roots.checkout.clone(),
             host_launch: Some(launch.clone()),
             mcp_project: None,
