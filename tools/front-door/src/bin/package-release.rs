@@ -1,4 +1,4 @@
-//! Build-only release staging; release archives ship only the `provenant` binary.
+//! Build-only release staging with an optional unattended PR worker.
 #[path = "../release_smoke.rs"]
 mod release_smoke;
 
@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let mut output = None;
     let mut binary = None;
+    let mut pr_worker = None;
     while let Some(arg) = args.next() {
         match arg.as_os_str() {
             value if value == OsStr::new("--out") => {
@@ -77,14 +78,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             value if value == OsStr::new("--binary") => {
                 binary = Some(PathBuf::from(args.next().ok_or("--binary needs a path")?));
             }
+            value if value == OsStr::new("--pr-worker") => {
+                let worker =
+                    PathBuf::from(args.next().ok_or("--pr-worker needs an absolute path")?);
+                if !worker.is_absolute()
+                    || worker.components().any(|part| part == Component::ParentDir)
+                {
+                    return Err("--pr-worker must be an absolute path without ..".into());
+                }
+                pr_worker = Some(worker.canonicalize()?);
+            }
             value if value == OsStr::new("--help") => {
                 writeln!(
                     io::stdout().lock(),
-                    "cargo run --bin package-release -- --out ABS [--binary PATH]"
+                    "cargo run --bin package-release -- --out ABS [--binary PATH] [--pr-worker ABS]"
                 )?;
                 return Ok(());
             }
-            _ => return Err("usage: package-release --out ABS [--binary PATH]".into()),
+            _ => {
+                return Err(
+                    "usage: package-release --out ABS [--binary PATH] [--pr-worker ABS]".into(),
+                );
+            }
         }
     }
     let output = output_directory(&output.ok_or("--out ABS is required")?)?;
@@ -101,11 +116,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = smoke.identity(&binary, &cancel)?;
     let current_source = SourceDigest::parse(env!("PROVENANT_SOURCE_DIGEST"))?;
     require_current_source(&identity, &current_source)?;
+    if let Some(worker) = &pr_worker {
+        smoke.require_matching_identity(worker, &identity, &cancel)?;
+    }
     // Never overwrite a previous stage. A failed stage has no completion marker;
     // preserve it for inspection and ask the caller to choose a fresh directory.
     fs::create_dir(&output)?;
     fs::create_dir(output.join("bin"))?;
     fs::copy(binary, output.join("bin/provenant"))?;
+    if let Some(worker) = &pr_worker {
+        fs::copy(worker, output.join("bin/pr-reconciler"))?;
+    }
     for &(source, name) in RELEASE_ASSETS {
         let destination = output.join(name);
         fs::create_dir_all(destination.parent().ok_or("release asset has no parent")?)?;

@@ -30,6 +30,20 @@ pub(crate) struct SystemSmoke {
     environment: Vec<(OsString, OsString)>,
 }
 impl SystemSmoke {
+    pub(crate) fn require_matching_identity(
+        &self,
+        executable: &Path,
+        expected: &VersionInfo,
+        cancel: &CancelToken,
+    ) -> io::Result<()> {
+        if self.identity(executable, cancel)? != *expected {
+            return Err(io::Error::other(
+                "PR worker identity differs from command binary",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(home: Option<&Path>) -> io::Result<Self> {
         let executor = SystemExecutor::new(1)
             .map_err(|_| io::Error::other("cannot start bounded release smoke executor"))?;
@@ -129,6 +143,14 @@ impl ReleaseSmoke for SystemSmoke {
     fn check(&self, release: &Release, cancel: &CancelToken) -> io::Result<VersionInfo> {
         let executable = release.source().join("bin/provenant");
         let identity = self.identity(&executable, cancel)?;
+        let worker = release.source().join("bin/pr-reconciler");
+        if release.manifest().files.iter().any(|file| {
+            file.path
+                .to_relative_path()
+                .is_ok_and(|path| path.as_path() == Path::new("bin/pr-reconciler"))
+        }) {
+            self.require_matching_identity(&worker, &identity, cancel)?;
+        }
         let help = self.invoke::<serde_json::Value>(&executable, &["--help", "--json"], cancel)?;
         if help.schema_version != 1
             || help.command != "help"
