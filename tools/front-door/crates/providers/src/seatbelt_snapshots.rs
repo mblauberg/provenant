@@ -280,9 +280,16 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             NetworkAccess::Open,
         ),
     ] {
-        cases.push(Case::new(name, "opencode", access, None, false, |plan| {
-            plan.network = network;
-        })?);
+        cases.push(Case::new(
+            name,
+            "opencode",
+            access,
+            Some("login"),
+            false,
+            |plan| {
+                plan.network = network;
+            },
+        )?);
     }
     Ok(cases)
 }

@@ -1115,7 +1115,7 @@ fn main() -> Result<()> {
                 // the sandbox. Claude's token arrives in its environment;
                 // OpenCode's free models need none.
                 selected_authentication: match args.adapter.as_str() {
-                    "codex" => Some("login".into()),
+                    "codex" | "cursor" | "opencode" => Some("login".into()),
                     "agy" => Some("keychain".into()),
                     _ => None,
                 },

@@ -616,7 +616,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                 let plan = fixture_access_plan(
                     access,
                     match id {
-                        "codex" | "cursor" => Some("login"),
+                        "codex" | "cursor" | "opencode" => Some("login"),
                         "agy" => Some("keychain"),
                         _ => None,
                     },

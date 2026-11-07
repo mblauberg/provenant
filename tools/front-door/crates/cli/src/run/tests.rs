@@ -281,8 +281,6 @@ fn seed_opencode_session(
     Ok(())
 }
 
-const OPENCODE_DECODE_XDG_MARKER: &str = "PROVENANT_TEST_OPENCODE_DECODE_XDG";
-
 fn opencode_decode_route() -> run::RouteRecord {
     run::RouteRecord {
         provider: Some("opencode".into()),
@@ -309,46 +307,6 @@ fn opencode_decode_holder_context(
         launch: None,
         sealed: None,
     })
-}
-
-/// Re-run `test` in a confined child process whose environment omits
-/// `XDG_DATA_HOME` (when `xdg` is `None`) or pins it to `xdg`, so the
-/// decode sees a controlled value without mutating this process's env.
-fn run_opencode_decode_child(
-    test: &str,
-    xdg: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    use std::ffi::OsString;
-    let argv = vec![
-        std::env::current_exe()?.into_os_string(),
-        "--exact".into(),
-        format!("run::tests::{test}").into(),
-        "--nocapture".into(),
-    ];
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| {
-            key != OPENCODE_DECODE_XDG_MARKER
-                && key != "XDG_DATA_HOME"
-                && key != provenant_core::RUN_STATE_DIRECTORY_ENV
-        })
-        .collect();
-    env.push((
-        OsString::from(OPENCODE_DECODE_XDG_MARKER),
-        OsString::from("1"),
-    ));
-    if let Some(xdg) = xdg {
-        env.push(("XDG_DATA_HOME".into(), xdg.as_os_str().into()));
-    }
-    let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 65_536 };
-    options.stderr = StreamPolicy::Capture { limit: 65_536 };
-    let out = SystemExecutor::new(1)?.execute(options)?;
-    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
-    assert!(!out.timed_out, "{out:?}");
-    Ok(())
 }
 
 #[test]

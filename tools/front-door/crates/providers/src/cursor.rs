@@ -85,7 +85,6 @@ fn prepare(
         crate::launch::OmissionSource::Toolchain,
         &mut omitted_discovery,
     );
-    let chats = input.home.join(".cursor/chats");
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
@@ -96,35 +95,33 @@ fn prepare(
         .as_ref()
         .ok_or(ProviderError::UnsupportedPolicy)?
         .path;
+    let chats = private.join(".cursor/chats");
     let mut setup = vec![SetupStep::CreateDir(chats.clone())];
-    if staged_skills.root.is_some() {
-        setup.push(SetupStep::CreateDir(private.join(".cursor")));
-        setup.push(SetupStep::CreateDir(private.join(".config")));
-        for (link, target) in [
-            (private.join(".cursor/chats"), chats.clone()),
-            (
-                private.join(".cursor/cli-config.json"),
-                input.home.join(".cursor/cli-config.json"),
-            ),
-            (
-                private.join(".config/cursor"),
-                input.home.join(".config/cursor"),
-            ),
-        ] {
-            if target.exists() || target == chats {
-                setup.push(SetupStep::Symlink { link, target });
-            }
+    setup.push(SetupStep::CreateDir(private.join(".cursor")));
+    setup.push(SetupStep::CreateDir(private.join(".config")));
+    for (link, target) in [
+        (
+            private.join(".cursor/cli-config.json"),
+            input.home.join(".cursor/cli-config.json"),
+        ),
+        (
+            private.join(".config/cursor"),
+            input.home.join(".config/cursor"),
+        ),
+    ] {
+        if target.exists() {
+            setup.push(SetupStep::Symlink { link, target });
         }
-        if let Some(skills) = &staged_skills.root {
-            setup.push(SetupStep::Symlink {
-                link: private.join(".cursor/skills"),
-                target: skills.clone(),
-            });
-        }
-        for (key, value) in &mut env {
-            if key == "HOME" {
-                *value = private.into();
-            }
+    }
+    if let Some(skills) = &staged_skills.root {
+        setup.push(SetupStep::Symlink {
+            link: private.join(".cursor/skills"),
+            target: skills.clone(),
+        });
+    }
+    for (key, value) in &mut env {
+        if key == "HOME" {
+            *value = private.into();
         }
     }
     Ok(LaunchSpec {
@@ -153,7 +150,6 @@ fn prepare(
                     roots: authentication,
                     in_place_writes: Vec::new(),
                 }],
-                state_writes: vec![subtree(chats)],
                 // The resolved launcher is a shell script in the self-updated
                 // `versions/<version>/` payload that execs its sibling `node`,
                 // so every lane needs a shell and that one payload directory.

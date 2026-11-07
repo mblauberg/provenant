@@ -3344,7 +3344,7 @@ mod user_skills_tests {
                 scope: PathScope::Subtree,
             };
             let auth = match adapter.name {
-                "codex" | "cursor" => Some("login".into()),
+                "codex" | "cursor" | "opencode" => Some("login".into()),
                 "agy" => Some("keychain".into()),
                 _ => None,
             };

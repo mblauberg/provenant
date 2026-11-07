@@ -2,7 +2,9 @@ use crate::launch::{
     Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
-use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
+use provenant_confinement::permissions::{
+    AuthenticationProfile, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
+};
 use serde::Deserialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -127,17 +129,14 @@ fn prepare(
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
     let mut tool_requirements = crate::launch::ToolRequirements::default();
-    if plan.selected_authentication.is_some() {
+    if plan.selected_authentication.as_deref() != Some("login") {
         return Err(ProviderError::UnsupportedPolicy);
     }
-    let private = plan.private_state.as_ref().map_or_else(
-        || {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "warning: OpenCode private state is unavailable; using the attempt scratch directory");
-            &plan.scratch.path
-        },
-        |state| &state.path,
-    );
+    let private = &plan
+        .private_state
+        .as_ref()
+        .ok_or(ProviderError::UnsupportedPolicy)?
+        .path;
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
@@ -245,8 +244,10 @@ fn prepare(
     };
     let config_home = xdg("XDG_CONFIG_HOME", ".config");
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
-    let data = data_home.join("opencode");
-    let mut runtime_reads = vec![package.clone(), subtree(&data)];
+    let host_data = data_home.join("opencode");
+    let private_data = private.join("data");
+    let data = private_data.join("opencode");
+    let mut runtime_reads = vec![package.clone()];
     if access == Access::WorktreeWrite {
         let start = runtime_reads.len();
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
@@ -299,13 +300,15 @@ fn prepare(
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
     );
+    let mut authentication_roots = runtime_reads.split_off(optional_start);
+    authentication_roots.push(exact(host_data.join("auth.json")));
     runtime_reads.extend(skill_reads);
-    // Keep the account store readable but outside all writable state grants.
-    let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
-        .map(|name| exact(data.join(name)))
-        .to_vec();
     let mut setup = vec![
         SetupStep::CreateDir(data.clone()),
+        SetupStep::Symlink {
+            link: data.join("auth.json"),
+            target: host_data.join("auth.json"),
+        },
         SetupStep::CreateDir(bin.clone()),
         SetupStep::Symlink {
             link: bin.join("git"),
@@ -344,7 +347,6 @@ fn prepare(
     // when that mkdir is denied.
     for name in ["log", "storage", "snapshot", "shell"] {
         let directory = data.join(name);
-        state_writes.push(subtree(&directory));
         setup.push(SetupStep::CreateDir(directory));
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
@@ -370,7 +372,7 @@ fn prepare(
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("XDG_CONFIG_HOME".into(), private_config.into_os_string()),
-        ("XDG_DATA_HOME".into(), data_home.clone().into_os_string()),
+        ("XDG_DATA_HOME".into(), private_data.into_os_string()),
         (
             "XDG_CACHE_HOME".into(),
             private.join("cache").into_os_string(),
@@ -418,7 +420,11 @@ fn prepare(
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads,
-                state_writes,
+                authentication: vec![AuthenticationProfile {
+                    mechanism: "login".into(),
+                    roots: authentication_roots,
+                    in_place_writes: Vec::new(),
+                }],
                 tool_exec_roots,
                 discovery_reads: input
                     .cwd
@@ -1102,7 +1108,7 @@ mod tests {
 
     #[test]
     fn server_shell_state_is_created_and_writable() {
-        let plan = crate::tests::read_only_plan("/fixture", None);
+        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let input = crate::tests::fixture_input(
@@ -1119,10 +1125,16 @@ mod tests {
             OpenCode.stream(None).unwrap(),
         )
         .unwrap();
-        let shell = input.home.join(".local/share/opencode/shell");
+        let shell = plan
+            .permissions()
+            .private_state
+            .as_ref()
+            .unwrap()
+            .path
+            .join("data/opencode/shell");
         assert!(spec.setup.iter().any(|step| matches!(
             step, SetupStep::CreateDir(path) if *path == shell)));
-        assert!(spec.profile.spec.state_writes.contains(&subtree(&shell)));
+        assert!(shell.starts_with(&plan.permissions().private_state.as_ref().unwrap().path));
         let argv: Vec<_> = spec.argv.iter().map(|a| a.to_string_lossy()).collect();
         assert!(argv.iter().any(|a| a == "--print-logs"));
     }
@@ -1132,7 +1144,7 @@ mod tests {
         use provenant_confinement::permissions::{PathGrant, PathScope};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
-        let base = crate::tests::read_only_plan("/fixture", None);
+        let base = crate::tests::read_only_plan("/fixture", Some("login"));
         let mut permissions = base.permissions().clone();
         // Provider state is attempt-private and separate from the lane state
         // root, as in the Seatbelt snapshot fixture.
@@ -1281,7 +1293,7 @@ mod tests {
         let host_bin = root.join("host/bin");
         std::fs::create_dir_all(&host_bin)?;
         std::fs::write(host_bin.join("rg"), "unrelated")?;
-        let plan = crate::tests::read_only_plan(lane.to_str().unwrap(), None);
+        let plan = crate::tests::read_only_plan(lane.to_str().unwrap(), Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
@@ -1442,7 +1454,7 @@ mod tests {
         let cached = root.join("state/cache/opencode/bin/rg");
         std::fs::create_dir_all(cached.parent().unwrap())?;
         std::fs::copy(rg, &cached)?;
-        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
@@ -1531,7 +1543,7 @@ mod tests {
 
     #[test]
     fn discovery_reads_are_literal_along_cwd_ancestry() {
-        let plan = crate::tests::read_only_plan("/fixture", None);
+        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let input = crate::tests::fixture_input(
@@ -1575,7 +1587,7 @@ mod tests {
     #[test]
     fn read_only_search_path_skips_unencodable_git_directory() {
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-        let base = crate::tests::read_only_plan("/fixture", None);
+        let base = crate::tests::read_only_plan("/fixture", Some("login"));
         let mut permissions = base.permissions().clone();
         permissions.scratch.path = "/fixture/scratch:other".into();
         let plan = ConfinedPlan::new(PlanRequest {
@@ -1622,7 +1634,7 @@ mod tests {
     fn writer_search_path_preserves_non_utf8_home() {
         use std::os::unix::ffi::OsStringExt;
 
-        let plan = crate::tests::read_only_plan("/fixture", None);
+        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
@@ -1647,7 +1659,7 @@ mod tests {
 
     #[test]
     fn writer_search_path_skips_home_with_path_separator() {
-        let plan = crate::tests::read_only_plan("/fixture", None);
+        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let home = std::path::Path::new("/fixture/home:with-separator");
@@ -1672,7 +1684,7 @@ mod tests {
 
     #[test]
     fn git_discovery_exec_is_exact_in_both_access_modes() {
-        let plan = crate::tests::read_only_plan("/fixture", None);
+        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let input = crate::tests::fixture_input(
@@ -1753,7 +1765,7 @@ mod tests {
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let plan = crate::tests::fixture_access_plan(access, None, false);
+            let plan = crate::tests::fixture_access_plan(access, Some("login"), false);
             let spec = OpenCode
                 .prepare(crate::tests::fixture_input(
                     &route,
@@ -1789,7 +1801,7 @@ mod tests {
     #[test]
     fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
         let home = std::path::Path::new("/fixture/home");
-        let plan = crate::tests::read_only_plan("/fixture/home", None);
+        let plan = crate::tests::read_only_plan("/fixture/home", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let cwd = home.join("repo/crate");
@@ -1883,7 +1895,7 @@ mod tests {
             fs::create_dir_all(cached.parent().unwrap()).unwrap();
             fs::copy("/opt/homebrew/bin/rg", &cached).unwrap();
         }
-        let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), None);
+        let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let cwd = project_parent.join("repo");
@@ -1959,8 +1971,8 @@ mod tests {
     }
 
     #[test]
-    fn xdg_data_home_follows_absolute_host_variable() {
-        let plan = crate::tests::read_only_plan("/fixture", None);
+    fn host_account_uses_xdg_fallback_while_session_data_is_private() {
+        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let lookup = |key: &str| match key {
@@ -1992,10 +2004,44 @@ mod tests {
                 .map(|(_, value)| value.clone())
         };
         assert_eq!(env("XDG_CONFIG_HOME"), Some("/fixture/state/config".into()));
-        // A relative XDG path is ignored, as the XDG base directory spec says.
-        assert_eq!(
-            env("XDG_DATA_HOME"),
-            Some("/fixture/home/.local/share".into())
+        assert_eq!(env("XDG_DATA_HOME"), Some("/fixture/state/data".into()));
+        let auth = exact("/fixture/home/.local/share/opencode/auth.json");
+        assert_eq!(spec.profile.spec.authentication[0].mechanism, "login");
+        assert!(spec.profile.spec.authentication[0].roots.contains(&auth));
+        assert!(spec.setup.contains(&SetupStep::Symlink {
+            link: "/fixture/state/data/opencode/auth.json".into(),
+            target: auth.path
+        }));
+        let lookup = |key: &str| match key {
+            "XDG_DATA_HOME" => Some("/xdg/data".into()),
+            _ => None,
+        };
+        let custom = PrepareInput {
+            host_var: &lookup,
+            ..input
+        };
+        let custom = prepare(
+            &custom,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            custom.profile.spec.authentication[0]
+                .roots
+                .contains(&exact("/xdg/data/opencode/auth.json"))
+        );
+        assert!(custom.setup.contains(&SetupStep::Symlink {
+            link: "/fixture/state/data/opencode/auth.json".into(),
+            target: "/xdg/data/opencode/auth.json".into()
+        }));
+        assert!(
+            spec.profile
+                .spec
+                .state_writes
+                .iter()
+                .all(|grant| grant.path.starts_with("/fixture/state/data/opencode"))
         );
     }
 }

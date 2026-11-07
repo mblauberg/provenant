@@ -6,7 +6,7 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
     let route = route("opencode", "configured/model");
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;
-    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
     let prepare = |home: &Path, plan: &_| {
         opencode::OpenCode.prepare(PrepareInput {
             home,
@@ -55,7 +55,7 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
     );
     // Read-only lanes deny bash, so they get no toolchain: only the search
     // binaries OpenCode's grep and glob tools execute.
-    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let spec = prepare(&home, &plan)?;
     assert_eq!(
         spec.profile.spec.tool_exec_roots,

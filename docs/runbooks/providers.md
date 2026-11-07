@@ -175,6 +175,21 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
+## Private session history
+
+Settlement scrubs known credential shapes from text files under the attempt's
+`.cursor/chats` and `data/opencode` trees, including text in `log`, `storage`,
+`snapshot` and `shell`. It uses the same bounded traversal and streaming filter
+as Codex and Claude transcripts. This is best effort: an unreadable store or a
+traversal or filter limit does not fail settlement. SQLite databases and their
+journals, and other binary files, remain unscrubbed.
+
+Provider-state expiry archives `.cursor/chats` and `data/opencode` under the
+attempt's `provider-history/candidate-N`, alongside retained Codex and Claude
+history, before disposing of the private provider state. OpenCode's
+authentication entry is removed rather than archived; a link's host target
+stays untouched.
+
 ## Project paths and host checkout identity
 
 Lanes receive `PROVENANT_PRIMARY_CHECKOUT`, the canonical primary checkout.
