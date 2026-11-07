@@ -314,7 +314,9 @@ impl TokenScanner {
                 return Ok(());
             }
 
-            if self.boundary && !matches!(self.escape, Escape::Slash) {
+            // Only an escaped opening backslash disables a Unicode marker.
+            // Raw ASCII markers still match immediately after a backslash.
+            if self.boundary && !(input[index] == b'\\' && matches!(self.escape, Escape::Slash)) {
                 if let Some((length, kind)) = token_marker_at(&input[index..]) {
                     let marker = &input[index..index + length];
                     for byte in marker {
@@ -1030,6 +1032,40 @@ mod tests {
     }
 
     #[test]
+    fn raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks() {
+        for (marker, kind) in TOKEN_MARKERS {
+            let bodies: &[&str] = match kind {
+                TokenKind::AwsAccessKey => &["0123456789ABCDEF", r"01234567\u00389ABCDEF"],
+                _ => &["abcdefghijklmnopqrst", r"abcdefghij\u006blmnopqrst"],
+            };
+            for body in bodies {
+                for prefix in [r"\", r"\\", r"\\\"] {
+                    let input = format!("{prefix}{}{body}!", String::from_utf8_lossy(marker));
+                    let expected = if matches!(kind, TokenKind::Bearer) {
+                        format!("{prefix}Bearer [REDACTED]!")
+                    } else {
+                        format!("{prefix}[REDACTED]!")
+                    };
+                    for split in 0..=input.len() {
+                        let mut redactor = Redactor::new([]).expect("empty secret set");
+                        assert_eq!(
+                            joined(
+                                &mut redactor,
+                                &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                            ),
+                            expected.as_bytes(),
+                            "prefix {prefix:?}, marker {marker:?}, body {body:?}, split {split}"
+                        );
+                    }
+                    let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(joined(&mut redactor, &chunks), expected.as_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unicode_escapes_inside_tokens_are_redacted_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
             let body = match kind {
@@ -1054,37 +1090,37 @@ mod tests {
                 );
             }
             let first = marker[0];
-            let input = format!(
-                "\\u{first:04x}{}{}!",
-                String::from_utf8_lossy(&marker[1..]),
-                body
-            );
-            for split in 0..=input.len() {
-                let mut redactor = Redactor::new([]).expect("empty secret set");
-                assert_eq!(
-                    joined(
-                        &mut redactor,
-                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
-                    ),
-                    expected.as_bytes(),
-                    "escaped marker {marker:?}, split {split}"
+            for prefix in ["", r"\", r"\\"] {
+                let input = format!(
+                    "{prefix}\\u{first:04x}{}{}!",
+                    String::from_utf8_lossy(&marker[1..]),
+                    body
                 );
+                let expected = if prefix == r"\" {
+                    // The Unicode marker's opening backslash is itself escaped.
+                    input.clone()
+                } else {
+                    format!("{prefix}{expected}")
+                };
+                for split in 0..=input.len() {
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(
+                        joined(
+                            &mut redactor,
+                            &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                        ),
+                        expected.as_bytes(),
+                        "prefix {prefix:?}, escaped marker {marker:?}, split {split}"
+                    );
+                }
+                let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(joined(&mut redactor, &chunks), expected.as_bytes());
             }
         }
         for input in [r"sk-short\u0061!", r"sk-short\u0021!", r"sk-short\u00xz!"] {
             let mut redactor = Redactor::new([]).expect("empty secret set");
             assert_eq!(joined(&mut redactor, &[input.as_bytes()]), input.as_bytes());
-        }
-        let literal_escape = br"\\u0067hp_abcdefghijklmnopqrst!";
-        for split in 0..=literal_escape.len() {
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                joined(
-                    &mut redactor,
-                    &[&literal_escape[..split], &literal_escape[split..]]
-                ),
-                literal_escape
-            );
         }
     }
 
