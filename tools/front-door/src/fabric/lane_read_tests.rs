@@ -601,17 +601,28 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         rows.iter()
             .any(|row| row["node_id"] == "parent--failure" && row["state"] == "failed")
     );
-    let _waited = lane_command(
+    let waited = lane_command(
         &rig,
         &[
             "status",
             "--target",
             "graph:lane-read-children",
             "--wait=1s",
+            "--follow",
             "--json",
         ],
         124,
     )?;
+    assert_eq!(waited["event"], "snapshot");
+    assert_eq!(waited["target"], "graph:lane-read-children");
+    assert_eq!(waited["terminal"], false);
+    assert!(
+        waited["data"]["rows"]
+            .as_array()
+            .ok_or("wait status rows")?
+            .iter()
+            .any(|row| row["node_id"] == "parent--failure" && row["state"] == "failed")
+    );
     let trace = lane_command(&rig, &["output", graph, "--trace", "--json"], 0)?;
     assert!(
         !trace["data"]["events"]
