@@ -1878,11 +1878,13 @@ fn nested_owner_stays_protected_when_native_custody_proof_is_uncertain(root: &Pa
             .join("reservation.json"),
         &identity,
     )?;
-    wait_for_registry_reads(&home, 2)?;
     assert_eq!(
         stop(&handle, StopReason::ExplicitCancellation)?,
         StopReceipt::Requested
     );
+    // An idle guardian need not repeat its census. Cancellation and cleanup
+    // revisit the registration while the nested owner's custody stays held.
+    wait_for_registry_reads(&home, 2)?;
     drop(gate);
     let exit = exited(&handle)?;
     assert!(exit.unresolved_cleanup);
