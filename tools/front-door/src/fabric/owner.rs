@@ -8,6 +8,8 @@ pub(crate) struct BoundGraphBases {
 }
 
 pub(crate) struct BoundGraphOwner<'a> {
+    /// Optional deadline for initial admission, supplied by a waited submission.
+    pub(crate) admission_timeout: Option<WaitBudget>,
     pub(crate) factory: &'a Factory,
     pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
     pub(crate) launch_warnings: Vec<String>,
@@ -1099,7 +1101,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             config.admission_seconds_for(&self.factory.context.identity.project.to_string())
         });
         let effective = provenant_run::AdmissionPolicy::resolve_timeout(None, configured);
-        Some(effective.seconds)
+        Some(self.admission_timeout.map_or(effective.seconds, |limit| {
+            let micros = limit.remaining(self.factory.clock.mono_now()).as_micros();
+            effective.seconds.min(micros / 1_000_000)
+        }))
     }
     type Error = FacadeError;
     fn resolve_review_base(
@@ -3407,6 +3412,7 @@ mod journal_error_tests {
         };
         let cancel = CancelToken::new();
         let mut owner = BoundGraphOwner {
+            admission_timeout: None,
             factory: &factory,
             repo_facts: Default::default(),
             launch_warnings: Vec::new(),

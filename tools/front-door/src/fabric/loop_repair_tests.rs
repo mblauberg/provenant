@@ -127,7 +127,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         directory: fixture.rig.project.clone(),
         document: document.clone(),
     })?;
-    let mut bound = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut bound = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
@@ -262,7 +262,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         actor: &actor,
         ask: &ask,
     };
-    let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
