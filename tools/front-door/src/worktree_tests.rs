@@ -259,6 +259,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_graph_output_preserves_lens_diff_base",
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
+            "writer_settlement_merges_upstream_advance",
             "writer_terminal_refuses_sequencer_state",
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
@@ -355,6 +356,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "second_writer_is_refused_while_first_holds_the_worktree" => {
                     second_writer_is_refused_while_first_holds_the_worktree()
+                }
+                "writer_settlement_merges_upstream_advance" => {
+                    writer_settlement_merges_upstream_advance()
                 }
                 "writer_terminal_refuses_sequencer_state" => {
                     writer_terminal_refuses_sequencer_state()
