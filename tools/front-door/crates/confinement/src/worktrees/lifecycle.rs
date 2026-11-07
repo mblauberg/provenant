@@ -528,6 +528,9 @@ fn create_with_default(
     if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
+    // Release the verified checkout descriptors before allowing a sibling
+    // launcher to inspect this newly created worktree.
+    drop(verified);
     // The mutation and registration checks are complete. The advisory census
     // must not keep other branches from acquiring the repository registry.
     drop(_lock);

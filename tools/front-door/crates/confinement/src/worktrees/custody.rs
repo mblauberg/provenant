@@ -344,9 +344,22 @@ pub(super) fn lock_worktree(
     if !preview {
         context.workers.invalidate();
     }
-    let (observations, details) = context
+    let (mut observations, mut details) = context
         .workers
         .observe_roots_with_details(std::slice::from_ref(&canonical));
+    // A sibling's inventory verification can briefly hold a directory handle
+    // in this tree. Re-observe rather than treating that snapshot as a writer;
+    // persistent holders and all other evidence still refuse normally.
+    if !preview {
+        for _ in 0..3 {
+            if !matches!(observations.get(&canonical), Some(Occupancy::Observed { process: Some(process) }) if process.kind == ProcessEvidenceKind::OtherHeldPath) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            context.workers.invalidate();
+            (observations, details) = context.workers.observe_roots_with_details(std::slice::from_ref(&canonical));
+        }
+    }
     // The writer lock establishes exclusion.
     // A census gap does not make a free lease live; only a positive
     // observation of a live process refuses. Landing also needs this root
