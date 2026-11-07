@@ -1,7 +1,7 @@
 # Composite nodes share the leaf template schema. This catalogue is separate
 # so leaf briefs and composite topology have independent owners.
 [review-panel]
-composite_behaviour = "review_panel"
+composite_behaviour = "panel"
 doc = "Review through a host-selected topology and lenses."
 exports = [{ node = "selected", outputs = ["result", "findings", "verdict"] }]
 nodes = [

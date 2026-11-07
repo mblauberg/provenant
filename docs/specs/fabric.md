@@ -392,7 +392,7 @@ repository templates are layered over bundled definitions. The generated
 
 A leaf template puts compiled node fields in `[node]`; unknown fields fail compilation.
 Put intentional graph metadata in `[node.extensions]`. Composite templates may
-declare `composite_behaviour` as `review_panel`, `repair` or `review_repair`
+declare `composite_behaviour` as `panel`, `repair` or `review_repair`
 to select the corresponding compiler protocol independently of their names.
 
 A template is a leaf or a composite containing nodes. A node selects `use`,
