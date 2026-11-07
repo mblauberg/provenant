@@ -456,7 +456,7 @@ database. Submission refuses a child above `lanes.max_depth` (default 2); the li
 bounds recursion and grants no authority.
 - Why: a lane must not read or forge other runs' records.
 - Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`;
-  `crates/run/src/dispatch_tests.rs::nested_lane_depth_stops_at_the_configured_maximum`
+  `crates/run/src/dispatch_core_tests.rs::nested_lane_depth_stops_at_the_configured_maximum`
 - Owner: `crates/run/src/plan.rs`
 
 ### The host validates and launches children

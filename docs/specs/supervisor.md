@@ -151,7 +151,7 @@ Ns`, custody is released, and `provenant retry` continues its session.
 - Why: stuck attempts hold worktrees, locks and quota for hours.
 - Test: `crates/supervisor/src/machine.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
   `crates/supervisor/tests/custody.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
-  `crates/run/src/dispatch_tests.rs::a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout`
+  `crates/run/src/dispatch_core_tests.rs::a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout`
 - Owner: `crates/supervisor/src/machine.rs`, `crates/supervisor/src/guardian.rs`,
   `crates/run/src/holder.rs`, `crates/run/src/controls.rs`
 
@@ -295,7 +295,7 @@ device number refuses recovery.
   `::worktree_settlement_retains_flock_until_recovery_is_dropped`;
   `::admission_ignores_predecessor_evidence_but_shares_writer_exclusion`;
   `::reservation_listing_isolates_an_inaccessible_slot`;
-  `crates/run/src/dispatch_tests.rs::reconcile_recovers_writer_when_device_numbers_change_after_reboot`;
+  `crates/run/src/dispatch_recovery_tests.rs::reconcile_recovers_writer_when_device_numbers_change_after_reboot`;
   `::changed_device_numbers_on_same_boot_keep_writer_custody`
 - Owner: `crates/supervisor/src/custody.rs`
 
