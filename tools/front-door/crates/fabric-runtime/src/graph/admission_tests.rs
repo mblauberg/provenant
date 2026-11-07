@@ -161,10 +161,25 @@ fn flat_plan_returns_typed_cause_with_original_text() {
     let graph = document(1, json!([{"id":"n","access":"read_only","prompt":"x"}]));
     let error = validate_flat_plan(&graph, &Default::default()).unwrap_err();
     assert!(matches!(error, AdmissionError::Plan(_)));
-    assert_eq!(error.to_string(), "route list is empty");
+    assert_eq!(error.to_string(), "node n: route list is empty");
     let error = graph.admit(&Default::default()).unwrap_err();
     assert!(matches!(error, AdmissionError::Plan(_)));
-    assert_eq!(error.to_string(), "route list is empty");
+    assert_eq!(error.to_string(), "node n: route list is empty");
+}
+
+#[test]
+fn writer_plan_refusal_names_the_node_and_missing_worktree() {
+    let graph = document(
+        1,
+        json!([{
+            "id":"implement",
+            "prompt":"Fix the issue",
+            "access":"worktree_write",
+            "route":{"alias":"senior"}
+        }]),
+    );
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert_eq!(error.to_string(), "node implement: writer worktree");
 }
 
 #[test]

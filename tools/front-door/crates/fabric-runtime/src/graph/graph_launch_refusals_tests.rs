@@ -378,6 +378,30 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
 }
 
 #[test]
+fn graph_plan_refusal_preserves_node_reason_and_writer_remedy() {
+    use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    let error = FacadeError::graph_admission(crate::graph::AdmissionError::Plan(
+        "node implement: writer worktree".into(),
+    ));
+    let diagnostic = error.diagnostic();
+    assert!(error.to_string().contains("node implement: writer worktree"));
+    assert_eq!(
+        diagnostic.detail.as_deref(),
+        Some("node implement: writer worktree")
+    );
+    assert!(diagnostic
+        .next
+        .as_deref()
+        .is_some_and(|next| next.contains("--worktree PATH") && next.contains("--branch B --base REF")));
+    assert!(!matches!(
+        error,
+        FacadeError::InvalidInput {
+            detail: Some(InvalidInputDetail::GraphReason(_))
+        }
+    ));
+}
+
+#[test]
 fn writer_binding_failure_persists_only_the_safe_projection() {
     use crate::coordination::facade::FacadeError;
     let mut writer = node("writer", route("first"));

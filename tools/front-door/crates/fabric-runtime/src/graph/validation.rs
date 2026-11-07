@@ -282,6 +282,10 @@ fn plan_error(reason: &str) -> AdmissionError {
     AdmissionError::Plan(reason.into())
 }
 
+fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> AdmissionError {
+    AdmissionError::Plan(format!("node {}: {reason}", node.id))
+}
+
 pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
@@ -333,7 +337,7 @@ pub(super) fn validate_flat_plan(
     let mut positions = std::collections::BTreeMap::<String, usize>::new();
     for (index, node) in document.nodes.iter().enumerate() {
         if !valid_node_identifier(&node.id) || positions.insert(node.id.clone(), index).is_some() {
-            return Err(AdmissionError::Plan("node id".into()));
+            return Err(node_plan_error(node, "node id"));
         }
     }
 
@@ -346,20 +350,23 @@ pub(super) fn validate_flat_plan(
                 reference.is_empty() || reference.len() > 4096 || reference.contains('\0')
             })
         }) {
-            return Err(AdmissionError::Plan(
-                "node review_base must be a nonempty reference".into(),
+            return Err(node_plan_error(
+                node,
+                "node review_base must be a nonempty reference",
             ));
         }
         if node.extra.contains_key("composite_members")
             || node.extra.contains_key("after_expansion")
         {
-            return Err(AdmissionError::Plan(
-                "computed topology fields are reserved to checkpoint expansions".into(),
+            return Err(node_plan_error(
+                node,
+                "computed topology fields are reserved to checkpoint expansions",
             ));
         }
         if node.deadline_seconds == Some(0) {
-            return Err(AdmissionError::Plan(
-                "node deadline_seconds must be positive".into(),
+            return Err(node_plan_error(
+                node,
+                "node deadline_seconds must be positive",
             ));
         }
         if let Some(reason) = node
@@ -367,23 +374,25 @@ pub(super) fn validate_flat_plan(
             .as_ref()
             .and_then(|spec| attempt_error(node, spec))
         {
-            return Err(AdmissionError::Plan(reason.into()));
+            return Err(node_plan_error(node, reason));
         }
-        plans::validate_spec(node).map_err(plan_error)?;
+        plans::validate_spec(node).map_err(|reason| node_plan_error(node, reason))?;
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
-            return Err(AdmissionError::Plan(
-                "composite requires nodes and exports".into(),
+            return Err(node_plan_error(
+                node,
+                "composite requires nodes and exports",
             ));
         }
         let is_loop = node.kind == Some(NodeKind::Loop);
         if is_loop != node.loop_body.is_some() {
-            return Err(AdmissionError::Plan("loop requires a body".into()));
+            return Err(node_plan_error(node, "loop requires a body"));
         }
         let is_decide = node.kind == Some(NodeKind::Decide);
         if is_decide != node.decide.is_some() {
-            return Err(AdmissionError::Plan(
-                "decide requires a question and options".into(),
+            return Err(node_plan_error(
+                node,
+                "decide requires a question and options",
             ));
         }
         asks::validate_decide(
@@ -391,14 +400,15 @@ pub(super) fn validate_flat_plan(
             node,
             document.decision_session.as_deref(),
         )
-        .map_err(plan_error)?;
+        .map_err(|reason| node_plan_error(node, reason))?;
         let is_land = node.kind == Some(NodeKind::Land);
         if is_land != node.land.is_some() {
-            return Err(AdmissionError::Plan(
-                "land requires a land spec naming its writer".into(),
+            return Err(node_plan_error(
+                node,
+                "land requires a land spec naming its writer",
             ));
         }
-        land::validate_node(node).map_err(plan_error)?;
+        land::validate_node(node).map_err(|reason| node_plan_error(node, reason))?;
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
             || !is_gate && node.loop_body.is_none() && node.on_fail.is_some()
@@ -411,8 +421,9 @@ pub(super) fn validate_flat_plan(
                     || !node.prompt.is_empty()
                     || node.required_verdict.is_some())
         {
-            return Err(AdmissionError::Plan(
-                "gate requires a condition and no agent configuration".into(),
+            return Err(node_plan_error(
+                node,
+                "gate requires a condition and no agent configuration",
             ));
         }
         if let Some(target) = &node.on_fail
@@ -421,8 +432,9 @@ pub(super) fn validate_flat_plan(
                     .get(target)
                     .is_some_and(|index| document.nodes[*index].depends_on.contains(&node.id)))
         {
-            return Err(AdmissionError::Plan(
-                "on_fail target must depend on its gate".into(),
+            return Err(node_plan_error(
+                node,
+                "on_fail target must depend on its gate",
             ));
         }
         match &node.condition {
@@ -442,7 +454,7 @@ pub(super) fn validate_flat_plan(
                         .any(|input| input.outputs != [OutputKind::Verdict])
                     || matches!(threshold, VerdictThreshold::Count(n) if *n == 0 || *n > node.inputs.len())
                 {
-                    return Err(AdmissionError::Plan("invalid verdict gate".into()));
+                    return Err(node_plan_error(node, "invalid verdict gate"));
                 }
             }
             Some(GateCondition::Ci {
@@ -459,19 +471,16 @@ pub(super) fn validate_flat_plan(
                         || name.len() > 1024
                         || !seen.insert(name)
                 }) {
-                    return Err(AdmissionError::Plan("invalid CI gate check names".into()));
+                    return Err(node_plan_error(node, "invalid CI gate check names"));
                 }
-                ci::validate_target(target, node, document).map_err(plan_error)?;
+                ci::validate_target(target, node, document)
+                    .map_err(|reason| node_plan_error(node, reason))?;
                 if !(1..=604800).contains(timeout_seconds) || !node.inputs.is_empty() {
-                    return Err(AdmissionError::Plan(
-                        "invalid CI gate target or timeout".into(),
-                    ));
+                    return Err(node_plan_error(node, "invalid CI gate target or timeout"));
                 }
             }
             Some(GateCondition::Budget { .. }) if !node.inputs.is_empty() => {
-                return Err(AdmissionError::Plan(
-                    "budget gate has no selected inputs".into(),
-                ));
+                return Err(node_plan_error(node, "budget gate has no selected inputs"));
             }
             _ => {}
         }
@@ -479,8 +488,9 @@ pub(super) fn validate_flat_plan(
             (&document.integration_branch, &node.delivery)
             && integration != target
         {
-            return Err(AdmissionError::Plan(
-                "node integration target differs from graph integration branch".into(),
+            return Err(node_plan_error(
+                node,
+                "node integration target differs from graph integration branch",
             ));
         }
         if node.required_verdict.as_ref().is_some_and(|line| {
@@ -488,19 +498,21 @@ pub(super) fn validate_flat_plan(
                 || line.len() > limits.node_prompt_bytes
                 || line.contains(['\n', '\r'])
         }) {
-            return Err(AdmissionError::Plan(
-                "required verdict must be a non-empty single line".into(),
+            return Err(node_plan_error(
+                node,
+                "required verdict must be a non-empty single line",
             ));
         }
         if let Some(title) = &node.title {
-            provenant_core::validate_task_title(title).map_err(plan_error)?;
+            provenant_core::validate_task_title(title)
+                .map_err(|reason| node_plan_error(node, reason))?;
         }
         if node
             .role
             .as_ref()
             .is_some_and(|role| !valid_identifier(role))
         {
-            return Err(AdmissionError::Plan("invalid role name".into()));
+            return Err(node_plan_error(node, "invalid role name"));
         }
         let mut roots = std::collections::BTreeSet::new();
         if node.read_roots.len() > 32
@@ -508,7 +520,7 @@ pub(super) fn validate_flat_plan(
                 root.is_empty() || root.len() > 4096 || root.contains('\0') || !roots.insert(root)
             })
         {
-            return Err(AdmissionError::Plan("invalid read roots".into()));
+            return Err(node_plan_error(node, "invalid read roots"));
         }
         if node.attachments.len() > 32
             || node
@@ -516,24 +528,24 @@ pub(super) fn validate_flat_plan(
                 .iter()
                 .any(|path| path.is_empty() || path.len() > 4096 || path.contains('\0'))
         {
-            return Err(AdmissionError::Plan("invalid attachments".into()));
+            return Err(node_plan_error(node, "invalid attachments"));
         }
         match &node.source {
             Some(SourceBinding::Commit { commit })
                 if commit.parse::<provenant_core::GitOid>().is_err() =>
             {
-                return Err(AdmissionError::Plan(
-                    "source requires a full commit ID".into(),
-                ));
+                return Err(node_plan_error(node, "source requires a full commit ID"));
             }
             Some(SourceBinding::Node { node: source }) if !node.depends_on.contains(source) => {
-                return Err(AdmissionError::Plan(
-                    "source node must be a direct dependency".into(),
+                return Err(node_plan_error(
+                    node,
+                    "source node must be a direct dependency",
                 ));
             }
             Some(SourceBinding::Integration) if document.integration_branch.is_none() => {
-                return Err(AdmissionError::Plan(
-                    "integration source requires an integration branch".into(),
+                return Err(node_plan_error(
+                    node,
+                    "integration source requires an integration branch",
                 ));
             }
             _ => {}
@@ -543,37 +555,37 @@ pub(super) fn validate_flat_plan(
                 || !node.read_roots.is_empty()
                 || !node.attachments.is_empty())
         {
-            return Err(AdmissionError::Plan(
-                "execution bindings require an agent node".into(),
+            return Err(node_plan_error(
+                node,
+                "execution bindings require an agent node",
             ));
         }
-        validate_access(node.access, node.worktree.as_deref()).map_err(plan_error)?;
+        validate_access(node.access, node.worktree.as_deref())
+            .map_err(|reason| node_plan_error(node, reason))?;
         if node.access == AccessMode::ReadOnly
             && !matches!(node.delivery, None | Some(DeliveryMode::None))
         {
-            return Err(AdmissionError::Plan("read-only node cannot deliver".into()));
+            return Err(node_plan_error(node, "read-only node cannot deliver"));
         }
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
-            return Err(AdmissionError::Plan(
-                "graph PR is exclusive with node PRs".into(),
-            ));
+            return Err(node_plan_error(node, "graph PR is exclusive with node PRs"));
         }
         if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
-            return Err(AdmissionError::Plan("prompt size".into()));
+            return Err(node_plan_error(node, "prompt size"));
         }
         prompt_bytes = prompt_bytes
             .checked_add(node.content_bytes())
-            .ok_or_else(|| plan_error("prompt size"))?;
+            .ok_or_else(|| node_plan_error(node, "prompt size"))?;
         if prompt_bytes > limits.graph_prompt_bytes {
-            return Err(AdmissionError::Plan("total prompt size".into()));
+            return Err(node_plan_error(node, "total prompt size"));
         }
         edge_count = edge_count
             .checked_add(node.dependencies().count())
-            .ok_or_else(|| plan_error("edge count"))?;
+            .ok_or_else(|| node_plan_error(node, "edge count"))?;
         if edge_count > limits.edges {
-            return Err(AdmissionError::Plan("edge count".into()));
+            return Err(node_plan_error(node, "edge count"));
         }
 
         let routes = match (&node.route, &node.routes) {
@@ -583,35 +595,32 @@ pub(super) fn validate_flat_plan(
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => {
-                return Err(AdmissionError::Plan(
-                    "route and routes are exclusive".into(),
-                ));
+                return Err(node_plan_error(node, "route and routes are exclusive"));
             }
             (None, None) | (None, Some(_)) => {
-                return Err(AdmissionError::Plan("route list is empty".into()));
+                return Err(node_plan_error(node, "route list is empty"));
             }
         };
         if routes.len() > limits.routes_per_node {
-            return Err(AdmissionError::Plan("route count".into()));
+            return Err(node_plan_error(node, "route count"));
         }
         if routes
             .iter()
             .any(|route| route.adapter.is_none() && route.alias.is_none())
         {
-            return Err(AdmissionError::Plan(
-                "route requires an adapter or alias".into(),
-            ));
+            return Err(node_plan_error(node, "route requires an adapter or alias"));
         }
         if routes
             .iter()
             .any(|route| (route.model.is_some() || route.name.is_some()) && route.adapter.is_none())
         {
-            return Err(AdmissionError::Plan(
-                "model or named adapter route requires an adapter".into(),
+            return Err(node_plan_error(
+                node,
+                "model or named adapter route requires an adapter",
             ));
         }
         if routes.iter().any(|route| !route_is_bounded(route)) {
-            return Err(AdmissionError::Plan("route field size".into()));
+            return Err(node_plan_error(node, "route field size"));
         }
         // Configured aliases resolve model providers, whose registry excludes host-native.
         for (index, route) in routes.iter().enumerate() {
@@ -620,8 +629,9 @@ pub(super) fn validate_flat_plan(
                     .iter()
                     .any(|fallback| fallback.adapter.as_deref() != Some("host-native"))
             {
-                return Err(AdmissionError::Plan(
-                    "host-native route requires a later non-native fallback".into(),
+                return Err(node_plan_error(
+                    node,
+                    "host-native route requires a later non-native fallback",
                 ));
             }
         }
@@ -641,40 +651,40 @@ pub(super) fn validate_flat_plan(
                     ..Default::default()
                 })
             {
-                return Err(AdmissionError::Plan(error.field.refusal().into()));
+                return Err(node_plan_error(node, error.field.refusal()));
             }
         }
 
         let mut seen = std::collections::BTreeSet::new();
         for parent in node.dependencies() {
             if !seen.insert(parent) || parent == &node.id || !positions.contains_key(parent) {
-                return Err(AdmissionError::Plan("dependency".into()));
+                return Err(node_plan_error(node, "dependency"));
             }
         }
         if node.kind == Some(NodeKind::Synthesise) && node.inputs.is_empty() {
-            return Err(AdmissionError::Plan(
-                "synthesise requires selected inputs".into(),
-            ));
+            return Err(node_plan_error(node, "synthesise requires selected inputs"));
         }
         let mut input_nodes = std::collections::BTreeSet::new();
         for input in &node.inputs {
             if input.extra.contains_key("required") {
-                return Err(AdmissionError::Plan(
-                    "required output semantics are not supported".into(),
+                return Err(node_plan_error(
+                    node,
+                    "required output semantics are not supported",
                 ));
             }
             if !node.depends_on.contains(&input.node)
                 || !input_nodes.insert(&input.node)
                 || input.outputs.is_empty()
             {
-                return Err(AdmissionError::Plan(
-                    "input must select outputs from a unique direct dependency".into(),
+                return Err(node_plan_error(
+                    node,
+                    "input must select outputs from a unique direct dependency",
                 ));
             }
             let mut kinds = Vec::new();
             for kind in &input.outputs {
                 if kinds.contains(kind) {
-                    return Err(AdmissionError::Plan("duplicate input output".into()));
+                    return Err(node_plan_error(node, "duplicate input output"));
                 }
                 kinds.push(*kind);
             }
@@ -687,8 +697,9 @@ pub(super) fn validate_flat_plan(
                         OutputKind::Commit | OutputKind::Verdict | OutputKind::Findings
                     )
                 {
-                    return Err(AdmissionError::Plan(
-                        "required outputs must be unique selected commit, verdict or findings values".into(),
+                    return Err(node_plan_error(
+                        node,
+                        "required outputs must be unique selected commit, verdict or findings values",
                     ));
                 }
                 required.push(*kind);
@@ -784,9 +795,17 @@ pub(super) fn validate_flat_plan(
         }
     }
     if order.len() != nodes.len() {
-        return Err(AdmissionError::Plan("dependency cycle".into()));
+        let node = nodes
+            .iter()
+            .enumerate()
+            .find(|(index, _)| indegree[*index] > 0)
+            .map(|(_, node)| node.id.as_str())
+            .unwrap_or("unknown");
+        return Err(AdmissionError::Plan(format!(
+            "node {node}: dependency cycle"
+        )));
     }
-    land::validate_relations(&nodes, &positions).map_err(plan_error)?;
+    land::validate_relations(&nodes, &positions).map_err(AdmissionError::Plan)?;
 
     // Dependencies are conjunctive. Reject nodes that require mutually
     // exclusive branches, including through transitive dependencies.
@@ -814,9 +833,10 @@ pub(super) fn validate_flat_plan(
         while let Some((index, outcome)) = pending.pop_front() {
             if let Some(prior) = required[index] {
                 if prior != outcome {
-                    return Err(AdmissionError::Plan(
-                        "node requires both gate outcomes".into(),
-                    ));
+                    return Err(AdmissionError::Plan(format!(
+                        "node {}: requires both gate outcomes",
+                        nodes[index].id
+                    )));
                 }
                 continue;
             }

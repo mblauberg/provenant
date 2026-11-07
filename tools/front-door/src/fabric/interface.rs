@@ -278,8 +278,6 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
         } else {
             cwd.join(path)
         });
-    } else if access == Some(&json!("worktree_write")) && node.get("worktree").is_none() {
-        node["worktree"] = json!(cwd);
     }
     if let Some(scope) = input.get("write_scope").filter(|value| !value.is_null()) {
         if !scope
@@ -2426,7 +2424,35 @@ mod tests {
                 .diagnostic()
                 .detail
                 .ok_or("patch refusal")?
-                .contains("graph plan is invalid")
+                .contains("node a: dependency cycle")
+        );
+        let error = factory
+            .graph_document(
+                json!({"op":"run", "use":"implement", "brief":"Fix it", "explain":true}),
+                budget,
+                &cancel,
+            )
+            .unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.starts_with("node ") && detail.contains("writer worktree")
+        }));
+        assert!(diagnostic.next.as_deref().is_some_and(|next| {
+            next.contains("--worktree PATH") && next.contains("--branch B --base REF")
+        }));
+        let error = factory
+            .graph_document(
+                json!({"op":"run", "brief":"Fix it", "access":"worktree_write", "explain":true}),
+                budget,
+                &cancel,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .diagnostic()
+                .next
+                .as_deref()
+                .is_some_and(|next| next.contains("--worktree PATH"))
         );
         Ok(())
     }
@@ -2455,6 +2481,45 @@ mod tests {
         ] {
             assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn writer_template_with_target_defaults_to_writer_access() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        for target in [
+            json!({"worktree":".worktrees/fix"}),
+            json!({"branch":"fix","base":"origin/main"}),
+        ] {
+            let mut input = json!({"op":"run","use":"implement","brief":"Fix it"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(target.as_object().unwrap().clone());
+            let request = factory.child_request(&input)?;
+            assert!(request.writer);
+            let node = &request
+                .launch
+                .as_ref()
+                .ok_or("missing compiled launch")?
+                .node;
+            assert_eq!(node["access"], "worktree_write");
+        }
+
+        let mut explicit_read = json!({"op":"run","use":"implement","brief":"Fix it","access":"read_only","worktree":".worktrees/fix"});
+        assert!(factory.child_request(&explicit_read).is_err());
+        explicit_read["access"] = json!("worktree_write");
+        let explicit_write = factory.child_request(&explicit_read)?;
+        assert!(explicit_write.writer);
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let cancel = CancelToken::new();
+        let explicit_read = factory.graph_document(
+            json!({"op":"run","use":"implement","brief":"Inspect","access":"read_only","explain":true}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(explicit_read["document"]["nodes"][0]["access"], "read_only");
         Ok(())
     }
 
