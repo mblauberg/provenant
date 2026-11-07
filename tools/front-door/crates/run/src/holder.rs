@@ -1139,6 +1139,7 @@ impl RunStore {
         // and its replay create the receipts together with the decision.
         let mut deferred: Vec<(SettlementEffect, EffectDisposition)> = Vec::new();
         let mut import_failed = false;
+        let mut import_stopped = false;
         // A late request alone cannot invalidate a verified clean exit, even
         // with a legacy guardian. Its cancellation receipt retains uncertainty.
         let mut cancelled = if exit.never_spawned {
@@ -1489,15 +1490,20 @@ impl RunStore {
                         || !matches!(error, RunError::ObjectImportLimit(_)) =>
                 {
                     if cancelled || import_stop_requested {
-                        cancelled = true;
-                        crate::artifacts::seal(
-                            attempt,
-                            "import-cancelled.json",
-                            &crate::db::bytes(&exit.scope)?,
-                            RECORD_LIMIT,
-                        )?;
-                        decoded.outcome = Outcome::Cancelled;
-                        decoded.reason = Some("cancelled during Git import".into());
+                        import_stopped = true;
+                        // A stop can end import, but cannot rewrite a sealed
+                        // prelaunch refusal or deadline as a cancellation.
+                        if !exit.never_spawned || cancelled {
+                            cancelled = true;
+                            crate::artifacts::seal(
+                                attempt,
+                                "import-cancelled.json",
+                                &crate::db::bytes(&exit.scope)?,
+                                RECORD_LIMIT,
+                            )?;
+                            decoded.outcome = Outcome::Cancelled;
+                            decoded.reason = Some("cancelled during Git import".into());
+                        }
                         Ok(())
                     } else if settlement
                         .as_ref()
@@ -1675,6 +1681,7 @@ impl RunStore {
             );
         }
         if cancelled
+            || import_stopped
             || decoded.outcome == Outcome::Cancelled
             || object_import_refused(attempt, exit.scope)?.is_some()
         {
@@ -1688,7 +1695,7 @@ impl RunStore {
                         "manifest.json",
                         &crate::db::bytes(&serde_json::json!({
                             "schema_version": 1, "scope": exit.scope, "kind": "quarantine_manifest",
-                            "disposition": if decoded.outcome == Outcome::Cancelled { "cancelled" } else { "import_refused" }
+                            "disposition": if decoded.outcome == Outcome::Cancelled || import_stopped { "cancelled" } else { "import_refused" }
                         }))?,
                         RECORD_LIMIT,
                     ),
@@ -3330,6 +3337,120 @@ mod writer_recovery_tests {
                 Some(CancellationDisposition::ImportEffective)
             );
             assert_eq!(observed.cancel_delivered_before_exit, delivered);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn never_spawned_exit_survives_cancel_during_import()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (stop_reason, expected, cancel_first) in [
+            (None, Outcome::Rejected, true),
+            (Some(StopReason::WallDeadline), Outcome::TimedOut, false),
+        ] {
+            use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let missing = "a".repeat(40);
+            std::fs::write(
+                candidate.join("git-common").join(launch.branch.as_str()),
+                format!("{missing}\n"),
+            )?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            drop(provenant_supervisor::fixture::bind_writer_attempt(
+                lease, &attempt,
+            )?);
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            observed.never_spawned = true;
+            observed.termination = None;
+            observed.settlement_evidence = custody::SettlementEvidence::NeverSpawned;
+            observed.stop_reason = stop_reason;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            crate::artifacts::seal(
+                &attempt,
+                "launch.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": scope, "requester": execution.actor_id
+                }))?,
+                RECORD_LIMIT,
+            )?;
+            if cancel_first {
+                assert!(matches!(
+                    store.cancel(id, "stop", &call)?,
+                    crate::CancelReceipt::Requested | crate::CancelReceipt::AlreadyRequested
+                ));
+            } else {
+                crate::artifacts::seal(
+                    &attempt,
+                    "cancel.json",
+                    &crate::db::bytes(&serde_json::json!({
+                        "schema_version": 1, "scope": scope, "requester": execution.actor_id,
+                        "request_id": "import-cancel", "reason": StopReason::ExplicitCancellation
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+            }
+            let found = store.reconcile_with_observer(
+                run.run_id,
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver,
+            )?;
+            assert_eq!(found, vec![(id, crate::Reconciled::Finished)]);
+            let record = store.record(id, &call)?;
+            assert!(
+                matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
+            );
+            assert_eq!(
+                record.terminal_evidence,
+                Some(TerminalEvidence::ProcessExit)
+            );
+            assert_eq!(record.provider_launched, Some(false));
+            assert!(read_sealed(&attempt, "import-cancelled.json", RECORD_LIMIT)?.is_none());
         }
         Ok(())
     }

@@ -1868,6 +1868,13 @@ mod tests {
             "INSERT INTO attempts VALUES ('project','run','attempt',?1,0)",
             [serde_json::to_vec(&record)?],
         )?;
+        let attempt = roots.state.as_path().join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&attempt)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+        let _lock = directory.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
         super::cutover_pending_guard(&roots.state)?;
         assert_eq!(
             super::pending_upgrade_findings(&roots.state, false)?.len(),
@@ -1936,6 +1943,13 @@ mod tests {
             "INSERT INTO attempts VALUES (?1, 'run', 'attempt', ?2, 0)",
             rusqlite::params![project, current],
         )?;
+        let attempt = roots.state.as_path().join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&attempt)?;
+        let root_directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+        let _root_lock = root_directory.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
         super::cutover_pending_guard(&roots.state)?;
         // A completed parent can still have a detached live attempt. Its
         // retained template snapshot remains authoritative after settlement.
@@ -1953,6 +1967,13 @@ mod tests {
         assert!(!directory.join("pending").exists());
         let child = roots.state.as_path().join("children/legacy");
         std::fs::create_dir_all(&child)?;
+        let child_attempt = child.join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&child_attempt)?;
+        let child_directory = provenant_os::fs::Directory::open_anchor(&child_attempt)?;
+        let _child_lock = child_directory.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
         let child_database = child.join("run.sqlite3");
         let db = rusqlite::Connection::open(&child_database)?;
         db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project', 'run', 'attempt', X'7b7d', 0);")?;

@@ -2069,6 +2069,13 @@ esac
     let db = rusqlite::Connection::open(&db_path)?;
     db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',X'7b7d',0);")?;
     drop(db);
+    let attempt = rig.state.join("runs/run-one/attempts/lane-one");
+    fs::create_dir_all(&attempt)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+    let _lock = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
     let child_store = rig.state.join("children/child-one");
     fs::create_dir_all(&child_store)?;
     let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;

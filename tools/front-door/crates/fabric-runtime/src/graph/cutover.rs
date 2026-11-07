@@ -97,7 +97,7 @@ pub fn pending_findings(
             .map_err(|e| e.to_string())?;
         for row in rows {
             let (project, run, attempt, record) = row.map_err(|e| e.to_string())?;
-            if store != state.as_path() && !child_supervisor_live(&store, &run, &attempt) {
+            if !supervisor_live(&store, &run, &attempt) {
                 continue;
             }
             if legacy_only && store == state.as_path() {
@@ -132,7 +132,7 @@ pub fn pending_findings(
 // The guardian holds this existing lock for the lifetime of supervision.
 // Missing attempt directories or locks have no live guardian; other errors
 // remain findings rather than being mistaken for absence.
-fn child_supervisor_live(store: &Path, run: &str, attempt: &str) -> bool {
+fn supervisor_live(store: &Path, run: &str, attempt: &str) -> bool {
     use provenant_os::fs::{Directory, FsError, LockMode};
     use std::ffi::OsStr;
     if !super::valid_identifier(run)
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn child_store_needs_live_custody_but_root_rows_still_block() {
+    fn root_and_child_stores_need_live_custody() {
         let temp = crate::test_support::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -306,8 +306,23 @@ mod tests {
         let db = rusqlite::Connection::open(base.join("run.sqlite3")).unwrap();
         db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project','run','root',X'7b7d',0);").unwrap();
         drop(db);
-        let findings = pending_findings(&state, true).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].contains("/root "));
+        for legacy_only in [false, true] {
+            assert!(pending_findings(&state, legacy_only).unwrap().is_empty());
+        }
+        assert!(pending_guard(&state).is_ok());
+        let root_attempt = base.join("runs/run/attempts/root");
+        std::fs::create_dir_all(&root_attempt).unwrap();
+        let directory = Directory::open_anchor(&root_attempt).unwrap();
+        let lock = directory
+            .try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)
+            .unwrap();
+        for legacy_only in [false, true] {
+            let findings = pending_findings(&state, legacy_only).unwrap();
+            assert_eq!(findings.len(), 1);
+            assert!(findings[0].contains("/root "));
+        }
+        assert!(pending_guard(&state).is_err());
+        drop(lock);
+        assert!(pending_guard(&state).is_ok());
     }
 }
