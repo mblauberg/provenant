@@ -3,7 +3,6 @@ use super::*;
 /// Whether the account's reading says a window is spent and has not reset.
 /// Admission gates only models with a quota pool; native providers surface a
 /// spent allowance as an exhausted snapshot, which a preview reads directly.
-
 pub(super) fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
     record.snapshot.as_ref().is_some_and(|snapshot| {
         snapshot.status == provenant_quota::QuotaStatus::Exhausted
