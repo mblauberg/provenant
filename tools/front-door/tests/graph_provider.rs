@@ -628,6 +628,17 @@ fn fixture() -> Result {
         format!(
             "{lens}\nwrite denied: {denied}\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n{verdict}{DONE_FENCE}"
         )
+    } else if prompt.contains("fixture commit source verdict") {
+        assert_eq!(
+            fs::read_to_string("review-subject.txt")?,
+            "pinned review subject\n"
+        );
+        assert!(fs::write("review-write-sentinel", b"forbidden").is_err());
+        // Session writes above and temporary writes here must remain available
+        // when the provider's working directory is an immutable source view.
+        let scratch = PathBuf::from(std::env::var_os("TMPDIR").ok_or("TMPDIR")?);
+        fs::write(scratch.join("review-started"), b"started")?;
+        format!("VERDICT: PASS{DONE_FENCE}")
     } else if prompt.contains("Review commit ") {
         let lens = prompt
             .lines()
@@ -3858,6 +3869,46 @@ fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
     Ok(())
 }
 
+fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.project.join("review-subject.txt"),
+        "pinned review subject\n",
+    )?;
+    provenant_os::fixture::run_git(&rig.project, &["add", "review-subject.txt"])?;
+    provenant_os::fixture::run_git(&rig.project, &["commit", "-qm", "fixture subject"])?;
+    let head = provenant_os::fixture::run_git(&rig.project, &["rev-parse", "HEAD"])?;
+    let head = std::str::from_utf8(&head)?.trim();
+    let lane = run_graph_provider(
+        &rig,
+        "codex-commit-source",
+        json!({
+            "id":"review", "use":"task", "brief":"fixture commit source verdict",
+            "access":"read_only", "source":{"type":"commit", "commit":head},
+            "route":{"adapter":"codex", "model":"gpt-6-luna", "effort":"low"}
+        }),
+    )?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let result = rig
+        .state
+        .join("runs")
+        .join(lane["run_id"].as_str().ok_or("run id")?)
+        .join("attempts")
+        .join(lane["attempt_id"].as_str().ok_or("attempt id")?)
+        .join("result.md");
+    assert!(
+        fs::read_to_string(result)?.contains("VERDICT: PASS"),
+        "{lane}"
+    );
+    assert!(!rig.project.join("review-write-sentinel").exists());
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4029,6 +4080,10 @@ fn main() -> ExitCode {
             (
                 "graph_host_native_launch_uses_the_provider_contract",
                 graph_host_native_launch_uses_the_provider_contract,
+            ),
+            (
+                "graph_codex_commit_source_starts_and_returns_a_verdict",
+                graph_codex_commit_source_starts_and_returns_a_verdict,
             ),
             (
                 "graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit",
