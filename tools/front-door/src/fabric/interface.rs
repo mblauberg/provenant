@@ -11,6 +11,22 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+fn retry_patch_error(error: patch::PatchError) -> FacadeError {
+    use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    let cause = if error.message.starts_with("unknown node ") {
+        GraphRelayCause::RetryUnknownNode
+    } else if error.message.contains("settled") {
+        GraphRelayCause::RetryUnsettled
+    } else if error.message.contains("container retry") {
+        GraphRelayCause::RetryContainerBrief
+    } else if error.admission.is_some() {
+        return graph_patch_error(error);
+    } else {
+        GraphRelayCause::RetryInvalidConfiguration
+    };
+    FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause))
+}
+
 /// A compile failure that reached graph admission keeps its typed refusal, so
 /// a template launch reads the same message as the raw document it compiles to.
 /// Failures before admission stay a redacted graph-input reason.
@@ -1454,7 +1470,7 @@ impl Factory {
                     limits: &self.context.config.graph.limits,
                 },
             )
-            .map_err(graph_input_reason)?;
+            .map_err(retry_patch_error)?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
         } else if input.get("brief").is_some_and(|value| !value.is_null()) {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(

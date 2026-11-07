@@ -1049,7 +1049,8 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE); may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
-    /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
+    /// Graph ID, node ID, GRAPH/NODE, attempt ID, HOST/ATTEMPT, RUN/ATTEMPT or RUN/TASK/ATTEMPT
+    #[arg(value_name = "TARGET")]
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]

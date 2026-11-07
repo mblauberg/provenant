@@ -673,7 +673,12 @@ pub(crate) fn unified_graph_command(
                 attempt: None,
             })
         } else {
-            factory.graph_target(selector)?
+            match factory.graph_target(selector) {
+                Err(FacadeError::Conflict) if matches!(command, GraphCommand::Retry { .. }) => {
+                    return Err("retry target matches more than one graph node or attempt; use a qualified target".into());
+                }
+                result => result?,
+            }
         }) else {
             return Ok(None);
         };
@@ -735,7 +740,17 @@ pub(crate) fn unified_graph_command(
         let cancel = CancelToken::new();
         let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
-        let mut data = factory.graph_document(input, budget, &cancel)?;
+        let mut data = factory.graph_document(input, budget, &cancel).map_err(|error| {
+            if matches!(command, GraphCommand::Retry { .. })
+                && matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(_)) } | FacadeError::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(_)), .. })
+            {
+                FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                    provenant_fabric_runtime::coordination::facade::GraphRelayCause::RetryInvalidConfiguration,
+                ))
+            } else {
+                error
+            }
+        })?;
         let timed_out = data["timed_out"].as_bool().unwrap_or(false);
         if let Some(rows) = data["rows"].as_array_mut()
             && !factory.context.in_lane
