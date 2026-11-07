@@ -915,6 +915,22 @@ fn prepare_writer_git(
         ))?
         .to_path_buf();
     let path = writer.worktree.path().to_path_buf();
+    let common = old_repo.common_dir().try_clone()?;
+    let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
+        let clock = SystemClock::new();
+        Ok(common.lock(
+            OsStr::new("provenant-lane-setup.lock"),
+            mode,
+            WaitBudget::cli(clock.mono_now(), 60)
+                .map_err(error("set writer config lock budget", None))?,
+            cancel,
+            &clock,
+        )?)
+    };
+    // Sibling config replacements can exhaust even a bounded stable read.
+    // Share the initial snapshot phase, then release before the fetch so
+    // overlapping origin requests can still coalesce without this lock.
+    let config_lock = lock_config(LockMode::Shared)?;
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(error("reopen writer repository", Some(&project)))?;
@@ -937,6 +953,7 @@ fn prepare_writer_git(
     let repo = writer.worktree.repo();
     repo.revalidate()
         .map_err(error("verify writer repository before fetch", Some(&path)))?;
+    drop(config_lock);
     crate::HostDeliveryContext::refresh_origin(
         &WriterRequest {
             extra: Default::default(),
@@ -947,6 +964,9 @@ fn prepare_writer_git(
         cancel,
         &writer.facts,
     )?;
+    // Keep post-fetch snapshots and both upstream writes in one exclusive
+    // phase. Reopening outside this phase races siblings' atomic config writes.
+    let config_lock = lock_config(LockMode::Exclusive)?;
     repo.revalidate()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
     let ref_path = Path::new(writer.branch.as_str());
@@ -1033,18 +1053,6 @@ fn prepare_writer_git(
                 "writer identity changed before launch",
             ));
         }
-        // Only Git's common-config writes need repository-wide exclusion.
-        // Reopen and verify before waiting; sibling upstream keys do not
-        // invalidate this worktree's configuration binding.
-        let clock = SystemClock::new();
-        let config_lock = worktree.repo().common_dir().lock(
-            OsStr::new("provenant-lane-setup.lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 60)
-                .map_err(error("set writer config lock budget", None))?,
-            cancel,
-            &clock,
-        )?;
         provenant_confinement::utility::set_lane_upstream_key(
             &executor,
             worktree.repo(),
@@ -1055,7 +1063,6 @@ fn prepare_writer_git(
             cancel,
         )
         .map_err(error("set writer upstream", Some(&path)))?;
-        drop(config_lock);
     }
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
@@ -1080,6 +1087,7 @@ fn prepare_writer_git(
         return Err(RunError::Validation("writer branch changed before launch"));
     }
     writer.worktree = refreshed;
+    drop(config_lock);
     Ok(())
 }
 
