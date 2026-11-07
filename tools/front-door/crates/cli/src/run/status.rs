@@ -487,7 +487,8 @@ fn paused_graph_status(
             Ok(Some(checkpoint)) => checkpoint,
             Ok(None) => return Ok(None),
             Err(error) if error.is_unreadable() => {
-                let message = provenant_fabric_runtime::graph::unreadable_graph_guidance(graph_id);
+                let message =
+                    provenant_fabric_runtime::graph::unreadable_graph_explanation(graph_id, &error);
                 return Ok(Some((
                     json!({"graph_id": graph_id, "status": "unreadable", "reason": message}),
                     format!("{message}\n"),

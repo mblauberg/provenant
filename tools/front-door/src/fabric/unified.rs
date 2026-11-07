@@ -241,11 +241,11 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             }));
         }
         if row["kind"] == "graph"
-            && run.advance_error.as_deref()
-                == Some(
-                    provenant_fabric_runtime::graph::unreadable_graph_guidance(&target.graph)
-                        .as_str(),
-                )
+            && run.advance_error.as_deref().is_some_and(|reason| {
+                reason.starts_with(&provenant_fabric_runtime::graph::unreadable_graph_guidance(
+                    &target.graph,
+                ))
+            })
         {
             row["state"] = json!("unreadable");
             row["next"] = json!(format!("provenant stop -- {}", target.graph));
@@ -931,9 +931,11 @@ pub(crate) fn append_graph_status(
                     None,
                     None,
                     json!("unreadable"),
-                    Some(&provenant_fabric_runtime::graph::unreadable_graph_guidance(
-                        &graph,
-                    )),
+                    Some(
+                        &provenant_fabric_runtime::graph::unreadable_graph_explanation(
+                            &graph, &error,
+                        ),
+                    ),
                 )),
                 Err(error) => return Err(error.into()),
             }

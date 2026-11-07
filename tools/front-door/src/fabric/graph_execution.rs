@@ -614,7 +614,7 @@ impl Factory {
                 Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
                 Err(error) if error.is_unreadable() => {
                     return Ok(unreadable_snapshot(
-                        provenant_fabric_runtime::graph::unreadable_graph_guidance(id),
+                        provenant_fabric_runtime::graph::unreadable_graph_explanation(id, &error),
                     ));
                 }
                 Err(error) => return Err(graph_journal_error(error)),
