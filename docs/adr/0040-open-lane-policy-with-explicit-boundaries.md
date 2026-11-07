@@ -99,12 +99,14 @@ The mandatory credential/preservation subtree roots under `H` are:
 - `Library/Keychains`, `Library/Application Support/GitHub CLI`;
 - `Archives/git-preservation`.
 
-The mandatory exact credential files under `H` are `.cargo/credentials` and
-`.cargo/credentials.toml`. These paths and scopes are compiled by
-`permissions/policy.rs#MandatoryRoots::new` from the existing credential
+The mandatory exact credential files under `H` are `.cargo/credentials`,
+`.cargo/credentials.toml` and `.claude.json`. The last can contain MCP secrets
+and is deliberately excluded by the current Claude profile; allow-default
+must preserve that protection. These paths and scopes are compiled by
+`permissions/policy.rs#MandatoryRoots::new` alongside the existing credential
 registries. The renderer slice replaces the old `render.rs#hard_denied`
-inventory with this shared owner. The compiler must deny content reads, mutation and execution of
-credential roots, with only the exceptions below. Preservation data stays
+inventory with this shared owner. The compiler must deny content reads, mutation
+and execution of credential roots, with only the exceptions below. Preservation data stays
 immutable and hidden under the same rule.
 
 The host also adds every registered provider identity directory, each isolated
@@ -152,6 +154,12 @@ Exceptions are host-derived typed grants, never optional configuration:
    IPC and `/usr/bin/security` must be explicitly denied unless a verified
    selected mechanism requires the precise service. Provider setup is not
    permission to expose an entire home. Credentials never cross hosts.
+   OpenCode currently reads its host configuration/account store through runtime
+   grants without a selected mechanism. Before flipping, declare its selected
+   host config root (`XDG_CONFIG_HOME/opencode`, default `H/.config/opencode`)
+   and exact account file (`XDG_DATA_HOME/opencode/auth.json`, default
+   `H/.local/share/opencode/auth.json`) as a fixture-backed authentication
+   mechanism with read-only grants. Other adapters receive neither root.
 2. **Writer publishing.** Only a writer with publishing authority and effective
    open network may read `H/.config/gh` and
    `H/Library/Application Support/GitHub CLI` (and host-resolved locations).
@@ -167,11 +175,27 @@ Exceptions are host-derived typed grants, never optional configuration:
    `LaunchPaths` bindings. Read only the selected continuation inputs. Do not
    open the whole attempt directory, another attempt or the runs store.
    Host-prepared prompt files and sealed attachments/inputs receive their
-   exact declared read grants. The exact attempt-bound Fabric socket remains
+   exact declared read grants. Host-captured user skill snapshots, normally
+   `S/runs/<run>/attempts/<attempt>/tmp/candidate-<n>-skills-<nonce>`, may be
+   read/executed and stay immutable; their original host credential/config
+   parents are not opened. The exact attempt-bound Fabric socket remains
    usable without exposing Fabric databases. Host indexes, target seeds,
    credential authority and config stay inaccessible and immutable. Scratch
    remains private to the owner; ancestor mutation, hard links and path swaps
    must not expand it.
+   Before flipping, relocate Cursor's current `H/.cursor/chats` writes and
+   OpenCode's host `XDG_DATA_HOME/opencode` writable stores (`opencode.db`,
+   `opencode.db-shm`, `opencode.db-wal`, `log`, `storage`, `snapshot`, `shell`)
+   into this attempt's private provider-state root. Rebind their session
+   continuation and model-observation paths there too. Claude's read-only
+   transcript writes currently target the host config's `projects/<project-key>`
+   tree: move those into private `claude-config/projects/<project-key>` as well,
+   setting `CLAUDE_CONFIG_DIR` independently of user-skill discovery. Do not exempt these
+   shared host stores from their mandatory parent denial: Cursor transcripts
+   and OpenCode's mutable database are state, not authentication. OpenCode's
+   server requires writable `shell` state; denying it produces HTTP 500 rather
+   than a usable run. This is a renderer prerequisite, not a migration shim or
+   a change implemented in this policy slice.
 4. **Read-only installation and packages.** Verified immutable
    `S/releases/<source-digest>/...` assets may be read/executed; no write to the
    release, releases parent or install receipt is granted. Preserve the
@@ -221,6 +245,12 @@ The renderer slice must pass these checks before flipping the default:
   publishing, prompt/inputs, relay, immutable release and standalone package
   exceptions work without exposing siblings. Read-only plus open network must
   fail GitHub-store reads; publishing-disabled/local-network writers fail too.
+  Cursor, OpenCode and read-only Claude must complete ordinary runs and resume using relocated
+  attempt-private stores, with model observation following the private database;
+  shared host state remains immutable. OpenCode's typed selected-auth store
+  reads work while other adapters cannot read them. `.claude.json` remains
+  hidden from all adapters, including Claude itself. User skills on/off must
+  preserve private state binding and immutable staged snapshot access.
 - Read-only source mutations fail through shell tools, provider state/cache
   grants, symlink aliases and ancestor operations. Live/isolated source and
   ordinary read-only write-exception semantics remain distinct. Writers can

@@ -47,7 +47,12 @@ impl MandatoryRoots {
             .map(|relative| subtree(&home.join(relative)))
             .collect();
         credentials.extend(
-            [".cargo/credentials", ".cargo/credentials.toml"].map(|relative| PathGrant {
+            [
+                ".cargo/credentials",
+                ".cargo/credentials.toml",
+                ".claude.json",
+            ]
+            .map(|relative| PathGrant {
                 path: home.join(relative),
                 scope: PathScope::Exact,
             }),

@@ -963,6 +963,13 @@ mod policy_tests {
             roots
                 .credentials()
                 .iter()
+                .any(|g| g.path == Path::new("/fixture/home/.claude.json")
+                    && g.scope == PathScope::Exact)
+        );
+        assert!(
+            roots
+                .credentials()
+                .iter()
                 .any(|g| g.path == Path::new("/fixture/home/Library/Keychains"))
         );
         assert!(
