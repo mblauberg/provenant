@@ -413,9 +413,6 @@ fn lock_worktree_impl(
         Some(Occupancy::Available | Occupancy::Unknown { .. }) => {
             Ok(LockedWorktree { verified, writer })
         }
-        Some(Occupancy::Observed { .. }) if !reobserve => {
-            Err(live_refusal(context.workers, &canonical))
-        }
         Some(Occupancy::Observed { process }) => Err(process
             .clone()
             .map_or(WorktreeError::LiveWriter, WorktreeError::LiveProcess)),
@@ -466,7 +463,7 @@ fn reobserve_held_path(
             break;
         }
         workers.invalidate();
-        let Some((states, _)) = workers.observe_roots_while(&[root.to_path_buf()], &keep_going)
+        let Some((states, _)) = workers.reobserve_roots_while(&[root.to_path_buf()], &keep_going)
         else {
             if cancel.is_cancelled() {
                 return Err(WorktreeError::Cancelled);
@@ -827,6 +824,39 @@ mod retry_tests {
                 ProcessEvidenceKind::OtherHeldPath,
             )),
         }
+    }
+
+    #[test]
+    fn mutation_refusal_uses_observed_process_without_another_query()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::lifecycle_tests::TestContext;
+        use crate::test_support::Fixture;
+        struct OneObservation;
+        impl WorkerObserver for OneObservation {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+                [(roots[0].clone(), holder())].into_iter().collect()
+            }
+            fn live_process(&self, _: &Path) -> Option<ObservedProcess> {
+                panic!("refusal must not query the observer again")
+            }
+        }
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut context = test_context.context();
+        let path = fixture._temp.path().join("refusal");
+        fixture.run(&["worktree", "add", "-b", "refusal", path.to_str().unwrap()])?;
+        let output = fixture.run(&["worktree", "list", "--porcelain", "-z"])?;
+        let entry = parse_worktree_list(&output.stdout.bytes)?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .ok_or("missing worktree")?;
+        context.workers = &OneObservation;
+        let error = match lock_worktree_for_mutation(&context, &entry, &CancelToken::new()) {
+            Ok(_) => panic!("observed holder must be refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, WorktreeError::LiveProcess(process) if process.pid == 42));
+        Ok(())
     }
 
     #[test]

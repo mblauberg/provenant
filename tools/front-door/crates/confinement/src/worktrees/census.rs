@@ -241,6 +241,34 @@ impl<'a> CensusSession<'a> {
 }
 
 impl WorkerObserver for CensusSession<'_> {
+    fn reobserve_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.invalidate();
+        let before = root_identities(roots)?;
+        let policy = self.inner.epoch_policy()?;
+        let (mut states, details) = self
+            .inner
+            .reobserve_roots_with_policy_while(roots, &policy, keep_going)?;
+        if root_identities(roots).as_ref() != Some(&before)
+            || self.inner.epoch_policy().as_ref() != Some(&policy)
+        {
+            for root in roots {
+                if !states.get(root).is_some_and(Occupancy::is_observed) {
+                    states.insert(
+                        root.clone(),
+                        Occupancy::census_unknown(
+                            root.clone(),
+                            "root identity or census policy changed during census",
+                        ),
+                    );
+                }
+            }
+        }
+        keep_going().then_some((states, details))
+    }
     fn observe_roots_while(
         &self,
         roots: &[PathBuf],
@@ -321,6 +349,24 @@ impl WorkerObserver for CensusSession<'_> {
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy>;
+
+    /// Retry evidence must account for occupancy gaps even if first admission excuses them.
+    fn reobserve_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.observe_roots_while(roots, keep_going)
+    }
+
+    fn reobserve_roots_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        policy: &CensusEpochPolicy,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.observe_roots_with_policy_while(roots, policy, keep_going)
+    }
 
     /// Fresh retry evidence, discarded if the caller's deadline expires.
     /// Native observers also poll the bound between process reads.
@@ -553,6 +599,23 @@ impl<'a> CensusPolicyWorkers<'a> {
     }
 }
 impl WorkerObserver for CensusPolicyWorkers<'_> {
+    fn reobserve_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.inner
+            .reobserve_roots_with_policy_while(roots, &self.epoch_policy()?, keep_going)
+    }
+    fn reobserve_roots_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        policy: &CensusEpochPolicy,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.inner
+            .reobserve_roots_with_policy_while(roots, policy, keep_going)
+    }
     fn observe_roots_while(
         &self,
         roots: &[PathBuf],
@@ -701,6 +764,31 @@ pub fn live_refusal(workers: &dyn WorkerObserver, root: &Path) -> WorktreeError 
 pub struct SystemWorkerObserver;
 
 impl WorkerObserver for SystemWorkerObserver {
+    fn reobserve_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.reobserve_roots_with_policy_while(roots, &CensusEpochPolicy::default(), keep_going)
+    }
+    fn reobserve_roots_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        policy: &CensusEpochPolicy,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        if !keep_going() {
+            return None;
+        }
+        let evidence = system_worker_evidence_while(
+            roots,
+            policy.exclude_ancestors,
+            &policy.entries,
+            Some(keep_going),
+            true,
+        );
+        keep_going().then_some((evidence.states, evidence.details))
+    }
     fn observe_roots_while(
         &self,
         roots: &[PathBuf],
@@ -722,6 +810,7 @@ impl WorkerObserver for SystemWorkerObserver {
             policy.exclude_ancestors,
             &policy.entries,
             Some(keep_going),
+            false,
         );
         keep_going().then_some((evidence.states, evidence.details))
     }
@@ -882,7 +971,7 @@ fn system_worker_evidence(
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
 ) -> WorkerEvidence {
-    system_worker_evidence_while(roots, ancestors, entries, None)
+    system_worker_evidence_while(roots, ancestors, entries, None, false)
 }
 
 fn system_worker_evidence_while(
@@ -890,6 +979,7 @@ fn system_worker_evidence_while(
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
     keep_going: Option<&dyn Fn() -> bool>,
+    strict_occupancy: bool,
 ) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
         let detail = process_detail(
@@ -933,7 +1023,7 @@ fn system_worker_evidence_while(
         &current,
         ancestors,
         &mut |_, _| {},
-        keep_going,
+        (keep_going, strict_occupancy),
     );
     WorkerEvidence {
         states,
@@ -1083,18 +1173,18 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
         current,
         ancestors,
         unplaceable,
-        None,
+        (None, false),
     )
 }
 
-fn observe_worker_holders_while(
+pub(super) fn observe_worker_holders_while(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
     cwd_observer: &dyn CwdObserver,
     current: &ProcessFact,
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
-    keep_going: Option<&dyn Fn() -> bool>,
+    (keep_going, strict_occupancy): (Option<&dyn Fn() -> bool>, bool),
 ) -> WorkerHolderAudit {
     let within_budget = || keep_going.is_none_or(|check| check());
     let mut states: BTreeMap<_, _> = roots
@@ -1343,7 +1433,7 @@ fn observe_worker_holders_while(
             }
             if !stable {
                 occupancy_gap = Some(provenant_os::pid::OccupancyGap::Churn);
-            } else if !occupancy.complete && !policy_exception {
+            } else if !occupancy.complete && (!policy_exception || strict_occupancy) {
                 occupancy_gap = Some(
                     occupancy
                         .gap
@@ -1509,7 +1599,7 @@ fn observe_worker_holders_while(
                     )
                 });
             }
-            if !excused {
+            if !excused || strict_occupancy {
                 record_unknown_all_with_taint(
                     &mut states,
                     &mut details,
