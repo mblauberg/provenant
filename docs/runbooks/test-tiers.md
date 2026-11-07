@@ -47,3 +47,26 @@ Set `test_threads` to a positive integer in `.provenant/verify.json` to cap
 test threads for tier runs. The default is unset. A cap reduces concurrent test
 load across lanes but can make each run slower; it does not reserve a shared
 execution slot.
+
+## Capture idle supervisor CPU on macOS
+
+Build the custody fixture, then run its manual capture outside nextest's
+30-second test timeout. From `tools/front-door`:
+
+```sh
+cargo test --locked -p provenant-supervisor --test custody -- --capture-idle-cpu
+```
+
+The capture launches its own guardian and a provider waiting on a socket. It
+runs `/usr/bin/sample` against that guardian for ten seconds, then measures its
+native `PROC_PIDTASKINFO` CPU counter over at least one minute. The JSON output
+includes the build version, process counts, elapsed time, CPU counters and
+percentage of one core. The sample stays in `TMPDIR`; retain findings in the
+report before that directory expires. Finish by cancelling through custody and
+settling the fixture's writer. No existing lane is stopped or signalled.
+
+This uses the custody fixture's recorded boot identity and observer. It measures
+the guardian's event loop and census backstop, without a configured host's disk
+or graph callbacks or a valid sandbox memory snapshot. Use a live waiting lane
+for those additional costs. A result below 3% is evidence for this fixture,
+not a substitute for a production-lane capture when its costs differ.
