@@ -228,10 +228,10 @@ impl Frames {
         }
         if !self.oversized
             && !self.partial_terminal_sent
-            && let FrameDelivery::Provider { decoder, events } = sink
+            && let FrameDelivery::Provider { decoder, .. } = sink
             && decoder.partial_terminal(&self.bytes)
         {
-            if events.try_send(FrameEvent::Terminal).is_err() {
+            if self.deliver(&sink).is_err() {
                 out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
             } else {
                 self.partial_terminal_sent = true;

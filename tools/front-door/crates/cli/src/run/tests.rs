@@ -231,7 +231,7 @@ fn lane_fixture(
     Ok(lane)
 }
 
-fn clean_exit() -> ExitObservation {
+pub(super) fn clean_exit() -> ExitObservation {
     ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
