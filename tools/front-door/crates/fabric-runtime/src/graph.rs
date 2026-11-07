@@ -2776,11 +2776,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     node,
                     &plan,
                     &positions,
-                    node_index,
-                    retry_was_pending,
-                    recorded_separation,
-                    usage_error,
-                    cost_error,
+                    transitions::ObservationRecord {
+                        node_index,
+                        retry_was_pending,
+                        recorded_separation,
+                        usage_error,
+                        cost_error,
+                    },
                 );
                 if quota_redraw {
                     transitions::redraw_quota_alias(

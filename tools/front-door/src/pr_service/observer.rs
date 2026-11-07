@@ -333,6 +333,7 @@ fn project_digest(directory: &Path, digest: &Digest) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)] // Also compiled by the harness=false worktree driver, without libtest.
 mod tests {
     use super::*;
     use serde_json::json;

@@ -169,6 +169,7 @@ impl Settings {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)] // Also compiled by the harness=false worktree driver, without libtest.
 pub(super) mod tests {
     use super::*;
 

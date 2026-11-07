@@ -866,17 +866,28 @@ pub(super) fn apply_input_manifest(
     Ok(())
 }
 
+pub(super) struct ObservationRecord {
+    pub node_index: usize,
+    pub retry_was_pending: bool,
+    pub recorded_separation: Option<FamilySeparation>,
+    pub usage_error: Option<String>,
+    pub cost_error: Option<String>,
+}
+
 pub(super) fn record_observation(
     checkpoint: &mut GraphCheckpoint,
     node: &PlannedNode,
     plan: &PlannedGraph,
     positions: &std::collections::BTreeMap<String, usize>,
-    node_index: usize,
-    retry_was_pending: bool,
-    recorded_separation: Option<FamilySeparation>,
-    usage_error: Option<String>,
-    cost_error: Option<String>,
+    record: ObservationRecord,
 ) {
+    let ObservationRecord {
+        node_index,
+        retry_was_pending,
+        recorded_separation,
+        usage_error,
+        cost_error,
+    } = record;
     if retry_was_pending {
         asks::refresh_wake(checkpoint);
     }

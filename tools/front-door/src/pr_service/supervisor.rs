@@ -43,6 +43,7 @@ pub fn render(settings: &Settings, config_path: &Path) -> io::Result<String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)] // Also compiled by the harness=false worktree driver, without libtest.
 mod tests {
     use super::*;
 
