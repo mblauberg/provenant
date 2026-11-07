@@ -275,7 +275,11 @@ fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderErro
             .filter(|entry| matches!(entry.adapter.id(), "claude" | "codex" | "opencode"))
         {
             let id = entry.adapter.id();
-            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let plan = fixture_access_plan(
+                access,
+                matches!(id, "codex" | "opencode").then_some("login"),
+                false,
+            );
             let mut route = route(id, "fixture-model");
             route.account_key = None;
             let spec = entry.adapter.prepare(fixture_input(
@@ -503,6 +507,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CONFIG_DIR",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
             ],
@@ -580,6 +585,10 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 );
             }
             "claude" => {
+                assert_eq!(
+                    spec.env.iter().find(|(key, _)| key == "CLAUDE_CONFIG_DIR").map(|(_, value)| Path::new(value)),
+                    Some(confined.permissions().private_state.as_ref().unwrap().path.join("claude-config").as_path())
+                );
                 assert!(argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));

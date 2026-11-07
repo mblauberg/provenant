@@ -1822,7 +1822,7 @@ mod tests {
         }
     }
 
-    /// A literal on the home's `.claude` or `.codex` would list their entries.
+    /// A discovery read on the home's `.claude` or `.codex` would list their entries.
     #[test]
     fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
         let home = std::path::Path::new("/fixture/home");
@@ -1854,7 +1854,10 @@ mod tests {
             }
             for parent in [home, std::path::Path::new("/fixture")] {
                 let literal = literal(parent, name);
-                assert!(!profile.contains(&literal), "{literal}");
+                assert!(
+                    !profile.lines().any(|line| line.starts_with("(allow file-read") && line.contains(&literal)),
+                    "{literal}"
+                );
             }
         }
     }

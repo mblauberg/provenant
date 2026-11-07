@@ -204,6 +204,8 @@ pub struct AdapterSpec {
     /// Preparation mechanism for a model-less named entry.
     pub named_entry: NamedEntry,
     pub user_sessions: bool,
+    /// Sessions formerly stored in host configuration now require private attempt state.
+    pub relocated_session_state: bool,
     /// Copy only session files when retaining private state.
     pub copy_sessions_only: bool,
     pub quota_probe: QuotaProbeKind,
@@ -419,6 +421,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
+        relocated_session_state: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
         quota_credits: true,
@@ -499,6 +502,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Rollout,
         named_entry: NamedEntry::None,
         user_sessions: false,
+        relocated_session_state: false,
         copy_sessions_only: true,
         quota_probe: QuotaProbeKind::Command,
         quota_credits: true,
@@ -578,6 +582,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
+        relocated_session_state: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
         quota_credits: false,
@@ -661,6 +666,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
+        relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::Command,
         quota_credits: false,
@@ -742,6 +748,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::SessionDatabase,
         named_entry: NamedEntry::None,
         user_sessions: false,
+        relocated_session_state: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::LocalLedger,
         quota_credits: true,
@@ -814,6 +821,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::Command,
         user_sessions: false,
+        relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
@@ -888,6 +896,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::DelegatedAgent,
         user_sessions: false,
+        relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
@@ -961,6 +970,7 @@ adapter_specs! { $;
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
+        relocated_session_state: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
@@ -1048,6 +1058,15 @@ mod tests {
             assert_eq!(
                 spec.copy_sessions_only,
                 spec.id == Harness::Codex,
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.relocated_session_state,
+                matches!(
+                    spec.id,
+                    Harness::Claude | Harness::Cursor | Harness::Opencode
+                ),
                 "{}",
                 spec.name
             );
