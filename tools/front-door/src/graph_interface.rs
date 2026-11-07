@@ -50,13 +50,17 @@ fn cli_input_error(detail: &str) -> Box<provenant_records::diagnostic::Diagnosti
 }
 
 fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
+    file_error(path, "input could not be read")
+}
+
+fn file_error(path: &Path, reason: &str) -> Box<provenant_records::diagnostic::Diagnostic> {
     let path = provenant_records::diagnostic::safe_path(
         path,
         provenant_records::diagnostic::Destination::Local,
     );
     cli_input_error(&format!(
-        "--file {}: input could not be read",
-        path.as_deref().unwrap_or("input")
+        "--file {}: {reason}",
+        path.as_deref().unwrap_or("input"),
     ))
 }
 
@@ -274,6 +278,7 @@ fn run_input(
         if let Some(name) = request.template {
             input["use"] = json!(name);
         }
+        let brief_selected = request.tier.is_some();
         if let Some(tier) = request.tier {
             input["tier"] = json!(tier);
         }
@@ -303,21 +308,15 @@ fn run_input(
         }
         if let Some(path) = request.file {
             let text = std::fs::read_to_string(&path).map_err(|_| file_input_error(&path))?;
+            if text.trim().is_empty() {
+                return Err(file_error(&path, "brief is empty"));
+            }
             match decode(&text) {
-                Ok(value) if value.is_object() => input["document"] = value,
-                Ok(_)
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext == "json" || ext == "toml") =>
+                Ok(value)
+                    if !brief_selected
+                        && value.as_object().is_some_and(|object| !object.is_empty()) =>
                 {
-                    return Err(cli_input_error("graph document must be an object"));
-                }
-                Err(_)
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext == "json" || ext == "toml") =>
-                {
-                    return Err(cli_input_error("graph document is invalid"));
+                    input["document"] = value;
                 }
                 _ => input["brief"] = json!(text),
             }

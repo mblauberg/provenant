@@ -10,6 +10,124 @@ use std::{
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
 #[test]
+fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
+    use std::io::Write;
+    let rig = GraphProject::new()?;
+    let brief = "# Brief at a named commit\n# Implement the task\n";
+    for path in [
+        rig.temp.path().join("jr-census-api.ABC123"),
+        rig.project.join("brief.md"),
+        rig.temp.path().join("brief.json"),
+    ] {
+        std::fs::write(&path, brief)?;
+        let output = rig
+            .command()
+            .args(["run", "--route", "junior", "--file"])
+            .arg(&path)
+            .arg("--explain")
+            .output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{value}");
+        assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], brief);
+    }
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(rig.project.join("brief.md"))
+        .arg("--explain")
+        .output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], brief);
+    let graph = rig.document(&json!({"schema_version":2,"graph_id":"file-graph","nodes":[{"id":"task","prompt":"graph prompt","access":"read_only","route":{"alias":"junior"}}]}))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(graph)
+        .arg("--explain")
+        .output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(
+        value["data"]["document"]["nodes"][0]["prompt"],
+        "graph prompt"
+    );
+    let path = rig.temp.path().join("structured.toml");
+    std::fs::write(&path, "task = 'do this'\n")?;
+    let output = rig
+        .command()
+        .args(["run", "--route", "junior", "--file"])
+        .arg(&path)
+        .arg("--explain")
+        .output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value["data"]["document"]["nodes"][0]["prompt"], "task = 'do this'\n",
+        "{value}"
+    );
+
+    for (name, contents) in [
+        ("empty", &b""[..]),
+        ("whitespace", &b" \n\t"[..]),
+        ("invalid-utf8", &b"\xff"[..]),
+    ] {
+        let path = rig.temp.path().join(name);
+        std::fs::write(&path, contents)?;
+        let output = rig
+            .command()
+            .args(["run", "--route", "junior", "--file"])
+            .arg(&path)
+            .output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(!output.status.success(), "{value}");
+        assert!(
+            value["error"]["message"].as_str().unwrap().contains(name),
+            "{value}"
+        );
+        assert!(graph_records(&rig.state())?.is_empty());
+    }
+    for path in [
+        rig.temp.path().join("missing"),
+        rig.temp.path().to_path_buf(),
+    ] {
+        let output = rig
+            .command()
+            .args(["run", "--route", "junior", "--file"])
+            .arg(&path)
+            .output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(!output.status.success(), "{value}");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(path.to_str().unwrap()),
+            "{value}"
+        );
+        assert!(graph_records(&rig.state())?.is_empty());
+    }
+    let mut child = rig
+        .command()
+        .args([
+            "run",
+            "--route",
+            "junior",
+            "--file",
+            "/dev/stdin",
+            "--explain",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    child.stdin.take().unwrap().write_all(brief.as_bytes())?;
+    let output = child.wait_with_output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], brief);
+    Ok(())
+}
+
+#[test]
 fn malformed_graph_reports_safe_output_field_and_action() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({
