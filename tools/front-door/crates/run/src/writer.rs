@@ -569,12 +569,33 @@ pub fn prepare_writer_with_facts(
     project: ProjectId,
     facts: &worktrees::RepoFacts,
 ) -> Result<WriterLaunch> {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::{clock::SystemClock, fs::LockMode};
     let utility = runtime(state)?;
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+    // Discover only the structural anchor before taking the lock. Even the
+    // first probed open reads config snapshots and must exclude sibling writes.
+    let common = provenant_confinement::repo::VerifiedRepo::open_common_directory(&request.project)
+        .map_err(worktrees::WorktreeError::from)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let _config_lock = common.lock(
+        OsStr::new("provenant-lane-setup.lock"),
+        LockMode::Shared,
+        WaitBudget::cli(clock.mono_now(), 60)
+            .map_err(error("set writer config lock budget", None))?,
+        &cancel,
+        &clock,
+    )?;
     let repo = utility
-        .open_repo(&executor, &request.project, budget()?, &CancelToken::new())
+        .open_repo(&executor, &request.project, budget()?, &cancel)
         .map_err(error("open writer repository", Some(&request.project)))?;
+    if !common.metadata()?.same_identity(&repo.common_identity()) {
+        return Err(RunError::Validation(
+            "writer repository changed during setup",
+        ));
+    }
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
     let branch = writer_branch(&worktree)?;
@@ -1341,7 +1362,7 @@ mod cargo_setup_tests {
 
     // Medium: eight real linked worktrees prepare Git concurrently.
     #[test]
-    fn eight_concurrent_writers_prepare_packed_refs_and_both_upstream_keys()
+    fn eight_complete_writer_preparations_overlap_config_updates()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
@@ -1518,8 +1539,32 @@ mod cargo_setup_tests {
             });
         }
         // Eight real worktrees share .git/config. Start their preparations
-        // together and require every launch to finish with both upstream keys.
+        // together, including the initial open, verification and custody reads,
+        // and require every launch to finish with both upstream keys.
         let start = std::sync::Barrier::new(8);
+        let common = Directory::open_anchor(&git_dir)?;
+        let clock = provenant_os::clock::SystemClock::new();
+        use provenant_core::Clock;
+        let config_lock = common.lock(
+            OsStr::new("provenant-lane-setup.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            provenant_core::WaitBudget::cli(clock.mono_now(), 60)?,
+            &cancel,
+            &clock,
+        )?;
+        let config = common.read_bounded(OsStr::new("config"), 1024 * 1024)?;
+        // Model a sibling's exclusive update. No preparation may inspect its
+        // intermediate config, even during its first repository open.
+        common
+            .atomic_write(
+                OsStr::new("config"),
+                ".test-config-",
+                b"[unfinished",
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        let (entered, starting) = std::sync::mpsc::channel();
+        let (prepared, finished) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             let handles: Vec<_> = std::iter::once(&mut writer)
                 .chain(std::iter::once(&mut second))
@@ -1527,16 +1572,50 @@ mod cargo_setup_tests {
                 .map(|writer| {
                     scope.spawn(|| {
                         start.wait();
+                        entered.send(()).map_err(|error| error.to_string())?;
+                        let request = WriterRequest {
+                            extra: Default::default(),
+                            project: project.clone(),
+                            worktree: writer.worktree.path().to_path_buf(),
+                        };
+                        let preparation = prepare_writer_with_facts(
+                            &request,
+                            &state,
+                            ProjectId::from_bytes([1; 16]),
+                            &worktrees::RepoFacts::default(),
+                        );
+                        prepared.send(()).map_err(|error| error.to_string())?;
+                        *writer = preparation.map_err(|error| error.to_string())?;
                         prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
                             .map_err(|error| error.to_string())
                     })
                 })
                 .collect();
+            let all_started = (0..8).all(|_| starting.recv_timeout(Duration::from_secs(5)).is_ok());
+            let blocked = matches!(
+                finished.recv_timeout(Duration::from_millis(200)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            let restored = common
+                .atomic_write(
+                    OsStr::new("config"),
+                    ".test-config-",
+                    &config,
+                    provenant_os::fs::PublishMode::Replace,
+                )
+                .and_then(|publication| publication.require_durable());
+            drop(config_lock);
+            restored.map_err(|error| error.to_string())?;
             for handle in handles {
                 handle
                     .join()
                     .map_err(|_| "writer preparation panicked".to_owned())??;
             }
+            assert!(all_started, "writer preparations did not start");
+            assert!(
+                blocked,
+                "initial preparation read config during a sibling update"
+            );
             Ok::<(), String>(())
         })?;
         for writer in std::iter::once(&writer)

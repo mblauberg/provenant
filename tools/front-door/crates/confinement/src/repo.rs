@@ -404,6 +404,13 @@ impl VerifiedRepo {
         })
     }
 
+    /// Open the common directory using structural checks only, without reading
+    /// config. Callers can acquire the setup lock before opening a probed repo;
+    /// they must compare its common identity with this directory under the lock.
+    pub fn open_common_directory(path: impl AsRef<Path>) -> Result<Directory, RepoError> {
+        Ok(Self::open_structure(path, false)?.common)
+    }
+
     /// Open and structurally verify the repository, then perform the supplied
     /// fixed Git safety probes before exposing it to callers.
     pub(crate) fn open<E>(
@@ -747,8 +754,6 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
     let git = provenant_os::git::git_executable()
         .ok_or(RepoError::ConfigNormalisation("Git executable unavailable"))?;
     let normalised = COMMON_CONFIG_NORMALISATION
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
         .normalise(&git, &bytes, || parse_common_config(&git, &bytes))?;
     let mut digest = Sha256::new();
     for entry in normalised
@@ -775,13 +780,15 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
 }
 
 // One bounded successful listing, shared across repeated snapshots and HEADs.
-// Serialise misses so sibling readers do not launch duplicate parser processes.
-static COMMON_CONFIG_NORMALISATION: std::sync::Mutex<ConfigNormalisationCache> =
-    std::sync::Mutex::new(ConfigNormalisationCache { entry: None });
+// Parsing runs outside the mutex: a slow miss must not queue unrelated readers.
+// Concurrent misses may parse the same snapshot more than once.
+static COMMON_CONFIG_NORMALISATION: ConfigNormalisationCache = ConfigNormalisationCache {
+    entry: std::sync::Mutex::new(None),
+};
 
 #[derive(Default)]
 struct ConfigNormalisationCache {
-    entry: Option<NormalisedConfig>,
+    entry: std::sync::Mutex<Option<NormalisedConfig>>,
 }
 
 struct NormalisedConfig {
@@ -793,7 +800,7 @@ struct NormalisedConfig {
 
 impl ConfigNormalisationCache {
     fn normalise(
-        &mut self,
+        &self,
         git: &Path,
         bytes: &[u8],
         parse: impl FnOnce() -> Result<Vec<u8>, RepoError>,
@@ -802,12 +809,18 @@ impl ConfigNormalisationCache {
             return Err(RepoError::MetadataTooLarge);
         }
         let executable = config_parser_metadata(git)?;
-        if let Some(entry) = &self.entry
-            && entry.git == git
-            && entry.executable.unchanged(&executable)
-            && entry.snapshot == bytes
         {
-            return Ok(entry.listing.clone());
+            let cached = self
+                .entry
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(entry) = &*cached
+                && entry.git == git
+                && entry.executable.unchanged(&executable)
+                && entry.snapshot == bytes
+            {
+                return Ok(entry.listing.clone());
+            }
         }
         let listing = parse()?;
         if listing.len() > CONFIG_LIMIT as usize * 2 {
@@ -820,7 +833,10 @@ impl ConfigNormalisationCache {
                 "Git executable changed during parsing",
             ));
         }
-        self.entry = Some(NormalisedConfig {
+        *self
+            .entry
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(NormalisedConfig {
             git: git.to_path_buf(),
             executable,
             snapshot: bytes.to_vec(),
@@ -1195,7 +1211,7 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok(b"core.bare\nfalse\0".to_vec())
         };
-        let mut cache = super::ConfigNormalisationCache::default();
+        let cache = super::ConfigNormalisationCache::default();
         let first = cache.normalise(&git, b"first", parse).unwrap();
         assert_eq!(cache.normalise(&git, b"first", parse).unwrap(), first);
         assert_eq!(calls.get(), 1);
@@ -1249,38 +1265,51 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_identical_snapshots_share_one_successful_parse() {
-        use std::sync::{
-            Barrier, Mutex,
-            atomic::{AtomicUsize, Ordering},
-        };
+    fn concurrent_cache_misses_do_not_hold_the_cache_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
         let temp = tempfile::tempdir().unwrap();
         let git = temp.path().join("git");
         fs::write(&git, b"parser").unwrap();
-        let cache = Mutex::new(super::ConfigNormalisationCache::default());
-        let start = Barrier::new(8);
-        let calls = AtomicUsize::new(0);
+        let cache = super::ConfigNormalisationCache::default();
+        let (entered, parsing) = mpsc::channel();
         std::thread::scope(|scope| {
+            let mut releases = Vec::new();
             let handles: Vec<_> = (0..8)
                 .map(|_| {
-                    scope.spawn(|| {
-                        start.wait();
+                    let (release, wait) = mpsc::channel();
+                    releases.push(release);
+                    let entered = entered.clone();
+                    let cache = &cache;
+                    let git = &git;
+                    scope.spawn(move || {
                         cache
-                            .lock()
-                            .unwrap()
-                            .normalise(&git, b"snapshot", || {
-                                calls.fetch_add(1, Ordering::SeqCst);
+                            .normalise(git, b"snapshot", || {
+                                entered.send(()).unwrap();
+                                wait.recv_timeout(Duration::from_secs(5)).unwrap();
                                 Ok(b"core.bare\nfalse\0".to_vec())
                             })
                             .unwrap()
                     })
                 })
                 .collect();
+            // A blocked parser must not keep other misses from entering. Release
+            // every worker before asserting, so a regression fails without hanging.
+            let all_entered = (0..8).all(|_| parsing.recv_timeout(Duration::from_secs(2)).is_ok());
+            for release in releases {
+                let _ = release.send(());
+            }
             for handle in handles {
                 assert_eq!(handle.join().unwrap(), b"core.bare\nfalse\0");
             }
+            assert!(all_entered, "cache readers queued behind a parser");
         });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cache
+                .normalise(&git, b"snapshot", || panic!("warm cache miss"))
+                .unwrap(),
+            b"core.bare\nfalse\0"
+        );
     }
 
     #[test]
