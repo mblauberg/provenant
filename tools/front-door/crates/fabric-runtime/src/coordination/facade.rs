@@ -614,6 +614,15 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
+                let reason = safe_graph_plan_reason(reason);
+                let next = if reason.contains("writer worktree") {
+                    "provide --worktree PATH, or --branch B --base REF"
+                } else {
+                    "fix the named graph node and validator reason, then retry"
+                };
+                projected = projected.detail(reason).next(next);
+            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
                 projected = fact.project(projected);
             }
@@ -624,7 +633,7 @@ impl FacadeError {
                     DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out", "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
-                    DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),
+                    DispatchRefusalFact::GraphPlan => unreachable!(),
                     DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
                     DispatchRefusalFact::Resource(_) => unreachable!(),
                     DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
@@ -733,6 +742,24 @@ impl FacadeError {
             Self::Timeout => "timeout",
             Self::Io { .. } => "io",
         }
+    }
+}
+
+/// Graph validator reasons are static contract text. Keep their useful words
+/// while refusing control characters and bounding malformed remote values.
+fn safe_graph_plan_reason(reason: &str) -> String {
+    let safe: String = reason
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, ' ' | '_' | '-' | '.' | ':' | '[' | ']' | '`')
+        })
+        .take(1024)
+        .collect();
+    if safe.is_empty() {
+        "graph plan validator refused the named node".into()
+    } else {
+        safe
     }
 }
 

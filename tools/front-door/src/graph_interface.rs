@@ -258,6 +258,7 @@ fn run_input(
             if key.is_empty() {
                 return Err(cli_input_error("--set parameter name is empty"));
             }
+            validate_set_value_path(key, &parsed["value"])?;
             parameters[key] = parsed["value"].clone();
         }
         input["set"] = parameters;
@@ -287,6 +288,45 @@ fn run_input(
         }
         Ok(input)
     })()
+}
+
+fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic::Diagnostic>> {
+    let Some(path) = key.strip_prefix("attempt.") else {
+        return Ok(());
+    };
+    match path {
+        "mode" => Err(cli_input_error("use --mode for attempt access mode")),
+        "worktree" => Err(cli_input_error("use --worktree for the writer worktree")),
+        "branch" | "base" | "new_worktree" => Err(cli_input_error(
+            "use --branch B --base REF for a new writer worktree",
+        )),
+        "host" | "account" | "confidential" | "provider_timeout" | "placement" | "capabilities"
+        | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root" => Ok(()),
+        _ if path.starts_with("mode.") => {
+            Err(cli_input_error("use --mode for attempt access mode"))
+        }
+        _ if path.starts_with("worktree.") => {
+            Err(cli_input_error("use --worktree for the writer worktree"))
+        }
+        _ => Err(cli_input_error(
+            "--set path is not applied by run; use --set NAME=TOML_VALUE for a declared template parameter or --mode, --worktree, --branch or --base for launch controls",
+        )),
+    }
+}
+
+fn validate_set_value_path(
+    key: &str,
+    value: &Value,
+) -> Result<(), Box<provenant_records::diagnostic::Diagnostic>> {
+    validate_set_path(key)?;
+    if key == "attempt"
+        && let Some(fields) = value.as_object()
+    {
+        for (field, value) in fields {
+            validate_set_value_path(&format!("attempt.{field}"), value)?;
+        }
+    }
+    Ok(())
 }
 pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn WorkerObserver) -> u8 {
     invoke(
@@ -449,6 +489,28 @@ mod tests {
         assert_eq!(input["set"]["attempt.confidential"], true);
         assert_eq!(input["set"]["attempt.provider_timeout"], 42);
         assert_eq!(input["set"]["attempt.host"], "other");
+    }
+
+    #[test]
+    fn attempt_access_paths_refuse_and_name_the_launch_flag() {
+        for (setting, flag) in [
+            ("attempt.mode='worktree-write'", "--mode"),
+            ("attempt.worktree='W'", "--worktree"),
+            ("attempt.branch='B'", "--branch B --base REF"),
+            ("attempt={mode='worktree-write'}", "--mode"),
+            ("attempt.unapplied=true", "declared template parameter"),
+        ] {
+            let mut request = run_request();
+            request.set.push(setting.into());
+            let error = run_input(request).expect_err("unsupported launch path must refuse");
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(flag)),
+                "{setting}: {error:?}"
+            );
+        }
     }
 
     #[test]
