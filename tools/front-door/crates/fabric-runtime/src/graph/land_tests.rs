@@ -54,6 +54,10 @@ struct Owner {
     no_wall_clock: bool,
     tick: bool,
     backoff: CiPollBackoff,
+    repair_fixture: bool,
+    repair_prompts: Vec<String>,
+    repair_families: std::collections::BTreeMap<String, String>,
+    repair_alternative: bool,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -77,6 +81,18 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        let mut families = Vec::new();
+        for family in attempts
+            .iter()
+            .filter_map(|attempt| self.repair_families.get(attempt))
+        {
+            if !families.contains(family) {
+                families.push(family.clone());
+            }
+        }
+        Ok(families)
+    }
     fn review_range(&mut self, _: &str, _: bool) -> Result<ReviewRange, Self::Error> {
         Ok(if self.equal_review_range {
             ReviewRange::Resolved {
@@ -165,12 +181,15 @@ impl AttemptOwner for Owner {
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
-        _: NodeInput<'_>,
+        input: NodeInput<'_>,
         _: &GraphRoute,
         _: AccessMode,
         worktree: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
+        if self.repair_fixture {
+            self.repair_prompts.push(input.prompt.to_owned());
+        }
         if self.pending_writer && key.node_id == "write" {
             return Ok(AttemptObservation::Pending {
                 attempt_ref: Some("pending-writer".into()),
@@ -185,8 +204,19 @@ impl AttemptOwner for Owner {
         let (result, branch, commit) = match key.node_id.as_str() {
             "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
+            id if self.repair_fixture && id.ends_with("--fix") => {
+                (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD))
+            }
             _ => {
-                let verdict = self.review_verdict.unwrap_or("VERDICT: PASS");
+                let verdict = if self.repair_fixture && key.node_id == "initial--lens" {
+                    "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"open\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\"}]}\n```\nVERDICT: FAIL"
+                } else if self.repair_fixture && key.node_id == "initial--synthesis" {
+                    "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"confirmed\"}]}\n```\nVERDICT: FAIL"
+                } else if self.repair_fixture {
+                    "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS"
+                } else {
+                    self.review_verdict.unwrap_or("VERDICT: PASS")
+                };
                 let mut capture = crate::result_capture::ResultCapture::new(None);
                 capture.push(format!("looks right\n{verdict}\n").as_bytes());
                 (Some(capture.finish()), None, None)
@@ -195,8 +225,26 @@ impl AttemptOwner for Owner {
         if let Some(commit) = commit {
             self.head = Some(commit.into());
         }
+        let attempt_ref = if self.repair_fixture {
+            let reference = format!("fixture/{}", self.launches.len());
+            let family = if self.repair_alternative
+                && input.distinct_from_attempts.iter().any(|reference| {
+                    self.repair_families
+                        .get(reference)
+                        .is_some_and(|family| family == "reviewer")
+                }) {
+                "writer"
+            } else {
+                "reviewer"
+            };
+            self.repair_families
+                .insert(reference.clone(), family.into());
+            Some(reference)
+        } else {
+            self.equal_review_range.then(|| "fixture-attempt".into())
+        };
         Ok(AttemptObservation::Terminal {
-            attempt_ref: self.equal_review_range.then(|| "fixture-attempt".into()),
+            attempt_ref,
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: result.map(Box::new),
@@ -212,6 +260,107 @@ fn owner() -> Owner {
     Owner {
         writer_branch: Some("feature/x".into()),
         ..Default::default()
+    }
+}
+
+#[test]
+fn findings_panels_feed_repair_and_land_the_reviewed_head() {
+    for (model_synthesis, alternative) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let library = template::TemplateLibrary::bundled();
+        let repair = template::Compiler::new(&library).compile(&json!({
+            "id":"cycles","use":"repair","after":["initial"],
+            "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+            "repeat":{"until":"accepted","max_rounds":3,"review_repair":true},
+            "with":{"worktree":"/wt/feature","write_scope":["src"],"writer":"write","lenses":["correctness"]}
+        })).unwrap();
+        let mut members = vec![
+            json!({"id":"lens","template":"review.correctness","review_lens":"correctness",
+            "access":"read_only","prompt":"review","route":{"alias":"senior"},"require_findings":true}),
+        ];
+        let exported = if model_synthesis {
+            members.push(json!({"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"synthesise",
+                "route":{"alias":"senior"},"depends_on":["lens"],"require_findings":true,
+                "inputs":[{"node":"lens","outputs":["findings"]}]}));
+            "synthesis"
+        } else {
+            "lens"
+        };
+        let initial: GraphNode = serde_json::from_value(
+            json!({"id":"initial","kind":"composite","access":"read_only",
+            "depends_on":["write"],"composite":{"nodes":members,"reduce_verdict":!model_synthesis,
+            "exports":[{"node":exported,"outputs":["findings","verdict"]}]}}),
+        )
+        .unwrap();
+        let mut document: GraphDocument = serde_json::from_value(json!({"schema_version":1,"graph_id":"repair-land",
+            "context":{"risk_tier":"substantial"},"nodes":[
+            {"id":"write","access":"worktree_write","worktree":"/wt/feature","delivery":"pr","prompt":"write","route":{"alias":"senior"}},
+            {"id":"ci","kind":"gate","access":"read_only","depends_on":["cycles"],"condition":{"type":"ci","target":{"node":"write"}}},
+            {"id":"review","access":"read_only","depends_on":["ci"],"source":{"type":"head","node":"write"},"prompt":"review","route":{"alias":"senior"}},
+            {"id":"accept","kind":"gate","access":"read_only","depends_on":["review"],"inputs":[{"node":"review","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
+            {"id":"land","kind":"land","access":"read_only","depends_on":["accept"],"land":{"node":"write","tier":"routine"}}
+        ]})).unwrap();
+        document.nodes.insert(1, initial);
+        document.nodes.insert(2, repair);
+        let mut owner = owner();
+        owner.repair_fixture = true;
+        owner.repair_alternative = alternative;
+        let mut journal = Journal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(
+            run.checkpoint.successful(),
+            "model={model_synthesis}: {:?}",
+            run.checkpoint
+                .nodes
+                .iter()
+                .map(|n| (&n.id, n.state, &n.advance_error))
+                .collect::<Vec<_>>()
+        );
+        let fix = owner
+            .launches
+            .iter()
+            .position(|launch| launch.node.ends_with("--fix"))
+            .unwrap();
+        let prompt = &owner.repair_prompts[fix];
+        let repair_node = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id.ends_with("--fix"))
+            .unwrap();
+        let separation = repair_node.separation.as_ref().unwrap();
+        assert_eq!(separation.excluded, ["reviewer"]);
+        assert_eq!(
+            separation.outcome,
+            if alternative {
+                SeparationOutcome::Separated
+            } else {
+                SeparationOutcome::Unavailable
+            }
+        );
+        for field in [
+            "F1",
+            "\"lens\":\"correctness\"",
+            "\"severity\":\"high\"",
+            "\"file\":\"a.rs\"",
+            "\"line\":1",
+            "\"evidence\":\"counterexample\"",
+            "\"proposed_fix\":\"repair\"",
+        ] {
+            assert!(prompt.contains(field), "missing {field}: {prompt}");
+        }
+        assert!(
+            owner
+                .launches
+                .iter()
+                .any(|launch| launch.node.contains("--check--correctness"))
+        );
+        assert_eq!(owner.lands[0].1, REPAIR_HEAD);
+        assert_eq!(
+            node(&run.checkpoint, "review").source_commit.as_deref(),
+            Some(REPAIR_HEAD)
+        );
     }
 }
 
