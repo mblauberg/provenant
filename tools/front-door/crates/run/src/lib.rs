@@ -953,10 +953,6 @@ mod diagnostic_projection_tests {
                 "host configuration",
             ),
             (
-                ResourceFact::DependencyPreparation { configured: true },
-                "sealed profile",
-            ),
-            (
                 ResourceFact::LanePorts {
                     blocks: 2,
                     origin: PortSettingSource::Configuration,
@@ -1074,6 +1070,15 @@ mod diagnostic_projection_tests {
                 "no safe resource projection for {site} ({code}, {setting})"
             );
         }
+        assert!(guards.iter().any(|row| {
+            row.get("site").and_then(|v| v.as_str())
+                == Some("cli/src/run/provider/preparation.rs#dependency_preparation_event")
+                && row.get("boundary").and_then(|v| v.as_str()) == Some("warning")
+                && row
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|reason| reason.contains("lanes.prepare_deps"))
+        }));
     }
 
     #[test]
