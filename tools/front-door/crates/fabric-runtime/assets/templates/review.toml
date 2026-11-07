@@ -2,7 +2,7 @@ identity = "content"
 doc = "Find defects at a pinned head."
 review = "lens"
 brief = """
-Review the change at its pinned head through the ${lens} lens. ${advice}
+Review the change at its pinned head through the ${lens} lens. The host supplies the pinned subject and diff context; Git metadata in the lane is read-only and cannot be fetched. ${advice}
 Example: ```findings
 {"schema_version":1,"findings":[]}
 ```

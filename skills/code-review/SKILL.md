@@ -13,10 +13,10 @@ Conventions and the review ladder come from the repo's own `AGENTS.md`,
 ## How it runs
 
 ```sh
-provenant run --use review --file BRIEF.md --explain
+provenant run --use review --file BRIEF.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain
 ```
 
-Pin the base, subject commit and spec in the brief. Use `review` by default;
+Supply the subject and base on the command line, and put the spec in the brief. The host fetches remote subjects and supplies pinned Git context; the read-only lane cannot fetch. Use `review` by default;
 a dotted flavour such as `review.security` selects a specific lens. A composite
 runs `review` over a panel resolved at launch, then `review.verify` and `review.synthesis`
 where needed. The planner chooses lenses and tiers from risk, changed paths
@@ -32,7 +32,7 @@ A changed subject needs review of its delta against the prior findings.
 
 - The reviewer is read-only and reads the pinned commit with `git show` and
   `git diff`, never the working tree, and uses no Git write verbs.
-- The brief carries the subject, the base and the spec. Never send the
+- The command pins the subject and base; the brief carries the spec. Never send the
   author's hypothesis, expected verdict or scratchpad.
 - Prefer a model family distinct from every author and repairer; the
   HARNESS.md review ladder asks for it from `substantial` upward when one is

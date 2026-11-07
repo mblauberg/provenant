@@ -415,12 +415,21 @@ pub fn serve_with_read(
                 provenant_fabric_runtime::graph::cutover::pending_guard(state)
                     .map_err(cutover_refusal)?;
             }
+            // Leave time to persist a refusal and deliver it to the caller.
+            // The relay's transport reserve alone does not cover journal I/O.
+            let now = clock.mono_now();
+            let remaining = budget.remaining(now).as_micros();
+            let reserve = 1_000_000.min(remaining / 2);
+            let provisioning_budget = WaitBudget::up_to(
+                now,
+                provenant_core::DurationMicros::from_micros(remaining - reserve),
+            );
             provision_added_writers(
                 context,
                 &mut journal,
                 &mut checkpoint,
                 &admitted.added,
-                budget,
+                provisioning_budget,
                 cancel,
             )?;
             json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
