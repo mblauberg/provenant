@@ -25,6 +25,14 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
     }
 }
 
+fn cutover_refusal(findings: String) -> ServiceError {
+    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
+    ServiceError::Facade(FacadeError::GraphRelayRefused {
+        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
+        detail: Some(InvalidInputDetail::CutoverFindings(findings)),
+    })
+}
+
 fn journal_error<E>(_: E) -> ServiceError {
     ServiceError::Facade(FacadeError::io("access graph journal"))
 }
@@ -106,7 +114,7 @@ pub fn serve(
                 return Ok(serde_json::to_value(receipt)?);
             }
             provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                .map_err(|_| refused("UPGRADE_DRAIN_REQUIRED", "Drain legacy graphs and lanes with the previous release before admitting new work"))?;
+                .map_err(cutover_refusal)?;
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
             let config =
@@ -255,7 +263,7 @@ pub fn serve(
             .map_err(|error| refused(error.code, error.message))?;
             if !admitted.replayed {
                 provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                    .map_err(|_| refused("UPGRADE_DRAIN_REQUIRED", "Drain legacy graphs and lanes with the previous release before admitting new work"))?;
+                    .map_err(cutover_refusal)?;
             }
             provision_added_writers(
                 context,
@@ -1401,6 +1409,13 @@ mod provisioning_tests {
         }
         let request = json!({"op":"add","id":"child","use":"task","brief":"Read","idempotency_key":"receipt"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
+        std::fs::remove_file(
+            context
+                .roots
+                .state
+                .as_path()
+                .join("graph-template-cutover-complete"),
+        )?;
         {
             let mut journal = FileJournal::open(
                 &context.roots.state,
@@ -1435,8 +1450,18 @@ mod provisioning_tests {
             fresh,
             json!({"op":"edit","id":"current","patch":{"schema_version":1,"idempotency_key":"new-edit","nodes":[{"id":"another","use":"task","brief":"More"}]}}),
         ] {
+            let error = serve(&context, "caller", request, budget, &cancel, &clock)
+                .expect_err("new relay work must be refused");
+            assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
+            let ServiceError::Facade(error) = error else {
+                return Err("expected a facade refusal".into());
+            };
             assert!(
-                matches!(serve(&context, "caller", request, budget, &cancel, &clock), Err(ServiceError::Cli { code, .. }) if code == "UPGRADE_DRAIN_REQUIRED")
+                error
+                    .diagnostic()
+                    .detail
+                    .unwrap_or_default()
+                    .contains("/legacy")
             );
             assert_eq!(
                 FileJournal::read_checkpoint(

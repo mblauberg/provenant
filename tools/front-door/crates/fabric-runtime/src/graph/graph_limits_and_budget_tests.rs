@@ -545,6 +545,6 @@ fn node_titles_are_validated_and_sent_to_attempts_and_status() {
     invalid.title = Some("bad\ntitle".into());
     assert_eq!(
         validate_plan(&graph(vec![invalid])).err(),
-        Some("task title must be 1 to 256 bytes and contain no control characters")
+        Some("node invalid: task title must be 1 to 256 bytes and contain no control characters")
     );
 }

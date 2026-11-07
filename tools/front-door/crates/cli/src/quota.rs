@@ -305,6 +305,24 @@ pub(crate) fn persist_provider_refusal(
     now_unix_seconds: i64,
     resets_unix_seconds: Option<i64>,
 ) -> Result<(), EdgeError> {
+    persist_provider_refusal_once(
+        state_root,
+        route,
+        pool,
+        now_unix_seconds,
+        resets_unix_seconds,
+        false,
+    )
+}
+
+pub(crate) fn persist_provider_refusal_once(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    pool: Option<&str>,
+    now_unix_seconds: i64,
+    resets_unix_seconds: Option<i64>,
+    replay: bool,
+) -> Result<(), EdgeError> {
     let adapter = route
         .provider
         .as_deref()
@@ -346,6 +364,17 @@ pub(crate) fn persist_provider_refusal(
                 && record.account.account_key == account.account_key
         })
         .cloned();
+    if replay
+        && current.as_ref().is_some_and(|record| {
+            record.refusals.iter().any(|refusal| {
+                refusal.model == model.strip_prefix(&format!("{adapter}/")).unwrap_or(model)
+                    && refusal.pool.as_deref() == pool
+                    && refusal.observed_unix_seconds >= now_unix_seconds
+            })
+        })
+    {
+        return Ok(());
+    }
     let account = current.as_ref().map_or(&account, |record| &record.account);
     let intent = provenant_quota::record_refusal(
         current.as_ref(),
@@ -1064,6 +1093,19 @@ fn keychain_repair(
     )
 }
 pub(crate) fn login_repair(entry: Option<&provenant_providers::accounts::Registration>) -> String {
+    login_repair_with_expired_session(entry, false)
+}
+
+pub(crate) fn login_expired_repair(
+    entry: Option<&provenant_providers::accounts::Registration>,
+) -> String {
+    login_repair_with_expired_session(entry, true)
+}
+
+fn login_repair_with_expired_session(
+    entry: Option<&provenant_providers::accounts::Registration>,
+    expired: bool,
+) -> String {
     let Some(entry) = entry else {
         return "account-specific login remedy unavailable; check `provenant accounts list`".into();
     };
@@ -1076,6 +1118,15 @@ pub(crate) fn login_repair(entry: Option<&provenant_providers::accounts::Registr
     let Some(spec) = provenant_records::AdapterSpec::get(&entry.adapter) else {
         return "account-specific login remedy unavailable; consult the provider's sign-in instructions".into();
     };
+    if expired
+        && let (Some(refresh), Some(login)) = (spec.login_refresh_template, spec.login_template)
+    {
+        return format!(
+            "try a short interactive session with `{}`; if that does not refresh the login, run `{}` interactively",
+            refresh.replace("{directory}", &quoted),
+            login.replace("{directory}", &quoted),
+        );
+    }
     if let Some(template) = spec.login_template {
         format!(
             "run `{}` interactively",
@@ -1141,7 +1192,11 @@ pub(crate) fn login_diagnostic(
         .map_or_else(|| "unknown".to_owned(), |at| at.to_string());
     format!(
         "{account}: {cause}; last successful observation {observed}; {}",
-        login_repair(entry)
+        if *reason == provenant_records::RouteExclusionReason::LoginExpired {
+            login_expired_repair(entry)
+        } else {
+            login_repair(entry)
+        }
     )
 }
 /// Attaches menu bar choices from config; hidden and order are applied by the app.
@@ -1169,9 +1224,8 @@ fn decorate(
             Some(ProbeFailure::IsolatedKeychainUnavailable) => {
                 Some(keychain_repair(entry, &row.account.label))
             }
-            Some(
-                ProbeFailure::Auth | ProbeFailure::LoginExpired | ProbeFailure::AccountMismatch,
-            ) => Some(login_repair(entry)),
+            Some(ProbeFailure::LoginExpired) => Some(login_expired_repair(entry)),
+            Some(ProbeFailure::Auth | ProbeFailure::AccountMismatch) => Some(login_repair(entry)),
             None if row.status == QuotaStatus::AuthRequired => Some(login_repair(entry)),
             _ => None,
         };
@@ -1221,7 +1275,17 @@ fn decorate_login(
             let entry = accounts.entries.values().find(|entry| {
                 entry.adapter == row.account.adapter && entry.key == row.account.account_key
             });
-            row.repair = Some(login_repair(entry));
+            row.repair = Some(
+                if row
+                    .login_expiry
+                    .as_ref()
+                    .is_some_and(|view| view.state == LoginExpiryState::Expired)
+                {
+                    login_expired_repair(entry)
+                } else {
+                    login_repair(entry)
+                },
+            );
         }
     }
 }
@@ -2277,76 +2341,58 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
         .iter()
         .map(|warning| format!("Warning: {warning}"))
         .collect();
-    rows.extend(
-        report
-            .accounts
-            .iter()
-            .filter(|row| {
-                !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly)
-                    || row
-                        .snapshot
-                        .as_ref()
-                        .and_then(|s| s.details.as_ref())
-                        .is_some_and(|details| details.coverage.as_deref() == Some("partial"))
-                    || !row.refusals.is_empty()
-                    || row
-                        .snapshot
-                        .as_ref()
-                        .and_then(shared_pool_exhaustions)
-                        .is_some()
+    rows.extend(report.accounts.iter().map(|row| {
+        let pools = row
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                shared_pool_exhaustions(snapshot).or_else(|| pool_states(snapshot))
             })
-            .map(|row| {
-                let pools = row
-                    .snapshot
-                    .as_ref()
-                    .and_then(|snapshot| {
-                        shared_pool_exhaustions(snapshot).or_else(|| pool_states(snapshot))
-                    })
-                    .map_or_else(String::new, |pools| format!(" ({pools})"));
-                let reset = row
+            .map_or_else(String::new, |pools| format!(" ({pools})"));
+        let reset = row
+            .resets_at
+            .as_deref()
+            .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
+        let refusals = displayed_refusals(row)
+            .into_iter()
+            .map(|refusal| {
+                let name = refusal.model.escape_debug();
+                let pool = refusal
+                    .pool
+                    .as_deref()
+                    .map(|pool| format!(" in pool {}", pool.escape_debug()))
+                    .unwrap_or_default();
+                let reset = refusal
                     .resets_at
                     .as_deref()
                     .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
-                let refusals = displayed_refusals(row)
-                    .into_iter()
-                    .map(|refusal| {
-                        let name = refusal.model.escape_debug();
-                        let pool = refusal
-                            .pool
-                            .as_deref()
-                            .map(|pool| format!(" in pool {}", pool.escape_debug()))
-                            .unwrap_or_default();
-                        let reset = refusal.resets_at.as_deref().and_then(|at| {
-                            reset_label(at, report.generated_unix_seconds, &time_zone)
-                        });
-                        format!(
-                            "recorded refusal for {name}{pool}{}",
-                            reset.map_or_else(String::new, |label| format!(" {label}"))
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let refusals = if refusals.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", refusals.join(", "))
-                };
                 format!(
-                    "{} [{}]: {}{}{}{}",
-                    row.account.label,
-                    row.account.adapter,
-                    state(row),
-                    pools,
-                    reset.map_or_else(String::new, |label| format!(" {label}")),
-                    refusals
+                    "recorded refusal for {name}{pool}{}",
+                    reset.map_or_else(String::new, |label| format!(" {label}"))
                 )
-            }),
-    );
+            })
+            .collect::<Vec<_>>();
+        let refusals = if refusals.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", refusals.join(", "))
+        };
+        format!(
+            "{} [{}]: {}{}{}{}",
+            row.account.label,
+            row.account.adapter,
+            state(row),
+            pools,
+            reset.map_or_else(String::new, |label| format!(" {label}")),
+            refusals
+        )
+    }));
     let next = report
         .accounts
         .iter()
         .any(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
         .then(|| "provenant quota tick".to_owned());
-    crate::Summary::new(
+    crate::Summary::complete(
         format!(
             "quota {}/{} current{}{}",
             report.coverage.known,
@@ -2558,6 +2604,12 @@ mod tests {
             login_repair(Some(&entry)),
             "run `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude auth login` interactively"
         );
+        let expired_repair = login_expired_repair(Some(&entry));
+        assert!(expired_repair.starts_with(
+            "try a short interactive session with `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude`"
+        ));
+        assert!(expired_repair.contains("if that does not refresh the login"));
+        assert!(expired_repair.contains("claude auth login` interactively"));
         let diagnostic = login_diagnostic(
             Some(&entry),
             Some(100),
@@ -2575,9 +2627,14 @@ mod tests {
         );
         assert!(mismatch.contains("signed-in account differs from registration"));
         assert!(mismatch.contains("CLAUDE_CONFIG_DIR="));
-        assert!(
-            diagnostic.contains("CLAUDE_CONFIG_DIR='/tmp/account'\\''s files'"),
-            "{diagnostic}"
+        assert!(diagnostic.contains(&expired_repair), "{diagnostic}");
+        let codex: provenant_providers::accounts::Registration = serde_json::from_value(
+            serde_json::json!({"adapter":"codex","label":"work","key":"key","directory":"/tmp/codex"}),
+        )
+        .unwrap();
+        assert_eq!(
+            login_expired_repair(Some(&codex)),
+            "run `CODEX_HOME='/tmp/codex' codex login` interactively"
         );
         let missing = login_diagnostic(
             None,
@@ -2744,7 +2801,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_only_flags_accounts_needing_attention() {
+    fn quota_summary_shows_every_configured_account() {
         let row = |status| AccountRow {
             account: AccountScope {
                 adapter: "test".into(),
@@ -2769,9 +2826,13 @@ mod tests {
         let mut report = QuotaReport {
             schema_version: 1,
             generated_unix_seconds: 0,
-            accounts: vec![row(QuotaStatus::Available), row(QuotaStatus::CreditOnly)],
+            accounts: vec![
+                row(QuotaStatus::Available),
+                row(QuotaStatus::CreditOnly),
+                row(QuotaStatus::Exhausted),
+            ],
             sources: vec![],
-            coverage: Coverage { total: 2, known: 2 },
+            coverage: Coverage { total: 3, known: 3 },
             refreshing_ids: vec![],
             next_due_unix_seconds: None,
             report_path: String::new(),
@@ -2779,11 +2840,41 @@ mod tests {
             display_icon_warning: Some("warning".into()),
         };
         let summary = quota_summary(&report);
-        assert_eq!(summary.lines.len(), 2);
-        assert_eq!(summary.next, None);
-        report.accounts.push(row(QuotaStatus::Stale));
+        assert_eq!(summary.lines.len(), 5); // headline, warning, and all three accounts
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("Available [test]: available"))
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("CreditOnly [test]: credit_only"))
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("Exhausted [test]: exhausted"))
+        );
+        assert_eq!(summary.omitted, 0);
+        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+        for _ in 0..14 {
+            report.accounts.push(row(QuotaStatus::Stale));
+        }
         let summary = quota_summary(&report);
-        assert!(summary.lines.iter().any(|line| line.contains("stale")));
+        assert_eq!(summary.lines.len(), 19); // more than the shared summary row limit
+        assert!(
+            summary
+                .lines
+                .iter()
+                .filter(|line| line.contains("[test]:"))
+                .count()
+                == 17
+        );
+        assert_eq!(summary.omitted, 0);
         assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
     }
 

@@ -1155,6 +1155,15 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
     assert_eq!(run["status"], "failed", "{run}");
     assert_eq!(run["data"]["outcome"], "failed", "{run}");
+    let refusals = run["data"]["launch_refusals"]
+        .as_array()
+        .ok_or("refusals")?;
+    assert_eq!(refusals.len(), 2, "{run}");
+    assert!(
+        refusals
+            .iter()
+            .all(|row| row["preparation_failure"] == "adapter_unavailable")
+    );
     assert_eq!(run["data"]["status"], "complete");
     let node = &run["data"]["checkpoint"]["nodes"][0];
     assert_eq!(node["state"], "failed");

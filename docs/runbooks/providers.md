@@ -447,14 +447,15 @@ seconds, and is cancelled with the dispatch. If pnpm is missing,
 `dependency_tool_not_found` names the searched PATH; install pnpm on that host
 and check `pnpm --version` in its login shell before retrying. If the probe fails, preparation falls back to the host process PATH and records
 `daemon_fallback` as the PATH source in the dependency preparation outcome; a
-missing pnpm refusal also names that source and the searched PATH. If no daemon
+missing pnpm warning also names that source and the searched PATH. If no daemon
 PATH is available, `dependency_path_unavailable` reports the probe failure.
 Cancellation stops preparation without falling back.
 The install is bounded, runs outside the sandbox, and is cancelled with the
 dispatch, with its process group cleaned up. Disable it with
 the `lanes.prepare_deps` config key. An
-install failure refuses the lane and includes the command, the exit status or
-signal, and the end of pnpm's stderr. Corepack neither follows a project's
+install failure warns and lets the writer continue. The redacted warning includes
+the command, the exit status or signal, and the end of pnpm's stderr, and is
+retained in the route record under `dependency_preparation`. Corepack neither follows a project's
 `packageManager` field nor downloads a version, so a pinned pnpm cannot arrive
 as a non-executable `@pnpm/exe` placeholder. The native install uses the host's
 shared pnpm store; a lane cannot write that store from inside its sandbox.

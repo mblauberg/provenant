@@ -112,6 +112,121 @@
                           }
                         ]
                       },
+                      "git_import_failure": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "head": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "retained_objects": {
+                            "anyOf": [
+                              {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "root"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "relative"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "path"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "root": {
+                                        "const": "/"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "root",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "reason",
+                          "head",
+                          "retained_objects"
+                        ],
+                        "type": "object"
+                      },
                       "handoff": {},
                       "head": {
                         "anyOf": [

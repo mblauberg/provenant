@@ -87,7 +87,10 @@ fn node_attempt_spec_refuses_what_the_graph_cannot_launch() {
         let mut lane = node("lane", pinned);
         lane.attempt = Some(serde_json::from_value(spec).unwrap());
         lane.capabilities = capabilities;
-        assert_eq!(validate_plan(&graph(vec![lane])).unwrap_err(), reason);
+        assert_eq!(
+            validate_plan(&graph(vec![lane])).unwrap_err(),
+            format!("node lane: {reason}")
+        );
     }
 }
 

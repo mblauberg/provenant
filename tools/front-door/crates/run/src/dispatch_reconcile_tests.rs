@@ -359,3 +359,80 @@ fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
     assert!(store.claim(second, &host, &call)?.is_none());
     Ok(())
 }
+
+#[test]
+fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult {
+    use std::{sync::mpsc, time::Duration};
+    for clears in [true, false] {
+        provenant_sqlite::with_busy_timeout(Duration::from_millis(300), || -> TestResult {
+            let temp = tempfile::tempdir()?;
+            let clock = provenant_os::clock::SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let context = context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = two_tasks(2);
+            store.create(&run, &call)?;
+            let first = run.attempts[0].attempt_id;
+            let second = run.attempts[1].attempt_id;
+            store.mark_starting(
+                &store.record(first, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let blocker =
+                rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
+            blocker.execute_batch("BEGIN IMMEDIATE")?;
+            let (release, released) = mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                if clears {
+                    let _ = released.recv_timeout(Duration::from_millis(150));
+                } else {
+                    released.recv().unwrap();
+                }
+                blocker.execute_batch("ROLLBACK").unwrap();
+            });
+            let found = store.reconcile_with_observer(
+                run.run_id,
+                &Fake::default(),
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver,
+            )?;
+            if !clears {
+                release.send(())?;
+            }
+            holder.join().unwrap();
+            assert!(found.contains(&(second, Reconciled::Queued)), "{found:?}");
+            if clears {
+                assert!(found.contains(&(first, Reconciled::Withdrawn)), "{found:?}");
+                assert!(
+                    store
+                        .reconcile_with_observer(
+                            run.run_id,
+                            &Fake::default(),
+                            &call,
+                            &provenant_supervisor::census::SystemProcessObserver
+                        )?
+                        .iter()
+                        .all(|(id, _)| *id == second)
+                );
+            } else {
+                assert!(
+                    found
+                        .iter()
+                        .any(|(id, state)| *id == first
+                            && matches!(state, Reconciled::Uncertain { .. })),
+                    "{found:?}"
+                );
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}

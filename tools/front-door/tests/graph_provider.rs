@@ -667,6 +667,89 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
+/// Exercise the same public writer command with an isolated invocation directory.
+fn writer_cli_launches_from_cwd(location: &str) -> Result {
+    let native_available = graph_fixture_available()?;
+    let mut rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        fs::write(rig.project.join(name), "original instructions\n")?;
+    }
+    for args in [
+        vec!["add", "."],
+        vec!["commit", "-qm", "instructions"],
+        vec![
+            "worktree",
+            "add",
+            "-qb",
+            "writer-cwd",
+            ".worktrees/writer-cwd",
+        ],
+    ] {
+        let output = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&output), 0, "{output:?}");
+    }
+    let tree = rig.project.join(".worktrees/writer-cwd");
+    fs::create_dir_all(tree.join("nested/directory"))?;
+    // TestRig uses project as the child's cwd; PROVENANT_ROOT selects assets.
+    rig.project = match location {
+        "worktree" => tree.clone(),
+        "subdirectory" => tree.join("nested/directory"),
+        _ => rig.project.clone(),
+    };
+    let output = rig.command(&[
+        "run",
+        "fixture writer shell",
+        "--tier",
+        "junior",
+        "--mode",
+        "worktree-write",
+        "--worktree",
+        tree.to_str().ok_or("tree")?,
+        "--wait=30s",
+        "--json",
+    ])?;
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let node = &response["data"]["checkpoint"]["nodes"][0];
+    assert!(
+        node["attempts"][0]["attempt_ref"].is_string(),
+        "{location}: {response}; {}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    // Admission is checked on every host. Native execution is also checked
+    // when the sandbox probe succeeds (CI requires that probe on macOS).
+    if !native_available {
+        return Ok(());
+    }
+    assert_eq!(code(&output), 0, "{location}: {response}");
+    assert_eq!(node["state"], "succeeded", "{location}: {response}");
+    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        assert_eq!(
+            fs::read_to_string(tree.join(name))?,
+            "edited by lane shell\n"
+        );
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
+fn writer_cli_launches_from_worktree_root() -> Result {
+    writer_cli_launches_from_cwd("worktree")
+}
+
+fn writer_cli_launches_from_worktree_subdirectory() -> Result {
+    writer_cli_launches_from_cwd("subdirectory")
+}
+
+fn writer_cli_launches_from_primary_checkout() -> Result {
+    writer_cli_launches_from_cwd("primary")
+}
+
 fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     let rig = policy_codex_fixture()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
@@ -1362,6 +1445,61 @@ fn graph_fixture_available() -> Result<bool> {
         return Ok(false);
     }
     Ok(true)
+}
+
+fn simultaneous_first_launches_pass_cutover_guard() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    fs::write(
+        rig.home.join(".claude-pro/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"credential-sentinel-2719-violet-fox","expiresAt":4102444800000}}"#,
+    )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\njunior = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+    )?;
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+    let mut children = Vec::new();
+    for index in 0..4 {
+        children.push(
+            std::process::Command::new(binary)
+                .current_dir(&rig.project)
+                .env_clear()
+                .envs(rig.env.iter().cloned())
+                .arg("--state-dir")
+                .arg(&rig.state)
+                .args([
+                    "run",
+                    &format!("parallel fixture {index}"),
+                    "--tier",
+                    "junior",
+                    "--wait=30s",
+                    "--json",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?,
+        );
+    }
+    for child in children {
+        let output = child.wait_with_output()?;
+        let text = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains("UPGRADE_DRAIN_REQUIRED"), "{text}");
+        assert!(output.status.success(), "{text}");
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["data"]["status"], "complete", "{result}");
+        assert_eq!(result["data"]["outcome"], "succeeded", "{result}");
+    }
+    Ok(())
 }
 
 /// A quota refusal with no generated work redraws the same alias in the graph.
@@ -2940,22 +3078,33 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
             fs::write(rig.project.join(name), "original instructions\n")?;
         }
+        fs::write(rig.project.join(".gitignore"), "setup-assets/\n")?;
         for args in [
-            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md"],
+            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md", ".gitignore"],
             vec!["commit", "-qm", "instructions"],
         ] {
             let out = rig.execute(&git, &args, None)?;
             assert_eq!(code(&out), 0, "{out:?}");
         }
-        let created = rig.command(&[
-            "worktree",
-            "create",
-            "shell-evidence",
-            "--base",
-            "HEAD",
-            "--json",
-        ])?;
+        // A plain Git worktree has no Provenant creation receipt. Setup scripts
+        // may leave ignored files and links without making it unsafe to launch.
+        let created = rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "shell-evidence",
+                ".worktrees/shell-evidence",
+                "HEAD",
+            ],
+            None,
+        )?;
         assert_eq!(code(&created), 0, "{created:?}");
+        let tree = rig.project.join(".worktrees/shell-evidence");
+        fs::create_dir_all(tree.join("setup-assets"))?;
+        fs::write(tree.join("setup-assets/installed.txt"), "setup output\n")?;
+        std::os::unix::fs::symlink("installed.txt", tree.join("setup-assets/current"))?;
         let mut node = json!({
             "id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
             "worktree":".worktrees/shell-evidence", "delivery":"none",
@@ -2970,7 +3119,10 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         }
         let lane = run_graph_provider_with_wait(&rig, "shell-evidence", node, "30s")?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
-        let tree = rig.project.join(".worktrees/shell-evidence");
+        assert_eq!(
+            fs::read_to_string(tree.join("setup-assets/current"))?,
+            "setup output\n"
+        );
         for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
             assert_eq!(
                 fs::read_to_string(tree.join(name))?,
@@ -3418,12 +3570,28 @@ fn main() -> ExitCode {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
             (
+                "simultaneous_first_launches_pass_cutover_guard",
+                simultaneous_first_launches_pass_cutover_guard,
+            ),
+            (
                 "writer_shell_edits_instructions_and_redacts_logs",
                 writer_shell_edits_instructions_and_redacts_logs,
             ),
             (
                 "uncatalogued_cli_model_launches_and_surfaces_provider_failure",
                 uncatalogued_cli_model_launches_and_surfaces_provider_failure,
+            ),
+            (
+                "writer_cli_launches_from_worktree_root",
+                writer_cli_launches_from_worktree_root,
+            ),
+            (
+                "writer_cli_launches_from_worktree_subdirectory",
+                writer_cli_launches_from_worktree_subdirectory,
+            ),
+            (
+                "writer_cli_launches_from_primary_checkout",
+                writer_cli_launches_from_primary_checkout,
             ),
             (
                 "remote_only_writer_cli_starts_at_remote_tip",

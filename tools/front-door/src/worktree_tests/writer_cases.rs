@@ -559,21 +559,6 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         store.record(attempt, &call)?.state,
         provenant_run::AttemptState::Terminal { .. }
     ));
-    // Temporarily hide the private objects to force a retryable import failure.
-    let objects = attempt_path.join("tmp/candidate-0/git-objects");
-    let hidden_objects = attempt_path.join("tmp/candidate-0/git-objects-hidden");
-    fs::rename(&objects, &hidden_objects)?;
-    let settling = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
-    assert!(
-        matches!(settling.as_slice(), [(id, provenant_run::Reconciled::Settling { .. })] if *id == attempt),
-        "{settling:?}"
-    );
-    assert_terminal_outcome(
-        &store.record(attempt, &call)?,
-        provenant_run::Outcome::Unsettled,
-    )?;
-    assert!(!attempt_path.join("quarantine/manifest.json").exists());
-    fs::rename(hidden_objects, objects)?;
     // The operation remains unfinished when the durable exit is recovered.
     fs::write(
         writer
@@ -583,21 +568,11 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
             .join("CHERRY_PICK_HEAD"),
         b"unfinished cherry-pick",
     )?;
-    // The backoff itself has unit coverage. Emulate its expiry so this fixture
-    // can exercise recovery of the private objects without a real-time wait.
-    let progress = attempt_path.join("settlement-progress.json");
-    let mut journal: Value = serde_json::from_slice(&fs::read(&progress)?)?;
-    journal["retry_after_ms"] = 0.into();
-    fs::write(progress, serde_json::to_vec(&journal)?)?;
     let found = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
-    // The sealed unsettled decision stays; the retry reaches explicit refusal
-    // of the unfinished operation, releases custody and removes temporary files.
-    assert_eq!(
-        found,
-        vec![(attempt, provenant_run::Reconciled::TemporaryRemoved)]
-    );
+    // Recovery refuses the unfinished operation, settles once and releases custody.
+    assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
     let terminal = store.record(attempt, &call)?;
-    assert_terminal_outcome(&terminal, provenant_run::Outcome::Unsettled)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
     assert!(matches!(
         terminal.settlement_receipts,
         Some(provenant_run::SettlementReceipts {

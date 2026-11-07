@@ -164,7 +164,7 @@ fn ancestors(
 pub(super) fn validate_relations(
     nodes: &[PlannedNode],
     positions: &BTreeMap<String, usize>,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     for node in nodes {
         if let Some(SourceBinding::Head { node: target }) = &node.source {
             let upstream = ancestors(nodes, positions, &node.id);
@@ -176,7 +176,10 @@ pub(super) fn validate_relations(
                     && writer.continues.is_none()
             });
             if !valid {
-                return Err("head source must name an upstream writer that delivers pr or push");
+                return Err(format!(
+                    "node {}: head source must name an upstream writer that delivers pr or push",
+                    node.id
+                ));
             }
         }
         if let Some(target) = &node.continues {
@@ -190,9 +193,10 @@ pub(super) fn validate_relations(
                     && writer.worktree == node.worktree
             });
             if !valid {
-                return Err(
-                    "continues must name an upstream writer that delivers pr or push from the same worktree",
-                );
+                return Err(format!(
+                    "node {}: continues must name an upstream writer that delivers pr or push from the same worktree",
+                    node.id
+                ));
             }
         }
         if let Some(spec) = &node.land {
@@ -204,7 +208,10 @@ pub(super) fn validate_relations(
                     && writer.delivery == Some(DeliveryMode::Pr)
                     && writer.continues.is_none()
             }) else {
-                return Err("land must follow a writer that delivers pr");
+                return Err(format!(
+                    "node {}: land must follow a writer that delivers pr",
+                    node.id
+                ));
             };
             let gate_after_writer = |ci: bool| {
                 upstream.iter().any(|index| {
@@ -218,7 +225,10 @@ pub(super) fn validate_relations(
                 })
             };
             if !gate_after_writer(true) || !gate_after_writer(false) {
-                return Err("land must follow a verdict gate and a CI gate after its writer");
+                return Err(format!(
+                    "node {}: land must follow a verdict gate and a CI gate after its writer",
+                    node.id
+                ));
             }
         }
     }

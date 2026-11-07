@@ -1291,7 +1291,7 @@ fn loop_body_integrate_requires_the_graph_integration_branch() {
     // The principal still targets the graph branch, so the flat check refuses.
     assert_eq!(
         validate_plan(&other).unwrap_err(),
-        "node integration target differs from graph integration branch"
+        "node principal: node integration target differs from graph integration branch"
     );
 }
 

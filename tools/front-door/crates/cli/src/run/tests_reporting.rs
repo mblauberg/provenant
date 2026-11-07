@@ -472,7 +472,7 @@ fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
             waiting_for: reason.into(),
         })
         .collect();
-    let compact = status::compact_status(&lanes, &waits, now);
+    let compact = status::compact_status(&lanes, &waits, now, Path::new("/state"));
     assert!(compact.len() <= 2048, "{compact}");
     assert!(compact.contains("disk below gc.free_floor; provenant output ID"));
     assert!(!compact.contains("23622320128"));

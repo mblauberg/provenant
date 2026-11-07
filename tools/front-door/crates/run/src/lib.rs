@@ -54,7 +54,9 @@ pub use git_context::{
     GitContext, continuation_history, ensure_local_branch, resolve_git_base,
     resolve_git_base_with_facts, review_merge_base,
 };
-pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
+pub use holder::{
+    HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
+};
 pub use launch::{
     Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers, RefusalKind,
     Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency,
@@ -951,10 +953,6 @@ mod diagnostic_projection_tests {
                 "host configuration",
             ),
             (
-                ResourceFact::DependencyPreparation { configured: true },
-                "sealed profile",
-            ),
-            (
                 ResourceFact::LanePorts {
                     blocks: 2,
                     origin: PortSettingSource::Configuration,
@@ -1072,6 +1070,15 @@ mod diagnostic_projection_tests {
                 "no safe resource projection for {site} ({code}, {setting})"
             );
         }
+        assert!(guards.iter().any(|row| {
+            row.get("site").and_then(|v| v.as_str())
+                == Some("cli/src/run/provider/preparation.rs#dependency_preparation_event")
+                && row.get("boundary").and_then(|v| v.as_str()) == Some("warning")
+                && row
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|reason| reason.contains("lanes.prepare_deps"))
+        }));
     }
 
     #[test]

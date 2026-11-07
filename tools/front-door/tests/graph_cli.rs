@@ -260,6 +260,12 @@ fn graph_records(path: &Path) -> std::io::Result<Vec<PathBuf>> {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             found.extend(graph_records(&entry.path())?);
+        } else if matches!(
+            entry.file_name().to_str(),
+            Some("graph-template-cutover.lock" | "graph-template-cutover-complete")
+        ) {
+            // The one-shot launch guard is state metadata, not a graph journal.
+            continue;
         } else if entry
             .file_name()
             .to_string_lossy()

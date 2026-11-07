@@ -222,22 +222,36 @@ impl Factory {
     > {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
-        if !path.starts_with(&self.cwd) {
-            return Err(FacadeError::ConfinementRefused { resource: None });
+        let limit =
+            provenant_fabric_runtime::config::GraphLimits::document_bytes_bound().maximum_u64();
+        let bytes = if !path.starts_with(&self.cwd) {
+            // A submission from a subdirectory is materialised in the enclosing
+            // checkout's scratch. Only that graph directory may sit outside cwd.
+            let graphs = self
+                .graph_documents_directory()
+                .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+            let directory = graphs
+                .current_path()
+                .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+            if path.parent() != Some(directory.as_path()) {
+                return Err(FacadeError::ConfinementRefused { resource: None });
+            }
+            let name = path
+                .file_name()
+                .ok_or(FacadeError::ConfinementRefused { resource: None })?;
+            // Keep the verified directory handle through the read: replacing a
+            // scratch component after validation must not redirect this access.
+            graphs.read_bounded(name, limit)
+        } else {
+            provenant_os::fs::FileHandle::open_source(&path)
+                .and_then(|mut file| file.read_bounded(limit))
         }
-        let bytes = provenant_os::fs::FileHandle::open_source(&path)
-            .and_then(|mut file| {
-                file.read_bounded(
-                    provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
-                        .maximum_u64(),
-                )
-            })
-            .map_err(|error| match error {
-                provenant_os::fs::FsError::TooLarge { .. } => {
-                    FacadeError::invalid(InvalidInputDetail::GraphDocumentTooLarge)
-                }
-                _ => FacadeError::io("access graph journal"),
-            })?;
+        .map_err(|error| match error {
+            provenant_os::fs::FsError::TooLarge { .. } => {
+                FacadeError::invalid(InvalidInputDetail::GraphDocumentTooLarge)
+            }
+            _ => FacadeError::io("access graph journal"),
+        })?;
         let document = decode_graph_document(&bytes)?;
         Ok((document, path, bytes))
     }
@@ -285,7 +299,8 @@ impl Factory {
         // Then a document path: any path-shaped selector, or a bare name of an
         // existing file in the working directory or the scratch graphs directory.
         let path = Path::new(selector);
-        let scratch = self.cwd.join(".provenant/scratch/graphs").join(path);
+        let checkout = self.graph_checkout().map_err(|_| refused())?;
+        let scratch = checkout.join(".provenant/scratch/graphs").join(path);
         let local = self.cwd.join(path);
         if path.is_absolute()
             || selector.contains(['/', '\\'])
@@ -327,10 +342,7 @@ impl Factory {
         hash: &str,
     ) -> Result<Vec<provenant_fabric_runtime::graph::GraphDocument>, provenant_os::fs::FsError>
     {
-        let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
-            provenant_os::fs::Directory::open_anchor(&self.cwd)?,
-            |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
-        )?;
+        let graphs = self.graph_documents_directory()?;
         let prefix = hash.to_ascii_lowercase();
         let mut found = Vec::new();
         for name in graphs.entries()?.flatten() {
@@ -946,21 +958,43 @@ impl Factory {
         Ok(graph_snapshot(checkpoint))
     }
 
+    fn graph_checkout(&self) -> Result<PathBuf, provenant_os::fs::FsError> {
+        provenant_os::git::repository_path(&self.cwd, provenant_os::git::RepositoryPath::Toplevel)
+            .map_err(|source| provenant_os::fs::FsError::Io {
+                operation: "locate graph checkout",
+                path: self.cwd.clone(),
+                source,
+            })
+    }
+
+    fn graph_documents_directory(
+        &self,
+    ) -> Result<provenant_os::fs::Directory, provenant_os::fs::FsError> {
+        [".provenant", "scratch", "graphs"].iter().try_fold(
+            provenant_os::fs::Directory::open_anchor(&self.graph_checkout()?)?,
+            |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
+        )
+    }
+
     pub(crate) fn prepare_scratch(
         &self,
         cancel: &CancelToken,
         budget: WaitBudget,
     ) -> Result<PathBuf, provenant_confinement::worktrees::WorktreeError> {
+        // Scratch belongs to the selected checkout, even when the command was
+        // invoked from one of its subdirectories. Keep self.cwd unchanged for
+        // relative launch arguments and the persisted execution directory.
+        let checkout = self.graph_checkout()?;
         provenant_confinement::worktrees::with_context(
             &self.context.roots,
             &self.home,
-            &self.cwd,
+            &checkout,
             &self.clock,
             cancel,
             |context| {
                 let repo = context.utility.open_repo(
                     context.executor,
-                    &self.cwd,
+                    &checkout,
                     context.utility_budget,
                     cancel,
                 )?;
@@ -1191,4 +1225,82 @@ pub(super) fn graph_operation(
         .map_err(|_| FacadeError::InvalidInput { detail: None })?;
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
         .map_err(|_| FacadeError::InvalidInput { detail: None })
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver includes this module without libtest"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_graph_selectors_refuse_symlinked_scratch_directories()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for component in [
+            ".provenant",
+            ".provenant/scratch",
+            ".provenant/scratch/graphs",
+        ] {
+            let rig = crate::worktree_tests::repository()?;
+            let nested = rig.project.join("nested/directory");
+            let graphs = rig.project.join(".provenant/scratch/graphs");
+            std::fs::create_dir_all(&nested)?;
+            std::fs::create_dir_all(&graphs)?;
+            let document = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "graph_id": "nested-selector", "nodes": []
+            }))?;
+            let source = graphs.join("plan.json");
+            std::fs::write(&source, &document)?;
+            let digest = provenant_records::CanonicalV1::file_digest(&document).to_string();
+            let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+            let factory = Factory {
+                context: Context::open(roots, &rig.home, &nested)?,
+                project_attribution: false,
+                clock: SystemClock,
+                backoff: ThreadPause,
+                executor: SystemExecutor::new(1)?,
+                home: rig.home.clone(),
+                cwd: nested,
+                assets: rig.project.clone(),
+                host_launch: None,
+                mcp_project: None,
+                workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+            };
+            for selector in ["plan.json", source.to_str().ok_or("graph path")?, &digest] {
+                let (id, graph) = factory.resolve_graph(selector)?;
+                assert_eq!(id, "nested-selector");
+                assert_eq!(graph.ok_or("resolved document")?.graph_id, id);
+            }
+            // The exception grants the scratch graph directory, not sibling
+            // documents elsewhere in the enclosing checkout.
+            let sibling = rig.project.join("sibling.json");
+            std::fs::write(&sibling, &document)?;
+            assert!(matches!(
+                factory.resolve_graph(sibling.to_str().ok_or("sibling path")?),
+                Err(FacadeError::ConfinementRefused { .. })
+            ));
+
+            let directory = rig.project.join(component);
+            let external = rig.root.join("external-graphs");
+            std::fs::rename(&directory, &external)?;
+            std::os::unix::fs::symlink(&external, &directory)?;
+            for selector in ["plan.json", source.to_str().ok_or("graph path")?] {
+                assert!(
+                    matches!(
+                        factory.resolve_graph(selector),
+                        Err(FacadeError::ConfinementRefused { .. })
+                    ),
+                    "accepted {selector} through linked {component}"
+                );
+            }
+            assert!(matches!(
+                factory.resolve_graph(&digest),
+                Err(FacadeError::DispatchRefused { .. })
+            ));
+        }
+        Ok(())
+    }
 }

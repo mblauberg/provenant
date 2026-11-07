@@ -278,8 +278,6 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
         } else {
             cwd.join(path)
         });
-    } else if access == Some(&json!("worktree_write")) && node.get("worktree").is_none() {
-        node["worktree"] = json!(cwd);
     }
     if let Some(scope) = input.get("write_scope").filter(|value| !value.is_null()) {
         if !scope
@@ -291,6 +289,87 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
         node["write_scope"] = scope.clone();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod launch_report_tests {
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn launch_report_distinguishes_refusal_mixed_and_fallback() {
+        let rows = vec![
+            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_reason":"pre_launch_refusal", "preparation_failure":"auth_required"}),
+            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_reason":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
+        ];
+        let attempt = |id: &str, launched: bool| json!({"attempt_ref":id,"launched":launched});
+        let mut all = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/two", false)]}]}});
+        report_launch_refusals(&mut all, &rows);
+        assert_eq!(all["outcome"], "failed");
+        assert_eq!(
+            all["launch_refusals"][0]["preparation_failure"],
+            "auth_required"
+        );
+        assert_eq!(
+            all["launch_refusals"][1]["preparation_failure"],
+            "usage_limited"
+        );
+        let mut mixed = json!({"status":"pending","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/three", true)]}]}});
+        report_launch_refusals(&mut mixed, &rows);
+        assert_eq!(mixed["outcome"], "partial");
+        let mut fallback = json!({"status":"complete","outcome":"succeeded","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false),attempt("host/three", true)]}]}});
+        report_launch_refusals(&mut fallback, &rows);
+        assert_eq!(fallback["outcome"], "succeeded");
+        let mut failed = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"state":"failed","attempts":[attempt("host/one", false)]},{"state":"succeeded","attempts":[attempt("host/three", true)]},{"state":"blocked","attempts":[]}]}});
+        report_launch_refusals(&mut failed, &rows);
+        assert_eq!(failed["outcome"], "failed");
+    }
+}
+
+// Project durable attempt facts after the owner has tried fallback routes.
+fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
+    let refusals: Vec<_> = rows
+        .iter()
+        .filter(|row| row["kind"] == "attempt" && row["settlement_reason"] == "pre_launch_refusal")
+        .cloned()
+        .collect();
+    if refusals.is_empty() {
+        return;
+    }
+    let Some(nodes) = result["checkpoint"]["nodes"].as_array() else {
+        return;
+    };
+    let mut refused = 0;
+    let mut admitted = 0;
+    let mut other_failure = false;
+    for node in nodes {
+        let Some(attempt) = node["attempts"]
+            .as_array()
+            .and_then(|attempts| attempts.last())
+        else {
+            other_failure |= node["state"] == "failed" || node["state"] == "blocked";
+            continue;
+        };
+        if attempt["launched"] == true {
+            admitted += 1;
+            other_failure |= node["state"] == "failed" || node["state"] == "blocked";
+        } else if attempt["attempt_ref"]
+            .as_str()
+            .is_some_and(|id| refusals.iter().any(|row| row["attempt_id"] == id))
+        {
+            refused += 1;
+        } else if node["state"] == "failed" || node["state"] == "blocked" {
+            other_failure = true;
+        }
+    }
+    if refused > 0
+        && admitted > 0
+        && !other_failure
+        && matches!(result["status"].as_str(), Some("pending" | "complete"))
+    {
+        result["outcome"] = json!("partial");
+    }
+    result["launch_refusals"] = json!(refusals);
 }
 
 impl Factory {
@@ -1133,7 +1212,31 @@ impl Factory {
         let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
             && run.status == GraphStatus::Pending
             && !cancel.is_cancelled();
+        let target = super::unified::GraphTarget {
+            graph: run.checkpoint.graph_id.clone(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = super::unified::status_rows(&run, &target);
+        rows.retain(|row| {
+            row["kind"] == "attempt"
+                && run
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.attempts)
+                    .any(|attempt| {
+                        !attempt.launched
+                            && attempt.state
+                                == provenant_fabric_runtime::graph::AttemptState::Terminal
+                            && attempt.attempt_ref.as_deref() == row["attempt_id"].as_str()
+                    })
+        });
+        if !rows.is_empty() {
+            super::unified::enrich_status_rows(&mut rows, &self.context, &self.clock, cancel)?;
+        }
         let mut result = encode(run)?;
+        report_launch_refusals(&mut result, &rows);
         result["timed_out"] = json!(timed_out);
         Ok(result)
     }
@@ -2426,7 +2529,35 @@ mod tests {
                 .diagnostic()
                 .detail
                 .ok_or("patch refusal")?
-                .contains("graph plan is invalid")
+                .contains("node a: dependency cycle")
+        );
+        let error = factory
+            .graph_document(
+                json!({"op":"run", "use":"implement", "brief":"Fix it", "explain":true}),
+                budget,
+                &cancel,
+            )
+            .unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.starts_with("node ") && detail.contains("writer worktree")
+        }));
+        assert!(diagnostic.next.as_deref().is_some_and(|next| {
+            next.contains("--worktree PATH") && next.contains("--branch B --base REF")
+        }));
+        let error = factory
+            .graph_document(
+                json!({"op":"run", "brief":"Fix it", "access":"worktree_write", "explain":true}),
+                budget,
+                &cancel,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .diagnostic()
+                .next
+                .as_deref()
+                .is_some_and(|next| next.contains("--worktree PATH"))
         );
         Ok(())
     }
@@ -2455,6 +2586,45 @@ mod tests {
         ] {
             assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn writer_template_with_target_defaults_to_writer_access() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        for target in [
+            json!({"worktree":".worktrees/fix"}),
+            json!({"branch":"fix","base":"origin/main"}),
+        ] {
+            let mut input = json!({"op":"run","use":"implement","brief":"Fix it"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(target.as_object().unwrap().clone());
+            let request = factory.child_request(&input)?;
+            assert!(request.writer);
+            let node = &request
+                .launch
+                .as_ref()
+                .ok_or("missing compiled launch")?
+                .node;
+            assert_eq!(node["access"], "worktree_write");
+        }
+
+        let mut explicit_read = json!({"op":"run","use":"implement","brief":"Fix it","access":"read_only","worktree":".worktrees/fix"});
+        assert!(factory.child_request(&explicit_read).is_err());
+        explicit_read["access"] = json!("worktree_write");
+        let explicit_write = factory.child_request(&explicit_read)?;
+        assert!(explicit_write.writer);
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let cancel = CancelToken::new();
+        let explicit_read = factory.graph_document(
+            json!({"op":"run","use":"implement","brief":"Inspect","access":"read_only","explain":true}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(explicit_read["document"]["nodes"][0]["access"], "read_only");
         Ok(())
     }
 

@@ -378,6 +378,30 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
 }
 
 #[test]
+fn graph_plan_refusal_preserves_node_reason_and_writer_remedy() {
+    use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    let error = FacadeError::graph_admission(crate::graph::AdmissionError::Plan(
+        "node implement: writer worktree".into(),
+    ));
+    let diagnostic = error.diagnostic();
+    assert!(error.to_string().contains("node implement: writer worktree"));
+    assert_eq!(
+        diagnostic.detail.as_deref(),
+        Some("node implement: writer worktree")
+    );
+    assert!(diagnostic
+        .next
+        .as_deref()
+        .is_some_and(|next| next.contains("--worktree PATH") && next.contains("--branch B --base REF")));
+    assert!(!matches!(
+        error,
+        FacadeError::InvalidInput {
+            detail: Some(InvalidInputDetail::GraphReason(_))
+        }
+    ));
+}
+
+#[test]
 fn writer_binding_failure_persists_only_the_safe_projection() {
     use crate::coordination::facade::FacadeError;
     let mut writer = node("writer", route("first"));
@@ -559,4 +583,37 @@ fn launched_reader_fallback_reopens_file_checkpoint() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Succeeded);
+}
+
+#[test]
+fn untyped_launch_refusal_persists_reason_without_an_attempt() {
+    use crate::coordination::facade::FacadeError;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, FacadeError::DispatchRefused {
+            reason: format!("worktree setup failed: missing dependency {secret}"),
+            disk: None,
+            fact: None,
+        })].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Blocked);
+    assert!(node.attempts.iter().all(|attempt| attempt.attempt_ref.is_none()));
+    assert!(node.attempts.iter().all(|attempt|
+        attempt.extra.get(PRELAUNCH_REFUSAL_PROOF).and_then(serde_json::Value::as_bool) == Some(true)));
+    let reason = node.advance_error.as_deref().unwrap();
+    assert!(reason.contains("worktree setup failed: missing dependency"));
+    assert!(!reason.contains(secret));
+    assert!(!reason.contains("receipt"));
+    // Re-read the persisted checkpoint as a later status request does.
+    let encoded = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
+    let retained: GraphCheckpoint = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(retained.nodes[0].advance_error, node.advance_error);
+    let later = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(later.checkpoint.nodes[0].advance_error, node.advance_error);
 }

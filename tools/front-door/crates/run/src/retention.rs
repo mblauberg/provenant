@@ -255,7 +255,10 @@ impl RunStore {
                     Err(error) if missing_directory(&error) => return Ok(()),
                     Err(error) => return Err(error),
                 };
-                if crate::settlement::abandoned(&attempt, Self::scope(&record))?.is_some() {
+                if crate::settlement::abandoned(&attempt, Self::scope(&record))?.is_some()
+                    || crate::holder::object_import_refused(&attempt, Self::scope(&record))?
+                        .is_some()
+                {
                     return Ok(());
                 }
                 let _writer = match attempt.try_lock_existing(

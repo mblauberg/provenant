@@ -290,7 +290,7 @@ fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
         );
         assert_eq!(
             validate_plan(&graph(vec![writer])).unwrap_err(),
-            "invalid new worktree binding"
+            "node writer: invalid new worktree binding"
         );
     }
     let mut writer = node("writer", route("first"));
@@ -307,7 +307,7 @@ fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
     });
     assert_eq!(
         validate_plan(&graph(vec![writer])).unwrap_err(),
-        "new worktree cannot override a source binding"
+        "node writer: new worktree cannot override a source binding"
     );
 }
 

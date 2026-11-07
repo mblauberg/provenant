@@ -1772,6 +1772,16 @@ mod result_tests {
         let mut checkpoint = graph_status_fixture().checkpoint;
         checkpoint.nodes[0].attempts.remove(0);
         checkpoint.nodes[0].attempts[0].key.route_index = 0;
+        let refusal = dispatch_refused(provenant_cli::run::Fail {
+            status: provenant_records::Outcome::Refused,
+            kind: provenant_run::ErrorKind::Refused,
+            message: "setup script failed: missing pnpm ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+            detail: None,
+            projection: None,
+        });
+        checkpoint.nodes[0].advance_error = refusal.diagnostic().detail;
+        checkpoint.nodes[0].advance_error_code = Some("dispatch_refused".into());
+        checkpoint.nodes[0].attempts.clear();
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
         checkpoint.pause_reason = Some(display.into());
         checkpoint.nodes[0].expansion_pause = Some(format!(
@@ -1819,6 +1829,14 @@ mod result_tests {
                 .unwrap()
                 .contains("invalid fragment: missing nodes")
         );
+        let refusal_reason = status.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+        assert!(refusal_reason.contains("setup script failed: missing pnpm"));
+        assert!(!refusal_reason.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+        assert!(!refusal_reason.contains("receipt"));
+        assert!(status.checkpoint.nodes[0].attempts.is_empty());
+        assert!(human.contains("setup script failed: missing pnpm"));
+        assert!(json["checkpoint"]["nodes"][0]["advance_error"].as_str().unwrap()
+            .contains("setup script failed: missing pnpm"));
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap(),
             before

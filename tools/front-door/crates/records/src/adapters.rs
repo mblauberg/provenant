@@ -166,6 +166,9 @@ pub struct AdapterSpec {
     pub login_hint: &'static str,
     /// Account-scoped interactive login command, with {directory} shell quoted.
     pub login_template: Option<&'static str>,
+    /// Account-scoped interactive command for refreshing an expired login.
+    /// `{directory}` is shell quoted by the caller.
+    pub login_refresh_template: Option<&'static str>,
     /// Lowercase provider stderr fragments indicating a missing or expired login.
     pub auth_markers: &'static [&'static str],
     /// Shell wrapper path and environment selector, relative to scratch.
@@ -394,6 +397,7 @@ adapter_specs! { $;
         credential_host_keychain: true,
         login_hint: "claude auth login",
         login_template: Some("CLAUDE_CONFIG_DIR={directory} claude auth login"),
+        login_refresh_template: Some("CLAUDE_CONFIG_DIR={directory} claude"),
         auth_markers: &["not logged in", "authentication_failed"],
         shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
         context_directory_arg: Some("--add-dir"),
@@ -469,6 +473,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "codex login",
         login_template: Some("CODEX_HOME={directory} codex login"),
+        login_refresh_template: None,
         auth_markers: &[
             "please log out and sign in again",
             "refresh token expired",
@@ -488,7 +493,7 @@ adapter_specs! { $;
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
-        token_budget_notice: Some("token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop"),
+        token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
         exit_route: false,
         stderr_quota: false,
         model_observation: ModelObservation::Rollout,
@@ -548,6 +553,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "agent login",
         login_template: None,
+        login_refresh_template: None,
         auth_markers: &[
             "authentication required. please run agent login",
             "not logged in",
@@ -630,6 +636,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "agy auth login",
         login_template: Some("HOME={directory} agy` and use `/login"),
+        login_refresh_template: None,
         auth_markers: &[
             "authentication required. please login to continue.",
             "authentication required. please log in",
@@ -713,6 +720,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "opencode auth login",
         login_template: None,
+        login_refresh_template: None,
         auth_markers: &["no api key found", "run opencode auth login"],
         shell_prefix: None,
         context_directory_arg: None,
@@ -784,6 +792,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "",
         login_template: None,
+        login_refresh_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
@@ -857,6 +866,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "",
         login_template: None,
+        login_refresh_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
@@ -929,6 +939,7 @@ adapter_specs! { $;
         credential_host_keychain: false,
         login_hint: "",
         login_template: None,
+        login_refresh_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,

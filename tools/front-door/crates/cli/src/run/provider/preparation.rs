@@ -1,7 +1,6 @@
 use super::*;
 
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
 fn uniform_candidate_boundary(
     count: usize,
@@ -226,7 +225,7 @@ pub(super) fn login_dependency_path(
     ))
 }
 
-pub(super) fn dependency_preparation_refusal(
+pub(super) fn dependency_preparation_warning(
     error: String,
     enabled: bool,
     profile: &provenant_records::run::HarnessProfile,
@@ -242,8 +241,54 @@ pub(super) fn dependency_preparation_refusal(
         "compiled default".to_owned()
     };
     format!(
-        "{error}; lanes.prepare_deps={enabled} ({origin}); set lanes.prepare_deps=false to skip dependency preparation"
+        "{error}; run `pnpm install --frozen-lockfile` in the worktree to inspect or repair dependencies; lanes.prepare_deps={enabled} ({origin}); set lanes.prepare_deps=false to skip dependency preparation"
     )
+}
+
+pub(super) fn dependency_preparation_event(
+    result: Result<serde_json::Value, String>,
+    enabled: bool,
+    profile: &provenant_records::run::HarnessProfile,
+) -> serde_json::Value {
+    match result {
+        Ok(event) => event,
+        Err(error) => {
+            let warning = provenant_confinement::redact::bounded_line(
+                &dependency_preparation_warning(error, enabled, profile),
+                4096,
+            );
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            serde_json::json!({
+                "command": "pnpm install --frozen-lockfile",
+                "outcome": "warning",
+                "reason": warning,
+            })
+        }
+    }
+}
+
+#[test]
+fn dependency_setup_failure_warns_and_retains_redacted_reason() {
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let event = dependency_preparation_event(
+        Err(format!("missing pnpm {secret}")),
+        true,
+        &provenant_records::run::HarnessProfile::default(),
+    );
+    assert_eq!(event["outcome"], "warning");
+    let reason = event["reason"].as_str().unwrap();
+    assert!(reason.contains("missing pnpm"));
+    assert!(reason.contains("lanes.prepare_deps"));
+    assert!(!reason.contains(secret));
+    let success = serde_json::json!({"outcome": "installed"});
+    assert_eq!(
+        dependency_preparation_event(
+            Ok(success.clone()),
+            true,
+            &provenant_records::run::HarnessProfile::default()
+        ),
+        success
+    );
 }
 
 pub(super) fn prepare_writer_dependencies(
@@ -300,25 +345,18 @@ pub(super) fn prepare_writer_dependencies(
     options.cleanup_process_group = true;
     options.cancel = Some(cancel);
     options.stdout = provenant_os::exec::StreamPolicy::Discard;
-    options.stderr = provenant_os::exec::StreamPolicy::Tail {
-        limit: DEPENDENCY_STDERR_TAIL,
-    };
+    // Install output is arbitrary subprocess content and must not enter a
+    // warning or retained launch event. Keep only the process outcome below.
+    options.stderr = provenant_os::exec::StreamPolicy::Discard;
     use provenant_os::exec::Executor;
     let outcome = executor
         .execute(options)
         .map_err(|error| format!("{command} failed: {error}"))?;
     let elapsed_micros = outcome.elapsed_micros;
-    let stderr = String::from_utf8_lossy(&outcome.stderr.bytes);
-    let stderr_tail = stderr.trim();
     if outcome.termination != provenant_os::exec::Termination::Exit(0)
         || outcome.timed_out
         || outcome.cancelled
     {
-        let detail = if stderr_tail.is_empty() {
-            String::new()
-        } else {
-            format!("; stderr tail: {stderr_tail}")
-        };
         let reason = if outcome.cancelled {
             "cancelled".to_owned()
         } else if outcome.timed_out {
@@ -336,7 +374,7 @@ pub(super) fn prepare_writer_dependencies(
                 }
             }
         };
-        return Err(format!("{command} failed ({reason}){detail}"));
+        return Err(format!("{command} failed ({reason})"));
     }
     Ok(serde_json::json!({
         "command": command,
@@ -476,8 +514,6 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     ContinuationRequest(#[from] ContinuationRequestError),
     #[error("{message}")]
-    DependencyPreparation { message: String, configured: bool },
-    #[error("{message}")]
     Candidates {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
@@ -572,18 +608,6 @@ impl PrepareError {
             Self::SourceHead(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
-                refusal
-            }
-            Self::DependencyPreparation {
-                message,
-                configured,
-            } => {
-                let mut refusal = run::PrepareRefusal::from(message);
-                refusal.resource = Some(
-                    provenant_records::diagnostic::ResourceFact::DependencyPreparation {
-                        configured,
-                    },
-                );
                 refusal
             }
             Self::ReadOnly(error) => {
@@ -792,22 +816,6 @@ impl From<String> for PrepareError {
 impl From<&str> for PrepareError {
     fn from(message: &str) -> Self {
         Self::Other(message.into())
-    }
-}
-
-#[test]
-fn dependency_preparation_retains_setting_source_without_source_error() {
-    use provenant_records::diagnostic::ResourceFact;
-    for configured in [false, true] {
-        let refusal = PrepareError::DependencyPreparation {
-            message: "TOKEN_SENTINEL".into(),
-            configured,
-        }
-        .into_refusal();
-        assert_eq!(
-            refusal.resource,
-            Some(ResourceFact::DependencyPreparation { configured })
-        );
     }
 }
 
@@ -2832,23 +2840,20 @@ pub(super) fn prepare_candidates(
                     .get("lanes.prepare_deps")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
-                Some(
-                    prepare_writer_dependencies(
-                        writer.worktree.path(),
-                        enabled,
-                        &|| host_dependency_path(cancel),
-                        cancel,
-                    )
-                    .map_err(|error| PrepareError::DependencyPreparation {
-                        message: dependency_preparation_refusal(error, enabled, &task.profile),
-                        configured: task
-                            .profile
-                            .knobs
-                            .get("lanes.prepare_deps")
-                            .and_then(serde_json::Value::as_bool)
-                            .is_some(),
-                    })?,
-                )
+                let result = prepare_writer_dependencies(
+                    writer.worktree.path(),
+                    enabled,
+                    &|| host_dependency_path(cancel),
+                    cancel,
+                );
+                // Cancellation remains terminal; dependency setup is otherwise
+                // advisory and the provider may install or repair it in the lane.
+                if cancel.is_cancelled() {
+                    return Err(PrepareError::Other(
+                        "dependency preparation cancelled".into(),
+                    ));
+                }
+                Some(dependency_preparation_event(result, enabled, &task.profile))
             }
             None => None,
         };
