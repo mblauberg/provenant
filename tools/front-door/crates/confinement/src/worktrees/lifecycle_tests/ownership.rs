@@ -991,3 +991,69 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
     assert!(read_branch_tips(&context, &cancel())?.contains_key(&GitRefName::branch("owned")?));
     Ok(())
 }
+
+#[test]
+fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Holder {
+        calls: AtomicUsize,
+        persistent: bool,
+    }
+    impl WorkerObserver for Holder {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    let state = if self.persistent || call == 0 {
+                        Occupancy::Observed {
+                            process: Some(ObservedProcess::new(
+                                42,
+                                Some("holder".into()),
+                                ProcessEvidenceKind::OtherHeldPath,
+                            )),
+                        }
+                    } else {
+                        Occupancy::Available
+                    };
+                    (root, state)
+                })
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "held-path-retry".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let entries = context.facts.fresh_inventory(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("entry")?;
+    let transient = Holder {
+        calls: AtomicUsize::new(0),
+        persistent: false,
+    };
+    context.workers = &transient;
+    drop(lock_worktree(&context, entry, &cancel(), false)?);
+    assert_eq!(transient.calls.load(Ordering::SeqCst), 2);
+    let persistent = Holder {
+        calls: AtomicUsize::new(0),
+        persistent: true,
+    };
+    context.workers = &persistent;
+    assert!(matches!(
+        lock_worktree(&context, entry, &cancel(), false),
+        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+    ));
+    assert!(persistent.calls.load(Ordering::SeqCst) >= 4);
+    Ok(())
+}
