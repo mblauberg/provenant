@@ -584,6 +584,8 @@ fn recover_provisioning(
     }
     let mut refusal = None;
     for (node, path, source) in pending {
+        // Older fences predate the durable child-spec creation marker.
+        relay::fence_provisioning(checkpoint, &node, &path, &source);
         let clock = provenant_os::clock::SystemClock;
         let now = clock.mono_now();
         let wall = clock
@@ -674,10 +676,12 @@ fn recover_provisioning(
                     retry
                 });
                 relay::clear_provisioning(checkpoint, &node);
-                journal.save(checkpoint).map_err(journal_error)?;
                 refusal.get_or_insert(error);
                 continue;
             }
+            // Earlier definitive results in this batch still need to settle
+            // durably, while this uncertain effect retains its recovery fence.
+            journal.save(checkpoint).map_err(journal_error)?;
             return Err(error);
         }
         relay::clear_provisioning(checkpoint, &node);
