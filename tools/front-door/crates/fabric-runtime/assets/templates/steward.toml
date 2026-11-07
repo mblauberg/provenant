@@ -19,6 +19,12 @@ Read candidate bodies, acceptance criteria, native parent links and comments.
 Similarity alone is not evidence of a duplicate. Compare the outcomes and scope,
 check chronology and require high confidence before proposing a duplicate.
 
+Before searching, read `.resources.search` with `gh api rate_limit`; pace
+hybrid requests one at a time against its remaining quota and reset time. Hybrid
+search may have a lower limit than the bucket reports, so treat a limit error as
+authoritative. Record each result as it returns. If its reset is within two
+minutes, wait for it and continue; otherwise stop and report the reset time.
+
 The only permitted tracker write is a comment on the newer issue proposing an
 older issue as a duplicate, with links and concrete evidence. Never close an
 issue. Never edit bodies, labels, types, priorities, parent links or board state;
@@ -33,10 +39,11 @@ posting, read all comments on the newer issue (paginate) and skip a pair whose
 marker already exists. Recheck immediately before writing. After any uncertain
 write or error, reread comments before retrying; if still uncertain, stop and
 report it. A later run must not repeat a marked proposal. Never comment on the
-older issue. On rate limits, stop and report the reset time.
+older issue.
 
 Return a concise report of search coverage, evidence and confidence, duplicate
 proposals posted or skipped with links, high-confidence parent suggestions, thin
-bodies and decisions needed. No match is a valid result. Do not apply parent
+bodies and decisions needed. Include assessed issues if a rate limit stops the
+sweep; a partial report is still a report. No match is a valid result. Do not apply parent
 links automatically: proposal mode permits only the duplicate comments above.
 '''
