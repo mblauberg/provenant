@@ -69,6 +69,47 @@ fn journal_retry_is_prompt_and_does_not_require_a_census() {
     assert!(!super::census_turn_due(100, Some(0), Some(0), false));
 }
 
+#[test]
+fn census_watches_only_possible_live_identities_without_discarding_custody_history() {
+    let live = identity(10, 100, 10, 10);
+    let dead = identity(20, 200, 10, 10);
+    let unknown = identity(30, 300, 30, 30);
+    let reused = identity(40, 400, 40, 40);
+    let absent = identity(50, 500, 50, 50);
+    let mut zombie = fact(dead.clone(), 10);
+    zombie.zombie = true;
+    let snapshot = Census::from_observations(
+        [
+            fact(live.clone(), 1),
+            zombie,
+            fact(identity(40, 401, 40, 40), 1),
+        ],
+        [(30, crate::census::ObservationIssue::Io)],
+        [50],
+        true,
+        false,
+        100,
+    )
+    .unwrap();
+    let history = BTreeSet::from([live, dead, unknown, reused, absent]);
+    assert_eq!(
+        super::census_watch_pids(&snapshot, history.iter()),
+        BTreeSet::from([10, 30])
+    );
+    // Watch selection borrows the evidence. Zombie/reused/unknown custody is
+    // still available to the existing conservative cleanup policy.
+    assert_eq!(history.len(), 5);
+    assert!(
+        matches!(snapshot.process(20), crate::census::ProcessLookup::Present(row) if row.zombie)
+    );
+}
+
+#[test]
+fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
+    assert_eq!(super::cancel_poll_interval(true), 1_000);
+    assert_eq!(super::cancel_poll_interval(false), 100);
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]

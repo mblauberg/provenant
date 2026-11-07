@@ -1139,6 +1139,15 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
             ),
         }
     }
+    fn observe_topology(&self, pid: i64) -> crate::census::ProcessObservation {
+        match crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")
+        {
+            Ok(observer) => observer.observe_topology(pid),
+            Err(_) => crate::census::ProcessObservation::Unknown(
+                crate::census::ObservationIssue::Malformed,
+            ),
+        }
+    }
     fn census(&self, limit: usize) -> Result<crate::census::Census, crate::census::CensusError> {
         crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
             .census(limit)
