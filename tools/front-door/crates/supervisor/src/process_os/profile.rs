@@ -1,6 +1,8 @@
-//! Anonymous profile custody. On Darwin /dev/fd duplicates a file description:
-//! a read-only description cannot be reopened for writing, even by its owner.
+//! Anonymous, verified profile custody across both guardian handoffs. At the
+//! final spawn edge a verified snapshot feeds an inherited read pipe: Darwin's
+//! sandbox-exec rewrites regular-file /dev/fd names and cannot consume them.
 use provenant_os::fs::Directory;
+use provenant_os::sys::profile::{ProfilePipe, ProfileSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -24,18 +26,12 @@ pub struct ProfileFile {
     identity: ProfileIdentity,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("sandbox profile transport refused: {0}")]
-struct ProfileTransportError(String);
-
 pub(crate) fn failure(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(ProfileTransportError(error.to_string()))
+    provenant_os::sys::profile::failure(error)
 }
 
 pub(crate) fn is_transport_error(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|source| source.is::<ProfileTransportError>())
+    provenant_os::sys::profile::is_transport_error(error)
 }
 
 impl ProfileFile {
@@ -109,7 +105,7 @@ impl ProfileFile {
         let mut offset = 0;
         let mut buffer = [0_u8; 65536];
         loop {
-            // Positional reads leave the shared offset at zero for sandbox-exec.
+            // Positional reads do not disturb other custody verifiers.
             let count = self.file.read_at(&mut buffer, offset).map_err(failure)?;
             if count == 0 {
                 break;
@@ -121,8 +117,7 @@ impl ProfileFile {
         if offset != self.identity.bytes || digest != self.identity.sha256 {
             return Err(failure("file content changed after verification"));
         }
-        // Darwin /dev/fd shares this offset. Repeated fixture consumers must
-        // start at zero too; a failed rewind is a launch refusal.
+        // Keep the staged-file API repeatable for direct fixture readers too.
         (&self.file).seek(SeekFrom::Start(0)).map_err(failure)?;
         Ok(())
     }
@@ -133,10 +128,50 @@ impl ProfileFile {
             || argv[0] != "/usr/bin/sandbox-exec"
             || argv[1] != "-f"
             || argv[2] != self.path()
+            || argv[3].is_empty()
+            || argv[3].as_encoded_bytes().starts_with(b"-")
         {
             return Err(failure("command does not consume the held descriptor"));
         }
         Ok(())
+    }
+}
+
+impl ProfileSource for ProfileFile {
+    fn prepare(&self, argv: &[OsString]) -> io::Result<ProfilePipe> {
+        self.verify_command(argv)?;
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        let mut buffer = [0_u8; 65536];
+        loop {
+            let count = self.file.read_at(&mut buffer, offset).map_err(failure)?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            offset += count as u64;
+        }
+        // Hash the actual snapshot sent to the pipe, not just an earlier read.
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if offset != self.identity.bytes || digest != self.identity.sha256 {
+            return Err(failure("profile snapshot changed before pipe transport"));
+        }
+        let pipe = ProfilePipe::new(bytes, argv)?;
+        self.verify_pipe_command(&pipe, pipe.argv())?;
+        Ok(pipe)
+    }
+}
+
+impl ProfileFile {
+    /// Final-form verification uses the prepared pipe's exact argv binding;
+    /// accepting an arbitrary /dev/fd path here would lose custody.
+    pub fn verify_pipe_command(&self, pipe: &ProfilePipe, argv: &[OsString]) -> io::Result<()> {
+        self.verify()?;
+        let digest: [u8; 32] = Sha256::digest(pipe.bytes()).into();
+        if pipe.bytes().len() as u64 != self.identity.bytes || digest != self.identity.sha256 {
+            return Err(failure("pipe snapshot does not match verified profile"));
+        }
+        pipe.verify_command(argv)
     }
 }
 
@@ -146,7 +181,52 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::Read;
 
-    // Medium: real filesystem custody, without Seatbelt or subprocesses.
+    // Medium: bind both forms to the verified bytes and the exact owned fd.
+    #[test]
+    fn profile_commands_bind_only_the_verified_source_and_pipe() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(root.path())?;
+        let profile = ProfileFile::create(b"(version 1)\n(allow default)\n", &directory)?;
+        let argv = vec![
+            "/usr/bin/sandbox-exec".into(),
+            "-f".into(),
+            profile.path(),
+            "/usr/bin/true".into(),
+        ];
+        profile.verify_command(&argv)?;
+        let pipe = profile.prepare(&argv)?;
+        profile.verify_pipe_command(&pipe, pipe.argv())?;
+        assert_ne!(pipe.argv()[2], profile.path());
+        assert!(profile.verify_command(pipe.argv()).is_err());
+        for (index, value) in [
+            (0, "/bin/sh"),
+            (1, "-p"),
+            (2, "/dev/fd/999"),
+            (2, "/dev/stdin"),
+            (2, "/tmp/profile.sb"),
+            (3, "-p"),
+            (3, "-f"),
+            (3, ""),
+        ] {
+            let mut changed = argv.clone();
+            changed[index] = value.into();
+            assert!(profile.verify_command(&changed).is_err());
+            let mut changed = pipe.argv().to_vec();
+            changed[index] = value.into();
+            assert!(profile.verify_pipe_command(&pipe, &changed).is_err());
+        }
+        assert!(profile.verify_command(&argv[..3]).is_err());
+        assert!(
+            profile
+                .verify_pipe_command(&pipe, &pipe.argv()[..3])
+                .is_err()
+        );
+        let forged = ProfilePipe::new(b"(version 1)\n(allow default)\n;different".to_vec(), &argv)?;
+        assert!(profile.verify_pipe_command(&forged, forged.argv()).is_err());
+        Ok(())
+    }
+
+    // Medium: real filesystem custody and repeated pipe consumers; no Seatbelt.
     #[test]
     fn anonymous_profile_preserves_large_bytes_and_refuses_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -184,6 +264,28 @@ mod tests {
         let mut applied = Vec::new();
         profile.file.try_clone()?.read_to_end(&mut applied)?;
         assert_eq!(applied, bytes);
+        let identity = profile.identity().clone();
+        for _ in 0..2 {
+            let argv = vec![
+                "/usr/bin/sandbox-exec".into(),
+                "-f".into(),
+                profile.path(),
+                "/bin/cat".into(),
+            ];
+            let pipe = profile.prepare(&argv)?;
+            let output = tempfile::tempfile()?;
+            let mut command = std::process::Command::new("/bin/cat");
+            command.arg(&pipe.argv()[2]).stdout(output.try_clone()?);
+            provenant_os::sys::child::configure_command(&mut command, &[pipe.fd()], None, false)?;
+            let mut child = command.spawn()?;
+            pipe.finish(&mut child)?;
+            assert!(child.wait()?.success());
+            let mut applied = vec![0; bytes.len()];
+            output.read_exact_at(&mut applied, 0)?;
+            assert_eq!(output.metadata()?.len(), bytes.len() as u64);
+            assert_eq!(applied, bytes);
+            assert_eq!(profile.identity(), &identity);
+        }
         std::fs::remove_dir(root.path())?;
         let error = ProfileFile::create(b"profile", &directory).unwrap_err();
         assert!(

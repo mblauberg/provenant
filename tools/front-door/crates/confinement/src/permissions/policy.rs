@@ -42,7 +42,11 @@ pub fn resolve_boundary_path(path: &Path) -> Result<PathBuf, PermissionError> {
                 let suffix = path
                     .strip_prefix(ancestor)
                     .map_err(|_| PermissionError::InvalidPath(path.to_owned()))?;
-                return Ok(base.join(suffix));
+                return Ok(if suffix.as_os_str().is_empty() {
+                    base
+                } else {
+                    base.join(suffix)
+                });
             }
             Err(error)
                 if matches!(
@@ -576,6 +580,14 @@ mod boundary_resolution_tests {
         let home = base.join("home");
         std::fs::create_dir(&home)?;
         std::fs::write(home.join(".cargo"), b"file")?;
+        // Existing leaves (including symlink targets) must not acquire a
+        // trailing slash when the unresolved suffix is empty.
+        let credential = base.join("credential");
+        std::fs::write(&credential, b"synthetic")?;
+        std::os::unix::fs::symlink(&credential, home.join(".claude.json"))?;
+        for path in [home.join(".cargo"), home.join(".claude.json")] {
+            validate_absolute(&resolve_boundary_path(&path)?)?;
+        }
         let source = base.join("source");
         std::fs::create_dir(&source)?;
         let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());

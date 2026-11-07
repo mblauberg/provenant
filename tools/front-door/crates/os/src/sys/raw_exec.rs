@@ -83,7 +83,7 @@ pub struct SpawnSpec<'a> {
     pub input: bool,
     pub secret_input: Option<&'a crate::exec::SecretInput>,
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
-    pub inherited_profile: Option<&'a std::fs::File>,
+    pub inherited_profile: Option<&'a dyn super::profile::ProfileSource>,
     /// A second descriptor the child and its descendants keep open; the lane
     /// port block, so it lasts as long as the process tree does.
     pub inherited_ports: Option<&'a crate::fs::LockGuard>,
@@ -91,7 +91,7 @@ pub struct SpawnSpec<'a> {
     pub capture_stdout: bool,
     pub capture_stderr: bool,
 }
-fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
+pub(super) fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     // SAFETY: fd is borrowed and live for both calls; flags belong to this
     // private pipe description. No pointer, ownership or shared state escapes.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
@@ -105,6 +105,54 @@ fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     }
     Ok(())
 }
+/// Observe an owned direct child without releasing its PID/PGID reservation.
+/// The caller must retain the unreaped Child while using the result.
+pub(super) fn child_exited(pid: u32) -> io::Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: the caller owns this unreaped direct child and reserves its PID/PGID.
+    // waitid borrows aligned output storage; WNOWAIT keeps that identity
+    // reserved until the caller explicitly reaps it.
+    let mut interrupted = 0;
+    loop {
+        // SAFETY: the owned child and writable siginfo storage above
+        // remain live across retries; WNOWAIT retains its PID.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as _,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted || interrupted == 8 {
+            return Err(error);
+        }
+        interrupted += 1;
+    }
+    // SAFETY: successful waitid initialises siginfo; zero PID means
+    // that no exit is ready. Linux exposes this field through a union.
+    let info = unsafe { info.assume_init() };
+    #[cfg(target_os = "linux")]
+    // SAFETY: waitid initialised this siginfo; si_pid reads its PID union.
+    let seen_pid = unsafe { info.si_pid() };
+    #[cfg(not(target_os = "linux"))]
+    let seen_pid = info.si_pid;
+    if seen_pid == 0 {
+        return Ok(false);
+    }
+    if seen_pid != pid as i32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "waitid observed another child",
+        ));
+    }
+    Ok(true)
+}
+
 impl OwnedPid {
     pub fn spawn(permit: Permit, spec: SpawnSpec<'_>) -> io::Result<Self> {
         Self::spawn_with_setup(permit, spec, |result| {
@@ -125,8 +173,12 @@ impl OwnedPid {
         spec: SpawnSpec<'_>,
         setup: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<Self> {
-        let (program, args) = spec
-            .argv
+        let profile = spec
+            .inherited_profile
+            .map(|source| source.prepare(spec.argv))
+            .transpose()?;
+        let argv = profile.as_ref().map_or(spec.argv, |pipe| pipe.argv());
+        let (program, args) = argv
             .split_first()
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         let mut command = Command::new(program);
@@ -166,8 +218,8 @@ impl OwnedPid {
         {
             pass.push(lease.handoff_file().as_fd());
         }
-        if let Some(profile) = spec.inherited_profile {
-            pass.push(profile.as_fd());
+        if let Some(profile) = &profile {
+            pass.push(profile.fd());
         }
         if let (Some(pipe), Some(input)) = (&secret, spec.secret_input) {
             environment = pipe.environment(input, &environment);
@@ -179,7 +231,13 @@ impl OwnedPid {
             Some(&environment),
             spec.process_group,
         )?;
-        let child = command.spawn()?;
+        let child = command.spawn().map_err(|error| {
+            if profile.is_some() {
+                super::profile::failure(format!("confined exec failed: {error}"))
+            } else {
+                error
+            }
+        })?;
         drop(secret);
         let mut result = Self {
             child: Some(child),
@@ -191,6 +249,13 @@ impl OwnedPid {
             stdout: None,
             stderr: None,
         };
+        if let Some(profile) = profile
+            && let Some(child) = result.child.as_mut()
+            && let Err(error) = profile.finish(child)
+        {
+            result.kill_before_transfer();
+            return Err(error);
+        }
         if let Some(child) = result.child.as_mut() {
             result.stdin = child.stdin.take();
             result.stdout = child.stdout.take();
@@ -252,47 +317,8 @@ impl OwnedPid {
                 .as_ref()
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
                 .id();
-            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-            // SAFETY: this owned, unreaped direct child reserves its PID/PGID.
-            // waitid borrows aligned output storage; WNOWAIT keeps that identity
-            // reserved until group cleanup completes and try_wait reaps below.
-            let mut interrupted = 0;
-            loop {
-                // SAFETY: the owned child and writable siginfo storage above
-                // remain live across retries; WNOWAIT retains its PID.
-                let result = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        pid as _,
-                        info.as_mut_ptr(),
-                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                    )
-                };
-                if result == 0 {
-                    break;
-                }
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted || interrupted == 8 {
-                    return Err(error);
-                }
-                interrupted += 1;
-            }
-            // SAFETY: successful waitid initialises siginfo; zero PID means
-            // that no exit is ready. Linux exposes this field through a union.
-            let info = unsafe { info.assume_init() };
-            #[cfg(target_os = "linux")]
-            // SAFETY: waitid initialised this siginfo; si_pid reads its PID union.
-            let seen_pid = unsafe { info.si_pid() };
-            #[cfg(not(target_os = "linux"))]
-            let seen_pid = info.si_pid;
-            if seen_pid == 0 {
+            if !child_exited(pid)? {
                 return Ok(None);
-            }
-            if seen_pid != pid as i32 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "waitid observed another child",
-                ));
             }
             // SAFETY: WNOWAIT still reserves this private group leader's PID.
             // Killing before reaping cannot target a recycled process group.

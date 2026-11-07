@@ -93,8 +93,9 @@ fn native_attempt_mach_lookups_preserve_custody_membership()
                 "dev.synthetic.ambient-service".into(),
             ],
             &attempt,
+            &provenant_os::fs::Directory::open_anchor(&root)?,
         )?;
-        let result = executor.execute(ExecOptions::new(&command, &root, Duration::from_secs(3)))?;
+        let result = executor.execute(command.options(&root, Duration::from_secs(3))?)?;
         assert!(successful_probe(&result), "writer={writer}: {result:?}");
     }
     Ok(())

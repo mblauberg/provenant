@@ -51,6 +51,7 @@
   (allow system-mac-syscall (mac-syscall-number 2)))
 (allow sysctl-read)
 (deny sysctl-read (sysctl-name-prefix "kern.procargs"))
+(deny mach-lookup (global-name-prefix "dev.provenant.attempt."))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (deny signal)

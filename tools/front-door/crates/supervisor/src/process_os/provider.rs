@@ -445,7 +445,7 @@ struct SpawnDescriptors<'a> {
     lease: &'a provenant_os::fs::LockGuard,
     secret: Option<&'a child::SecretPipe>,
     ports: Option<&'a provenant_os::fs::LockGuard>,
-    profile: Option<&'a std::fs::File>,
+    profile: Option<BorrowedFd<'a>>,
 }
 
 fn spawn_identified(
@@ -474,7 +474,7 @@ fn spawn_identified(
     }
     let mut pass = lease_descriptors(lease, ports);
     if let Some(profile) = profile {
-        pass.push(profile.as_fd());
+        pass.push(profile);
     }
     if let Some(pipe) = secret {
         pass.push(pipe.fd());
@@ -536,7 +536,11 @@ fn spawn_identified(
         .and_then(|identity| identity);
     match (spawned, identity) {
         (Ok(child), Ok(identity)) => Ok((child, identity, permit)),
-        (Ok(child), Err(error)) => {
+        (Ok(mut child), Err(error)) => {
+            // SAFETY: this just-spawned, unreaped child owns its process group;
+            // its PID/PGID is reserved until the reaper receives custody.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.kill();
             permit.transfer(child);
             Err(error)
         }
@@ -690,8 +694,12 @@ impl ProviderGroup {
         boot: &str,
         priority: u8,
     ) -> io::Result<Self> {
-        let (program, args) = spec
-            .argv
+        let profile = spec
+            .inherited_profile
+            .map(|source| source.prepare(spec.argv))
+            .transpose()?;
+        let argv = profile.as_ref().map_or(spec.argv, |pipe| pipe.argv());
+        let (program, args) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty provider argv"))?;
         let reaper = Reaper::new(1)?;
@@ -737,7 +745,7 @@ impl ProviderGroup {
             } else {
                 Stdio::null()
             });
-        let (child, identity, permit) = spawn_identified(
+        let (mut child, identity, permit) = spawn_identified(
             command,
             &env,
             boot,
@@ -746,9 +754,19 @@ impl ProviderGroup {
                 lease,
                 secret: secret.as_ref(),
                 ports: spec.inherited_ports,
-                profile: spec.inherited_profile,
+                profile: profile.as_ref().map(|pipe| pipe.fd()),
             },
         )?;
+        if let Some(profile) = profile
+            && let Err(error) = profile.finish(&mut child)
+        {
+            // SAFETY: the just-spawned child owns its process group. Until it
+            // is reaped its PID/PGID cannot be reused; kill retains no pointer.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.kill();
+            permit.transfer(child);
+            return Err(error);
+        }
         drop(secret);
         drop(priority_writer);
         let mut evidence = [0_u8; 8];

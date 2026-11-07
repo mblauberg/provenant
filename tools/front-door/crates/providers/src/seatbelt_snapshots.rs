@@ -715,20 +715,30 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
                 &provenant_core::AttemptId::from_bytes([1; 16]),
                 &provenant_os::fs::Directory::open_anchor(&root)?,
             )?;
-            let mut process = std::process::Command::new(&command[0]);
+            use provenant_os::sys::profile::ProfileSource;
+            let pipe = command.profile.prepare(&command)?;
+            let mut process = std::process::Command::new(&pipe.argv()[0]);
             process
-                .args(&command[1..])
+                .args(&pipe.argv()[1..])
                 .current_dir(&worktree)
                 .env_clear()
                 .envs(spec.env.iter().cloned());
-            use std::os::fd::AsFd;
             provenant_os::sys::child::configure_command(
                 &mut process,
-                &[command.profile.file().as_fd()],
+                &[pipe.fd()],
                 Some(&spec.env),
                 false,
             )?;
-            Ok(process.output()?)
+            process
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = process.spawn()?;
+            if let Err(error) = pipe.finish(&mut child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+            Ok(child.wait_with_output()?)
         };
     for args in [&["log", "-1"][..], &["diff", "HEAD~1"][..]] {
         let argv: Vec<std::ffi::OsString> =

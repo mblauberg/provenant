@@ -44,7 +44,10 @@ policy is in the [supervisor spec](../../../../docs/specs/supervisor.md#permissi
 It returns an owned `ConfinedCommand`: keep its anonymous read-only profile file
 through launch, and use `options` for direct fixture execution. Run stages under
 the selected host state root and passes the file into guardian custody. The
-profile never enters exec argv: `sandbox-exec -f /dev/fd/N` consumes the held file.
+profile never enters exec argv. At the final spawn edge,
+`sandbox-exec -f /dev/fd/N` consumes a pipe fed from the verified file bytes.
+Launch refuses write failures and incomplete consumption, and joins the writer
+before returning from spawn.
 The applied digest includes the attempt's Mach lookup rule.
 
 No provider profile files are loaded from configuration here. Unsupported or nested enforcement refuses before launch. Linux builds

@@ -1963,10 +1963,9 @@ impl Driver<'_> {
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),
                             inherited_lease: None,
-                            inherited_profile: self
-                                .profile_file
-                                .as_ref()
-                                .map(crate::ProfileFile::file),
+                            inherited_profile: self.profile_file.as_ref().map(|profile| {
+                                profile as &dyn provenant_os::sys::profile::ProfileSource
+                            }),
                             inherited_ports: ports,
                             process_group: false,
                             capture_stdout: plan.stdout.piped(),

@@ -151,8 +151,8 @@ pub struct ExecOptions<'a> {
     pub secret_input: Option<&'a SecretInput>,
     /// Pass a lane or updater lease through exec, including to descendants.
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
-    /// Held, read-only anonymous profile consumed by sandbox-exec.
-    pub inherited_profile: Option<&'a std::fs::File>,
+    /// Verified profile custody; prepare a read pipe at the final exec edge.
+    pub inherited_profile: Option<&'a dyn crate::sys::profile::ProfileSource>,
     /// Run in a private session and kill the whole group immediately on timeout.
     pub process_group: bool,
     /// Run in a private session and kill remaining group members on every exit,

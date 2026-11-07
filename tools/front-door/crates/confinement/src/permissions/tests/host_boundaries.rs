@@ -170,8 +170,9 @@ if printf overwrite > "$6"; then exit 85; fi
                 if selected { "yes" } else { "no" }.into(),
             ],
             &provenant_core::AttemptId::from_bytes([9; 16]),
+            &provenant_os::fs::Directory::open_anchor(&root)?,
         )?;
-        let result = executor.execute(ExecOptions::new(&command, &root, Duration::from_secs(5)))?;
+        let result = executor.execute(command.options(&root, Duration::from_secs(5))?)?;
         assert!(successful_probe(&result), "selected={selected}: {result:?}");
     }
     Ok(())
