@@ -4,6 +4,7 @@ use provenant_core::Roots;
 use provenant_os::fs::Directory;
 use std::{
     ffi::{OsStr, OsString},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -60,8 +61,8 @@ fn inventory_error(path: &Path, stage: &'static str) -> PermissionError {
 }
 
 // Declared file layouts in provider identities and host credential stores.
-// Identity directory names are arbitrary, so inspect these names in every
-// inventoried store, without listing it or opening credential contents.
+// Identity directory names are arbitrary. These endpoints are also tracked
+// when missing, so a later change is caught during compilation.
 const HOST_CREDENTIAL_ENDPOINTS: &[&str] = &[
     "oauth_creds.json",
     "hosts.yml",
@@ -69,6 +70,129 @@ const HOST_CREDENTIAL_ENDPOINTS: &[&str] = &[
     "login.keychain-db",
     "Library/Keychains/login.keychain-db",
 ];
+
+const CREDENTIAL_WALK_MAX_DEPTH: usize = 8;
+const CREDENTIAL_WALK_MAX_ENTRIES: usize = 4096;
+
+fn inventory_links(
+    mandatory: &mut MandatoryRoots,
+    root: &PathGrant,
+    source: &Path,
+    scratch: &Path,
+) -> Result<(), PermissionError> {
+    let mut pending = vec![(root.path.clone(), 0)];
+    let mut count = 0;
+    while let Some((directory, depth)) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: cannot inspect credential directory {}",
+                    directory.display()
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: cannot inspect an entry in credential directory {}",
+                    directory.display()
+                );
+                continue;
+            };
+            if count == CREDENTIAL_WALK_MAX_ENTRIES {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: credential symlink inventory entry limit reached at {}",
+                    root.path.display()
+                );
+                return Ok(());
+            }
+            count += 1;
+            let Ok(kind) = entry.file_type() else {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: cannot inspect credential entry in {}",
+                    directory.display()
+                );
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_symlink() {
+                let (Ok(target), Ok(metadata)) =
+                    (resolve_boundary_path(&path), std::fs::metadata(&path))
+                else {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: cannot resolve credential symlink {}",
+                        path.display()
+                    );
+                    continue;
+                };
+                let scope = if metadata.is_dir() {
+                    PathScope::Subtree
+                } else {
+                    PathScope::Exact
+                };
+                if scope == PathScope::Subtree
+                    && (source.starts_with(&target) || scratch.starts_with(&target))
+                {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: skipping credential symlink target covering source or scratch: {}",
+                        path.display()
+                    );
+                    continue;
+                }
+                if (PathGrant {
+                    path: target.clone(),
+                    scope,
+                })
+                .validate()
+                .is_err()
+                    || (PathGrant {
+                        path: path.clone(),
+                        scope,
+                    })
+                    .validate()
+                    .is_err()
+                {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: cannot represent credential symlink target: {}",
+                        path.display()
+                    );
+                    continue;
+                }
+                for path in [path, target] {
+                    mandatory.add_credentials_alias(root, PathGrant { path, scope })?;
+                }
+            } else if kind.is_dir() {
+                if depth + 1 >= CREDENTIAL_WALK_MAX_DEPTH {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: credential symlink inventory depth limit reached at {}",
+                        path.display()
+                    );
+                } else {
+                    pending.push((path, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 impl MandatoryRoots {
     /// Complete the host inventory before an enforcing launch. Credentials and
@@ -78,6 +202,27 @@ impl MandatoryRoots {
         roots: &Roots,
         home: &Path,
         source: &Path,
+        credentials: &[PathGrant],
+        github: &[PathGrant],
+        protected: &[PathGrant],
+    ) -> Result<Self, PermissionError> {
+        Self::for_host_with_scratch(
+            roots,
+            home,
+            source,
+            roots.state.as_path(),
+            credentials,
+            github,
+            protected,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_host_with_scratch(
+        roots: &Roots,
+        home: &Path,
+        source: &Path,
+        scratch: &Path,
         credentials: &[PathGrant],
         github: &[PathGrant],
         protected: &[PathGrant],
@@ -113,6 +258,8 @@ impl MandatoryRoots {
             .flat_map(|spec| spec.credential_files.iter().copied())
             .chain(HOST_CREDENTIAL_ENDPOINTS.iter().copied())
             .collect();
+        let resolved_source = resolve_boundary_path(source)?;
+        let resolved_scratch = resolve_boundary_path(scratch)?;
         for root in mandatory.credentials().to_vec() {
             let alias = resolve_boundary_path(&root.path)?;
             if alias != root.path {
@@ -125,9 +272,37 @@ impl MandatoryRoots {
                 )?;
             }
             if root.scope == PathScope::Subtree {
+                inventory_links(&mut mandatory, &root, &resolved_source, &resolved_scratch)?;
                 for endpoint in &endpoints {
                     let path = root.path.join(endpoint);
                     let target = resolve_boundary_path(&path)?;
+                    if target != path
+                        && target.is_dir()
+                        && (resolved_source.starts_with(&target)
+                            || resolved_scratch.starts_with(&target))
+                    {
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "warning: skipping credential endpoint target covering source or scratch: {}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    if target != path
+                        && (PathGrant {
+                            path: target.clone(),
+                            scope: PathScope::Exact,
+                        })
+                        .validate()
+                        .is_err()
+                    {
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "warning: cannot represent credential endpoint target: {}",
+                            path.display()
+                        );
+                        continue;
+                    }
                     // Also retain regular and missing endpoints for the final
                     // metadata recheck, without rendering redundant denials
                     // for files already covered by the store subtree.
@@ -154,7 +329,6 @@ impl MandatoryRoots {
         if state != roots.state.as_path() {
             mandatory.add_state_alias(subtree(&state))?;
         }
-        let resolved_source = resolve_boundary_path(source)?;
         if resolved_source != source {
             mandatory.add_source_alias(subtree(&resolved_source))?;
         }
@@ -245,6 +419,143 @@ mod tests {
         let mut input = provenant_core::RootInputs::new(root.join("home"), root.join("source"));
         input.state_dir = Some(root.join("state"));
         Ok(input.resolve(&provenant_os::fs::SystemPathResolver)?)
+    }
+
+    #[test]
+    fn inventory_finds_dotfiles_links_and_skips_lane_directories()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let store = home.join(".ssh");
+        let dotfiles = root.join("dotfiles");
+        let scratch = root.join("scratch");
+        for path in [&store, &dotfiles, &scratch, &dotfiles.join("keys")] {
+            std::fs::create_dir_all(path)?;
+        }
+        let key = dotfiles.join("id_rsa");
+        std::fs::write(&key, b"fixture")?;
+        std::os::unix::fs::symlink(&key, store.join("id_rsa"))?;
+        std::os::unix::fs::symlink(dotfiles.join("keys"), store.join("keys"))?;
+        let hidden = root.join("not-followed");
+        std::fs::write(&hidden, b"fixture")?;
+        std::os::unix::fs::symlink(&hidden, dotfiles.join("keys/nested"))?;
+        std::os::unix::fs::symlink(root.join("source"), store.join("source"))?;
+        std::os::unix::fs::symlink(root.join("source"), store.join("auth.json"))?;
+        std::os::unix::fs::symlink(&scratch, store.join("scratch"))?;
+        let inventory = MandatoryRoots::for_host_with_scratch(
+            &roots,
+            &home,
+            &root.join("source"),
+            &scratch,
+            &[],
+            &[],
+            &[],
+        )?;
+        for (path, scope) in [
+            (key, PathScope::Exact),
+            (dotfiles.join("keys"), PathScope::Subtree),
+        ] {
+            assert!(inventory.credentials().contains(&PathGrant { path, scope }));
+        }
+        for path in [root.join("source"), scratch] {
+            assert!(
+                !inventory
+                    .credentials()
+                    .iter()
+                    .any(|grant| grant.path == path)
+            );
+        }
+        assert!(
+            !inventory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == hidden)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_depth_limit_keeps_earlier_links() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let store = root.join("store");
+        let target = root.join("target");
+        std::fs::create_dir(&store)?;
+        std::fs::write(&target, b"fixture")?;
+        std::os::unix::fs::symlink(&target, store.join("found"))?;
+        let mut deep = store.clone();
+        for _ in 0..CREDENTIAL_WALK_MAX_DEPTH {
+            deep.push("nested");
+            std::fs::create_dir(&deep)?;
+        }
+        let missed = root.join("missed");
+        std::fs::write(&missed, b"fixture")?;
+        std::os::unix::fs::symlink(&missed, deep.join("link"))?;
+        let mut mandatory = MandatoryRoots::new(
+            &root.join("home"),
+            &root.join("state"),
+            &root.join("source"),
+        )?;
+        let grant = PathGrant {
+            path: store,
+            scope: PathScope::Subtree,
+        };
+        inventory_links(
+            &mut mandatory,
+            &grant,
+            &root.join("source"),
+            &root.join("scratch"),
+        )?;
+        assert!(
+            mandatory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == target)
+        );
+        assert!(
+            !mandatory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == missed)
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", feature = "snapshot"))]
+    #[test]
+    fn selected_exact_endpoint_keeps_only_its_dotfiles_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let store = home.join(".local/share/opencode");
+        let dotfiles = root.join("dotfiles");
+        std::fs::create_dir_all(&store)?;
+        std::fs::create_dir_all(&dotfiles)?;
+        let endpoint = store.join("auth.json");
+        let target = dotfiles.join("opencode-auth");
+        std::fs::write(&target, b"fixture")?;
+        std::os::unix::fs::symlink(&target, &endpoint)?;
+        let inventory =
+            MandatoryRoots::for_host(&roots, &home, &root.join("source"), &[], &[], &[])?;
+        let exact = |path| PathGrant {
+            path,
+            scope: PathScope::Exact,
+        };
+        assert!(inventory.credentials().contains(&exact(target.clone())));
+        assert_eq!(
+            inventory.credential_alias_reads(&[exact(endpoint)]),
+            vec![exact(target)]
+        );
+        assert!(
+            inventory
+                .credential_alias_reads(&[exact(store.join("other"))])
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]

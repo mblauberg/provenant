@@ -295,7 +295,7 @@ impl MandatoryRoots {
     pub fn credentials(&self) -> &[PathGrant] {
         &self.credentials
     }
-    /// A selected subtree login retains reads of its declared endpoints when
+    /// A selected login retains reads of its declared endpoints when
     /// those files resolve outside the store. This confers no refresh writes.
     #[cfg(any(target_os = "macos", feature = "snapshot"))]
     pub(crate) fn credential_alias_reads(&self, reads: &[PathGrant]) -> Vec<PathGrant> {
@@ -303,8 +303,9 @@ impl MandatoryRoots {
             .iter()
             .filter(|(path, target)| {
                 path != target
-                    && reads.iter().any(|grant| {
-                        grant.scope == PathScope::Subtree && path.starts_with(&grant.path)
+                    && reads.iter().any(|grant| match grant.scope {
+                        PathScope::Subtree => path.starts_with(&grant.path),
+                        PathScope::Exact => path == &grant.path,
                     })
             })
             .map(|(_, target)| PathGrant {

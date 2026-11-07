@@ -220,10 +220,11 @@ pub(super) fn confinement_request(
             &fixture_roots
         }
     };
-    let mut mandatory = provenant_confinement::permissions::MandatoryRoots::for_host(
+    let mut mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch(
         host_roots,
         roots.home,
         roots.cwd,
+        roots.scratch,
         roots.credential_roots,
         roots.github_roots,
         roots.protected_worktrees,

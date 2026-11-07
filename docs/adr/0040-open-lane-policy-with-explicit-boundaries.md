@@ -285,6 +285,14 @@ exists outside granted roots, such as an object in an earlier `git clone --local
 is not covered. New hard links remain denied. The owner accepts this limit;
 launches are not refused merely because a file has multiple links.
 
+Credential directory symlinks are inventoried without following directory
+links, up to a depth and entry limit per root. Hitting a limit warns and leaves
+the remaining links uninventoried. Links whose targets cover the lane source or
+scratch are skipped with a warning. Links introduced after inventory, or links
+that cannot be resolved or represented during the walk, cannot be covered by
+this walk. Existing declared endpoint validation still rejects unresolved
+dangling endpoint links.
+
 ## Consequences
 
 Optional host policy is observable and tolerant, while the boundaries remain
