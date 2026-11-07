@@ -233,8 +233,9 @@ fn inventory_links(
                 // credential endpoints. Do not spend the inventory budget on
                 // logs, messages or Git snapshots. Inspect links at these names
                 // above, and keep walking similarly named trees in other stores.
+                // A basename alone does not identify a provider's data root.
                 if depth == 0
-                    && root.path.file_name() == Some(OsStr::new("opencode"))
+                    && root.path == home.join(".local/share/opencode")
                     && ["log", "storage", "snapshot", "shell"]
                         .iter()
                         .any(|name| entry.file_name() == *name)
@@ -622,7 +623,8 @@ mod tests {
     fn inventory_skips_opencode_runtime_trees() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
-        let store = root.join("opencode");
+        let home = root.join("home");
+        let store = home.join(".local/share/opencode");
         let target = root.join("credential");
         std::fs::write(&target, b"fixture")?;
         for name in ["log", "storage", "snapshot", "shell"] {
@@ -647,7 +649,7 @@ mod tests {
                 path: store,
                 scope: PathScope::Subtree,
             },
-            &root,
+            &home,
             &root.join("source"),
             &root.join("scratch"),
             &mut warnings,
@@ -660,6 +662,36 @@ mod tests {
         assert!(mandatory.credentials().contains(&PathGrant {
             path: target,
             scope: PathScope::Exact
+        }));
+        Ok(())
+    }
+
+    // Medium: a registered store's name does not establish its provider.
+    #[test]
+    fn inventory_walks_unrelated_store_named_opencode() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let store = root.join("identity/opencode");
+        let target = root.join("credential");
+        std::fs::create_dir_all(store.join("storage"))?;
+        std::fs::write(&target, b"fixture")?;
+        std::os::unix::fs::symlink(&target, store.join("storage/link"))?;
+        let inventory = MandatoryRoots::for_host(
+            &roots,
+            &home,
+            &root.join("source"),
+            &[PathGrant {
+                path: store,
+                scope: PathScope::Subtree,
+            }],
+            &[],
+            &[],
+        )?;
+        assert!(inventory.credentials().contains(&PathGrant {
+            path: target,
+            scope: PathScope::Exact,
         }));
         Ok(())
     }
