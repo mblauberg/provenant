@@ -38,6 +38,7 @@ mod provider_retention;
 mod release_smoke;
 mod roots;
 mod settlement;
+mod staging_gc;
 mod status_wait;
 mod target_seed_build;
 mod usage;
