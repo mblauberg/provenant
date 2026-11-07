@@ -136,6 +136,7 @@ pub(super) fn prepare_command(
         roots,
         project,
         &source,
+        &cwd,
         &git,
         request,
         isolated,

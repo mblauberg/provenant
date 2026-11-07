@@ -67,7 +67,6 @@ impl ReadOnlyPolicy {
             });
         }
         Ok(ReadOnlyGrants {
-            #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
             root: repo.0.root_path().to_owned(),
             // The host binding is authority; the lane's Git marker is not.
             // Its subtree includes each linked worktree's private directory.
@@ -85,7 +84,6 @@ impl ReadOnlyPolicy {
 /// constructor that can turn a lane's Git marker into authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadOnlyGrants {
-    #[cfg(any(target_os = "macos", test, feature = "snapshot"))]
     pub(crate) root: std::path::PathBuf,
     pub(crate) git_reads: [PathGrant; 1],
     pub(crate) writes: Vec<PathGrant>,
@@ -105,6 +103,9 @@ impl ReadOnlyGrants {
         }
     }
 
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
     pub fn writable_paths(&self) -> &[String] {
         &self.relative
     }

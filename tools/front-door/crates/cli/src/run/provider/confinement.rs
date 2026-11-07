@@ -443,10 +443,12 @@ fn read_only_plan_preserves_typed_authority_failures() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn read_only_plan(
     roots: &provenant_core::Roots,
     project: ProjectId,
     cwd: &Path,
+    view: &Path,
     git: &Path,
     mut request: PlanRequest,
     isolated: bool,
@@ -519,6 +521,7 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
+            let scratch = request.permissions.scratch.path.clone();
             let plan = if live {
                 run::live_read_only_plan(&repo, &binding, request)
             } else if isolated {
@@ -526,15 +529,23 @@ pub(super) fn read_only_plan(
             } else {
                 run::read_only_plan(&roots.state, &repo, &binding, request)
             };
-            plan.map(|plan| {
-                (
-                    plan,
-                    head,
-                    provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
-                    Some(repo.private_git_dir().to_owned()),
-                )
-            })
-            .map_err(ReadOnlyPlanError::from)
+            let plan = plan.map_err(ReadOnlyPlanError::from)?;
+            let view_git = isolated.then(|| view.join(".git"));
+            let view_head = if let Some(path) = &view_git {
+                let raw = std::fs::read_to_string(path.join("HEAD"))
+                    .map_err(|error| error.to_string())?;
+                Some(provenant_core::GitOid::parse(raw.trim()).map_err(|error| error.to_string())?)
+            } else {
+                head
+            };
+            run::prepare_read_only_git(git, &repo, &scratch, view_git.as_deref(), view_head)
+                .map_err(ReadOnlyPlanError::from)?;
+            Ok((
+                plan,
+                head,
+                provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                Some(repo.private_git_dir().to_owned()),
+            ))
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
         None if isolated => Err(ReadOnlyPlanError::PinnedSourceRequiresGit),

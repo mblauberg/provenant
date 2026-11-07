@@ -395,7 +395,7 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                 assert!(spec.env.iter().all(|(name, _)| name != key), "{id} {key}");
             }
             let bound = spec.git_wrapper.bound.as_ref();
-            assert_eq!(bound.is_some(), access == Access::WorktreeWrite, "{id}");
+            assert!(bound.is_some(), "{id}");
             if let Some(bound) = bound {
                 assert_eq!(bound.worktree, Path::new("/fixture/repo"));
                 for (key, path) in [
@@ -418,7 +418,7 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                     assert!(spec.env.iter().all(|(name, _)| name != key), "{id} {key}");
                 }
             }
-            if access == Access::WorktreeWrite {
+            {
                 assert!(spec.env.iter().any(|(key, value)| {
                     key == "GIT_CONFIG_GLOBAL" && value == "/fixture/scratch/gitconfig"
                 }));
@@ -537,7 +537,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 .is_some_and(|spec| spec.launch.write)
         })
         .flat_map(|entry| {
-            [Access::WorktreeWrite]
+            [Access::WorktreeWrite, Access::ReadOnly]
                 .into_iter()
                 .map(move |access| (entry, access))
         })
@@ -635,7 +635,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
             })
             .collect();
         if access == Access::ReadOnly {
-            permissions.read_only = Some(ReadOnlyGrants::for_test(repo.clone(), vec![]));
+            permissions.read_only = Some(ReadOnlyGrants::for_test(linked.clone(), vec![]));
         } else {
             permissions.read_only = None;
             let mut mode = serde_json::to_value(&permissions.mode)?;
@@ -688,7 +688,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 _ => {}
             }
         }
-        if access == Access::WorktreeWrite {
+        {
             let objects = scratch.join("git-objects");
             std::fs::create_dir_all(objects.join("info"))?;
             std::fs::write(
@@ -784,6 +784,33 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
             .output()?;
         assert!(other_read.status.success());
         assert_eq!(other_read.stdout, other_head);
+        // The wrapper must discard its binding when Git selects another repository,
+        // even after its environment was cleared by the caller.
+        let other_via_wrapper = Command::new(scratch.join("bin/git"))
+            .current_dir(&linked)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .args(["-C", other.to_str().ok_or("other path")?, "rev-parse", "HEAD"])
+            .output()?;
+        assert!(other_via_wrapper.status.success());
+        assert_eq!(other_via_wrapper.stdout, other_head);
+        let explicit_other = Command::new(scratch.join("bin/git"))
+            .current_dir(&linked)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .arg(format!("--git-dir={}", other.join(".git").display()))
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(explicit_other.status.success());
+        assert_eq!(explicit_other.stdout, other_head);
+        if access == Access::ReadOnly {
+            std::fs::write(other.join("reader-upstream"), "fetched content")?;
+            host_git(&other, &["add".as_ref(), "reader-upstream".as_ref()]);
+            host_git(&other, &["commit".as_ref(), "-qm".as_ref(), "reader upstream".as_ref()]);
+            lane_git(&["-c".as_ref(), "protocol.file.allow=always".as_ref(), "fetch".as_ref(), "--quiet".as_ref(), "origin".as_ref(), "HEAD:refs/remotes/origin/reader".as_ref()]);
+            assert_eq!(lane_git(&["rev-parse".as_ref(), "FETCH_HEAD".as_ref()]), host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]));
+            assert_eq!(host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]), bound_head);
+        }
         let input = scratch.join("input");
         std::fs::write(&input, "lane scratch object")?;
         let oid = lane_git(&["hash-object".as_ref(), "-w".as_ref(), input.as_os_str()]);

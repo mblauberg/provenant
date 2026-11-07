@@ -9,6 +9,29 @@ pub(crate) fn prepare_refs(
     branch: &str,
     base: GitOid,
 ) -> Result<()> {
+    prepare_refs_from(
+        git,
+        repo.common_dir(),
+        repo.private_dir(),
+        repo.common_git_dir(),
+        repo.root_path(),
+        scratch,
+        &format!("ref: {branch}\n"),
+        Some((branch, base)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_refs_from(
+    git: &Path,
+    source_common: &Directory,
+    source_private: &Directory,
+    common_path: &Path,
+    root_path: &Path,
+    scratch: &Directory,
+    head: &str,
+    branch: Option<(&str, GitOid)>,
+) -> Result<()> {
     let common = directory(scratch, OsStr::new("git-common"))?;
     let write = |directory: &Directory, name: &str, bytes: &[u8]| -> Result<()> {
         directory
@@ -16,39 +39,29 @@ pub(crate) fn prepare_refs(
             .require_durable()?;
         Ok(())
     };
-    // Repository open refuses config includes. Keep the host's validated
-    // remotes and branch upstream, while the host never reads this mutable copy.
+    // Keep the repository's remotes and branch upstream in the lane copy.
+    // The host never reads this mutable copy back during settlement.
     write(
         &common,
         "config",
-        &repo
-            .common_dir()
-            .read_stable(OsStr::new("config"), 1024 * 1024)?,
+        &source_common.read_stable(OsStr::new("config"), 1024 * 1024)?,
     )?;
-    match repo
-        .common_dir()
-        .read_stable(OsStr::new("shallow"), 1024 * 1024)
-    {
+    match source_common.read_stable(OsStr::new("shallow"), 1024 * 1024) {
         Ok(bytes) => write(&common, "shallow", &bytes)?,
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    write(&common, "HEAD", format!("ref: {branch}\n").as_bytes())?;
+    write(&common, "HEAD", head.as_bytes())?;
     directory(&common, OsStr::new("objects"))?;
-    match repo
-        .private_dir()
-        .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
-    {
+    directory(&common, OsStr::new("refs"))?;
+    match source_private.read_stable(OsStr::new("index"), 64 * 1024 * 1024) {
         Ok(bytes) => write(&common, "index", &bytes)?,
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    // A continuation gets the same merge metadata as the host index.
-    for name in ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
-        match repo
-            .private_dir()
-            .read_stable(OsStr::new(name), 1024 * 1024)
-        {
+    // Preserve per-worktree settings and merge metadata alongside the index.
+    for name in ["config.worktree", "MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
+        match source_private.read_stable(OsStr::new(name), 1024 * 1024) {
             Ok(bytes) => write(&common, name, &bytes)?,
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
@@ -56,8 +69,8 @@ pub(crate) fn prepare_refs(
     }
     let refs = command(
         git,
-        repo.common_git_dir(),
-        repo.root_path(),
+        common_path,
+        root_path,
         &args(&[
             "for-each-ref",
             "--sort=refname",
@@ -68,16 +81,15 @@ pub(crate) fn prepare_refs(
     let mut packed = b"# pack-refs with: sorted\n".to_vec();
     packed.extend_from_slice(&refs);
     write(&common, "packed-refs", &packed)?;
-    let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
-    let mut parent_dir = common.try_clone()?;
-    for component in parent.split('/') {
-        parent_dir = directory(&parent_dir, OsStr::new(component))?;
+    if let Some((branch, base)) = branch {
+        let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
+        let mut parent_dir = common.try_clone()?;
+        for component in parent.split('/') {
+            parent_dir = directory(&parent_dir, OsStr::new(component))?;
+        }
+        write(&parent_dir, leaf, format!("{base}\n").as_bytes())?;
     }
-    write(&parent_dir, leaf, format!("{base}\n").as_bytes())?;
-    if let Ok(info) = repo
-        .common_dir()
-        .open_verified_directory(OsStr::new("info"))
-    {
+    if let Ok(info) = source_common.open_verified_directory(OsStr::new("info")) {
         match info.read_stable(OsStr::new("exclude"), 1024 * 1024) {
             Ok(bytes) => write(&directory(&common, OsStr::new("info"))?, "exclude", &bytes)?,
             Err(error) if error.is_not_found() => {}
@@ -85,6 +97,50 @@ pub(crate) fn prepare_refs(
         }
     }
     common.sync()?;
+    Ok(())
+}
+
+/// Prepare a disposable reader repository using the same snapshot as writers.
+pub(crate) fn prepare_read_only(
+    git: &Path,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    scratch: &Path,
+    view_git: Option<&Path>,
+    head: Option<GitOid>,
+) -> Result<()> {
+    repo.revalidate().map_err(|_| invalid())?;
+    let held = Directory::open_anchor(scratch)?;
+    let objects = directory(&held, OsStr::new("git-objects"))?;
+    let info = directory(&objects, OsStr::new("info"))?;
+    info.atomic_write(
+        OsStr::new("alternates"),
+        ".objects-",
+        format!(
+            "{}\n",
+            quote_alternate(&repo.common_git_dir().join("objects"))
+        )
+        .as_bytes(),
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    let view = view_git.map(Directory::open_anchor).transpose()?;
+    let private = view.as_ref().unwrap_or_else(|| repo.private_dir());
+    let head = match head {
+        Some(oid) => format!("{oid}\n"),
+        None => String::from_utf8(private.read_stable(OsStr::new("HEAD"), 1024)?)
+            .map_err(|_| invalid())?,
+    };
+    prepare_refs_from(
+        git,
+        repo.common_dir(),
+        private,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &held,
+        &head,
+        None,
+    )?;
+    repo.revalidate().map_err(|_| invalid())?;
     Ok(())
 }
 

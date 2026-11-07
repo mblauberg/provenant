@@ -502,18 +502,17 @@ pub(crate) fn base_env(
     env
 }
 
-/// Writer Git uses a complete private directory, including its index and all
-/// operation state. Shared metadata is read-only. The Git launcher applies
+/// Repository lanes use a complete private Git directory, including its index
+/// and operation state. Shared metadata is read-only. The Git launcher applies
 /// this binding inside the worktree, even when a provider's subprocess clears
 /// its environment, and nowhere else.
 pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
-    if !matches!(
-        input.confined.permissions().mode,
-        AccessMode::WorktreeWrite(_)
-    ) {
+    if matches!(input.confined.permissions().mode, AccessMode::ReadOnly)
+        && input.confined.permissions().read_only.is_none()
+    {
         let git = input.provenant.git;
         let bin = input
             .confined
@@ -614,10 +613,18 @@ pub(crate) fn private_git_objects(
     // identity to any Git executable, while `useConfigOnly` prevents fallback
     // to a generated hostname identity. The wrapper keeps the private binding
     // limited to this worktree.
+    let worktree = input
+        .confined
+        .permissions()
+        .read_only
+        .as_ref()
+        .map(|grants| grants.root())
+        .filter(|root| input.cwd.starts_with(root))
+        .unwrap_or(input.cwd);
     let mut bound = vec![
         ("GIT_DIR".into(), private.clone().into()),
         ("GIT_COMMON_DIR".into(), private.into()),
-        ("GIT_WORK_TREE".into(), input.cwd.into()),
+        ("GIT_WORK_TREE".into(), worktree.into()),
         (
             "GIT_OBJECT_DIRECTORY".into(),
             scratch.join("git-objects").into(),
@@ -640,7 +647,7 @@ pub(crate) fn private_git_objects(
         !identity
     });
     spec.git_wrapper.bound = Some(crate::lane::BoundGit {
-        worktree: input.cwd.to_owned(),
+        worktree: worktree.to_owned(),
         env: bound,
     });
     // A single source generates every Git shim, including Claude's scrub shim.

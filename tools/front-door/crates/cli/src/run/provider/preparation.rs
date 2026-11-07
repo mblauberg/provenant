@@ -2454,6 +2454,7 @@ pub(super) fn prepare_candidates(
                 roots,
                 project_id,
                 &source,
+                &cwd,
                 &git,
                 request,
                 isolated,
