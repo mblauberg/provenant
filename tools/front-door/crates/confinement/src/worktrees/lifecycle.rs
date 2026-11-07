@@ -309,6 +309,35 @@ pub fn create(
     create_with_default(context, request, cancel, None)
 }
 
+/// Fetch a remote branch when no local branch exists and return its exact tip.
+/// The fetch names the full remote ref, independent of configured refspecs.
+pub fn fetch_remote_branch_tip(
+    context: &WorktreeContext<'_>,
+    name: &str,
+    cancel: &CancelToken,
+) -> Result<Option<GitOid>, WorktreeError> {
+    let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
+    if read_branch_tips(context, cancel)?.contains_key(&branch) {
+        return Ok(None);
+    }
+    let remote = crate::utility::fetch_missing_remote_branch(
+        context.executor,
+        context.repo,
+        context.utility,
+        context.home,
+        &format!("origin/{name}"),
+        context.mutation_budget,
+        cancel,
+    )
+    .map_err(|_| WorktreeError::RemoteOnlyBranch {
+        branch: name.to_owned(),
+    })?;
+    match remote {
+        crate::utility::RemoteBase::Found(tip) => Ok(Some(tip)),
+        crate::utility::RemoteBase::NotRemote | crate::utility::RemoteBase::Missing => Ok(None),
+    }
+}
+
 fn create_with_default(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,

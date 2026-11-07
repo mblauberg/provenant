@@ -33,6 +33,49 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(), Box<dyn Error>> {
+    let source = Fixture::new()?;
+    source.run(&["branch", "remote-only"])?;
+    let mut fixture = Fixture::new()?;
+    fixture.run(&[
+        "remote",
+        "add",
+        "origin",
+        source.root.to_str().ok_or("source")?,
+    ])?;
+    fixture.run(&[
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ])?;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let tip = fetch_remote_branch_tip(&context, "remote-only", &cancel())?
+        .ok_or("remote branch tip was not fetched")?;
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "remote-only".into(),
+            base: Some(tip.to_string()),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(created.head, tip);
+    let local_tip = fixture.run(&["rev-parse", "refs/heads/remote-only"])?;
+    assert_eq!(
+        GitOid::parse(std::str::from_utf8(&local_tip.stdout.bytes)?.trim())?,
+        tip
+    );
+    Ok(())
+}
+
+#[test]
 fn create_defaults_to_fetched_remote_head_and_preserves_existing_and_explicit_bases()
 -> Result<(), Box<dyn Error>> {
     let source = Fixture::new()?;

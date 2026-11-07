@@ -16,6 +16,7 @@ use provenant_fabric_runtime::graph::{
     template::{Layer, TemplateLibrary},
 };
 use serde_json::{Value, json};
+use std::io::Write as _;
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
     ServiceError::Cli {
@@ -549,8 +550,17 @@ fn provision_in_context(
         .into_iter()
         .find(|entry| entry.path == expected)
     {
+        let expected_branch = format!("refs/heads/{branch}");
+        let remote_ref =
+            provenant_confinement::repo::GitRefName::new(format!("refs/remotes/origin/{branch}"))
+                .map_err(|_| WorktreeError::InvalidRequest)?;
+        let remote_tip = context
+            .facts
+            .resolve_commit(context, remote_ref.clone(), cancel)
+            .ok();
+        let seeded_at_remote_tip = remote_tip == Some(existing.head);
         if existing.branch.as_deref() != Some(format!("refs/heads/{branch}").as_str())
-            || existing.head.to_string() != source
+            || (existing.head.to_string() != source && !seeded_at_remote_tip)
         {
             return Err(WorktreeError::InvalidRequest);
         }
@@ -582,30 +592,49 @@ fn provision_in_context(
             },
         )?;
         worktrees::check_writer_terminal(tree.repo())?;
-        let reference =
-            provenant_confinement::repo::GitRefName::new(format!("refs/heads/{branch}"))
-                .map_err(|_| WorktreeError::IdentityChanged)?;
+        let reference = provenant_confinement::repo::GitRefName::new(expected_branch)
+            .map_err(|_| WorktreeError::IdentityChanged)?;
         let head = tree
             .repo()
             .private_dir()
             .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
-        if head != format!("ref: {}\n", reference.as_str()).as_bytes()
-            || context
+        let branch_tip = context
+            .facts
+            .resolve_commit(context, reference.clone(), cancel)?;
+        let current_remote_tip = if existing.head.to_string() == source {
+            None
+        } else {
+            context
                 .facts
-                .resolve_commit(context, reference, cancel)?
-                .to_string()
-                != source
+                .resolve_commit(context, remote_ref, cancel)
+                .ok()
+        };
+        if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+            || branch_tip != existing.head
+            || (existing.head.to_string() != source && current_remote_tip != Some(existing.head))
         {
             return Err(WorktreeError::IdentityChanged);
         }
         worktrees::require_clean_worktree(context, &mut tree, cancel)?;
         return Ok(());
     }
+    let remote_tip = worktrees::fetch_remote_branch_tip(context, branch, cancel)?;
+    let base = if let Some(tip) = remote_tip {
+        if source != tip.to_string() {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: ignoring --base {source} for --branch {branch}; using remote tip {tip}"
+            );
+        }
+        tip.to_string()
+    } else {
+        source.to_owned()
+    };
     worktrees::create(
         context,
         WorktreeCreate {
             branch: branch.into(),
-            base: Some(source.into()),
+            base: Some(base),
         },
         cancel,
     )
