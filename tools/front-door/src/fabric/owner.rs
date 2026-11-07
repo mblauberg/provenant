@@ -1413,6 +1413,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             &self.factory.context,
             path,
             source,
+            self.budget,
             self.cancel,
         )
         .map(|()| true)
