@@ -163,13 +163,21 @@ impl BoundGraphOwner<'_> {
             .knobs
             .get("chair.refusal_notice")
             .map_or_else(|| serde_json::json!("inbox"), |knob| knob.value.clone());
-        // Facade serialisers select safe fields (including a fixed dispatch
-        // reason and redacted worktree paths). Relay codes need the same
-        // grammar check as the facade's public code projection.
+        // Retain the safe diagnostic reason for dispatch refusals; persisting
+        // the original error can include host paths. Relay codes need the
+        // same grammar check as the facade's public code projection.
         let replay_error = match error {
             FacadeError::GraphRelayRefused { detail, .. } => FacadeError::GraphRelayRefused {
                 refusal_code: error.code().to_owned(),
                 detail: detail.clone(),
+            },
+            FacadeError::DispatchRefused { disk, fact, .. } => FacadeError::DispatchRefused {
+                reason: diagnostic
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "dispatch was refused".into()),
+                disk: disk.clone(),
+                fact: *fact,
             },
             error => error.clone(),
         };
@@ -3498,6 +3506,7 @@ mod journal_error_tests {
         let serialised = serde_json::to_string(&first)?;
         assert!(!serialised.contains("HOST_PATH_SENTINEL"));
         assert!(!serialised.contains("PROMPT_SENTINEL"));
+        assert!(serialised.contains("the writer worktree has uncommitted edits"));
         // This worktree cannot be prepared. The stored dispatch refusal must
         // win without consulting the filesystem or looking for an admitted run.
         let repeated = owner
@@ -3511,6 +3520,11 @@ mod journal_error_tests {
             )
             .unwrap_err();
         assert_eq!(repeated.code(), original.code());
+        assert!(
+            repeated
+                .to_string()
+                .contains("the writer worktree has uncommitted edits")
+        );
         assert_eq!(
             store
                 .operation(&scope.operation, &call)?

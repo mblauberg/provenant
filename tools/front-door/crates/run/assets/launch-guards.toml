@@ -30,6 +30,11 @@ boundary = "warning"
 reason = "Unreadable or invalid resource settings warn and use the compiled domains.run.grant_limit and domains.run.profile_limit_bytes defaults."
 
 [[guard]]
+site = "cli/src/run/provider/preparation.rs#dependency_preparation_event"
+boundary = "warning"
+reason = "Dependency preparation failures warn with lanes.prepare_deps and its compiled default or sealed profile origin; the provider may repair dependencies in the lane."
+
+[[guard]]
 site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
