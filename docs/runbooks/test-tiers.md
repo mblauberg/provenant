@@ -91,7 +91,10 @@ custody capture. `idle` holds its provider on a socket; `churn` loops spawning
 at the ordinary census cadence. The JSON identifies the workload and whether
 the Fabric child reader was present. The example uses synthetic admission and
 terminal records, with no provider credentials, disk callback or sandbox memory
-snapshot. It verifies cancellation, resolved cleanup, exit publication and
+snapshot. Its directory project has no `.git` or `config.toml`, so these numbers
+exclude Git probes and user TOML parsing. Measure those costs in a live Git lane
+on a host that permits the native utility sandbox. The example verifies
+cancellation, resolved cleanup, exit publication and
 writer-lock release before returning. Compare identical release builds and
 retain the process counts and native counter deltas with the before/after
 percentages; the sample paths expire with `TMPDIR`.
