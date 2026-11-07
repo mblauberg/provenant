@@ -250,6 +250,6 @@ event wiring remains with those callers.
   `src/tick_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
   `src/disk_guard.rs::settlement_collects_below_the_shared_floor_only`;
   `::lane_pause_rereads_the_floor_each_observation`;
-  `crates/run/src/dispatch_tests.rs::admission_rereads_gc_floor_after_submission_and_while_waiting`;
+  `crates/run/src/dispatch_writer_tests.rs::admission_rereads_gc_floor_after_submission_and_while_waiting`;
   `crates/confinement/src/disk.rs::lane_sample_uses_each_output_volume_and_propagates_errors`
 - Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/tick_agent.rs`
