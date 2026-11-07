@@ -52,7 +52,7 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn commit_source_codex_can_read_its_view_without_changing_adapter_writes()
+fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{AuthenticationProfile, ProviderProfile};
 
@@ -116,7 +116,7 @@ fn commit_source_codex_can_read_its_view_without_changing_adapter_writes()
             let plan = ConfinedPlan::new(request)?;
             let permissions = plan.permissions();
             let mandatory = permissions.policy.as_ref().ok_or("policy")?.mandatory();
-            let expected = if adapter == "codex" && kind == "commit" {
+            let expected = if kind == "commit" {
                 vec![grant(&view)]
             } else {
                 vec![]
@@ -146,7 +146,7 @@ fn commit_source_codex_can_read_its_view_without_changing_adapter_writes()
             }
             let rendered =
                 provenant_confinement::permissions::snapshot::render(permissions, &profile, &home)?;
-            if adapter == "codex" && kind == "commit" {
+            if kind == "commit" {
                 let state_read = rendered
                     .lines()
                     .find(|line| {
