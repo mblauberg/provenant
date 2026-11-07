@@ -486,7 +486,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
 }
 
 #[test]
-fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn std::error::Error>>
+fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result<(), Box<dyn std::error::Error>>
 {
     use provenant_core::{AttemptId, Digest, RunId, TaskId};
     use provenant_records::{
@@ -528,8 +528,8 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
         }))?;
         let state = Path::new("/fixture/missing-state");
         let result = continuation_for(&prior, &route, "fixture", state, state, state);
+        assert!(result.is_err(), "retained state is required for {adapter}");
         if adapter == "codex" {
-            assert!(result.is_err(), "Codex still requires its retained state");
             let session = "01234567-89ab-cdef-0123-456789abcdef";
             prior.session = Some(session.into());
             let rollout =
@@ -842,7 +842,23 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 transcript
             );
         } else {
-            assert_eq!(result?.session(), "fixture-session");
+            assert!(result.unwrap_err().to_string().contains("retained provider continuation is missing or expired"));
+            if adapter == "opencode" {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().canonicalize()?;
+                let state = root.join(format!("runs/{}/attempts/{}/provider-state", prior.run_id, prior.attempt_id));
+                let data = state.join("candidate-0/data/opencode");
+                std::fs::create_dir_all(&data)?;
+                let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+                db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"fixture","id":"model"}}"#))?;
+                drop(db);
+                let copied = root.join("copy");
+                continuation_available(&prior, &root, &root)?;
+                let resumed = continuation_for(&prior, &route, "fixture", &root, &root, &copied)?;
+                assert_eq!(resumed.session(), "fixture-session");
+                assert_eq!(provenant_providers::opencode::observe_model(&copied.join("data/opencode"), "fixture-session")?, "opencode/fixture/model");
+            }
             prior.session = None;
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());
         }

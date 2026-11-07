@@ -153,17 +153,24 @@ pub(super) fn continuation_for(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
-    match find_session_state_within(&prior_state, session, policy.limits) {
+    let located = if route.adapter == "opencode" {
+        super::observation::observe_opencode_session(&prior_state, session)
+            .ok()
+            .map(|(path, _)| path)
+    } else {
+        find_session_state_within(&prior_state, session, policy.limits)
+            .map_err(|exhausted| StateCopyError::resource(policy.fact(exhausted.limit(), None)))?
+    };
+    match located {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
         // the copied sessions instead of resolving back into settled history.
-        Ok(Some(retained)) => copy_state_classified(&retained, private_state, policy, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
-        // These adapters retain sessions in their existing user data stores.
-        Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
-        Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
-        // An unfinished search proves nothing missing, whatever the adapter.
-        Err(exhausted) => {
-            return Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into());
-        }
+        Some(retained) => copy_state_classified(
+            &retained,
+            private_state,
+            policy,
+            AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only),
+        )?,
+        None => return Err("retained provider continuation is missing or expired".into()),
     }
     Ok(continuation)
 }
@@ -310,6 +317,11 @@ pub(crate) fn continuation_available(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
+    if provider == "opencode" {
+        return super::observation::observe_opencode_session(&state, session)
+            .map(|_| ())
+            .map_err(|_| "retained provider continuation is missing or expired".into());
+    }
     match find_session_state_within(&state, session, policy.limits) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("retained provider continuation is missing or expired".into()),

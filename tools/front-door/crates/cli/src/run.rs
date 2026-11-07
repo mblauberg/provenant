@@ -690,16 +690,10 @@ impl Registry<'_> {
         let opencode_model = (model_observation
             == provenant_records::ModelObservation::SessionDatabase)
             .then(|| {
-                let data = std::env::var_os("XDG_DATA_HOME")
-                    .map(std::path::PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .or_else(|| self.home.map(|home| home.join(".local/share")))
-                    .map(|data| data.join(adapter.id()))
-                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
                 let session = outcome
                     .session()
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-                provenant_providers::opencode::observe_model(&data, session)
+                provider::observe_opencode_session(provider_state, session).map(|(_, model)| model)
             });
         let opencode_model = match opencode_model {
             Some(Ok(model)) => Some(model),
