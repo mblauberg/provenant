@@ -718,7 +718,28 @@ fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned(
     )
     .unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert!(owner.prompts[0].contains("```findings\n{\"schema_version\":1,\"findings\":[]}\n```"));
+    let (_, example) = owner.prompts[0]
+        .rsplit_once("```findings\n")
+        .expect("required findings prompt includes a fenced example");
+    let (example, _) = example
+        .split_once("\n```")
+        .expect("findings example has a closing fence");
+    let example: serde_json::Value =
+        serde_json::from_str(example).expect("findings example is valid JSON");
+    assert_eq!(example["schema_version"], 1);
+    let findings = example["findings"]
+        .as_array()
+        .expect("findings example contains an array");
+    let finding = findings
+        .first()
+        .and_then(serde_json::Value::as_object)
+        .expect("findings example demonstrates a finding");
+    for field in ["id", "severity", "file", "summary", "status"] {
+        assert!(
+            finding.get(field).and_then(serde_json::Value::as_str).is_some(),
+            "finding example has a string {field}"
+        );
+    }
 }
 
 #[test]
