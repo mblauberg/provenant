@@ -14,6 +14,31 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Resolve a denial without losing a dangling public symlink. A missing
+/// literal leaf is safe to deny by name, but a dangling link could acquire an
+/// unprotected target after compilation, when an ambient lane creates it.
+/// Inspect only metadata; credential contents are never opened.
+pub fn resolve_boundary_path(path: &Path) -> Result<PathBuf, PermissionError> {
+    validate_absolute(path)?;
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if std::fs::canonicalize(ancestor).is_err() {
+                    return Err(PermissionError::InvalidPath(ancestor.to_owned()));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(PermissionError::InvalidPath(ancestor.to_owned())),
+        }
+    }
+    provenant_core::PathResolver::resolve_existing_ancestor(
+        &provenant_os::fs::SystemPathResolver,
+        path,
+    )
+    .map_err(|_| PermissionError::InvalidPath(path.to_owned()))
+}
+
 /// Tolerant envelope for optional host policy. Decode entries at resolution,
 /// so a wrong type cannot discard a valid sibling or turn an optional setting
 /// into a boundary config error. Only resolved types reach the renderer.
@@ -23,14 +48,22 @@ pub struct HostPolicySettings(Value);
 
 /// Host-derived mandatory roots, never loaded from optional settings.
 /// Paths must be canonical host paths; the compiler must hold/revalidate their
-/// anchors before use. This inventory performs no filesystem access.
+/// anchors before use. Construction records paths without filesystem access;
+/// compilation separately revalidates them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MandatoryRoots {
     credentials: Vec<PathGrant>,
+    non_exempt: Vec<PathGrant>,
     state: PathGrant,
     source: PathGrant,
     git: Vec<PathGrant>,
     home: PathBuf,
+    protected: Vec<PathGrant>,
+    state_reads: Vec<PathGrant>,
+    state_exec: Vec<PathGrant>,
+    github: Vec<PathGrant>,
+    state_aliases: Vec<PathGrant>,
+    source_aliases: Vec<PathGrant>,
 }
 
 impl MandatoryRoots {
@@ -58,11 +91,28 @@ impl MandatoryRoots {
             }),
         );
         let roots = Self {
+            non_exempt: [
+                subtree(&home.join("Library/Keychains")),
+                subtree(&home.join("Archives/git-preservation")),
+                PathGrant {
+                    path: home.join(".claude.json"),
+                    scope: PathScope::Exact,
+                },
+            ]
+            .to_vec(),
             credentials,
             state: subtree(state),
             source: subtree(source),
             git: Vec::new(),
             home: home.to_owned(),
+            protected: Vec::new(),
+            state_reads: Vec::new(),
+            state_exec: Vec::new(),
+            github: [".config/gh", "Library/Application Support/GitHub CLI"]
+                .map(|relative| subtree(&home.join(relative)))
+                .to_vec(),
+            state_aliases: Vec::new(),
+            source_aliases: Vec::new(),
         };
         for grant in roots
             .credentials
@@ -82,12 +132,128 @@ impl MandatoryRoots {
         Ok(())
     }
 
+    /// Preserve mandatory category when a public credential spelling is a link.
+    pub fn add_credentials_alias(
+        &mut self,
+        original: &PathGrant,
+        alias: PathGrant,
+    ) -> Result<(), PermissionError> {
+        self.add_credentials(alias.clone())?;
+        if self.non_exempt.contains(original) {
+            self.non_exempt.push(alias);
+        }
+        Ok(())
+    }
+
+    pub fn non_exempt(&self) -> &[PathGrant] {
+        &self.non_exempt
+    }
+
     /// Add both the verified common Git dir and linked worktree Git dir.
     /// The writable lane-private Git dir is a separate host-owned exception.
     pub fn add_git(&mut self, root: PathGrant) -> Result<(), PermissionError> {
         root.validate()?;
         self.git.push(root);
         Ok(())
+    }
+
+    /// Other host-owned worktrees and controls remain readable and immutable.
+    pub fn add_protected(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        root.validate()?;
+        self.protected.push(root);
+        Ok(())
+    }
+
+    pub fn add_state_alias(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        root.validate()?;
+        self.state_aliases.push(root);
+        Ok(())
+    }
+
+    pub fn add_source_alias(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        root.validate()?;
+        self.source_aliases.push(root);
+        Ok(())
+    }
+
+    /// Only host-prepared prompt, input, skill and immutable release paths.
+    pub fn add_state_read(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        root.validate()?;
+        if root.path == self.state.path || self.state.path.starts_with(&root.path) {
+            return Err(PermissionError::ProtectedOverlap);
+        }
+        self.state_reads.push(root);
+        Ok(())
+    }
+
+    /// Verified immutable releases and staged user-skill snapshots may execute.
+    pub fn add_state_read_exec(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        self.add_state_read(root.clone())?;
+        self.state_exec.push(root);
+        Ok(())
+    }
+
+    pub fn state_exec(&self) -> &[PathGrant] {
+        &self.state_exec
+    }
+
+    /// Recheck public spellings and aliases immediately before and after
+    /// compilation. Missing leaves are resolved through their existing parent;
+    /// a newly introduced symlink target must already be denied in this family.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn revalidate_paths(&self) -> Result<(), PermissionError> {
+        let families: Vec<Vec<&PathGrant>> = vec![
+            self.credentials.iter().collect(),
+            std::iter::once(&self.state)
+                .chain(&self.state_aliases)
+                .collect(),
+            std::iter::once(&self.source)
+                .chain(&self.source_aliases)
+                .collect(),
+            self.git.iter().collect(),
+            self.protected.iter().collect(),
+        ];
+        for roots in families {
+            for root in &roots {
+                let resolved = resolve_boundary_path(&root.path).map_err(|_| {
+                    super::anchors::anchor_at(&root.path, "mandatory path resolution")
+                })?;
+                if !roots
+                    .iter()
+                    .any(|known| known.path == resolved && known.scope == root.scope)
+                {
+                    return Err(super::anchors::anchor_at(
+                        &root.path,
+                        "mandatory alias changed",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Host-resolved GitHub CLI configuration; always immutable.
+    pub fn add_github(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        self.add_credentials(root.clone())?;
+        self.github.push(root);
+        Ok(())
+    }
+
+    pub fn state_reads(&self) -> &[PathGrant] {
+        &self.state_reads
+    }
+    pub fn github(&self) -> &[PathGrant] {
+        &self.github
+    }
+
+    pub fn protected(&self) -> &[PathGrant] {
+        &self.protected
+    }
+    pub fn state_aliases(&self) -> &[PathGrant] {
+        &self.state_aliases
+    }
+    pub fn source_aliases(&self) -> &[PathGrant] {
+        &self.source_aliases
     }
 
     pub fn credentials(&self) -> &[PathGrant] {
@@ -119,6 +285,9 @@ impl MandatoryRoots {
         if self
             .git
             .iter()
+            .chain(&self.protected)
+            .chain(&self.state_aliases)
+            .chain(&self.source_aliases)
             .chain([&self.state, &self.source])
             .any(|root| root.overlaps(grant))
         {
@@ -184,9 +353,41 @@ impl LanePolicy {
     pub fn mandatory(&self) -> &MandatoryRoots {
         &self.mandatory
     }
+    /// Enrichment is host-owned, for verified Git handles acquired at launch.
+    pub fn mandatory_mut(&mut self) -> &mut MandatoryRoots {
+        &mut self.mandatory
+    }
     pub fn optional(&self) -> &OptionalPolicy {
         &self.optional
     }
+    /// Add resolved aliases without removing the public spelling. Denials only.
+    pub fn resolve_optional_aliases(
+        &mut self,
+        mut resolve: impl FnMut(&Path) -> Result<PathBuf, PermissionError>,
+    ) -> Result<(), PermissionError> {
+        for roots in [&mut self.optional.deny_read, &mut self.optional.deny_write] {
+            let aliases = roots
+                .iter()
+                .map(|root| {
+                    Ok(PathGrant {
+                        path: resolve(&root.path)?,
+                        scope: root.scope,
+                    })
+                })
+                .collect::<Result<Vec<_>, PermissionError>>()?;
+            for alias in aliases {
+                validate_absolute(&alias.path)?;
+                if !profile_path_representable(&alias.path) {
+                    return Err(PermissionError::InvalidPath(alias.path));
+                }
+                if !roots.contains(&alias) {
+                    roots.push(alias);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn source(&self) -> &PolicySource {
         &self.source
     }
@@ -297,5 +498,44 @@ impl HostPolicySettings {
             }
         }
         resolved
+    }
+}
+
+#[cfg(test)]
+mod boundary_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn boundary_resolution_refuses_dangling_links_but_keeps_absent_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        std::fs::create_dir(&home)?;
+        let credential_target = root.join("absent-credential-target");
+        let config_target = root.join("absent-config-target");
+        std::os::unix::fs::symlink(&credential_target, home.join(".ssh"))?;
+        std::os::unix::fs::symlink(&config_target, home.join(".config"))?;
+        for path in [home.join(".ssh"), home.join(".config/opencode")] {
+            assert!(matches!(
+                resolve_boundary_path(&path),
+                Err(PermissionError::InvalidPath(_))
+            ));
+        }
+        assert_eq!(
+            resolve_boundary_path(&home.join(".aws"))?,
+            home.join(".aws")
+        );
+        std::fs::create_dir(&credential_target)?;
+        std::fs::create_dir(&config_target)?;
+        assert_eq!(
+            resolve_boundary_path(&home.join(".ssh"))?,
+            credential_target
+        );
+        assert_eq!(
+            resolve_boundary_path(&home.join(".config/opencode"))?,
+            config_target.join("opencode")
+        );
+        Ok(())
     }
 }

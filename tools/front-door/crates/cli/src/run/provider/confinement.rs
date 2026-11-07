@@ -46,6 +46,10 @@ pub fn graph_node_inputs_directory(
 pub(super) struct ConfinementRoots<'a> {
     pub(super) cwd: &'a Path,
     pub(super) home: &'a Path,
+    pub(super) state: &'a Path,
+    pub(super) credential_roots: &'a [PathGrant],
+    pub(super) github_roots: &'a [PathGrant],
+    pub(super) protected_worktrees: &'a [PathGrant],
     pub(super) scratch: &'a Path,
     pub(super) private_state: &'a Path,
     pub(super) assets: &'a Path,
@@ -197,9 +201,97 @@ pub(super) fn confinement_request(
         path: path.to_owned(),
         scope: PathScope::Subtree,
     };
+    let mut mandatory = provenant_confinement::permissions::MandatoryRoots::new(
+        roots.home,
+        roots.state,
+        roots.cwd,
+    )?;
+    for credential in roots.credential_roots {
+        mandatory.add_credentials(credential.clone())?;
+    }
+    for credential in mandatory.credentials().to_vec() {
+        let alias = resolve_policy_path(&credential.path)?;
+        if alias != credential.path {
+            mandatory.add_credentials_alias(
+                &credential,
+                PathGrant {
+                    path: alias,
+                    scope: credential.scope,
+                },
+            )?;
+        }
+    }
+    let state_alias = resolve_policy_path(roots.state)?;
+    if state_alias != roots.state {
+        mandatory.add_state_alias(grant(&state_alias))?;
+    }
+    let source_alias = resolve_policy_path(roots.cwd)?;
+    if source_alias != roots.cwd {
+        mandatory.add_source_alias(grant(&source_alias))?;
+    }
+    for path in roots.protected_worktrees {
+        mandatory.add_protected(path.clone())?;
+    }
+    for root in roots.github_roots {
+        mandatory.add_github(root.clone())?;
+    }
+    for root in mandatory.github().to_vec() {
+        let alias = resolve_policy_path(&root.path)?;
+        if alias != root.path {
+            mandatory.add_github(PathGrant {
+                path: alias,
+                scope: root.scope,
+            })?;
+        }
+    }
+    for path in roots
+        .prompt_file
+        .into_iter()
+        .chain(access.attachments.iter().map(PathBuf::as_path))
+    {
+        mandatory.add_state_read(PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Exact,
+        })?;
+    }
+    if let Some(path) = &access.inputs_root {
+        mandatory.add_state_read(grant(path))?;
+    }
+    // Product releases are host-verified before preparation; arbitrary assets
+    // do not open another state subtree.
+    if roots.assets.starts_with(roots.state.join("releases")) {
+        mandatory.add_state_read_exec(grant(roots.assets))?;
+    }
+    if let Some(writer) = writer {
+        for path in [
+            writer.worktree.repo().common_git_dir(),
+            writer.worktree.repo().private_git_dir(),
+        ] {
+            mandatory.add_git(grant(path))?;
+        }
+    }
+    let writes = write_roots(
+        access,
+        host_writes,
+        writer.is_some(),
+        &project_id.to_string(),
+    );
+    for write in &writes {
+        mandatory.validate_extra_write(write)?;
+        mandatory.validate_extra_write(&PathGrant {
+            path: resolve_policy_path(&write.path)?,
+            scope: write.scope,
+        })?;
+    }
+    let mut policy = host_writes.policy_for_launch(roots.state, mandatory);
+    policy.resolve_optional_aliases(resolve_policy_path)?;
+    let network = policy
+        .optional()
+        .network_for(access.network(writer.is_some()));
     Ok(PlanRequest {
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
+            policy: Some(policy),
             read_only: None,
             mode,
             scratch: grant(roots.scratch),
@@ -229,18 +321,212 @@ pub(super) fn confinement_request(
                 .and_then(|spec| spec.authentication)
                 .map(Into::into),
             include_continuation: false,
-            write_roots: write_roots(
-                access,
-                host_writes,
-                writer.is_some(),
-                &project_id.to_string(),
-            ),
-            network: access.network(writer.is_some()),
+            write_roots: writes,
+            network,
             nested_confinement: false,
         },
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
+    })
+}
+
+/// Resolve existing ancestors too: a mandatory store remains denied when the
+/// leaf is absent at compile time or its public spelling traverses a symlink.
+fn resolve_policy_path(
+    path: &Path,
+) -> Result<PathBuf, provenant_confinement::permissions::PermissionError> {
+    provenant_confinement::permissions::resolve_boundary_path(path)
+}
+
+pub(super) fn protected_worktrees(
+    registry: &Registry<'_>,
+    source: &Path,
+    git: &Path,
+) -> Result<Vec<PathGrant>, String> {
+    let roots = registry.roots.ok_or("routing context is unavailable")?;
+    let utility_home = host_git_home(roots.state.as_path())?;
+    let utility = provenant_confinement::UtilityRuntime::new(git, utility_home.path())
+        .map_err(|error| error.to_string())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
+    let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    let cancel = provenant_core::CancelToken::new();
+    let ancestor = source.ancestors().find(|path| path.join(".git").exists());
+    let selected = ancestor.unwrap_or(source);
+    let mut paths = Vec::new();
+    if let Some(ancestor) = ancestor {
+        let repo = utility
+            .open_read_repo(&executor, ancestor, budget, &cancel)
+            .map_err(|error| error.to_string())?;
+        paths.extend(
+            registry
+                .repo_facts
+                .read_only_worktree_paths(&repo, &executor, &utility, budget, &cancel)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    // The selected repository's Git list does not cover another project's
+    // active or retained lanes. Only host registrations supply those paths;
+    // no unrelated filesystem repositories are discovered.
+    for binding in
+        provenant_config::registered_projects(roots).map_err(|error| error.to_string())?
+    {
+        let common = binding.common_dir();
+        let git = common.file_name() == Some(std::ffi::OsStr::new(".git"))
+            || (common.join("HEAD").is_file() && common.join("objects").is_dir());
+        if git {
+            paths.push(common.to_owned());
+            let project_state = roots
+                .state
+                .as_path()
+                .join("worktrees")
+                .join(binding.project_id().to_string());
+            let custody_slots = match Directory::open_anchor(&project_state) {
+                Ok(directory) => {
+                    let listing =
+                        provenant_supervisor::custody::list_writer_reservations(&directory)
+                            .map_err(|error| error.to_string())?;
+                    if !listing.issues.is_empty() {
+                        return Err("registered writer custody inventory is incomplete".into());
+                    }
+                    listing
+                        .reservations
+                        .iter()
+                        .map(|reservation| {
+                            reservation
+                                .custody_directory()
+                                .map(Path::to_owned)
+                                .ok_or_else(|| {
+                                    "registered writer custody slot is invalid".to_owned()
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+                Err(error) if error.is_not_found() => Vec::new(),
+                Err(error) => return Err(error.to_string()),
+            };
+            paths.extend(
+                provenant_confinement::worktrees::owned_worktree_paths(common, &custody_slots)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    let mut protected = Vec::new();
+    for path in paths {
+        let alias = resolve_policy_path(&path).map_err(|error| error.to_string())?;
+        if alias == selected {
+            continue;
+        }
+        protected.push(PathGrant {
+            path: path.clone(),
+            scope: PathScope::Subtree,
+        });
+        if alias != path {
+            protected.push(PathGrant {
+                path: alias,
+                scope: PathScope::Subtree,
+            });
+        }
+    }
+    protected.sort_by(|left, right| left.path.cmp(&right.path));
+    protected.dedup();
+    Ok(protected)
+}
+
+/// Inventory names and registration metadata only; credential contents are
+/// never needed to establish the mandatory boundary.
+pub(super) fn credential_roots(
+    registry: &Registry<'_>,
+    home: &Path,
+    settings: &provenant_providers::accounts::Settings,
+) -> Result<Vec<PathGrant>, String> {
+    let mut paths: Vec<PathBuf> = settings
+        .entries
+        .values()
+        .flat_map(|entry| std::iter::once(&entry.directory).chain(&entry.directories))
+        .filter(|path| path.as_path() != home)
+        .cloned()
+        .collect();
+    match registry.host {
+        Some(host) => {
+            paths.extend(host.credential_roots.iter().cloned());
+            paths.extend(host.default_account_directories.values().cloned());
+        }
+        None => paths.extend(run::HostLaunchContext::credential_roots()),
+    }
+    // Agy's isolated homes have concrete directory names, never a wildcard
+    // grant. Merely listing home does not open an isolated home's contents.
+    for entry in std::fs::read_dir(home).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".agy-"))
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths
+        .into_iter()
+        .map(|path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        })
+        .collect())
+}
+
+pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
+    registry
+        .host
+        .map(|host| host.github_roots.clone())
+        .unwrap_or_else(run::HostLaunchContext::github_roots)
+        .into_iter()
+        .map(|path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        })
+        .collect()
+}
+
+pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<std::ffi::OsString> {
+    if let Some(host) = registry.host
+        && matches!(
+            name,
+            "CODEX_HOME"
+                | "CLAUDE_CONFIG_DIR"
+                | "GH_CONFIG_DIR"
+                | "XDG_CONFIG_HOME"
+                | "XDG_DATA_HOME"
+        )
+    {
+        return host.provider_path_environment.get(name).cloned();
+    }
+    std::env::var_os(name)
+}
+
+/// Host token delivery must respect the same typed GitHub exception as file
+/// access; acquiring a token outside the lane cannot bypass an explicit denial.
+pub(super) fn github_auth_permitted(
+    plan: &ConfinedPlan,
+    profile: &provenant_confinement::permissions::ProviderProfileSpec,
+) -> bool {
+    if plan.permissions().network != NetworkAccess::Open
+        || profile.deny_credential_access
+        || profile.deny_network
+    {
+        return false;
+    }
+    plan.permissions().policy.as_ref().is_none_or(|policy| {
+        !policy.optional().deny_read.iter().any(|denied| {
+            policy
+                .mandatory()
+                .github()
+                .iter()
+                .any(|root| denied.overlaps(root))
+        })
     })
 }
 
@@ -506,6 +792,33 @@ pub(super) fn read_only_plan(
     };
     match repository {
         Some(repo) => {
+            if let Some(policy) = request.permissions.policy.as_mut() {
+                // A launch from a checkout subdirectory still protects the
+                // entire verified source; an isolated view also protects its
+                // original live checkout.
+                policy
+                    .mandatory_mut()
+                    .add_source_alias(PathGrant {
+                        path: repo.root_path().to_owned(),
+                        scope: PathScope::Subtree,
+                    })
+                    .map_err(|error| error.to_string())?;
+                for path in [repo.common_git_dir(), repo.private_git_dir()] {
+                    policy
+                        .mandatory_mut()
+                        .add_git(PathGrant {
+                            path: path.to_owned(),
+                            scope: PathScope::Subtree,
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+                for root in &request.permissions.write_roots {
+                    policy
+                        .mandatory()
+                        .validate_extra_write(root)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
             // The host's own read of the checkout HEAD is the only reviewed
             // head a read-only lane can claim; an unreadable HEAD stays unproven.
             let head = run_read_utility(

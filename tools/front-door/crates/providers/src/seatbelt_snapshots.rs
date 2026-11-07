@@ -288,8 +288,8 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
 }
 
 #[test]
-fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn std::error::Error>>
-{
+fn open_network_grants_gh_reads_independently_of_publishing()
+-> Result<(), Box<dyn std::error::Error>> {
     let (mut plan, profile) =
         prepared("codex", Access::WorktreeWrite, login("codex"), false, None)?;
     for network in [
@@ -324,8 +324,8 @@ fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn
         authority.set_publishing(false);
     }
     let disabled = render(&plan, &profile, Path::new(HOME))?;
-    assert!(disabled.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
-    assert!(!disabled.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"));
+    assert!(!disabled.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
+    assert!(disabled.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"));
     Ok(())
 }
 
@@ -530,7 +530,7 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
     };
     let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
     let source = std::str::from_utf8(&compiled.profile)?;
-    assert!(source.contains("(deny default)"));
+    assert!(source.contains("(allow default)"));
     assert!(source.contains(&format!(
         "(allow file-read* (subpath \"{}\"))",
         repo.display()
@@ -567,6 +567,21 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+
+    let executor = SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    if let Err(error) = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &[],
+        },
+    ) {
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "native sandbox unavailable: {error}"
+        ))?;
+        return Ok(());
+    }
 
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;

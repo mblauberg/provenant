@@ -17,6 +17,7 @@ fn request(root: &Path) -> PlanRequest {
     PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
+            policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
             scratch: grant("scratch"),

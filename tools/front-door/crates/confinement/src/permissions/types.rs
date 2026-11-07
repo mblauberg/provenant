@@ -263,9 +263,19 @@ pub struct NetworkEndpoint {
     pub port: u64,
 }
 
+/// The keychain IPC service already proven by the selected Agy mechanism.
+/// No free-form Mach service or blanket keychain authority is accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeychainAccess {
+    SecurityServer,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticationProfile {
+    #[serde(default)]
+    pub keychain: Option<KeychainAccess>,
     pub mechanism: String,
     pub roots: Vec<PathGrant>,
     /// Exact credential files the CLI rewrites in place on token refresh.
@@ -373,6 +383,8 @@ impl WorktreeWriteAuthority {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
+    /// Host-resolved ambient policy; never decoded from lane input.
+    pub policy: Option<LanePolicy>,
     pub read_only: Option<crate::plan::ReadOnlyGrants>,
     pub mode: AccessMode,
     pub scratch: PathGrant,

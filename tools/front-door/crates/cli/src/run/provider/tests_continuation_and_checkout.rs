@@ -375,6 +375,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let request = PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
+            policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
             scratch: grant("scratch"),
@@ -671,6 +672,10 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 ConfinementRoots {
                     cwd: &cwd,
                     home: &home,
+                    state: Path::new("/fixture-host-state"),
+                    credential_roots: &[],
+                    github_roots: &[],
+                    protected_worktrees: &[],
                     scratch: &scratch,
                     private_state: &copied,
                     assets: &assets,

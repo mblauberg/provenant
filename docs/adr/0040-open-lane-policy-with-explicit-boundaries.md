@@ -26,13 +26,13 @@ alternate profile mode. Ordinary filesystem, process and network access is
 ambient unless a mandatory boundary, explicit lane request, adapter offline
 requirement or optional host policy restricts it.
 
-This slice establishes the contract in
+The policy contract lives in
 `tools/front-door/crates/confinement/src/permissions/policy.rs#LanePolicy` and
 `tools/front-door/crates/confinement/src/run_config.rs#RunConfig::policy_for_launch`.
-It does not change rendering or launch behaviour. The renderer slice must consume
-this contract at `confinement_request`, derive complete mandatory roots from the
-verified launch context, report once at launch and enforce them before flipping
-the default. An empty input list must never mean that mandatory protection is
+The launch edge consumes
+this contract at `confinement_request`, derives complete mandatory roots from the
+verified launch context, reports once at launch and enforces them with the ambient
+default. An empty input list must never mean that mandatory protection is
 absent. Resolution is data, not proof of enforcement.
 
 ### Optional host policy
@@ -175,7 +175,10 @@ Exceptions are host-derived typed grants, never optional configuration:
    `LaunchPaths` bindings. Read only the selected continuation inputs. Do not
    open the whole attempt directory, another attempt or the runs store.
    Host-prepared prompt files and sealed attachments/inputs receive their
-   exact declared read grants. Host-captured user skill snapshots, normally
+   exact declared read grants. The host process-tree snapshot and provisioned
+   build-slot directory/lockfiles receive exact read-only coordination grants;
+   locking existing slot files does not grant content writes or open their
+   state-root siblings. Host-captured user skill snapshots, normally
    `S/runs/<run>/attempts/<attempt>/tmp/candidate-<n>-skills-<nonce>`, may be
    read/executed and stay immutable; their original host credential/config
    parents are not opened. The exact attempt-bound Fabric socket remains

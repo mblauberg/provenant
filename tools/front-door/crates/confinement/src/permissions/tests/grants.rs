@@ -15,6 +15,7 @@ pub(super) fn write_grants_fixture() -> (PlanPermissions, ProviderProfile) {
         scope,
     };
     let plan = PlanPermissions {
+        policy: None,
         read_only: Some(crate::plan::ReadOnlyGrants::for_test(
             "/fixture/repo".into(),
             vec![grant("/fixture/repo/locks", PathScope::Subtree)],
@@ -39,6 +40,7 @@ pub(super) fn write_grants_fixture() -> (PlanPermissions, ProviderProfile) {
                 .map(|mechanism| {
                     let credential = grant(&format!("/fixture/auth/{mechanism}"), PathScope::Exact);
                     AuthenticationProfile {
+                        keychain: None,
                         mechanism: mechanism.into(),
                         roots: vec![credential.clone()],
                         in_place_writes: vec![credential],
@@ -167,6 +169,16 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
     let (mut plan, profile) = write_grants_fixture();
     let scratch = "/fixture/runs/run/attempts/own/tmp/candidate-0";
     plan.scratch.path = scratch.into();
+    let private_state = "/fixture/runs/run/attempts/own/provider-state/candidate-0";
+    plan.private_state.as_mut().expect("private state").path = private_state.into();
+    plan.policy = Some(crate::run_config::RunConfig::default().policy_for_launch(
+        Path::new("/fixture/runs"),
+        MandatoryRoots::new(
+            Path::new("/fixture/home"),
+            Path::new("/fixture/runs"),
+            Path::new("/fixture/repo"),
+        )?,
+    ));
     let git = worktree_grants_fixture();
     for writer in [false, true] {
         if writer {
@@ -189,14 +201,9 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
-        // Every ordinary writer/reviewer profile keeps database IPC denied.
-        assert_eq!(
-            rendered
-                .lines()
-                .filter(|line| line.starts_with("(allow ipc-"))
-                .collect::<Vec<_>>(),
-            ["(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))",]
-        );
+        // Ordinary database IPC is ambient; legacy grant flags add no denial.
+        assert!(rendered.contains("(allow default)"));
+        assert!(!rendered.contains("(deny ipc-sysv-"));
         let mut database = ProviderProfile {
             spec: profile.spec.clone(),
             observations: BTreeMap::new(),
@@ -217,22 +224,16 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             writer
         );
         assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
-        for outside in [
-            "/fixture/runs",
-            "/fixture/runs/run",
-            "/fixture/runs/run/attempts/own",
-            "/fixture/runs/run/attempts/own/tmp",
-            "/fixture/runs/run/attempts/own/tmp/candidate-1",
-            "/fixture/runs/run/attempts/other/tmp/candidate-0",
-        ] {
-            for operation in ["process-exec", "file-read*"] {
-                assert!(
-                    !rendered.contains(&format!("(allow {operation} (subpath \"{outside}\"))")),
-                    "{outside}"
-                );
-            }
+        for operation in ["file-read*", "file-write*", "process-exec"] {
+            let denial = format!(
+                "(deny {operation} (require-all (subpath \"/fixture/runs\") (require-not (subpath \"{scratch}\")) (require-not (subpath \"{private_state}\"))))"
+            );
+            assert!(
+                rendered.contains(&denial),
+                "attempt-private state denial: {denial}"
+            );
         }
-        assert!(!rendered.contains("(allow process-exec (subpath \"/fixture/private\"))"));
+        assert!(rendered.contains("(deny signal)"));
         let signals: Vec<_> = rendered
             .lines()
             .filter(|line| line.starts_with("(allow signal"))
@@ -242,19 +243,10 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
         assert!(!rendered.contains("(sysctl-name-prefix \"kern.proc.\")"));
         assert!(rendered.contains("(allow process-info*)"));
         assert!(!rendered.contains("(deny process-info*)"));
-        assert_eq!(
-            rendered
-                .lines()
-                .filter(|line| line.starts_with("(allow process-info"))
-                .collect::<Vec<_>>(),
-            ["(allow process-info*)"]
-        );
-        assert_eq!(
-            rendered.contains("(allow file-read* (subpath \"/dev/fd\"))"),
-            writer
-        );
-        assert!(!rendered.contains("(allow file-read* (subpath \"/dev\"))"));
-        assert!(!rendered.contains("(allow file-write* (subpath \"/dev/fd\"))"));
+        assert!(rendered.contains("(deny process-info-setcontrol process-info-dirtycontrol)"));
+        assert!(rendered.contains(
+            "(allow process-info-setcontrol process-info-dirtycontrol (target same-sandbox))"
+        ));
     }
     Ok(())
 }

@@ -697,6 +697,7 @@ fn native_lane(
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let git = std::fs::canonicalize(provenant_os::git::git_executable().ok_or("Git unavailable")?)?;
     let plan = PlanPermissions {
+        policy: None,
         read_only: None,
         mode: AccessMode::ReadOnly,
         scratch: grant(scratch, PathScope::Subtree),

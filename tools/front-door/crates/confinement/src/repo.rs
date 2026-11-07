@@ -877,7 +877,7 @@ fn read_common_config(directory: &Directory) -> Result<Option<Vec<u8>>, RepoErro
 
 /// A Git path file contains exactly one `gitdir: ` line, or a one-line path in
 /// `commondir` / a private `gitdir` backlink. Paths remain raw Unix bytes.
-fn parse_git_path(bytes: &[u8], prefix: &[u8]) -> Option<PathBuf> {
+pub(crate) fn parse_git_path(bytes: &[u8], prefix: &[u8]) -> Option<PathBuf> {
     let mut line = match bytes.strip_suffix(b"\n") {
         Some(line) => line,
         None => bytes,
@@ -895,7 +895,7 @@ fn parse_git_path(bytes: &[u8], prefix: &[u8]) -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from_vec(path_bytes.to_vec())))
 }
 
-fn resolve_git_path(base: &Path, target: &Path) -> Result<PathBuf, RepoError> {
+pub(crate) fn resolve_git_path(base: &Path, target: &Path) -> Result<PathBuf, RepoError> {
     let joined = if target.is_absolute() {
         target.to_path_buf()
     } else {

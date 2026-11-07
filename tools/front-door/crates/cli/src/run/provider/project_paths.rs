@@ -271,6 +271,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
                 scratch: grant(root.join("scratch")),
@@ -473,6 +474,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
                 scratch: grant(root.join("scratch")),
@@ -561,6 +563,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
                 scratch: grant(root.join("scratch")),
@@ -669,6 +672,7 @@ mod tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
+                    policy: None,
                     mode,
                     read_only: None,
                     scratch: grant(scratch.clone()),
@@ -809,6 +813,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 mode: AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
                     WorktreeWriteAuthority,
                 >(json!({

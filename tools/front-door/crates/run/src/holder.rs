@@ -48,6 +48,15 @@ pub struct HostLaunchContext {
     /// Trusted environment overrides for adapter default account directories.
     #[serde(default)]
     pub default_account_directories: std::collections::BTreeMap<String, PathBuf>,
+    /// Host-resolved relocated credential stores, inherited unchanged by children.
+    #[serde(default)]
+    pub credential_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub github_roots: Vec<PathBuf>,
+    /// Trusted path overrides needed to select the same host authentication
+    /// mechanism after the guardian clears its process environment.
+    #[serde(default)]
+    pub provider_path_environment: std::collections::BTreeMap<String, std::ffi::OsString>,
     #[serde(default)]
     pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
@@ -56,6 +65,44 @@ pub struct HostLaunchContext {
     pub fixture_state_write: bool,
 }
 impl HostLaunchContext {
+    pub fn provider_path_environment() -> std::collections::BTreeMap<String, std::ffi::OsString> {
+        [
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "GH_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        ]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name.into(), value)))
+        .collect()
+    }
+    pub fn github_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(path) = std::env::var_os("GH_CONFIG_DIR").map(PathBuf::from) {
+            roots.push(path);
+        }
+        if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+            roots.push(path.join("gh"));
+        }
+        roots.retain(|path| path.is_absolute());
+        roots
+    }
+    pub fn credential_roots() -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .collect();
+        if let Some(config) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+            roots.extend(["gh", "gcloud", "cursor", "opencode"].map(|name| config.join(name)));
+        }
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+            roots.push(data.join("opencode"));
+        }
+        roots.retain(|path| path.is_absolute());
+        roots
+    }
     pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
         account_directories(provenant_records::ADAPTER_SPECS, |name| {
             std::env::var_os(name)
@@ -83,6 +130,9 @@ impl HostLaunchContext {
                 .unwrap_or_default(),
             git,
             default_account_directories: Self::default_account_directories(),
+            credential_roots: Self::credential_roots(),
+            github_roots: Self::github_roots(),
+            provider_path_environment: Self::provider_path_environment(),
             cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
@@ -2499,6 +2549,9 @@ mod disk_admission_tests {
                 executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
                 default_account_directories: Default::default(),
+                credential_roots: Default::default(),
+                github_roots: Default::default(),
+                provider_path_environment: Default::default(),
                 cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,

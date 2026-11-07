@@ -346,6 +346,16 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         observations: Default::default(),
     };
     let plan = PlanPermissions {
+        policy: Some(
+            provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+                &root.join("state"),
+                provenant_confinement::permissions::MandatoryRoots::new(
+                    &home,
+                    &root.join("state"),
+                    &lane,
+                )?,
+            ),
+        ),
         read_only: None,
         mode: AccessMode::WorktreeWrite(Box::new(authority)),
         scratch: grant(scratch.clone()),

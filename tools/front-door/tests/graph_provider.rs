@@ -730,6 +730,15 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
     }
     assert_eq!(code(&output), 0, "{location}: {response}");
     assert_eq!(node["state"], "succeeded", "{location}: {response}");
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.starts_with("lane policy: "))
+            .count(),
+        1,
+        "direct launch must report policy once: {stderr}"
+    );
     for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
         assert_eq!(
             fs::read_to_string(tree.join(name))?,
@@ -3288,13 +3297,25 @@ fn run_graph_provider_with_wait(
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
     let record = store.record(attempt.parse()?, &call)?;
-    Ok(serde_json::to_value(provenant_cli::run::project_lane(
+    let lane = serde_json::to_value(provenant_cli::run::project_lane(
         &record,
         &[],
         rig.state.as_path(),
         None,
         false,
-    ))?)
+    ))?;
+    if graph_id == "fixture-claude" && !lane["started_at"].is_null() {
+        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|line| line.starts_with("lane policy: "))
+                .count(),
+            1,
+            "host graph child launch must report once, including candidate fallback: {stderr}"
+        );
+    }
+    Ok(lane)
 }
 
 fn opencode_usage_limit_stops_hanging_provider() -> Result {

@@ -148,6 +148,7 @@ fn prepare(
                     .chain(optional_reads)
                     .collect(),
                 authentication: vec![AuthenticationProfile {
+                    keychain: None,
                     mechanism: "login".into(),
                     roots: authentication,
                     in_place_writes: Vec::new(),

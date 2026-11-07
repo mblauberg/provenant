@@ -726,7 +726,7 @@ printf 'agy 1.0.0\n'
         codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
         "the lane builds into its own target"
     );
-    configure_build_slots(
+    let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &home,
@@ -734,11 +734,21 @@ printf 'agy 1.0.0\n'
         &codex_runtime,
         &state,
     );
+    assert!(
+        coordination_reads
+            .iter()
+            .all(|root| root.scope == PathScope::Exact)
+    );
+    assert!(
+        coordination_reads
+            .iter()
+            .any(|root| root.path.ends_with("slot-0.lock"))
+    );
     // An unrepresentable shim input warns and leaves the prepared lane intact.
     let env_before = codex.env.clone();
     let profile_before = codex.profile.spec.clone();
     let setup_count = codex.setup.len();
-    configure_build_slots(
+    let refused_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &home,
@@ -746,6 +756,7 @@ printf 'agy 1.0.0\n'
         Path::new("relative-runtime"),
         &state,
     );
+    assert!(refused_coordination_reads.is_empty());
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
@@ -1450,6 +1461,10 @@ printf 'agy 1.0.0\n'
         ConfinementRoots {
             cwd: &project,
             home: &home,
+            state: Path::new("/fixture-host-state"),
+            credential_roots: &[],
+            github_roots: &[],
+            protected_worktrees: &[],
             scratch: &paths.scratch,
             private_state: &paths.provider_state,
             assets: &assets,
@@ -1525,7 +1540,7 @@ printf 'agy 1.0.0\n'
     .err()
     .ok_or("unconfinable worktree accepted")?;
     assert!(
-        matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::InvalidRoots))),
+        matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::Permission(provenant_confinement::permissions::PermissionError::ProtectedOverlap)))),
         "{error}"
     );
     Ok(())

@@ -35,7 +35,8 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
     );
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), Some(worktree))?;
     let source = render(&grants)?;
-    assert!(source.contains("(deny default)"));
+    assert!(source.contains("(allow default)"));
+    assert!(!source.contains("(deny default)"));
     let exec = source.find("(allow process-exec)\n").expect("writer exec");
     assert!(source.contains("(allow process-fork)\n"));
     assert!(source.contains("(allow pseudo-tty)\n"));
@@ -49,7 +50,7 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
         "(deny file-write* (subpath \"/fixture/repo/.git\"))",
         "(deny file-read* (subpath \"/fixture/home/.ssh\"))",
         "(deny file-read* (subpath \"/fixture/home/.config/gh\"))",
-        "(deny file-write* (literal \"/fixture/worktrees/lane/.git\"))",
+        "(deny file-write* (subpath \"/fixture/worktrees/lane/.git\"))",
     ] {
         assert!(source.contains(deny), "{deny}");
     }
@@ -90,6 +91,7 @@ fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(
     });
     for index in 0..20 {
         profile.spec.authentication.push(AuthenticationProfile {
+            keychain: None,
             mechanism: format!("extra-{index}"),
             roots: vec![PathGrant {
                 path: format!("/fixture/credential-{index}").into(),
@@ -196,10 +198,21 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let policy: ReadOnlyPolicy =
         serde_json::from_str(r#"{"readOnlyWritable":[".agent-run/locks"]}"#)?;
     let binding = f.binding()?;
+    let home = provenant_os::fs::canonicalize(&f.home)?;
+    let state = provenant_os::fs::canonicalize(&f._temp.path().join("state"))?;
+    let mut mandatory = MandatoryRoots::new(&home, &state, root)?;
+    for path in [repo.common_git_dir(), repo.private_git_dir()] {
+        mandatory.add_git(PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Subtree,
+        })?;
+    }
+    let lane_policy = crate::run_config::RunConfig::default().policy_for_launch(&state, mandatory);
     let plan = ConfinedPlan::new(
         PlanRequest {
             scope: WorkScope::Project(binding.project_id()),
             permissions: PlanPermissions {
+                policy: Some(lane_policy),
                 read_only: None,
                 mode: AccessMode::ReadOnly,
                 scratch: PathGrant {
@@ -224,7 +237,6 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     )?;
     use FixtureOperation as O;
     use FixtureOutcome::{Allowed, Denied};
-    let home = provenant_os::fs::canonicalize(&f.home)?;
     for directory in [
         home.join(".cargo/bin"),
         home.join(".cargo/registry"),
@@ -274,14 +286,14 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
         },
         observations: BTreeMap::from([
             (O::DeclaredRead, Allowed),
-            (O::UndeclaredRead, Denied),
-            (O::UndeclaredWrite, Denied),
+            (O::UndeclaredRead, Allowed),
+            (O::UndeclaredWrite, Allowed),
             (O::SecretRead, Denied),
             (O::ProtectedWrite, Denied),
             (O::OtherNetwork, Denied),
             (O::DeclaredProcessExec, Allowed),
-            (O::UndeclaredProcessExec, Denied),
-            (O::ProcessFork, Denied),
+            (O::UndeclaredProcessExec, Allowed),
+            (O::ProcessFork, Allowed),
             (O::RuntimeRead, Allowed),
         ]),
     };
@@ -440,7 +452,7 @@ fn denied_probe_requires_an_operating_system_refusal() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn sbpl_process_authority_is_exact_and_fork_requires_profile_data() {
+fn sbpl_process_and_pty_authority_is_ambient_without_catalogue_grants() {
     let executable = PathGrant {
         path: PathBuf::from("/usr/bin/true"),
         scope: PathScope::Exact,
@@ -455,6 +467,7 @@ fn sbpl_process_authority_is_exact_and_fork_requires_profile_data() {
         observations: BTreeMap::new(),
     };
     let plan = PlanPermissions {
+        policy: None,
         read_only: None,
         private_state: None,
         mode: AccessMode::ReadOnly,
@@ -477,8 +490,10 @@ fn sbpl_process_authority_is_exact_and_fork_requires_profile_data() {
     .expect("UTF-8 SBPL");
     assert!(rendered.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
     assert!(rendered.contains("(allow process-fork)"));
-    assert!(!rendered.contains("localhost"));
-    assert!(!rendered.contains("pseudo-tty") && !rendered.contains("/dev/ttys"));
+    assert!(rendered.contains("(allow default)"));
+    assert!(!rendered.contains("(deny pseudo-tty)"));
+    assert!(rendered.contains("(deny file-read* file-write* file-ioctl"));
+    assert!(rendered.contains("(require-not (extension \"com.apple.sandbox.pty\"))"));
 
     spec.allow_process_fork = false;
     spec.loopback_server = true;
@@ -491,7 +506,8 @@ fn sbpl_process_authority_is_exact_and_fork_requires_profile_data() {
         render_profile(&plan, &profile, &[], &[], None, Path::new("/Users/fixture")).expect("SBPL"),
     )
     .expect("UTF-8 SBPL");
-    assert!(!rendered.contains("(allow process-fork)"));
+    assert!(rendered.contains("(allow default)"));
+    assert!(!rendered.contains("(deny process-fork)"));
     // A private server binds and is reached on loopback only.
     assert!(rendered.contains("(allow network-bind (local ip \"localhost:*\"))"));
     assert!(rendered.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
@@ -524,6 +540,7 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
         observations: BTreeMap::new(),
     };
     let mut plan = PlanPermissions {
+        policy: None,
         read_only: None,
         private_state: None,
         mode: AccessMode::ReadOnly,
@@ -780,4 +797,338 @@ fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
     assert!(!source.contains("hosts.yml"));
     assert!(!source.contains("/fixture/unsafe/.codex"));
     Ok(())
+}
+
+// Small: mandatory and host denials must survive ambient access and broad grants.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn ambient_policy_renders_complete_mandatory_and_host_denials()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut plan, mut profile) = write_grants_fixture();
+    let home = Path::new("/fixture/home");
+    let state = Path::new("/fixture/host-state");
+    let mut mandatory = MandatoryRoots::new(home, state, Path::new("/fixture/repo"))?;
+    mandatory.add_credentials(PathGrant {
+        path: "/fixture/relocated/unselected".into(),
+        scope: PathScope::Subtree,
+    })?;
+    mandatory.add_git(PathGrant {
+        path: "/fixture/host-git".into(),
+        scope: PathScope::Subtree,
+    })?;
+    let config: crate::run_config::RunConfig = serde_json::from_value(serde_json::json!({
+        "host_policy": {
+            "deny_read": ["/fixture/host-private", 42, "relative"],
+            "deny_write": ["/fixture/host-archive"],
+            "network": "open",
+            "allow": ["/fixture/home/.ssh"]
+        }
+    }))?;
+    plan.policy = Some(config.policy_for_launch(state, mandatory.clone()));
+    plan.network = NetworkAccess::Open;
+    plan.read_roots.push(PathGrant {
+        path: "/fixture".into(),
+        scope: PathScope::Subtree,
+    });
+    profile.spec.tool_writes.push(PathGrant {
+        path: "/fixture/home".into(),
+        scope: PathScope::Subtree,
+    });
+    let grants = GrantSet::build(&plan, &profile, home, None)?;
+    let rendered = render(&grants)?;
+    assert!(rendered.starts_with("(version 1)\n(allow default)\n"));
+    assert!(rendered.contains("(deny file-link)"));
+    let last_ordinary_write = rendered
+        .find("(allow file-write* (subpath \"/fixture/home\"))")
+        .expect("broad ordinary grant");
+    let gh = gh_config_paths(home);
+    for credential in mandatory.credentials() {
+        let scope = match credential.scope {
+            PathScope::Exact => "literal",
+            PathScope::Subtree => "subpath",
+        };
+        for operation in ["file-write*", "process-exec"] {
+            let denial = format!(
+                "(deny {operation} ({scope} \"{}\"))",
+                credential.path.display()
+            );
+            assert!(rendered.find(&denial).expect(&denial) > last_ordinary_write);
+        }
+        if !gh.contains(&credential.path) {
+            let denial = format!(
+                "(deny file-read* ({scope} \"{}\"))",
+                credential.path.display()
+            );
+            assert!(rendered.find(&denial).expect(&denial) > last_ordinary_write);
+            let clone_denial = format!(
+                "(deny file-clone ({scope} \"{}\"))",
+                credential.path.display()
+            );
+            assert!(rendered.find(&clone_denial).expect(&clone_denial) > last_ordinary_write);
+        }
+    }
+    for (operation, path) in [
+        ("file-read*", "/fixture/host-state"),
+        ("file-clone", "/fixture/host-state"),
+        ("file-write*", "/fixture/host-state"),
+        ("process-exec", "/fixture/host-state"),
+        ("file-write*", "/fixture/host-git"),
+        ("file-read*", "/fixture/host-private"),
+        ("file-clone", "/fixture/host-private"),
+        ("process-exec", "/fixture/host-private"),
+        ("file-write*", "/fixture/host-archive"),
+    ] {
+        let denial = format!("(deny {operation} (subpath \"{path}\"))");
+        assert!(rendered.contains(&denial), "missing {denial}");
+    }
+    assert_eq!(plan.policy.as_ref().expect("policy").warnings().len(), 3);
+    for root in [state, Path::new("/fixture")] {
+        profile.spec.authentication.push(AuthenticationProfile {
+            keychain: None,
+            mechanism: "whole-state".into(),
+            roots: vec![PathGrant {
+                path: root.to_owned(),
+                scope: PathScope::Subtree,
+            }],
+            in_place_writes: vec![],
+        });
+        plan.selected_authentication = Some("whole-state".into());
+        assert!(matches!(
+            render(&GrantSet::build(&plan, &profile, home, None)?),
+            Err(PermissionError::ProtectedOverlap)
+        ));
+        profile.spec.authentication.pop();
+    }
+    Ok(())
+}
+
+// Small: optional host ceilings cannot widen requests, including offline adapters.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::run_config::RunConfig;
+    let home = Path::new("/fixture/home");
+    for (setting, ceiling) in [
+        ("provider", NetworkAccess::Provider),
+        ("local", NetworkAccess::Local),
+        ("open", NetworkAccess::Open),
+    ] {
+        for request in [
+            NetworkAccess::Provider,
+            NetworkAccess::Local,
+            NetworkAccess::Open,
+        ] {
+            let (mut plan, mut profile) = write_grants_fixture();
+            let config: RunConfig = serde_json::from_value(serde_json::json!({
+                "host_policy": {"network": setting}
+            }))?;
+            let policy = config.policy_for_launch(
+                Path::new("/fixture/host-state"),
+                MandatoryRoots::new(
+                    home,
+                    Path::new("/fixture/host-state"),
+                    Path::new("/fixture/repo"),
+                )?,
+            );
+            let effective = policy.optional().network_for(request);
+            assert_eq!(
+                effective == NetworkAccess::Open,
+                ceiling == NetworkAccess::Open && request == NetworkAccess::Open
+            );
+            plan.network = request;
+            plan.policy = Some(policy);
+            let rendered = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+            assert_eq!(
+                rendered.contains("(allow network-outbound (remote ip \"*:*\"))"),
+                effective == NetworkAccess::Open
+            );
+            assert_eq!(
+                rendered.contains("(allow network-outbound (remote ip \"localhost:*\"))"),
+                effective != NetworkAccess::Provider
+            );
+            assert_eq!(
+                rendered.contains("(deny network*)"),
+                effective != NetworkAccess::Open
+            );
+            profile.spec.deny_network = true;
+            let offline = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+            let final_deny = offline.rfind("(deny network*)").expect("offline denial");
+            assert!(
+                offline
+                    .rfind("(allow network")
+                    .is_none_or(|allow| final_deny > allow)
+            );
+        }
+    }
+    Ok(())
+}
+
+// Small: only a selected isolated keychain mechanism can open its named IPC.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn keychain_ipc_requires_the_selected_isolated_typed_mechanism() -> Result<(), PermissionError> {
+    let home = Path::new("/fixture/home");
+    for (path, selected, typed, explicit_deny, permitted) in [
+        (
+            "/fixture/isolated/Library/Keychains/login.keychain-db",
+            true,
+            true,
+            false,
+            true,
+        ),
+        (
+            "/fixture/isolated/Library/Keychains/login.keychain-db",
+            false,
+            true,
+            false,
+            false,
+        ),
+        (
+            "/fixture/isolated/Library/Keychains/login.keychain-db",
+            true,
+            false,
+            false,
+            false,
+        ),
+        (
+            "/fixture/home/Library/Keychains/login.keychain-db",
+            true,
+            true,
+            false,
+            false,
+        ),
+        (
+            "/fixture/isolated/Library/Keychains/login.keychain-db",
+            true,
+            true,
+            true,
+            false,
+        ),
+    ] {
+        let (mut plan, mut profile) = write_grants_fixture();
+        plan.selected_authentication = selected.then(|| "keychain".into());
+        profile.spec.deny_keychain_access = explicit_deny;
+        profile.spec.authentication.push(AuthenticationProfile {
+            keychain: typed.then_some(KeychainAccess::SecurityServer),
+            mechanism: "keychain".into(),
+            roots: vec![PathGrant {
+                path: path.into(),
+                scope: PathScope::Exact,
+            }],
+            in_place_writes: vec![],
+        });
+        let source = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+        assert_eq!(
+            source.contains("(deny process-exec (literal \"/usr/bin/security\"))"),
+            !permitted
+        );
+        assert_eq!(
+            source.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"),
+            !permitted
+        );
+        assert!(source.contains("(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))"));
+    }
+    Ok(())
+}
+
+// Small: resolving an alias cannot turn a non-exempt store into selected auth.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn mandatory_alias_categories_cannot_become_authentication_exceptions()
+-> Result<(), PermissionError> {
+    let home = Path::new("/fixture/home");
+    for (relative, alias, scope) in [
+        (
+            ".claude.json",
+            "/fixture/relocated/claude-sidecar",
+            PathScope::Exact,
+        ),
+        (
+            "Library/Keychains",
+            "/fixture/relocated/Library/Keychains",
+            PathScope::Subtree,
+        ),
+        (
+            "Archives/git-preservation",
+            "/fixture/relocated/git-preservation",
+            PathScope::Subtree,
+        ),
+    ] {
+        let (mut plan, mut profile) = write_grants_fixture();
+        let mut mandatory = MandatoryRoots::new(
+            home,
+            Path::new("/fixture/host-state"),
+            Path::new("/fixture/repo"),
+        )?;
+        let original = PathGrant {
+            path: home.join(relative),
+            scope,
+        };
+        let alias = PathGrant {
+            path: alias.into(),
+            scope,
+        };
+        mandatory.add_credentials_alias(&original, alias.clone())?;
+        let exact = PathGrant {
+            path: match scope {
+                PathScope::Exact => alias.path.clone(),
+                PathScope::Subtree => alias.path.join("login.keychain-db"),
+            },
+            scope: PathScope::Exact,
+        };
+        profile.spec.authentication.push(AuthenticationProfile {
+            keychain: Some(KeychainAccess::SecurityServer),
+            mechanism: "selected-alias".into(),
+            roots: vec![exact.clone()],
+            in_place_writes: vec![exact],
+        });
+        plan.selected_authentication = Some("selected-alias".into());
+        plan.policy = Some(
+            crate::run_config::RunConfig::default()
+                .policy_for_launch(Path::new("/fixture/host-state"), mandatory),
+        );
+        let source = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+        let filter = match scope {
+            PathScope::Exact => "literal",
+            PathScope::Subtree => "subpath",
+        };
+        for operation in [
+            "file-read*",
+            "file-write*",
+            "process-exec",
+            "file-map-executable",
+            "file-clone",
+        ] {
+            let denial = format!("(deny {operation} ({filter} \"{}\"))", alias.path.display());
+            assert!(
+                source.contains(&denial),
+                "non-exempt alias {relative}: {denial}"
+            );
+        }
+        assert!(source.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
+    }
+    Ok(())
+}
+
+// Small: enforcing compilation cannot guess the selected state root.
+#[cfg(target_os = "macos")]
+#[test]
+fn enforcing_backend_refuses_missing_host_policy_before_inspecting_grants() {
+    let (plan, profile) = write_grants_fixture();
+    assert!(plan.policy.is_none());
+    let anchors = Anchors {
+        home: Path::new("/fixture/home"),
+        directories: &[],
+        worktree: None,
+    };
+    let result = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits::default(),
+    }
+    .compile(&plan, &profile, &anchors);
+    assert!(matches!(
+        result,
+        Err(PermissionError::PermissionNotRecorded)
+    ));
 }

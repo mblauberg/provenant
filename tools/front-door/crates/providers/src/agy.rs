@@ -461,6 +461,9 @@ fn prepare(
                 // Its `run_command` tool fails unless it can allocate a PTY.
                 allow_pseudo_tty: true,
                 authentication: vec![AuthenticationProfile {
+                    keychain: Some(
+                        provenant_confinement::permissions::KeychainAccess::SecurityServer,
+                    ),
                     mechanism: "keychain".into(),
                     roots: vec![exact(&keychain)],
                     in_place_writes: Vec::new(),
