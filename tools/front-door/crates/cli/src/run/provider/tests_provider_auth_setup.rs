@@ -219,7 +219,7 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     let pnpm = bin.join("pnpm");
     std::fs::write(
         &pnpm,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = failing ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\ntouch node_modules/.modules.yaml\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = failing ]; then printf '%s\\n' 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' 'plain-fixture-secret-value' >&2; exit 7; fi\nmkdir -p node_modules\ntouch node_modules/.modules.yaml\n",
     )?;
     std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
     let locate = || {
@@ -274,7 +274,20 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
         .expect_err("fake pnpm failure is refused");
     assert!(error.contains("pnpm install --frozen-lockfile"));
     assert!(error.contains("exited with status 7"));
-    assert!(error.contains("fixture stderr tail"));
+    assert!(!error.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(!error.contains("plain-fixture-secret-value"));
+    let event = super::dependency_preparation_event(
+        Err(error),
+        true,
+        &provenant_records::run::HarnessProfile::default(),
+    );
+    let warning = event["reason"].as_str().expect("retained warning reason");
+    assert_eq!(event["outcome"], "warning");
+    assert!(warning.contains("pnpm install --frozen-lockfile"));
+    assert!(warning.contains("exited with status 7"));
+    assert!(warning.contains("in the worktree"));
+    assert!(!warning.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(!warning.contains("plain-fixture-secret-value"));
     Ok(())
 }
 #[test]

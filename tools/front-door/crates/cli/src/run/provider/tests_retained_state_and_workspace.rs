@@ -1139,6 +1139,7 @@ fn writer_preparation_warning_names_setting_and_origin() {
     let mut profile = provenant_records::run::HarnessProfile::default();
     let default = super::dependency_preparation_warning("missing pnpm".into(), true, &profile);
     assert!(default.contains("lanes.prepare_deps=true (compiled default)"));
+    assert!(default.contains("pnpm install --frozen-lockfile` in the worktree"));
     profile.name = "focused".into();
     profile
         .knobs

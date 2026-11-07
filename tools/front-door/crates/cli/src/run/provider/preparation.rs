@@ -1,7 +1,6 @@
 use super::*;
 
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
 fn uniform_candidate_boundary(
     count: usize,
@@ -242,11 +241,11 @@ pub(super) fn dependency_preparation_warning(
         "compiled default".to_owned()
     };
     format!(
-        "{error}; lanes.prepare_deps={enabled} ({origin}); set lanes.prepare_deps=false to skip dependency preparation"
+        "{error}; run `pnpm install --frozen-lockfile` in the worktree to inspect or repair dependencies; lanes.prepare_deps={enabled} ({origin}); set lanes.prepare_deps=false to skip dependency preparation"
     )
 }
 
-fn dependency_preparation_event(
+pub(super) fn dependency_preparation_event(
     result: Result<serde_json::Value, String>,
     enabled: bool,
     profile: &provenant_records::run::HarnessProfile,
@@ -346,25 +345,18 @@ pub(super) fn prepare_writer_dependencies(
     options.cleanup_process_group = true;
     options.cancel = Some(cancel);
     options.stdout = provenant_os::exec::StreamPolicy::Discard;
-    options.stderr = provenant_os::exec::StreamPolicy::Tail {
-        limit: DEPENDENCY_STDERR_TAIL,
-    };
+    // Install output is arbitrary subprocess content and must not enter a
+    // warning or retained launch event. Keep only the process outcome below.
+    options.stderr = provenant_os::exec::StreamPolicy::Discard;
     use provenant_os::exec::Executor;
     let outcome = executor
         .execute(options)
         .map_err(|error| format!("{command} failed: {error}"))?;
     let elapsed_micros = outcome.elapsed_micros;
-    let stderr = String::from_utf8_lossy(&outcome.stderr.bytes);
-    let stderr_tail = stderr.trim();
     if outcome.termination != provenant_os::exec::Termination::Exit(0)
         || outcome.timed_out
         || outcome.cancelled
     {
-        let detail = if stderr_tail.is_empty() {
-            String::new()
-        } else {
-            format!("; stderr tail: {stderr_tail}")
-        };
         let reason = if outcome.cancelled {
             "cancelled".to_owned()
         } else if outcome.timed_out {
@@ -382,7 +374,7 @@ pub(super) fn prepare_writer_dependencies(
                 }
             }
         };
-        return Err(format!("{command} failed ({reason}){detail}"));
+        return Err(format!("{command} failed ({reason})"));
     }
     Ok(serde_json::json!({
         "command": command,
