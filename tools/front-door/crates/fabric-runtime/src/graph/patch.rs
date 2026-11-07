@@ -733,7 +733,6 @@ fn refused_before_launch(progress: &NodeProgress) -> bool {
                     .get(PRELAUNCH_REFUSAL_PROOF)
                     .and_then(Value::as_bool)
                     == Some(true)
-                    && !attempt.launched
                     && attempt.attempt_ref.is_none()
                     && attempt.state == AttemptState::Starting
             })

@@ -104,7 +104,7 @@ pub fn list_cached(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    list_impl(context, cancel, |_, _| {}, true, true)
+    list_impl(context, cancel, |_, _| {}, true, true, |_, _| true)
 }
 
 /// Report the inventory size before the census and each completed row after
@@ -115,7 +115,7 @@ pub fn list_streaming(
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    list_impl(context, cancel, report, true, false)
+    list_impl(context, cancel, report, true, false, |_, _| true)
 }
 
 /// Inventory for GC. Cleanliness is checked only for candidates after the
@@ -124,7 +124,17 @@ pub fn list_for_gc(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    list_impl(context, cancel, |_, _| {}, false, false)
+    list_for_gc_matching(context, cancel, |_, _| true)
+}
+
+/// Read registration and custody only for selected inventory entries. The
+/// predicate runs on Git's registration before opening any checkout.
+pub fn list_for_gc_matching(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+    matches: impl Fn(&Path, Option<&str>) -> bool,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    list_impl(context, cancel, |_, _| {}, false, false, matches)
 }
 
 fn list_impl(
@@ -133,6 +143,7 @@ fn list_impl(
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
     reuse_inventory: bool,
+    matches: impl Fn(&Path, Option<&str>) -> bool,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
@@ -150,6 +161,12 @@ fn list_impl(
     let candidates: Vec<_> = entries
         .iter()
         .filter(|entry| !entry.bare)
+        .filter(|entry| {
+            matches(
+                &entry.path,
+                entry.branch.as_ref().map(|branch| branch.as_str()),
+            )
+        })
         .filter_map(|entry| canonicalize(&entry.path).ok().map(|path| (path, entry)))
         .collect();
     let total = candidates.len();

@@ -1,6 +1,6 @@
 //! Lane Fabric observations and the attempt-bound host messaging endpoint.
 mod support;
-use provenant_core::{AttemptId, CancelToken, RootInputs};
+use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, RootInputs};
 use provenant_fabric_runtime::{
     coordination::{CoordinationService, ThreadPause},
     identity::Address,
@@ -555,10 +555,21 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         },
         move |arguments, _, _| match serde_json::from_value::<RelayOp>(arguments)? {
             RelayOp::Add(child) => {
-                assert_eq!(child.brief, "Observe child");
-                // Admission may outlast the requested observation window.
-                for _ in 0..22 {
-                    provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+                assert!(matches!(
+                    child.brief.as_str(),
+                    "Observe child" | "Delayed child"
+                ));
+                if child.brief == "Delayed child" {
+                    // Admission may outlast the original observation deadline.
+                    let clock = SystemClock;
+                    clock
+                        .wait_until(
+                            clock
+                                .mono_now()
+                                .checked_add(DurationMicros::from_micros(1_100_000))
+                                .unwrap(),
+                        )
+                        .unwrap();
                 }
                 Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
             }
@@ -586,19 +597,26 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         zero_wait["structuredContent"]["path"],
         "arguments.wait_seconds"
     );
-    for fail in [false, true] {
+    for (brief, fail) in [
+        ("Observe child", false),
+        ("Observe child", true),
+        ("Delayed child", false),
+    ] {
         fail_observation.store(fail, Ordering::SeqCst);
-        let cli = host(&rig, &["run", "Observe child", "--wait=1s", "--json"])?;
+        let cli = host(&rig, &["run", brief, "--wait=1s", "--json"])?;
         let mcp = mcp(
             &rig,
             "fabric_run",
-            json!({"op":"run","brief":"Observe child","wait_seconds":1}),
+            json!({"op":"run","brief":brief,"wait_seconds":1}),
         )?;
         assert_ne!(mcp["isError"], true, "{mcp}");
         let value = &cli["data"];
         assert_eq!(*value, mcp["structuredContent"]);
         assert_eq!(value["receipt"]["revision"], 2);
-        if fail {
+        if brief == "Delayed child" {
+            assert_eq!(value["observation_error"], "child wait timed out");
+            assert!(value.get("children").is_none());
+        } else if fail {
             assert!(
                 value["observation_error"]
                     .as_str()
@@ -611,5 +629,72 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
             assert!(value.get("observation_error").is_none());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Result {
+    use provenant_fabric_runtime::graph::relay::RelayOp;
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "task", "list", "--json"])?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=60\n",
+    )?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| unreachable!("expected graph request"),
+        move |arguments, _, within| {
+            match serde_json::from_value::<RelayOp>(arguments)? {
+                RelayOp::Add(child) if child.brief == "Delayed child" => {
+                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
+                    // Model registry contention beyond the former socket ceiling.
+                    let clock = SystemClock;
+                    clock
+                        .wait_until(
+                            clock
+                                .mono_now()
+                                .checked_add(DurationMicros::from_micros(56_000_000))
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
+                }
+                RelayOp::Add(_) => {
+                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
+                    Err(provenant_fabric_mcp::tools::ServiceError::Facade(
+                        provenant_fabric_mcp::tools::FacadeError::WriterLockBusy,
+                    ))
+                }
+                _ => unreachable!("unexpected graph operation"),
+            }
+        },
+    );
+    let _relay = match relay {
+        Ok(relay) => relay,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "child relay socket: {error}"
+            ))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    lane_environment(&mut rig, attempt)?;
+    let output = rig.command(&["run", "Delayed child", "--wait=1s", "--json"])?;
+    let receipt: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(receipt["data"]["receipt"]["revision"], 2, "{receipt}");
+    assert_eq!(receipt["data"]["observation_error"], "child wait timed out");
+    let output = rig.command(&["run", "Refused child", "--wait=1s", "--json"])?;
+    let refused: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(refused["error"]["code"], "writer_lock_busy", "{refused}");
+    assert!(
+        refused["error"]["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("retry")),
+        "{refused}"
+    );
     Ok(())
 }

@@ -658,7 +658,8 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
     leaf.advance_error_code = Some("launch_refused".into());
     let attempt = &mut leaf.attempts[0];
     attempt.state = AttemptState::Starting;
-    attempt.launched = false;
+    // Dispatch sets this flag before the host can refuse acceptance.
+    attempt.launched = true;
     attempt.attempt_ref = None;
     attempt
         .extra
@@ -675,7 +676,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
             0 => {
                 leaf.attempts[0].extra.remove(PRELAUNCH_REFUSAL_PROOF);
             }
-            1 => leaf.attempts[0].launched = true,
+            1 => leaf.attempts[0].state = AttemptState::Running,
             2 => leaf.attempts[0].attempt_ref = Some("host/uncertain".into()),
             _ => leaf.advance_error_code = Some("launch_retry_exhausted".into()),
         }
@@ -1333,10 +1334,10 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     assert!(!prior.launched);
     assert!(prior.attempt_ref.is_none());
     let sibling = checkpoint.nodes[1].clone();
-    for unsafe_case in 0..6 {
+    // The launch flag is set before dispatch; explicit host proof overrides it.
+    for unsafe_case in 1..6 {
         let mut candidate = checkpoint.clone();
         match unsafe_case {
-            0 => candidate.nodes[0].attempts[0].launched = true,
             1 => candidate.nodes[0].attempts[0].attempt_ref = Some("host/uncertain".into()),
             2 => candidate.nodes[0].advance_error_code = Some("launch_retry_exhausted".into()),
             3 => candidate.nodes[0].state = NodeState::Running,

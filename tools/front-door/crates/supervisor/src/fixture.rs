@@ -287,9 +287,6 @@ pub fn run_libtest(
         }
         index += 1;
     }
-    if ignored {
-        return Ok(());
-    }
     let selected: Vec<&str> = if let Some(name) = exact {
         if !test_names.contains(&name) {
             return Err(io::Error::new(
@@ -301,6 +298,9 @@ pub fn run_libtest(
     } else {
         test_names.to_vec()
     };
+    if ignored {
+        return Ok(());
+    }
     if list {
         let mut stdout = io::stdout().lock();
         for name in selected {
@@ -1239,4 +1239,28 @@ pub fn bind_writer_attempt(
 /// This fixture seam synchronises observation tests without scheduler sleeps.
 pub fn on_writer_lock_wait(hook: impl FnOnce() + 'static) {
     crate::custody::WRITER_LOCK_WAIT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+mod libtest_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_exact_name_fails_in_every_mode() {
+        for flags in [
+            &[][..],
+            &["--ignored"][..],
+            &["--list"][..],
+            &["--ignored", "--list"][..],
+        ] {
+            let args: Vec<OsString> = flags
+                .iter()
+                .copied()
+                .chain(["--exact", "unknown"])
+                .map(OsString::from)
+                .collect();
+            let error = run_libtest(&args, &["known"], |_| panic!("unknown test ran")).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        }
+    }
 }

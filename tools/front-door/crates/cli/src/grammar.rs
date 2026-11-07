@@ -700,7 +700,9 @@ pub struct GraphRunArgs {
     /// Explain the compiled graph without starting work
     #[arg(long)]
     pub explain: bool,
-    /// Wait for settlement (default 1 hour; use --wait=30m for a duration)
+    /// Wait for settlement (default 1 hour; use --wait=30m for a duration).
+    /// Writer binding can block beyond this wait: each binding gets at least
+    /// domains.fabric.graph.writer_launch_seconds (default 55s). Expiry leaves work running.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
     pub wait: Option<u64>,
     /// Raw CLI evidence that a duration after bare `--wait` became the brief.
@@ -1049,7 +1051,8 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE); may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
-    /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
+    /// Graph ID, node ID, GRAPH/NODE, attempt ID, HOST/ATTEMPT, RUN/ATTEMPT or RUN/TASK/ATTEMPT
+    #[arg(value_name = "TARGET")]
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
     #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]

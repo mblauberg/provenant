@@ -9,6 +9,8 @@ use provenant_os::{
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 
+mod steward;
+
 const DAY_SECONDS: u64 = 86_400;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -581,6 +583,7 @@ fn tick(
     let tasks = vec![
         gc,
         target_seed,
+        steward::run(&config.domains.steward, &resolved, workers),
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
     ];
@@ -593,11 +596,12 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
             let failed = !data.graphs.errors.is_empty()
                 || data.tasks.iter().any(|task| task.error.is_some());
             let mut human = format!(
-                "tick: graphs={} errors={} gc={} seed={}\n",
+                "tick: graphs={} errors={} gc={} seed={} steward={}\n",
                 data.graphs.advanced,
                 data.graphs.errors.len(),
                 data.tasks[0].state,
-                data.tasks[1].state
+                data.tasks[1].state,
+                data.tasks[2].state
             );
             for warning in &data.graphs.warnings {
                 human.push_str(&format!("warning: {warning}\n"));
@@ -647,7 +651,7 @@ mod tests {
 
     #[test]
     fn daily_cadence_survives_restart_and_fires_at_the_deadline() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         let directory = provenant_config::private_directory(temp.path(), true).unwrap();
         let now = WallTime::from_micros(1_000_000).unwrap();
         let cadence = read_cadence(&directory).unwrap();

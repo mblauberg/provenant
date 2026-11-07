@@ -259,6 +259,15 @@ pub trait AttemptOwner {
         LaunchRetryPolicy::default()
     }
 
+    /// Restore a writer's sealed deadline, or start its launch allowance before binding.
+    fn begin_launch(
+        &mut self,
+        _access: AccessMode,
+        deadline: Option<provenant_core::WallTime>,
+    ) -> Result<Option<provenant_core::WallTime>, Self::Error> {
+        Ok(deadline)
+    }
+
     /// Maximum time to admit a launch, measured from its first submission.
     fn admission_timeout_seconds(&self) -> Option<u64> {
         None
@@ -1977,6 +1986,35 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .clone();
                 let key = transitions::attempt_key(&plan, node_index, &checkpoint, route_index)
                     .map_err(|error| GraphError::Invalid(error.into()))?;
+
+                {
+                    let prior = checkpoint.nodes[node_index]
+                        .launch_retry
+                        .as_ref()
+                        .and_then(|retry| retry.deadline);
+                    if let Some(deadline) = owner
+                        .begin_launch(node.access, prior)
+                        .map_err(GraphError::Run)?
+                        && prior.is_none()
+                    {
+                        checkpoint.nodes[node_index].launch_retry = Some(LaunchRetry {
+                            extra: Default::default(),
+                            policy: owner.launch_retry_policy(),
+                            failures: 0,
+                            deadline: Some(deadline),
+                            wake_at: None,
+                            reason: None,
+                        });
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    }
+                    // Relay provisioning seals the deadline before the host owner
+                    // is available to resolve the configured retry policy.
+                    if checkpoint.nodes[node_index].attempts.is_empty()
+                        && let Some(retry) = checkpoint.nodes[node_index].launch_retry.as_mut()
+                    {
+                        retry.policy = owner.launch_retry_policy();
+                    }
+                }
 
                 // Expanded writers acquire their binding as soon as they exist.
                 if plans::writer(node)

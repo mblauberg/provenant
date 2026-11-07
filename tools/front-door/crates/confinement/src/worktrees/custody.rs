@@ -440,7 +440,7 @@ fn reobserve_held_path(
     cancel: &CancelToken,
     pause: &dyn provenant_core::Pause,
 ) -> Result<Occupancy, WorktreeError> {
-    for _ in 0..3 {
+    loop {
         if !matches!(&observed, Occupancy::Observed { process: Some(process) }
             if process.kind == ProcessEvidenceKind::OtherHeldPath)
         {

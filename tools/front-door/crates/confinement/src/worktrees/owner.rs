@@ -211,7 +211,7 @@ pub fn prune_owned(
     if !is_ancestor(context, head, upstream, cancel)? {
         return Err(WorktreeError::InvalidRequest);
     }
-    let lanes = list(context, cancel)?
+    let lanes = list_for_gc_matching(context, cancel, |candidate, _| candidate == path)?
         .into_iter()
         .filter(|lane| lane.path == path && lane.head == head)
         .collect::<Vec<_>>();
@@ -224,7 +224,7 @@ pub fn prune_owned(
         upstream: None,
         ..*policy
     };
-    collect(context, &lanes, &output_policy, cancel)?;
+    collect_lazy(context, &lanes, &output_policy, cancel)?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries

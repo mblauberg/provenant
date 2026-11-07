@@ -26,10 +26,23 @@ pub fn host_budget(
 ) -> Result<WaitBudget, provenant_core::TimeError> {
     let now = clock.mono_now();
     let within = within
-        .min(Duration::from_secs(crate::MAX_WAIT_SECONDS))
+        .min(Duration::from_secs(GRAPH_LAUNCH_MAX_SECONDS))
         .saturating_sub(Duration::from_millis(100));
-    Ok(WaitBudget::mcp(now, crate::MAX_WAIT_SECONDS)?
-        .cap_at(now.checked_add(DurationMicros::from_micros(within.as_micros() as u64))?))
+    Ok(WaitBudget::up_to(
+        now,
+        DurationMicros::from_micros(within.as_micros() as u64),
+    ))
+}
+
+// Graph launch is internal CLI transport; public MCP observations retain their cap.
+const GRAPH_LAUNCH_MAX_SECONDS: u64 = provenant_core::WaitTransport::Cli.maximum_seconds() + 1;
+
+fn request_max_seconds(request: &Request) -> u64 {
+    if request.tool == GRAPH_TOOL && request.arguments["op"] == "add" {
+        GRAPH_LAUNCH_MAX_SECONDS
+    } else {
+        crate::MAX_WAIT_SECONDS
+    }
 }
 
 /// Relay frame for a lane adding to its own graph. It is not an MCP tool:
@@ -374,6 +387,7 @@ fn confirm_budget(
     stream: &mut UnixStream,
     deadline: Instant,
     cancel: &CancelToken,
+    maximum_seconds: u64,
 ) -> io::Result<Duration> {
     write(stream, &Reply::Ready, deadline, cancel)?;
     let mut milliseconds = [0; 4];
@@ -383,8 +397,7 @@ fn confirm_budget(
         Instant::now() + IO_TIMEOUT,
         cancel,
     )?;
-    let milliseconds =
-        u64::from(u32::from_be_bytes(milliseconds)).min(crate::MAX_WAIT_SECONDS * 1000);
+    let milliseconds = u64::from(u32::from_be_bytes(milliseconds)).min(maximum_seconds * 1000);
     if milliseconds == 0 {
         return Err(io::ErrorKind::TimedOut.into());
     }
@@ -419,12 +432,12 @@ pub(crate) fn serve_one_with(
     let request: Request = provenant_records::decode(bytes.as_slice(), limits)
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
     let reply = if request.tool == GRAPH_TOOL {
-        let within = confirm_budget(stream, deadline, cancel)?;
+        let within = confirm_budget(stream, deadline, cancel, request_max_seconds(&request))?;
         reply(graph(request.arguments, cancel, within))
     } else {
         match ToolCall::parse(&request.tool, request.arguments) {
             Ok(call) => {
-                let within = confirm_budget(stream, deadline, cancel)?;
+                let within = confirm_budget(stream, deadline, cancel, crate::MAX_WAIT_SECONDS)?;
                 reply(handler(call, cancel, within))
             }
             Err(crate::tools::InvalidInput::Validated(error)) => Reply::Error {
@@ -518,7 +531,7 @@ pub(crate) fn exchange_within(
         }
     };
     stream.set_nonblocking(true).map_err(unavailable)?;
-    let deadline = Instant::now() + within.min(Duration::from_secs(crate::MAX_WAIT_SECONDS));
+    let deadline = Instant::now() + within.min(Duration::from_secs(request_max_seconds(request)));
     write(
         stream,
         request,
@@ -1100,6 +1113,60 @@ mod tests {
             serving.join().unwrap()?;
             Ok(())
         })
+    }
+
+    #[test]
+    fn graph_launch_negotiates_more_than_fifty_five_seconds_without_extending_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (tool, arguments, long) in [
+            (GRAPH_TOOL, serde_json::json!({"op":"add"}), true),
+            (GRAPH_TOOL, serde_json::json!({"op":"children"}), false),
+            ("fabric_events", request().arguments, false),
+        ] {
+            let (mut client, mut server) = UnixStream::pair()?;
+            let cancel = CancelToken::new();
+            let observe = |within: Duration| {
+                if long {
+                    assert!(within > Duration::from_secs(59), "{within:?}");
+                } else {
+                    assert!(within <= Duration::from_secs(55), "{within:?}");
+                }
+                let clock = provenant_os::clock::SystemClock;
+                let host = host_budget(&clock, within).unwrap();
+                if long {
+                    assert!(host.remaining(clock.mono_now()).as_micros() > 59_000_000);
+                } else {
+                    assert!(host.remaining(clock.mono_now()).as_micros() < 55_000_000);
+                }
+                Ok(Value::Null)
+            };
+            thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+                let serving = scope.spawn(|| {
+                    serve_one_with(
+                        &mut server,
+                        provenant_records::Limits::CONFIG,
+                        &|_, _, within| observe(within),
+                        &|_, _: &CancelToken, within| observe(within),
+                        &cancel,
+                    )
+                });
+                assert_eq!(
+                    exchange_within(
+                        &mut client,
+                        &Request {
+                            tool: tool.into(),
+                            arguments
+                        },
+                        &cancel,
+                        Duration::from_secs(60)
+                    )?,
+                    Value::Null
+                );
+                serving.join().unwrap()?;
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]

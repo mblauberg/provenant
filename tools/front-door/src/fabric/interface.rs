@@ -11,6 +11,22 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+fn retry_patch_error(error: patch::PatchError) -> FacadeError {
+    use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    let cause = if error.message.starts_with("unknown node ") {
+        GraphRelayCause::RetryUnknownNode
+    } else if error.message.contains("settled") {
+        GraphRelayCause::RetryUnsettled
+    } else if error.message.contains("container retry") {
+        GraphRelayCause::RetryContainerBrief
+    } else if error.admission.is_some() {
+        return graph_patch_error(error);
+    } else {
+        GraphRelayCause::RetryInvalidConfiguration
+    };
+    FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause))
+}
+
 /// A compile failure that reached graph admission keeps its typed refusal, so
 /// a template launch reads the same message as the raw document it compiles to.
 /// Failures before admission stay a redacted graph-input reason.
@@ -459,15 +475,34 @@ impl Factory {
         if input["explain"] == true {
             return encode(request);
         }
+        let settlement = input
+            .get("wait_seconds")
+            .and_then(Value::as_u64)
+            .map(|seconds| {
+                WaitBudget::cli(self.clock.mono_now(), seconds)
+                    .map(|wait| wait.cap_at(budget.deadline().as_mono_time()))
+            })
+            .transpose()
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let launch = provenant_cli::fabric::graph_relay::writer_launch_budget(
+            &self.context,
+            &self.clock,
+            budget,
+        );
         let within =
-            std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros());
+            std::time::Duration::from_micros(launch.remaining(self.clock.mono_now()).as_micros())
+                .saturating_add(std::time::Duration::from_secs(1));
         let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
             .map_err(relay_error)?;
-        if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
+        if let Some(settlement) = settlement {
+            let remaining = settlement.remaining(self.clock.mono_now()).as_micros();
+            if remaining == 0 {
+                return Ok(json!({"receipt":receipt,"observation_error":"child wait timed out"}));
+            }
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
                     cancel,
-                    std::time::Duration::from_secs(seconds),
+                    std::time::Duration::from_micros(remaining),
                 ) {
                     Ok(children) => json!({"receipt":receipt,"children":children}),
                     Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
@@ -1454,7 +1489,7 @@ impl Factory {
                     limits: &self.context.config.graph.limits,
                 },
             )
-            .map_err(graph_input_reason)?;
+            .map_err(retry_patch_error)?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
         } else if input.get("brief").is_some_and(|value| !value.is_null()) {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
@@ -1591,21 +1626,15 @@ impl Factory {
                     .zip(now)
                     .is_some_and(|(wake, now)| now >= wake)
             });
-            if !due {
+            if !due || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
                 return Ok(observed);
             }
-            let retry_budget = if budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-                WaitBudget::cli(self.clock.mono_now(), 5)
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
-            } else {
-                budget
-            };
             self.graph_with_scratch(
                 GraphInput::Run {
                     extra: Default::default(),
                     document: document.to_owned(),
                 },
-                retry_budget,
+                budget,
                 cancel,
                 Some(scratch),
                 None,
@@ -3269,6 +3298,7 @@ mod tests {
                     source
                 );
                 let mut owner = BoundGraphOwner {
+                    writer_launch_budget: None,
                     admission_timeout: None,
                     launch_warnings: Vec::new(),
                     repo_facts: Default::default(),

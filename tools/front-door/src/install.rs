@@ -1837,7 +1837,7 @@ mod tests {
             assert!(!output.timed_out && !output.cancelled);
             Ok(())
         };
-        let temp = tempfile::tempdir()?;
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
         let path = temp.path().join("run.sqlite3");
         let writer = rusqlite::Connection::open(&path)?;
         writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project','run','attempt',X'7b7d',0);")?;

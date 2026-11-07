@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[serde(deny_unknown_fields)]
 pub struct Domains {
     #[serde(default)]
+    pub steward: crate::steward::Settings,
+    #[serde(default)]
     pub wait: crate::wait::Settings,
     pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
@@ -681,7 +683,7 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
 ]);
 
-static ENTRIES: [DomainSection; 8] = [
+static ENTRIES: [DomainSection; 9] = [
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
@@ -690,6 +692,7 @@ static ENTRIES: [DomainSection; 8] = [
     provenant_confinement::run_config::SECTION,
     PR_SECTION,
     LANES_SECTION,
+    crate::steward::SECTION,
 ];
 pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
 
@@ -700,6 +703,33 @@ mod tests {
     use provenant_core::{PathResolver, Roots};
     use serde_json::json;
     use std::path::Path;
+
+    // Medium: actual config loader and editor, with no tracker or providers.
+    #[test]
+    fn steward_host_config_is_opt_in_and_validates_cadence() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let config = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
+        assert!(config.domains.steward.repositories.is_empty());
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.steward.repositories.tracker.directory": "/checkout",
+                "domains.steward.repositories.tracker.cadence_seconds": 3600,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            edited.config.domains.steward.repositories["tracker"].cadence_seconds,
+            3600
+        );
+        for patch in [
+            json!({"domains.steward.repositories.tracker.cadence_seconds":0}),
+            json!({"domains.steward.repositories.tracker.directory":"relative"}),
+        ] {
+            assert!(edit(&roots, patch).is_err());
+        }
+    }
 
     #[test]
     fn cloud_targets_round_trip_with_project_selection() {

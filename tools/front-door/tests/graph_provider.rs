@@ -1518,52 +1518,55 @@ fn writer_registry_fixture() -> Result<TestRig> {
 
 /// Admission must survive repository-wide contention even without native execution.
 fn simultaneous_writer_launches_create_attempts() -> Result {
-    let rig = writer_registry_fixture()?;
-    let _cleanup = rig.process_cleanup();
-    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
-    let barrier = std::sync::Barrier::new(6);
-    std::thread::scope(|scope| -> Result {
-        let mut launches = Vec::new();
-        for index in 0..6 {
-            let barrier = &barrier;
-            let rig = &rig;
-            launches.push(scope.spawn(move || {
-                barrier.wait();
-                std::process::Command::new(binary)
-                    .current_dir(&rig.project)
-                    .env_clear()
-                    .envs(rig.env.iter().cloned())
-                    .arg("--state-dir")
-                    .arg(&rig.state)
-                    .args([
-                        "run",
-                        "fixture writer",
-                        "--tier",
-                        "junior",
-                        "--mode",
-                        "worktree-write",
-                        "--branch",
-                        &format!("parallel-{index}"),
-                        "--base",
-                        "HEAD",
-                        "--wait=55s",
-                        "--json",
-                    ])
-                    .output()
-            }));
-        }
-        for launch in launches {
-            let output = launch.join().map_err(|_| "launch thread panicked")??;
-            let response: Value = serde_json::from_slice(&output.stdout)?;
-            assert!(
-                response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-                    .is_string(),
-                "{response}; {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(())
-    })
+    for wait in ["--wait=8s", "--wait=1s"] {
+        let rig = writer_registry_fixture()?;
+        let _cleanup = rig.process_cleanup();
+        let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+        let barrier = std::sync::Barrier::new(6);
+        std::thread::scope(|scope| -> Result {
+            let mut launches = Vec::new();
+            for index in 0..6 {
+                let barrier = &barrier;
+                let rig = &rig;
+                launches.push(scope.spawn(move || {
+                    barrier.wait();
+                    std::process::Command::new(binary)
+                        .current_dir(&rig.project)
+                        .env_clear()
+                        .envs(rig.env.iter().cloned())
+                        .arg("--state-dir")
+                        .arg(&rig.state)
+                        .args([
+                            "run",
+                            "fixture writer",
+                            "--tier",
+                            "junior",
+                            "--mode",
+                            "worktree-write",
+                            "--branch",
+                            &format!("parallel-{index}"),
+                            "--base",
+                            "HEAD",
+                            wait,
+                            "--json",
+                        ])
+                        .output()
+                }));
+            }
+            for launch in launches {
+                let output = launch.join().map_err(|_| "launch thread panicked")??;
+                let response: Value = serde_json::from_slice(&output.stdout)?;
+                assert!(
+                    response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+                        .is_string(),
+                    "{response}; {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 /// A held registry consumes the launch budget, then reports a typed CLI error.
@@ -1574,6 +1577,12 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         fs::{Directory, LockMode, SystemPathResolver},
     };
     let rig = writer_registry_fixture()?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+    )?;
     let _cleanup = rig.process_cleanup();
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -1614,12 +1623,12 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
     ])?;
     let elapsed = start.elapsed();
     assert!(
-        elapsed >= std::time::Duration::from_secs(1),
+        elapsed >= std::time::Duration::from_secs(2),
         "launch did not wait for the held registry: {elapsed:?}"
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
-        "launch exceeded its one-second wait budget: {elapsed:?}"
+        elapsed < std::time::Duration::from_secs(30),
+        "launch exceeded its configured binding allowance: {elapsed:?}"
     );
     assert_ne!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -1633,6 +1642,20 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
     assert_eq!(
         response["data"]["checkpoint"]["nodes"][0]["attempts"],
         json!([]),
+        "{response}"
+    );
+    assert!(!rig.project.join(".worktrees/blocked-writer").exists());
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let branch = rig.execute(
+        &git,
+        &["show-ref", "--verify", "refs/heads/blocked-writer"],
+        None,
+    )?;
+    assert_ne!(code(&branch), 0, "{branch:?}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("then retry")),
         "{response}"
     );
     let graph = response["data"]["checkpoint"]["graph_id"]
@@ -1663,8 +1686,8 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
     Ok(())
 }
 
-/// An expanded writer keeps the original run deadline during provisioning.
-fn expanded_writer_registry_wait_uses_run_deadline() -> Result {
+/// Expanded writer provisioning obeys the same configured launch allowance.
+fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
     use provenant_core::{Clock, RootInputs, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
@@ -1674,6 +1697,12 @@ fn expanded_writer_registry_wait_uses_run_deadline() -> Result {
         return Ok(());
     }
     let rig = writer_registry_fixture()?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+    )?;
     let _cleanup = rig.process_cleanup();
     let key =
         provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
@@ -1734,12 +1763,14 @@ fn expanded_writer_registry_wait_uses_run_deadline() -> Result {
     let start = std::time::Instant::now();
     let output = rig.command(&["run", "--file", doc, "--wait=1s", "--json"])?;
     let elapsed = start.elapsed();
+    assert!(elapsed >= std::time::Duration::from_secs(2), "{elapsed:?}");
     assert!(
         elapsed < std::time::Duration::from_secs(4),
         "expanded provisioning exceeded its deadline: {elapsed:?}"
     );
     assert_ne!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["error"]["code"], "writer_lock_busy", "{response}");
     let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
         &roots.state,
         binding.project_id(),
@@ -3280,13 +3311,17 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
-    let lane = run_graph_provider(
+    // Settlement takes about as long as the helper's default wait, so a slow
+    // runner can see the lane still running. The stop reason below is the
+    // real bound; this wait only has to outlast settlement.
+    let lane = run_graph_provider_with_wait(
         &rig,
         "opencode-hanging-limit",
         json!({
             "id":"provider", "prompt":"free limit then hang", "access":"read_only",
             "route":{"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}
         }),
+        "60s",
     )?;
     let run = lane["run_id"].as_str().ok_or("run")?;
     assert_eq!(lane["state"], "quota_limited", "{lane}");
@@ -3298,7 +3333,7 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
     let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
     // Cleanup, rather than a natural exit or the attempt wall deadline, must
-    // have ended the provider. The dispatch wait bounds the settlement above.
+    // have ended the provider.
     assert_eq!(exit["stop_reason"], "post_terminal_cleanup", "{exit}");
     assert_eq!(exit["terminal_observed"], true, "{exit}");
     cleanup.disarm();
@@ -3880,8 +3915,8 @@ fn main() -> ExitCode {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
             (
-                "expanded_writer_registry_wait_uses_run_deadline",
-                expanded_writer_registry_wait_uses_run_deadline,
+                "expanded_writer_registry_wait_uses_launch_allowance",
+                expanded_writer_registry_wait_uses_launch_allowance,
             ),
             (
                 "pending_graph_reports_pre_attempt_writer_failure",

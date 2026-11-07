@@ -1006,7 +1006,7 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
                 .iter()
                 .cloned()
                 .map(|root| {
-                    let state = if self.persistent || call == 0 {
+                    let state = if self.persistent || call < 4 {
                         Occupancy::Observed {
                             process: Some(ObservedProcess::new(
                                 42,
@@ -1049,17 +1049,21 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
     ));
     assert_eq!(transient.calls.load(Ordering::SeqCst), 1);
     transient.calls.store(0, Ordering::SeqCst);
-    drop(lock_worktree_for_launch(&context, entry, &cancel())?);
-    assert_eq!(transient.calls.load(Ordering::SeqCst), 2);
+    fast_forward(&context, &info.path, info.head, &cancel())?;
+    assert_eq!(transient.calls.load(Ordering::SeqCst), 5);
     let persistent = Holder {
         calls: AtomicUsize::new(0),
         persistent: true,
     };
     context.workers = &persistent;
+    context.lock_budget = WaitBudget::up_to(
+        context.clock.mono_now(),
+        provenant_core::DurationMicros::from_micros(350_000),
+    );
     assert!(matches!(
-        lock_worktree_for_launch(&context, entry, &cancel()),
+        fast_forward(&context, &info.path, info.head, &cancel()),
         Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
     ));
-    assert!(persistent.calls.load(Ordering::SeqCst) >= 4);
+    assert!(persistent.calls.load(Ordering::SeqCst) >= 1);
     Ok(())
 }

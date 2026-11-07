@@ -75,7 +75,7 @@ fn advance_receiver(
         cancel,
         &factory.clock,
     )?;
-    let mut owner = BoundGraphOwner { admission_timeout: None,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None,
         repo_facts: Default::default(),
         launch_warnings: Vec::new(),
         factory,
