@@ -293,6 +293,15 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
         plan.private_state = None;
         plan.scratch.path = root.clone();
         plan.write_roots.clear();
+        // Attempt state sits under the host's protected state root.
+        let mut mandatory =
+            MandatoryRoots::new(Path::new("/fixture/home"), &base, &root.join("worktree"))?;
+        mandatory.add_state_read(PathGrant {
+            path: snapshot_path.clone(),
+            scope: PathScope::Exact,
+        })?;
+        plan.policy =
+            Some(crate::run_config::RunConfig::default().policy_for_launch(&base, mandatory));
         let git = worktree_grants_fixture();
         plan.mode = if writer {
             AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
@@ -348,6 +357,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
         )?)?;
         let attempt_rules = source
             .lines()
+            .filter(|line| line.starts_with("(allow"))
             .filter(|line| line.contains(attempt_path.to_str().expect("attempt path")))
             .collect::<Vec<_>>();
         assert_eq!(

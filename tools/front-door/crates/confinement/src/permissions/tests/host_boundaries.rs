@@ -22,6 +22,8 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
     ] {
         std::fs::create_dir_all(directory)?;
     }
+    // The registry only reads a private state directory, whatever the umask.
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), primary.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
