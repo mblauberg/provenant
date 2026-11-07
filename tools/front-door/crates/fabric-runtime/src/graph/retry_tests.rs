@@ -1909,10 +1909,10 @@ fn no_work_continuation_requires_enabled_writer_and_proven_unchanged_head() {
         work.auto_continue_no_work = enabled;
         let document = graph(vec![work]);
         let mut stopped = no_work_stop(head.as_deref());
-        if head.as_deref() != Some("a".repeat(40).as_str()) {
-            if let AttemptObservation::Terminal { outcome, .. } = &mut stopped {
-                *outcome = AttemptOutcome::DeclaredStop;
-            }
+        if head.as_deref() != Some("a".repeat(40).as_str())
+            && let AttemptObservation::Terminal { outcome, .. } = &mut stopped
+        {
+            *outcome = AttemptOutcome::DeclaredStop;
         }
         let mut owner = FakeOwner {
             observations: [stopped].into(),

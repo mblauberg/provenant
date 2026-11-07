@@ -57,9 +57,9 @@ pub(crate) fn collect(state: &Path, before: i128, dry_run: bool) -> Result<(), F
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn old_scratch_is_removed_only_with_owner_locks() {
+        use super::*;
         let temp = tempfile::tempdir().unwrap();
         let root = Directory::open_anchor(temp.path()).unwrap();
         std::fs::create_dir(temp.path().join("install")).unwrap();
