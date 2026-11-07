@@ -1306,9 +1306,12 @@ mod provisioning_tests {
                         &source,
                         &cancel,
                     )?;
+                    // The fixture's TMPDIR may be an alias. Lock the same
+                    // canonical checkout identity that production verifies.
+                    let canonical_worktree = std::fs::canonicalize(project.join(path))?;
                     let _held = provenant_confinement::worktrees::cache_writer_guard(
                         ctx.project_state,
-                        &project.join(path),
+                        &canonical_worktree,
                     )
                     .map_err(provenant_confinement::worktrees::custody_refusal)?;
                     let held = provision_in_context(
