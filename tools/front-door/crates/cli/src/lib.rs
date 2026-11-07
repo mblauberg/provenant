@@ -475,7 +475,7 @@ fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
         ],
         "status" => &["all", "wait", "target", "until", "follow"],
         "output" => &["part", "tail", "trace"],
-        "steer" => &["text-stdin"],
+        "steer" => &["text-stdin", "operation-id"],
         "edit" | "templates" => &["file"],
         "stop" => &["wait", "reason"],
         "retry" => &["node", "brief", "extend", "wait"],
@@ -1125,6 +1125,17 @@ mod tests {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
             panic!("compact help")
         };
+        let steer = catalog
+            .commands
+            .iter()
+            .find(|command| command.command == "provenant steer")
+            .expect("documented steer command");
+        assert!(
+            steer
+                .arguments
+                .iter()
+                .any(|argument| { argument.long.as_deref() == Some("operation-id") })
+        );
         let mut globals = std::collections::BTreeSet::new();
         let rows = catalog
             .commands

@@ -294,6 +294,7 @@ Accepted by every command, before or after the subcommand.
 |---|---|
 | `attempt` | `{"description": "Attempt ID, graph ID or graph/node target", "name": "attempt", "positional": true, "required": true}` |
 | `--text-stdin` | `{"defaults": ["false"], "description": "Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `--operation-id` | `{"name": "operation_id"}` |
 
 ```json
 {
