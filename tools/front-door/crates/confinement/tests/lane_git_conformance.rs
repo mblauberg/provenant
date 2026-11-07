@@ -910,6 +910,7 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         fs::create_dir(path)?;
     }
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))?;
     let git_path = provenant_os::git::git_executable()
         .ok_or("Git unavailable")?
         .canonicalize()?;
@@ -990,6 +991,16 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            policy: Some(
+                provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+                    &root.join("state"),
+                    provenant_confinement::permissions::MandatoryRoots::new(
+                        &home,
+                        &root.join("state"),
+                        &lane,
+                    )?,
+                ),
+            ),
             read_only: None,
             mode: AccessMode::ReadOnly,
             scratch: grant(scratch.clone()),

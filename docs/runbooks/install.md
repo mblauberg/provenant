@@ -134,6 +134,14 @@ publish job verifies the transferred bytes and publishes the archive and checksu
 only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
 `docs/release-notes/<tag>.md`; that file becomes the GitHub Release body.
 
+### Test a candidate binary
+
+Run an uninstalled candidate only on its own `--state-dir`, never on the real
+state directory. A candidate with a newer run schema migrates `run.sqlite3` on
+first use, and installed binaries then fail with an IO error for every session on
+the host. `install --source DIR --upgrade-preflight` is read-only and safe on real
+state. An uninstalled binary also needs `PROVENANT_ROOT` set to its checkout.
+
 ## Build a staged release
 
 On the host, outside a Fabric lane, build the binary and run the release packaging binary.

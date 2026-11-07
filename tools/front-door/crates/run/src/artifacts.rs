@@ -60,9 +60,7 @@ fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<
         .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for entry in entries {
         if directory.metadata_at(&entry)?.kind == FileKind::Directory {
-            directory
-                .directory()
-                .make_owner_accessible_at(&entry)?;
+            directory.directory().make_owner_accessible_at(&entry)?;
             remove_payload_contents(&directory.child(&entry)?)?;
             directory.rmdir(&entry)?;
         } else {

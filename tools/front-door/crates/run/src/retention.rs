@@ -608,9 +608,7 @@ fn restore_owned_temporary_directories(parent: &Directory, name: &OsStr) {
         return;
     };
     if metadata.kind != FileKind::Directory
-        || !parent
-            .make_owner_accessible_at(name)
-            .unwrap_or(false)
+        || !parent.make_owner_accessible_at(name).unwrap_or(false)
     {
         return;
     }

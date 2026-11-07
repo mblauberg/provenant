@@ -280,6 +280,12 @@ The renderer slice must pass these checks before flipping the default:
 
 ## Known limits
 
+Login shell startup files stay unreadable: `/etc/zprofile`, `/etc/profile` and
+the zsh and bash files in the home directory or `ZDOTDIR`. They reorder `PATH`,
+which puts a system Git ahead of the lane's Git wrapper, and a writer's ordinary
+`git add` then fails on the protected Git directory. They can also source
+secrets. A lane keeps the `PATH` of the environment that launched it.
+
 Boundaries are enforced by pathname. A hard link to a protected file that already
 exists outside granted roots, such as an object in an earlier `git clone --local`,
 is not covered. New hard links remain denied. The owner accepts this limit;

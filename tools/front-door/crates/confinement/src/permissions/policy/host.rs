@@ -34,6 +34,12 @@ pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<P
     if let Some(data) = lookup("XDG_DATA_HOME").map(PathBuf::from) {
         roots.push(subtree(data.join("opencode")));
     }
+    if let Some(directory) = lookup("ZDOTDIR").map(PathBuf::from) {
+        roots.extend(HOME_SHELL_STARTUP.iter().map(|name| PathGrant {
+            path: directory.join(name),
+            scope: PathScope::Exact,
+        }));
+    }
     if let Some(socket) = lookup("SSH_AUTH_SOCK").map(PathBuf::from) {
         roots.push(PathGrant {
             path: socket,
@@ -72,6 +78,21 @@ const HOST_CREDENTIAL_ENDPOINTS: &[&str] = &[
     "config.yml",
     "login.keychain-db",
     "Library/Keychains/login.keychain-db",
+];
+
+/// Login shells run these. They reorder `PATH`, which puts a system Git ahead of
+/// the lane's Git wrapper, and they can source secrets. `PATH` already comes from
+/// the launching environment, so a lane loses nothing it needs.
+const SYSTEM_SHELL_STARTUP: &[&str] = &["/etc/zprofile", "/etc/profile"];
+const HOME_SHELL_STARTUP: &[&str] = &[
+    ".zshenv",
+    ".zprofile",
+    ".zshrc",
+    ".zlogin",
+    ".bash_profile",
+    ".bash_login",
+    ".bashrc",
+    ".profile",
 ];
 
 const CREDENTIAL_WALK_MAX_DEPTH: usize = 8;
@@ -262,6 +283,16 @@ impl MandatoryRoots {
         let mut mandatory = Self::new(home, roots.state.as_path(), source)?;
         for root in credentials {
             mandatory.add_credentials(root.clone())?;
+        }
+        for path in SYSTEM_SHELL_STARTUP
+            .iter()
+            .map(PathBuf::from)
+            .chain(HOME_SHELL_STARTUP.iter().map(|name| home.join(name)))
+        {
+            mandatory.add_credentials(PathGrant {
+                path,
+                scope: PathScope::Exact,
+            })?;
         }
         let entries = match std::fs::read_dir(home) {
             Ok(entries) => Some(entries),
@@ -530,6 +561,45 @@ mod tests {
                 .iter()
                 .any(|grant| grant.path == hidden)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_denies_shell_startup_through_links_and_zdotdir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let dotfiles = root.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles)?;
+        std::fs::write(dotfiles.join("zshenv"), "")?;
+        std::os::unix::fs::symlink(dotfiles.join("zshenv"), home.join(".zshenv"))?;
+        let zdotdir = root.join("zdot");
+        let credentials = host_credential_roots(|name| {
+            (name == "ZDOTDIR").then(|| zdotdir.clone().into_os_string())
+        });
+        let inventory =
+            MandatoryRoots::for_host(&roots, &home, &root.join("source"), &credentials, &[], &[])?;
+        let exact = |path: PathBuf| PathGrant {
+            path,
+            scope: PathScope::Exact,
+        };
+        for path in [
+            home.join(".zshenv"),
+            dotfiles.join("zshenv"),
+            home.join(".zprofile"),
+            home.join(".bash_profile"),
+            zdotdir.join(".zshenv"),
+            PathBuf::from("/etc/zprofile"),
+            PathBuf::from("/etc/profile"),
+        ] {
+            assert!(
+                inventory.credentials().contains(&exact(path.clone())),
+                "{}",
+                path.display()
+            );
+        }
         Ok(())
     }
 
