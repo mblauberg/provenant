@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::ModelObservation;
 use provenant_records::diagnostic::ContinuationCopyLimit;
 
 #[derive(Debug, thiserror::Error)]
@@ -153,7 +154,9 @@ pub(super) fn continuation_for(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
-    let located = if route.adapter == "opencode" {
+    let located = if AdapterSpec::get(&route.adapter)
+        .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+    {
         super::observation::find_opencode_session(&prior_state, session).ok()
     } else {
         find_session_state_within(&prior_state, session, policy.limits)
@@ -174,7 +177,7 @@ pub(super) fn continuation_for(
 }
 
 fn missing_continuation(provider: &str) -> ContinuationError {
-    if matches!(provider, "cursor" | "opencode" | "claude") {
+    if AdapterSpec::get(provider).is_some_and(|spec| spec.relocated_session_state) {
         format!("retained provider continuation is missing or expired; {provider} sessions now require attempt-private state, so host-backed sessions from before this release cannot resume; start a new lane").into()
     } else {
         "retained provider continuation is missing or expired; start a new lane".into()
@@ -323,7 +326,9 @@ pub(crate) fn continuation_available(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
-    if provider == "opencode" {
+    if AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+    {
         return super::observation::find_opencode_session(&state, session)
             .map(|_| ())
             .map_err(|_| missing_continuation(provider));

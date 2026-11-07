@@ -1392,6 +1392,10 @@ printf 'agy 1.0.0\n'
     };
     prior.applied_route = Some(launch.route.clone());
     prior.session = Some("fixture-session".into());
+    // Cursor continuation is retained in the settled attempt, never the host home.
+    let retained_session = paths.provider_state.join("candidate-0/chats/fixture-session");
+    std::fs::create_dir_all(&retained_session)?;
+    std::fs::write(retained_session.join("transcript"), b"retained fixture session")?;
     let mut continued_task = task.clone();
     continued_task.route = prior.requested_route.clone();
     continued_task.account = Some("retired-account-alias".into());
@@ -1431,6 +1435,10 @@ printf 'agy 1.0.0\n'
     assert_eq!(continued.route.account_key, launch.route.account_key);
     assert!(continued.route.pool_selection.is_none());
     assert!(continued.argv.iter().any(|arg| arg == "--resume"));
+    assert_eq!(
+        std::fs::read(continued_paths.provider_state.join("candidate-0/chats/fixture-session/transcript"))?,
+        b"retained fixture session"
+    );
     let confinement = launch.confinement.ok_or("writer confinement missing")?;
     assert!(confinement.writer.is_some());
     // Exercise the actual request builder with two distinct project overrides.
