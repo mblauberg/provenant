@@ -677,23 +677,48 @@ mod tests {
             Run::Passed
         ));
         let dir = tempfile::tempdir().unwrap();
+        let wait_for_marker = |marker: &std::path::Path, timeout: Duration| {
+            let until = std::time::Instant::now() + timeout;
+            while std::time::Instant::now() < until {
+                if marker.exists() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            marker.exists()
+        };
+        let control_trigger = dir.path().join("control-trigger");
+        let control_marker = dir.path().join("control-marker");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "while [ ! -e '{}' ]; do sleep 0.01; done; echo alive > '{}'",
+                control_trigger.display(),
+                control_marker.display()
+            ))
+            .spawn()
+            .unwrap();
+        std::fs::write(&control_trigger, b"").unwrap();
+        assert!(
+            wait_for_marker(&control_marker, Duration::from_secs(2)),
+            "live child did not write its marker after the trigger"
+        );
+        assert!(child.wait().unwrap().success());
+
         for (suffix, expected_success) in [("0", true), ("1", false)] {
-            let pid_path = dir.path().join(format!("pid-{suffix}"));
+            let trigger_path = dir.path().join(format!("trigger-{suffix}"));
+            let marker_path = dir.path().join(format!("background-{suffix}"));
             let command = format!(
-                "sleep 60 & echo $! > '{}'; test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"; exit {suffix}",
-                pid_path.display()
+                "(while [ ! -e '{}' ]; do sleep 0.01; done; echo alive > '{}') & test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"; exit {suffix}",
+                trigger_path.display(),
+                marker_path.display()
             );
             let result = run_command(dir.path(), &command, deadline, &[]).unwrap();
             assert!(matches!(result, Run::Passed) == expected_success);
-            let pid = std::fs::read_to_string(pid_path).unwrap();
-            let status = Command::new("ps")
-                .args(["-o", "stat=", "-p", pid.trim()])
-                .output()
-                .unwrap();
-            let state = String::from_utf8_lossy(&status.stdout);
+            std::fs::write(&trigger_path, b"").unwrap();
             assert!(
-                state.trim().is_empty() || state.trim().starts_with('Z'),
-                "background process still running: {state}"
+                !wait_for_marker(&marker_path, Duration::from_secs(1)),
+                "background process outlived command completion"
             );
         }
     }

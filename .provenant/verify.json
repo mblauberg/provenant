@@ -1,5 +1,13 @@
 {
   "workspace": "tools/front-door",
+  "package_paths": [
+    {
+      "paths": [
+        "scripts/verify-nextest"
+      ],
+      "package": "provenant"
+    }
+  ],
   "quarantine_command": [
     "scripts/flaky-quarantine"
   ],
@@ -34,6 +42,9 @@
     {
       "paths": [
         "tools/front-door/crates/cli/src/run/*",
+        "scripts/verify-nextest",
+        "tools/front-door/src/fabric/interface.rs",
+        "tools/front-door/src/fabric/graph_execution.rs",
         "tools/front-door/tests/graph_provider.rs"
       ],
       "package": "provenant",
@@ -47,13 +58,6 @@
       ],
       "package": "provenant",
       "binary": "cloud_adapter"
-    },
-    {
-      "paths": [
-        "tools/front-door/tests/graph_provider.rs"
-      ],
-      "package": "provenant",
-      "binary": "graph_provider"
     },
     {
       "paths": [

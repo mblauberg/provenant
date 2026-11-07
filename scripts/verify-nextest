@@ -38,6 +38,18 @@ def main(args):
             del args[index:index + 2]
     if threads := os.environ.get("VERIFY_TIER_TEST_THREADS"):
         run_options.extend(["--test-threads", threads])
+    # The verifier itself runs inside a Provenant lane, but its tests must
+    # start as ordinary test processes. Ambient lane markers otherwise make
+    # unit fixtures take production lane-only lookup/relay paths that CI
+    # never exercises. Lane-specific tests pass these markers explicitly to
+    # the child process they are testing.
+    test_env = os.environ.copy()
+    for name in (
+        "PROVENANT_PARENT_ATTEMPT_ID",
+        "PROVENANT_RUN_STATE_DIR",
+        "PROVENANT_LANE_DEPTH",
+    ):
+        test_env.pop(name, None)
     with tempfile.TemporaryDirectory(prefix="provenant-nextest-") as scratch:
         metadata = Path(scratch) / "cargo.json"
         binaries = Path(scratch) / "binaries.json"
@@ -46,10 +58,10 @@ def main(args):
         if status:
             return status
         with binaries.open("w") as out:
-            status = subprocess.run(["cargo", "nextest", "list", "--list-type", "binaries-only", "--message-format", "json", *args], stdout=out).returncode
+            status = subprocess.run(["cargo", "nextest", "list", "--list-type", "binaries-only", "--message-format", "json", *args], stdout=out, env=test_env).returncode
         if status:
             return status
-        return subprocess.run(["cargo", "nextest", "run", "--profile", profile, "--cargo-metadata", str(metadata), "--binaries-metadata", str(binaries), *run_options, *test_filters]).returncode
+        return subprocess.run(["cargo", "nextest", "run", "--profile", profile, "--cargo-metadata", str(metadata), "--binaries-metadata", str(binaries), *run_options, *test_filters], env=test_env).returncode
 
 
 if __name__ == "__main__":
