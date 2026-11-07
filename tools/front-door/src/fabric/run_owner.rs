@@ -762,7 +762,9 @@ impl BinaryRunOwner<'_> {
 impl BinaryRunOwner<'_> {
     pub(crate) fn capabilities(&self) -> RunCapabilities {
         RunCapabilities {
-            submit: false,
+            // Peer submission admits graph attempts even though the legacy
+            // top-level run mutation tools have been removed.
+            submit: true,
             list: true,
             status: true,
             wait: true,
