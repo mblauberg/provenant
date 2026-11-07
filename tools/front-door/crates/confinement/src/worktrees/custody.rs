@@ -356,7 +356,12 @@ pub(super) fn lock_worktree(
             {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            use provenant_core::Pause;
+            provenant_core::ThreadPause
+                .wait(provenant_core::DurationMicros::from_micros(100_000), cancel);
+            if cancel.is_cancelled() {
+                return Err(WorktreeError::Cancelled);
+            }
             context.workers.invalidate();
             (observations, details) = context
                 .workers
