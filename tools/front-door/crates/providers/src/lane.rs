@@ -803,6 +803,12 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
 /// cannot tell where the subcommand starts, so it does not bind.
 fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
     use std::os::unix::ffi::OsStrExt;
+    if value
+        .to_str()
+        .is_some_and(|text| text.chars().any(char::is_control))
+    {
+        return Err(ProviderError::InvalidPath);
+    }
     let mut quoted = String::from("'");
     for &byte in value.as_bytes() {
         match byte {
