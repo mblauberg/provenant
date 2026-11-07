@@ -1321,7 +1321,8 @@ write roots retain the ordinary launch protections.
 - Why: any agent must be able to launch children and collect their results and
   failure causes without gaining direct access to host journals or credentials.
 - Test: `crates/fabric-runtime/src/graph/relay_tests.rs`;
-  `src/fabric/lane_read_tests.rs`
+  `src/fabric/lane_read_tests.rs`;
+  `src/fabric/interface.rs::tests::explicit_writer_children_use_their_selected_project_custody`
 - Owner: `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/unified.rs`
 
 ## Not provided
