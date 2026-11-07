@@ -2773,6 +2773,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 })?;
                 transitions::record_observation(
                     &mut checkpoint,
+                    node,
+                    &plan,
+                    &positions,
                     node_index,
                     retry_was_pending,
                     recorded_separation,

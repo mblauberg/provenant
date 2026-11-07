@@ -339,6 +339,12 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
                 SeparationOutcome::Unavailable
             }
         );
+        let warnings = &repair_node.outputs.as_ref().unwrap().warnings;
+        assert_eq!(
+            warnings.iter().any(|warning| warning
+                .contains("No separate model family was available for the repair writer")),
+            !alternative
+        );
         for field in [
             "F1",
             "\"lens\":\"correctness\"",
@@ -360,6 +366,12 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
         assert_eq!(
             node(&run.checkpoint, "review").source_commit.as_deref(),
             Some(REPAIR_HEAD)
+        );
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
         );
     }
 }
