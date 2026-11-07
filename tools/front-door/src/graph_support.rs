@@ -3,73 +3,7 @@ use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-/// Lower a tier (a pool name, an exact `ADAPTER/ID[@effort]`, a route table or
-/// a route list) to the `route` or `routes` entry a node carries. A read-only
-/// pool name repeats once, so a usage-limited first member falls back to the
-/// next resolution. Writers keep one entry. A route table that names neither
-/// an alias nor an adapter and model is refused rather than dropped.
-pub(crate) fn tier_route(
-    id: &str,
-    tier: &Value,
-    effort: Option<&Value>,
-    read_only: bool,
-) -> Result<(&'static str, Value), String> {
-    if tier.is_array() {
-        if effort.is_some() {
-            return Err(format!(
-                "node {id}: route lists cannot be combined with effort"
-            ));
-        }
-        return Ok(("routes", tier.clone()));
-    }
-    let mut route = match tier {
-        Value::String(name) if !name.is_empty() => {
-            if let Some((adapter, model)) = name.split_once('/') {
-                let (model, embedded_effort) = model
-                    .split_once('@')
-                    .map_or((model, None), |(model, effort)| (model, Some(effort)));
-                if adapter.is_empty() || model.is_empty() || embedded_effort == Some("") {
-                    return Err(format!("node {id}: invalid exact-model tier {name}"));
-                }
-                if embedded_effort.is_some() && effort.is_some() {
-                    return Err(format!(
-                        "node {id}: exact-model tier and effort both specify effort"
-                    ));
-                }
-                let mut route = json!({"adapter":adapter,"model":model});
-                if let Some(embedded_effort) = embedded_effort {
-                    route["effort"] = json!(embedded_effort);
-                }
-                route
-            } else {
-                json!({"alias":name})
-            }
-        }
-        Value::Object(table) => {
-            let named = |key: &str| table.get(key).is_some_and(|value| value.is_string());
-            if !named("alias") && !(named("adapter") && named("model")) {
-                return Err(format!(
-                    "node {id}: route table needs an alias, or an adapter and a model"
-                ));
-            }
-            tier.clone()
-        }
-        _ => {
-            return Err(format!(
-                "node {id}: tier must be a name, route table or route list"
-            ));
-        }
-    };
-    if let Some(effort) = effort {
-        route["effort"] = effort.clone();
-    }
-    let alias_only = route.get("alias").is_some() && route.get("model").is_none();
-    if read_only && alias_only {
-        Ok(("routes", json!([route.clone(), route])))
-    } else {
-        Ok(("route", route))
-    }
-}
+pub(crate) use provenant_cli::fabric::graph_relay::tier_route;
 
 /// The worktrees of the project `directory` belongs to, main checkout first,
 /// which a graph node may always read. Outside a repository the project is only

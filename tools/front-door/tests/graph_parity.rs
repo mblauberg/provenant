@@ -42,6 +42,13 @@ struct Provider {
     accepted: Option<bool>,
     /// The host's wall clock; retry waits are measured against it.
     now: Option<provenant_core::WallTime>,
+    quota_redraw: bool,
+    retry_limit: Option<u8>,
+    prior_attempts: Vec<Vec<String>>,
+    permissions: Vec<(graph::AccessMode, Option<String>)>,
+    writer_head: Option<String>,
+    writer_bindings: usize,
+    terminal_commit: Option<String>,
 }
 enum Step {
     Pending(Option<&'static str>),
@@ -50,6 +57,37 @@ enum Step {
 }
 impl AttemptOwner for Provider {
     type Error = Crash;
+    fn retry_allowance(
+        &self,
+        _: &provenant_records::ExtraFields,
+        _: &provenant_records::ExtraFields,
+    ) -> std::result::Result<Option<(u8, String)>, Crash> {
+        Ok(self.retry_limit.map(|limit| (limit, "fixture".into())))
+    }
+    fn quota_alias_redraw(&mut self, _: &AttemptKey, _: &str) -> std::result::Result<bool, Crash> {
+        Ok(self.quota_redraw)
+    }
+    fn attempt_models(&mut self, attempts: &[String]) -> std::result::Result<Vec<String>, Crash> {
+        Ok(attempts
+            .iter()
+            .filter(|reference| reference.as_str() == "h/quota")
+            .map(|_| "member0/model".into())
+            .collect())
+    }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Crash> {
+        self.writer_bindings += 1;
+        Ok(self
+            .writer_head
+            .as_ref()
+            .map(|head| graph::WriterWorktreeBinding {
+                extra: Default::default(),
+                worktree: worktree.into(),
+                head: head.clone(),
+            }))
+    }
     fn actor(&self) -> String {
         "fixture-actor".into()
     }
@@ -81,14 +119,16 @@ impl AttemptOwner for Provider {
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
-        _: graph::NodeInput<'_>,
+        node: graph::NodeInput<'_>,
         _: &graph::GraphRoute,
-        _: graph::AccessMode,
-        _: Option<&str>,
+        access: graph::AccessMode,
+        worktree: Option<&str>,
         replay: graph::Replay<'_>,
     ) -> std::result::Result<AttemptObservation, Crash> {
         self.calls
             .push((key.clone(), replay.stored_ref.map(str::to_owned)));
+        self.prior_attempts.push(node.prior_attempts.to_vec());
+        self.permissions.push((access, worktree.map(str::to_owned)));
         if !self.launches.contains(key) {
             self.launches.push(key.clone());
         }
@@ -100,8 +140,8 @@ impl AttemptOwner for Provider {
                 result: None,
                 result_warning: None,
                 result_path: None,
-                branch: None,
-                commit: None,
+                branch: self.terminal_commit.as_ref().map(|_| "lane/parity".into()),
+                commit: self.terminal_commit.clone(),
             }),
             Some(Step::Pending(reference)) => Ok(AttemptObservation::Pending {
                 attempt_ref: reference.map(str::to_owned),
@@ -123,18 +163,22 @@ struct Harness {
 }
 impl Harness {
     fn new(id: &str, node: serde_json::Value) -> Result<Self> {
+        Self::with_document(serde_json::from_value(
+            json!({"schema_version":1,"graph_id":id,"nodes":[node]}),
+        )?)
+    }
+    fn with_document(document: GraphDocument) -> Result<Self> {
         let rig = TestRig::new()?;
         let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
         inputs.state_dir = Some(rig.state.clone());
         let state = inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state;
-        let document: GraphDocument =
-            serde_json::from_value(json!({"schema_version":1,"graph_id":id,"nodes":[node]}))?;
+        let id = document.graph_id.clone();
         Ok(Self {
             rig,
             state,
             project: ProjectId::from_bytes([7; 16]),
             document,
-            id: id.into(),
+            id,
         })
     }
     /// Opening takes the graph lock; the previous handle must be dropped first,
@@ -390,6 +434,179 @@ fn quota_limit_retries_on_another_member() -> Result {
     let events = h.events()?;
     assert_eq!(codes(&events, GraphEventKind::Wait), ["quota"]);
     assert_same_story(&events, &checkpoint);
+    Ok(())
+}
+
+/// Medium: compile the plain `task` submission and a composite's task member
+/// through the same patch admission used by the front door. Quota redraw must
+/// retain identical predecessor evidence, including for a committed writer,
+/// after another supervisor reopens the on-disk journal.
+#[test]
+fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
+    use graph::patch::{self, Patch, PatchContext};
+    use graph::template::TemplateLibrary;
+
+    for writer in [false, true] {
+        let mut lineages = Vec::new();
+        for composite in [false, true] {
+            let mut task = json!({"id":"task", "use":"task", "brief":"do the work"});
+            if writer {
+                task["access"] = json!("worktree_write");
+                task["worktree"] = json!("/fixture/parity-writer");
+                task["write_scope"] = json!(["src"]);
+            }
+            let library = TemplateLibrary::bundled();
+            let mut patch = Patch {
+                schema_version: patch::PATCH_SCHEMA_VERSION,
+                nodes: vec![task.clone()],
+                ..Default::default()
+            };
+            if composite {
+                patch.templates.insert(
+                    "parity-composite".into(),
+                    serde_json::from_value(json!({"nodes":[task]}))?,
+                );
+                patch.nodes = vec![json!({"id":"group", "use":"parity-composite"})];
+            }
+            let id = format!("parity-quota-{writer}-{composite}");
+            let document = patch::submit(
+                &id,
+                &patch,
+                &PatchContext {
+                    library: &library,
+                    resolvers: &Default::default(),
+                    scan: &patch::scan_for_secrets,
+                    journal: None,
+                    limits: &Default::default(),
+                },
+                None,
+            )?;
+            let h = Harness::with_document(document)?;
+            let node_id = if composite { "group--task" } else { "task" };
+            let initial_head = "1".repeat(40);
+            let partial_commit = "2".repeat(40);
+            let mut first = Provider {
+                script: [
+                    Step::Done(AttemptOutcome::UsageLimited, true, "h/quota"),
+                    Step::Pending(Some("h/continuation")),
+                ]
+                .into(),
+                quota_redraw: true,
+                retry_limit: Some(1),
+                writer_head: writer.then(|| initial_head.clone()),
+                terminal_commit: writer.then(|| partial_commit.clone()),
+                ..Default::default()
+            };
+            assert_eq!(h.advance(&mut first)?.status, GraphStatus::Pending);
+            let waiting = h.checkpoint()?;
+            let node = waiting
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .unwrap();
+            assert_eq!(node.state, NodeState::Running);
+            assert_eq!(node.previous_attempts.len(), 1);
+            assert_eq!(
+                node.previous_attempts[0].outcome,
+                Some(AttemptOutcome::UsageLimited)
+            );
+            assert_eq!(
+                node.previous_attempts[0].attempt_ref.as_deref(),
+                Some("h/quota")
+            );
+            assert_eq!(node.attempts.len(), 1);
+            let successor = &node.attempts[0];
+            assert_eq!(successor.key.extra["previous_attempt_ref"], "h/quota");
+            assert_eq!(successor.key.extra["retry_generation"], 1);
+            assert_eq!(
+                successor.key.route_index, 0,
+                "redraw keeps the task's tier alias"
+            );
+            assert_eq!(successor.route.alias.as_deref(), Some("senior"));
+            assert_ne!(successor.key, node.previous_attempts[0].key);
+            assert_eq!(
+                first.prior_attempts,
+                [vec![], vec!["member0/model".to_owned()]]
+            );
+            assert_eq!(first.launches.len(), 2);
+            if writer {
+                assert_eq!(
+                    first.writer_bindings, 1,
+                    "continuation retains the bound worktree"
+                );
+                assert_eq!(node.source_commit.as_deref(), Some(initial_head.as_str()));
+                assert_eq!(node.writer_binding.as_ref().unwrap().head, initial_head);
+                assert!(first.permissions.iter().all(|permission| {
+                    permission
+                        == &(
+                            graph::AccessMode::WorktreeWrite,
+                            Some("/fixture/parity-writer".into()),
+                        )
+                }));
+            }
+            // Fresh supervisor observes the admitted successor, with its
+            // predecessor and original launch actor preserved in the row.
+            let mut resumed = Provider {
+                script: [Step::Done(
+                    AttemptOutcome::Succeeded,
+                    true,
+                    "h/continuation",
+                )]
+                .into(),
+                terminal_commit: writer.then(|| partial_commit.clone()),
+                ..Default::default()
+            };
+            let run = h.advance(&mut resumed)?;
+            assert_eq!(run.status, GraphStatus::Complete);
+            let checkpoint = h.checkpoint()?;
+            let node = checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .unwrap();
+            assert_eq!(node.state, NodeState::Succeeded);
+            assert_eq!(
+                resumed.calls,
+                [(successor.key.clone(), Some("h/continuation".into()))]
+            );
+            assert_eq!(
+                node.previous_attempts,
+                waiting
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == node_id)
+                    .unwrap()
+                    .previous_attempts
+            );
+            assert_eq!(node.attempts.len(), 1);
+            assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::Succeeded));
+            if writer {
+                let output = node.outputs.as_ref().unwrap();
+                assert_eq!(output.branch.as_deref(), Some("lane/parity"));
+                assert_eq!(output.commit.as_deref(), Some(partial_commit.as_str()));
+                assert_eq!(resumed.writer_bindings, 0);
+            }
+            assert_eq!(codes(&h.events()?, GraphEventKind::Wait), ["quota"]);
+            lineages.push(
+                node.recorded_attempts()
+                    .map(|attempt| {
+                        json!({
+                            "reference":attempt.attempt_ref,
+                            "predecessor":attempt.key.extra.get("previous_attempt_ref"),
+                            "generation":attempt.key.extra.get("retry_generation"),
+                            "route_index":attempt.key.route_index,
+                            "actor":attempt.launch_actor,
+                            "outcome":attempt.outcome,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            lineages[0], lineages[1],
+            "plain task and composite member have identical lineage"
+        );
+    }
     Ok(())
 }
 

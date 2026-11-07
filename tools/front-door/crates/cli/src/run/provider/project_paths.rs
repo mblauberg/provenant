@@ -141,17 +141,18 @@ fn apply_to(
         "PROVENANT_PRIMARY_CHECKOUT".into(),
         primary.as_os_str().to_owned(),
     ));
-    if let Some(gitdir) = context.worktree_gitdir {
+    if let Some(gitdir) = context
+        .worktree_gitdir
+        .filter(|gitdir| context.writer || Some(*gitdir) != context.common_git)
+    {
         env.push((
             "PROVENANT_WORKTREE_GITDIR".into(),
             gitdir.as_os_str().to_owned(),
         ));
-        if context.writer || Some(gitdir) != context.common_git {
-            profile.spec.runtime_reads.push(PathGrant {
-                path: gitdir.to_owned(),
-                scope: PathScope::Subtree,
-            });
-        }
+        profile.spec.runtime_reads.push(PathGrant {
+            path: gitdir.to_owned(),
+            scope: PathScope::Subtree,
+        });
     }
     let mut shared = Vec::new();
     let mut exec = Vec::new();
@@ -443,7 +444,7 @@ mod tests {
             },
         );
         assert!(
-            env.iter()
+            !env.iter()
                 .any(|(key, _)| key == "PROVENANT_WORKTREE_GITDIR")
         );
         assert!(!profile.spec.runtime_reads.contains(&grant(common.clone())));

@@ -56,6 +56,8 @@ impl<'a> Watch<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
+    pub(crate) cancel_changed: bool,
+    pub(crate) cancel_watch_failed: bool,
     pub(crate) process_changed: bool,
     pub(crate) process_overflow: bool,
 }
@@ -67,6 +69,7 @@ pub(crate) struct GuardianReactor {
     queue: std::fs::File,
     _mask: SignalMask,
     processes: BTreeSet<i64>,
+    cancellation_directory: Option<std::fs::File>,
     #[cfg(feature = "fixture")]
     injected_watch_failures: usize,
 }
@@ -110,9 +113,45 @@ impl GuardianReactor {
             queue,
             _mask: mask,
             processes: BTreeSet::new(),
+            cancellation_directory: None,
             #[cfg(feature = "fixture")]
             injected_watch_failures: 0,
         })
+    }
+
+    /// Watch the pinned attempt directory, including atomic cancel publication.
+    /// Retain the descriptor for the filter's lifetime; failure leaves polling
+    /// available. A directory notification is a hint, never process evidence.
+    pub(crate) fn watch_cancellation_directory(
+        &mut self,
+        directory: &provenant_os::fs::Directory,
+    ) -> io::Result<()> {
+        let file = directory.handoff_file().try_clone()?;
+        // SAFETY: zero is a valid empty kevent; fields below describe a vnode
+        // filter on a live descriptor, and no pointers are retained.
+        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+        change.ident = file.as_raw_fd() as usize;
+        change.filter = libc::EVFILT_VNODE;
+        change.flags = libc::EV_ADD | libc::EV_CLEAR;
+        change.fflags =
+            libc::NOTE_WRITE | libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE;
+        // SAFETY: queue and file are live, change is initialised and borrowed
+        // for this call only; no output records are requested.
+        let result = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.cancellation_directory = Some(file);
+        Ok(())
     }
 
     /// Watch known processes for fork and exit. A failure requires a full
@@ -188,7 +227,9 @@ impl GuardianReactor {
             let remaining = timeout
                 .saturating_sub(started.elapsed())
                 .min(MAX_REACTOR_WAIT);
-            let millis = remaining.as_millis().min(1_000) as i32;
+            // poll takes whole milliseconds. Truncating a positive tail
+            // to zero spins until the guardian's next millisecond deadline.
+            let millis = poll_timeout_ms(remaining);
             let mut pollfds = Vec::with_capacity(watches.len() + 1);
             let signal_raw = self.queue.as_raw_fd();
             pollfds.push(libc::pollfd {
@@ -262,6 +303,14 @@ impl GuardianReactor {
                 return Ok(());
             }
             for item in events.iter().take(result as usize) {
+                if item.filter == libc::EVFILT_VNODE {
+                    event.cancel_changed = true;
+                    event.cancel_watch_failed |= item.flags & (libc::EV_ERROR | libc::EV_EOF) != 0
+                        || item.fflags
+                            & (libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE)
+                            != 0;
+                    continue;
+                }
                 if item.filter == libc::EVFILT_PROC {
                     event.process_changed = true;
                     if item.flags & libc::EV_ERROR != 0 {
@@ -290,10 +339,15 @@ impl GuardianReactor {
         }
         // More events may remain; do not assume the bounded drain kept up.
         event.process_overflow = true;
+        event.cancel_watch_failed = true;
         // The bounded drain may have left exit notifications behind.
         self.processes.clear();
         Ok(())
     }
+}
+
+fn poll_timeout_ms(remaining: Duration) -> i32 {
+    remaining.as_nanos().div_ceil(1_000_000).min(1_000) as i32
 }
 
 fn register_process_watches(
@@ -1219,6 +1273,43 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn reactor_rounds_positive_waits_up_without_turning_nonblocking_polls_into_waits() {
+        assert_eq!(poll_timeout_ms(Duration::ZERO), 0);
+        assert_eq!(poll_timeout_ms(Duration::from_nanos(1)), 1);
+        assert_eq!(poll_timeout_ms(Duration::from_millis(1)), 1);
+        assert_eq!(poll_timeout_ms(Duration::from_nanos(1_000_001)), 2);
+        assert_eq!(poll_timeout_ms(Duration::MAX), 1_000);
+    }
+
+    #[test]
+    fn cancellation_directory_events_do_not_request_a_process_census() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let watched = root.path().join("attempt");
+        std::fs::create_dir(&watched)?;
+        let directory =
+            provenant_os::fs::Directory::open_anchor(&watched).map_err(io::Error::other)?;
+        let mut reactor = GuardianReactor::install()?;
+        reactor.watch_cancellation_directory(&directory)?;
+        std::fs::write(watched.join("cancel.new"), b"request")?;
+        std::fs::rename(watched.join("cancel.new"), watched.join("cancel.json"))?;
+        let event = reactor.wait(&[], Duration::ZERO)?;
+        assert!(event.cancel_changed);
+        assert!(!event.cancel_watch_failed);
+        assert!(!event.process_changed);
+        assert!(!event.process_overflow);
+
+        // Losing the watched pathname requests the cancellation polling
+        // fallback without triggering a process census.
+        std::fs::rename(&watched, root.path().join("moved-attempt"))?;
+        let event = reactor.wait(&[], Duration::ZERO)?;
+        assert!(event.cancel_changed);
+        assert!(event.cancel_watch_failed);
+        assert!(!event.process_changed);
+        assert!(!event.process_overflow);
+        Ok(())
+    }
 
     #[test]
     fn process_watch_failures_do_not_hide_later_pids() {

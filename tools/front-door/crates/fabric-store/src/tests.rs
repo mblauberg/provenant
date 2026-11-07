@@ -1143,13 +1143,62 @@ fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
     (m, t)
 }
 
+// Rewrite each seeded row as a version 6 binary writes it, with the removed
+// members null. Canonical records sort `legacy` and `legacy_output_path` into
+// place; the peer reply's Task has `legacy` as its last field.
+fn write_null_members(store: &Store, t: &Task) {
+    let rows = [
+        (
+            "messages",
+            "record",
+            "",
+            &["legacy", "legacy_output_path"][..],
+        ),
+        ("tasks", "record", "", &["legacy"][..]),
+        (
+            "coordination_operations",
+            "result",
+            "/task",
+            &["legacy"][..],
+        ),
+    ];
+    for (table, column, pointer, names) in rows {
+        let bytes: Vec<u8> = store
+            .db
+            .query_row(&format!("SELECT {column} FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let object = value.pointer_mut(pointer).unwrap().as_object_mut().unwrap();
+        for name in names {
+            object.insert((*name).into(), serde_json::Value::Null);
+        }
+        let old = encode(&value).unwrap();
+        store
+            .db
+            .execute(&format!("UPDATE {table} SET {column}=?1"), [old])
+            .unwrap();
+    }
+    let task_json = serde_json::to_string(t).unwrap();
+    let old_reply = peer_reply(&format!(
+        "{},\"legacy\":null}}",
+        task_json.strip_suffix('}').unwrap()
+    ));
+    store
+        .db
+        .execute("UPDATE peer_operations SET response=?1", [old_reply])
+        .unwrap();
+}
+
 #[test]
 fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     let f = Fixture::new();
     let store = f.open();
     let (m, t) = seed_records(&f, &store);
     let before = stored_records(&store.db);
+    write_null_members(&store, &t);
     downgrade_to_six(&store, "");
+    let before_upgrade = stored_records(&store.db);
+    assert_ne!(before_upgrade, before);
     drop(store);
 
     let store = f.open();
@@ -1164,7 +1213,7 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
             .unwrap(),
         6
     );
-    assert_eq!(stored_records(&backup), before);
+    assert_eq!(stored_records(&backup), before_upgrade);
     assert_eq!(
         store
             .db
@@ -1206,6 +1255,174 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     assert_eq!(stored_records(&store.db), before);
     drop(store);
     drop(f.open());
+}
+
+#[test]
+fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (modern_message, modern_task) = seed_records(&f, &store);
+    let mut imported_task = task(&f);
+    imported_task.id = TaskId::from_bytes([80; 16]);
+    store.create_task(&imported_task, &f.request()).unwrap();
+    for id in 81..=85 {
+        store.send(&message(&f, id), &f.request()).unwrap();
+    }
+    let modern_events = store.events(project(), 0, 100, &f.request()).unwrap().items;
+    downgrade_to_six(
+        &store,
+        &format!(
+            "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,1,5,X'7B7D'); \
+             UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json_object('id','old')) AS BLOB) WHERE id='{}'; \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json_object('id','old')) AS BLOB) WHERE id='{}'; \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.conversation',json_object('scope','legacy','id','old')) AS BLOB) WHERE id='{}'; \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',json_object('scope','legacy','id','old')) AS BLOB) WHERE id='{}'; \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.task',json_object('scope','legacy','id','old')) AS BLOB) WHERE id='{}'; \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy_output_path','old-output') AS BLOB) WHERE id='{}'; \
+             INSERT INTO events(project,dedup,record) SELECT project,NULL,CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) FROM events WHERE seq=1; \
+             INSERT INTO coordination_operations SELECT project,'legacy-create',actor,request,CAST(json_set(CAST(result AS TEXT),'$.task.legacy',json_object('id','old')) AS BLOB) FROM coordination_operations WHERE id='create-1'; \
+             INSERT INTO peer_operations SELECT project,'legacy-peer',actor,digest,phase,request,CAST(json_set(CAST(response AS TEXT),'$.result.data.result.task.legacy',json_object('id','old')) AS BLOB) FROM peer_operations WHERE id='peer-1'; \
+             INSERT INTO peer_operations SELECT project,'empty-peer',actor,digest,phase,request,X'' FROM peer_operations WHERE id='peer-1';",
+            project(),
+            imported_task.id,
+            MessageId::from_bytes([81; 16]),
+            MessageId::from_bytes([82; 16]),
+            MessageId::from_bytes([83; 16]),
+            MessageId::from_bytes([84; 16]),
+            MessageId::from_bytes([85; 16]),
+        ),
+    );
+    let deleted_cursor: i64 = store
+        .db
+        .query_row("SELECT max(seq) FROM events", [], |row| row.get(0))
+        .unwrap();
+    drop(store);
+    let store = f.open();
+    let request = f.request();
+    assert!(
+        !store
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='imports')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
+    let empty_response: Vec<u8> = store
+        .db
+        .query_row(
+            "SELECT response FROM peer_operations WHERE id='empty-peer'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(empty_response.is_empty());
+    assert_eq!(
+        store
+            .tasks(project(), None, None, 100, &request)
+            .unwrap()
+            .items,
+        vec![modern_task.clone()]
+    );
+    assert!(matches!(
+        store.task(project(), imported_task.id, &request),
+        Err(Error::NotFound)
+    ));
+    let mail = store
+        .read_mail(project(), actor(3), Some(0), 100, &request)
+        .unwrap();
+    assert_eq!(mail.items.len(), 1);
+    assert_eq!(mail.items[0].message, modern_message);
+    assert_eq!(
+        store.events(project(), 0, 100, &request).unwrap().items,
+        modern_events
+    );
+    assert!(matches!(
+        store.mark_events_read(project(), actor(3), deleted_cursor, &request),
+        Err(Error::Invalid(_))
+    ));
+    let note = event(
+        project(),
+        Some(actor(3)),
+        EventKind::Note,
+        None,
+        "after migration".into(),
+        f.now(),
+    );
+    assert!(store.note(&note, None, &request).unwrap() > deleted_cursor);
+    store
+        .mark_events_read(project(), actor(3), deleted_cursor, &request)
+        .unwrap();
+    assert_eq!(
+        store.event_cursor(project(), actor(3), &request).unwrap(),
+        deleted_cursor
+    );
+    assert!(
+        store
+            .claims(project(), None, 100, &request)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        store
+            .landing(project(), "refs/heads/main", &request)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .coordination_receipt::<TaskReceipt>(
+                project(),
+                actor(2),
+                &provenant_core::OperationId::parse("create-1").unwrap(),
+                &request
+            )
+            .unwrap(),
+        Some(TaskReceipt::Created { task: modern_task })
+    );
+    let operation = store
+        .lookup_peer(
+            project(),
+            actor(2),
+            &provenant_core::OperationId::parse("peer-1").unwrap(),
+            &request,
+        )
+        .unwrap()
+        .unwrap();
+    let _: serde_json::Value =
+        serde_json::from_slice(operation.response.as_deref().unwrap()).unwrap();
+    assert!(
+        store
+            .coordination_receipt::<TaskReceipt>(
+                project(),
+                actor(2),
+                &provenant_core::OperationId::parse("legacy-create").unwrap(),
+                &request
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .lookup_peer(
+                project(),
+                actor(2),
+                &provenant_core::OperationId::parse("legacy-peer").unwrap(),
+                &request
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .db
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

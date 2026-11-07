@@ -1442,3 +1442,475 @@ fn inline_prompt_checkpoints_still_decode() {
     let stored = decode_checkpoint_in(&directory, bytes.as_bytes(), "g-test").unwrap();
     assert_eq!(stored.checkpoint, fixture.checkpoint);
 }
+
+/// Use the real journal and a durable-operation stand-in at the process edge.
+/// A recovered supervisor has a new actor, but must replay the original key
+/// and launch actor rather than accepting another provider process.
+mod launch_recovery {
+    use super::*;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    const ATTEMPT: &str = "22222222222222222222222222222222";
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: StateRoot,
+        project: ProjectId,
+        execution: GraphExecution,
+    }
+
+    impl Fixture {
+        fn new(nodes: serde_json::Value) -> Self {
+            let temp = crate::test_support::tempdir().unwrap();
+            let base = std::fs::canonicalize(temp.path()).unwrap();
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut inputs =
+                provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+            inputs.state_dir = Some(base.clone());
+            let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+            Self {
+                _temp: temp,
+                root,
+                project: ProjectId::from_bytes([1; 16]),
+                execution: GraphExecution {
+                    extra: Default::default(),
+                    integration_base: None,
+                    review_base: None,
+                    directory: base,
+                    document: serde_json::from_value(serde_json::json!({
+                        "schema_version":2, "graph_id":"launch-recovery", "nodes":nodes
+                    }))
+                    .unwrap(),
+                },
+            }
+        }
+
+        fn single() -> Self {
+            Self::new(serde_json::json!([{
+                "id":"reader", "prompt":"work", "access":"read_only",
+                "route":{"adapter":"fixture", "model":"fixture/model"}
+            }]))
+        }
+
+        fn open(&self) -> FileJournal {
+            let clock = SystemClock;
+            let mut journal = FileJournal::open(
+                &self.root,
+                self.project,
+                &self.execution.document.graph_id,
+                WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+            journal.bind(self.execution.clone()).unwrap();
+            journal
+        }
+
+        fn checkpoint(&self) -> GraphCheckpoint {
+            FileJournal::read_checkpoint(
+                &self.root,
+                self.project,
+                &self.execution.document.graph_id,
+            )
+            .unwrap()
+            .unwrap()
+        }
+    }
+
+    #[derive(Default)]
+    struct Ledger {
+        starts: Vec<(AttemptKey, String)>,
+        calls: Vec<(AttemptKey, String, Option<String>)>,
+    }
+
+    struct ProcessOwner {
+        actor: &'static str,
+        ledger: Arc<Mutex<Ledger>>,
+        terminal: bool,
+        failed_node: Option<&'static str>,
+        barrier: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+        crash: bool,
+    }
+
+    impl ProcessOwner {
+        fn new(actor: &'static str, ledger: Arc<Mutex<Ledger>>) -> Self {
+            Self {
+                actor,
+                ledger,
+                terminal: false,
+                failed_node: None,
+                barrier: None,
+                crash: false,
+            }
+        }
+    }
+
+    impl AttemptOwner for ProcessOwner {
+        type Error = Infallible;
+
+        fn actor(&self) -> String {
+            self.actor.into()
+        }
+
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            replay: Replay<'_>,
+        ) -> Result<AttemptObservation, Infallible> {
+            {
+                let mut ledger = self.ledger.lock().unwrap();
+                let operation = (key.clone(), replay.launch_actor.to_owned());
+                if !ledger.starts.contains(&operation) {
+                    ledger.starts.push(operation);
+                }
+                ledger.calls.push((
+                    key.clone(),
+                    replay.launch_actor.to_owned(),
+                    replay.stored_ref.map(str::to_owned),
+                ));
+            }
+            // No timing guess: the observer confirms that the owner is inside
+            // this call and keeps its journal lock until explicitly released.
+            if let Some((entered, release)) = self.barrier.take() {
+                entered.send(()).unwrap();
+                release
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }
+            assert!(
+                !self.crash,
+                "injected loss before saving the accepted reference"
+            );
+            let reference = format!(
+                "fixture/{}",
+                if key.node_id == "other" {
+                    "33333333333333333333333333333333"
+                } else {
+                    ATTEMPT
+                }
+            );
+            if self.terminal || self.failed_node == Some(key.node_id.as_str()) {
+                Ok(AttemptObservation::Terminal {
+                    attempt_ref: Some(reference),
+                    outcome: if self.failed_node == Some(key.node_id.as_str()) {
+                        AttemptOutcome::OtherFailure
+                    } else {
+                        AttemptOutcome::Succeeded
+                    },
+                    launched: true,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                })
+            } else {
+                Ok(AttemptObservation::Pending {
+                    attempt_ref: Some(reference),
+                })
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum InterruptAt {
+        BeforeLaunch,
+        ReferenceSave,
+        BeforeSettlementSave,
+        AfterSettlementSave,
+    }
+
+    struct InterruptedJournal {
+        inner: FileJournal,
+        point: InterruptAt,
+    }
+
+    impl GraphJournal for InterruptedJournal {
+        type Error = JournalError;
+
+        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, JournalError> {
+            self.inner.load(id)
+        }
+
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), JournalError> {
+            let attempt = checkpoint.nodes[0].attempts.last();
+            let selected = attempt.is_some_and(|attempt| match self.point {
+                InterruptAt::BeforeLaunch => {
+                    attempt.state == AttemptState::Starting && attempt.attempt_ref.is_none()
+                }
+                InterruptAt::ReferenceSave => {
+                    attempt.attempt_ref.is_some() && attempt.outcome.is_none()
+                }
+                InterruptAt::BeforeSettlementSave | InterruptAt::AfterSettlementSave => {
+                    attempt.outcome.is_some()
+                }
+            });
+            if selected
+                && matches!(
+                    self.point,
+                    InterruptAt::ReferenceSave | InterruptAt::BeforeSettlementSave
+                )
+            {
+                panic!("injected interruption before {:?}", self.point);
+            }
+            self.inner.save(checkpoint)?;
+            assert!(!selected, "injected interruption after {:?}", self.point);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn durable_launch_boundaries_recover_one_process_under_the_original_actor() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        for point in [
+            InterruptAt::BeforeLaunch,
+            InterruptAt::ReferenceSave,
+            InterruptAt::BeforeSettlementSave,
+            InterruptAt::AfterSettlementSave,
+        ] {
+            let fixture = Fixture::single();
+            let ledger = Arc::new(Mutex::new(Ledger::default()));
+            let mut first = ProcessOwner::new("original-actor", ledger.clone());
+            if matches!(
+                point,
+                InterruptAt::BeforeSettlementSave | InterruptAt::AfterSettlementSave
+            ) {
+                advance(&fixture.execution.document, &mut first, &mut fixture.open()).unwrap();
+                first.terminal = true;
+            }
+            let interrupted = catch_unwind(AssertUnwindSafe(|| {
+                let mut journal = InterruptedJournal {
+                    inner: fixture.open(),
+                    point,
+                };
+                advance(&fixture.execution.document, &mut first, &mut journal).unwrap();
+            }));
+            assert!(interrupted.is_err(), "{point:?}");
+            let saved = fixture.checkpoint();
+            let attempt = &saved.nodes[0].attempts[0];
+            assert_eq!(attempt.launch_actor, "original-actor", "{point:?}");
+            assert_eq!(attempt.key.route_index, 0);
+            assert_eq!(
+                ledger.lock().unwrap().starts.len(),
+                usize::from(point != InterruptAt::BeforeLaunch),
+                "{point:?}"
+            );
+            if matches!(
+                point,
+                InterruptAt::BeforeLaunch | InterruptAt::ReferenceSave
+            ) {
+                assert_eq!(attempt.attempt_ref, None, "{point:?}");
+            }
+            let before_recovery = ledger.lock().unwrap().calls.len();
+            let mut recovered = ProcessOwner::new("recovery-actor", ledger.clone());
+            recovered.terminal = true;
+            let completed = resume(
+                &fixture.execution.document,
+                &mut recovered,
+                &mut fixture.open(),
+            )
+            .unwrap();
+            assert_eq!(completed.status, GraphStatus::Complete, "{point:?}");
+            let saved = fixture.checkpoint();
+            assert_eq!(saved.nodes[0].state, NodeState::Succeeded);
+            assert_eq!(saved.nodes[0].attempts.len(), 1);
+            assert_eq!(saved.nodes[0].attempts[0].key, attempt.key);
+            assert_eq!(saved.nodes[0].attempts[0].launch_actor, "original-actor");
+            let calls = {
+                let ledger = ledger.lock().unwrap();
+                assert_eq!(
+                    ledger.starts,
+                    [(attempt.key.clone(), "original-actor".into())]
+                );
+                for (key, actor, _) in &ledger.calls[before_recovery..] {
+                    assert_eq!(key, &attempt.key);
+                    assert_eq!(actor, "original-actor");
+                }
+                if point == InterruptAt::AfterSettlementSave {
+                    assert_eq!(ledger.calls.len(), before_recovery);
+                }
+                ledger.calls.len()
+            };
+            advance(
+                &fixture.execution.document,
+                &mut recovered,
+                &mut fixture.open(),
+            )
+            .unwrap();
+            assert_eq!(ledger.lock().unwrap().calls.len(), calls);
+        }
+    }
+
+    fn assert_lock_timeout<T>(result: Result<T, JournalError>) {
+        assert!(matches!(
+            result,
+            Err(JournalError::Filesystem(FsError::LockTimeout { .. }))
+        ));
+    }
+
+    #[test]
+    fn concurrent_advance_tick_and_resume_keep_one_launch_and_the_bound_execution() {
+        for crash in [false, true] {
+            let fixture = Fixture::single();
+            let ledger = Arc::new(Mutex::new(Ledger::default()));
+            std::thread::scope(|scope| {
+                let (entered, at_owner) = mpsc::channel();
+                let (release, released) = mpsc::channel();
+                let holder_fixture = &fixture;
+                let holder_ledger = ledger.clone();
+                let holder = scope.spawn(move || {
+                    let mut owner = ProcessOwner::new("original-actor", holder_ledger);
+                    owner.barrier = Some((entered, released));
+                    owner.crash = crash;
+                    let mut journal = holder_fixture.open();
+                    advance(&holder_fixture.execution.document, &mut owner, &mut journal).unwrap()
+                });
+                at_owner
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                let before = fixture.checkpoint();
+                let clock = SystemClock;
+                let cancel = CancelToken::new();
+                let open = |budget| {
+                    FileJournal::open(
+                        &fixture.root,
+                        fixture.project,
+                        &fixture.execution.document.graph_id,
+                        budget,
+                        &cancel,
+                        &clock,
+                    )
+                };
+                // Settlement waits are bounded; a held owner cannot be bypassed.
+                assert_lock_timeout(open(WaitBudget::up_to(
+                    clock.mono_now(),
+                    DurationMicros::from_micros(20_000),
+                )));
+                // This is the nonblocking open used by tick_graphs. Its caller
+                // treats exactly this timeout as a skip, never an advance error.
+                assert_lock_timeout(open(WaitBudget::nonblocking(clock.mono_now())));
+                // Manual resume must acquire custody before bind or resume.
+                assert_lock_timeout(open(WaitBudget::up_to(
+                    clock.mono_now(),
+                    DurationMicros::from_micros(20_000),
+                )));
+                assert_eq!(fixture.checkpoint(), before);
+                assert_eq!(ledger.lock().unwrap().starts.len(), 1);
+                release.send(()).unwrap();
+                assert_eq!(holder.join().is_err(), crash);
+            });
+            let saved = fixture.checkpoint();
+            let original = &saved.nodes[0].attempts[0];
+            assert_eq!(original.attempt_ref.is_none(), crash);
+            let mut journal = fixture.open();
+            let mut from_other_checkout = fixture.execution.clone();
+            from_other_checkout.directory = fixture.root.as_path().join("other-checkout");
+            journal.bind(from_other_checkout).unwrap();
+            let mut resumed = ProcessOwner::new("manual-resume-actor", ledger.clone());
+            resumed.terminal = true;
+            let run = resume(&fixture.execution.document, &mut resumed, &mut journal).unwrap();
+            assert_eq!(run.status, GraphStatus::Complete);
+            assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+            assert_eq!(run.checkpoint.nodes[0].attempts[0].key, original.key);
+            assert_eq!(
+                journal.execution.as_ref().unwrap().directory,
+                fixture.execution.directory
+            );
+            let ledger = ledger.lock().unwrap();
+            assert_eq!(
+                ledger.starts,
+                [(original.key.clone(), "original-actor".into())]
+            );
+            let (key, actor, reference) = ledger.calls.last().unwrap();
+            assert_eq!(key, &original.key);
+            assert_eq!(actor, "original-actor");
+            assert_eq!(reference, &original.attempt_ref);
+        }
+    }
+
+    #[test]
+    fn delivery_retry_cannot_reopen_a_failed_node_during_a_held_advance() {
+        let fixture = Fixture::new(serde_json::json!([
+            {"id":"delivered", "prompt":"work", "access":"read_only",
+                "route":{"adapter":"fixture", "model":"fixture/model"}},
+            {"id":"other", "prompt":"other work", "access":"read_only",
+                "route":{"adapter":"fixture", "model":"fixture/model"}}
+        ]));
+        let ledger = Arc::new(Mutex::new(Ledger::default()));
+        // Seed both real attempts, with a delivery failure on the first node.
+        let mut seed = ProcessOwner::new("original-actor", ledger.clone());
+        seed.failed_node = Some("delivered");
+        advance(&fixture.execution.document, &mut seed, &mut fixture.open()).unwrap();
+        assert_eq!(fixture.checkpoint().nodes[0].state, NodeState::Failed);
+        std::thread::scope(|scope| {
+            let (entered, at_owner) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let holder_fixture = &fixture;
+            let holder_ledger = ledger.clone();
+            let holder = scope.spawn(move || {
+                let mut owner = ProcessOwner::new("settlement-actor", holder_ledger);
+                owner.barrier = Some((entered, released));
+                advance(
+                    &holder_fixture.execution.document,
+                    &mut owner,
+                    &mut holder_fixture.open(),
+                )
+                .unwrap()
+            });
+            at_owner
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            let before = fixture.checkpoint();
+            let clock = SystemClock;
+            assert_lock_timeout(FileJournal::retry_delivered_attempt(
+                &fixture.root,
+                fixture.project,
+                ATTEMPT.parse().unwrap(),
+                WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(20_000)),
+                &CancelToken::new(),
+                &clock,
+            ));
+            assert_eq!(fixture.checkpoint(), before);
+            assert_eq!(ledger.lock().unwrap().starts.len(), 2);
+            release.send(()).unwrap();
+            holder.join().unwrap();
+        });
+        let clock = SystemClock;
+        FileJournal::retry_delivered_attempt(
+            &fixture.root,
+            fixture.project,
+            ATTEMPT.parse().unwrap(),
+            WaitBudget::cli(clock.mono_now(), 5).unwrap(),
+            &CancelToken::new(),
+            &clock,
+        )
+        .unwrap();
+        let reopened = fixture.checkpoint();
+        assert_eq!(reopened.nodes[0].state, NodeState::Running);
+        assert_eq!(reopened.nodes[0].attempts[0].state, AttemptState::Starting);
+        assert_eq!(reopened.nodes[0].attempts[0].outcome, None);
+        assert_eq!(reopened.nodes[1].attempts[0].outcome, None);
+        let mut final_owner = ProcessOwner::new("retry-actor", ledger.clone());
+        final_owner.terminal = true;
+        let complete = advance(
+            &fixture.execution.document,
+            &mut final_owner,
+            &mut fixture.open(),
+        )
+        .unwrap();
+        assert_eq!(complete.status, GraphStatus::Complete);
+        assert!(
+            complete
+                .checkpoint
+                .nodes
+                .iter()
+                .all(|node| { node.state == NodeState::Succeeded && node.attempts.len() == 1 })
+        );
+        assert_eq!(ledger.lock().unwrap().starts.len(), 2);
+    }
+}

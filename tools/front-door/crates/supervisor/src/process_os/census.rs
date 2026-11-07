@@ -129,7 +129,11 @@ impl ProcessObserver for SystemProcessObserver {
         if pid <= 0 {
             return ProcessObservation::Unknown(ObservationIssue::Malformed);
         }
-        system_observe(pid)
+        system_observe(pid, true)
+    }
+
+    fn observe_topology(&self, pid: i64) -> ProcessObservation {
+        system_observe(pid, false)
     }
 
     fn census(&self, max_entries: usize) -> Result<Census, CensusError> {
@@ -194,6 +198,10 @@ impl ProcessObserver for NativeProcessObserver {
 
     fn observe(&self, pid: i64) -> ProcessObservation {
         NativeProcessObserver::observe(self, pid)
+    }
+
+    fn observe_topology(&self, pid: i64) -> ProcessObservation {
+        observe_with_boot_mode(pid, &self.boot, false)
     }
 
     fn census(&self, max_entries: usize) -> Result<Census, CensusError> {
@@ -266,7 +274,7 @@ fn read_system_boot_identity() -> Result<String, CensusError> {
     Err(CensusError::Unsupported)
 }
 
-fn system_observe(pid: i64) -> ProcessObservation {
+fn system_observe(pid: i64, sample_cpu: bool) -> ProcessObservation {
     if pid <= 0 || i32::try_from(pid).ok().filter(|pid| *pid > 0).is_none() {
         return ProcessObservation::Unknown(ObservationIssue::Malformed);
     }
@@ -278,13 +286,19 @@ fn system_observe(pid: i64) -> ProcessObservation {
         Ok(observer) => observer,
         Err(_) => return ProcessObservation::Unknown(ObservationIssue::Malformed),
     };
-    observer.observe(pid)
+    observe_with_boot_mode(pid, &observer.boot, sample_cpu)
 }
 
 /// Read one native process fact under an explicitly supplied boot key. This
 /// crate-private seam lets custody tests use recorded stable boot fixtures;
 /// production observation calls it only with the native kernel boot identity.
 pub(crate) fn observe_with_boot(pid: i64, boot: &str) -> ProcessObservation {
+    observe_with_boot_mode(pid, boot, true)
+}
+
+fn observe_with_boot_mode(pid: i64, boot: &str, sample_cpu: bool) -> ProcessObservation {
+    #[cfg(not(target_os = "macos"))]
+    let _ = sample_cpu;
     if pid <= 0 || boot.is_empty() || boot.len() > 256 {
         return ProcessObservation::Unknown(ObservationIssue::Malformed);
     }
@@ -307,7 +321,7 @@ pub(crate) fn observe_with_boot(pid: i64, boot: &str) -> ProcessObservation {
     }
     #[cfg(target_os = "macos")]
     {
-        darwin_process(pid, boot)
+        darwin_process(pid, boot, sample_cpu)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -409,7 +423,7 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
     let mut unknown = BTreeMap::new();
     let mut absent = BTreeSet::new();
     for pid in pids {
-        match darwin_process(pid, boot) {
+        match darwin_process(pid, boot, false) {
             ProcessObservation::Present(fact) => facts.push(fact),
             ProcessObservation::Absent => {
                 absent.insert(i64::from(pid));
@@ -677,7 +691,7 @@ fn classify_darwin_zero_probe(session: i32, errno: Option<i32>) -> ProcessObserv
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_process(pid: i32, boot: &str) -> ProcessObservation {
+fn darwin_process(pid: i32, boot: &str, sample_cpu: bool) -> ProcessObservation {
     use std::mem::{MaybeUninit, size_of};
     if pid <= 0 {
         return ProcessObservation::Unknown(ObservationIssue::Malformed);
@@ -744,7 +758,7 @@ fn darwin_process(pid: i32, boot: &str) -> ProcessObservation {
             ProcessObservation::Unknown(ObservationIssue::PermissionDenied)
         };
     }
-    let cpu_micros = darwin_cpu_micros(pid);
+    let cpu_micros = sample_cpu.then(|| darwin_cpu_micros(pid)).flatten();
     let mut verify = MaybeUninit::<libc::proc_bsdinfo>::uninit();
     // SAFETY: verify is aligned writable storage with the exact ABI size.
     // libproc borrows it and retains no pointer.
@@ -1057,6 +1071,24 @@ mod native_tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn topology_observation_omits_cpu_accounting_but_preserves_native_identity() {
+        let pid = i64::from(std::process::id());
+        let observer = NativeProcessObserver::for_boot("recorded-boot").unwrap();
+        match (observer.observe(pid), observer.observe_topology(pid)) {
+            (ProcessObservation::Present(full), ProcessObservation::Present(topology)) => {
+                assert_eq!(full.identity, topology.identity);
+                assert_eq!(full.parent_pid, topology.parent_pid);
+                assert_eq!(full.identity.group_id, topology.identity.group_id);
+                assert_eq!(full.identity.session_id, topology.identity.session_id);
+                assert!(full.cpu_micros.is_some());
+                assert_eq!(topology.cpu_micros, None);
+            }
+            other => panic!("native identity unavailable: {other:?}"),
+        }
+    }
+
+    #[test]
     fn darwin_pid_listing_retries_when_a_process_arrives_after_the_count() {
         let mut count_calls = 0_usize;
         let mut buffer_calls = 0_usize;
@@ -1095,7 +1127,7 @@ mod native_tests {
     #[cfg(target_os = "macos")]
     fn darwin_short_record_and_sysctl_start_match_the_full_native_identity() {
         let pid = i32::try_from(std::process::id()).unwrap();
-        let full = darwin_process(pid, "recorded-boot");
+        let full = darwin_process(pid, "recorded-boot", true);
         let fallback = darwin_short_process(pid, "recorded-boot");
         match (full, fallback) {
             (ProcessObservation::Present(full), ProcessObservation::Present(fallback)) => {

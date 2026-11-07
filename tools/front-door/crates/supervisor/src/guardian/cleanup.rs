@@ -279,7 +279,7 @@ impl Driver<'_> {
                 break;
             }
             attempted = attempted.saturating_add(1);
-            let observation = self.observer.observe(pid);
+            let observation = self.observer.observe_topology(pid);
             if census
                 .observe_known(pid, &self.reservation.boot, observation)
                 .is_err()

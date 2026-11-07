@@ -384,13 +384,13 @@ jobs:
           | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
           | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
-          | test(=writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source)
           | test(=writer_dispatch_edits_a_linked_worktree)
           | test(=second_writer_is_refused_while_first_holds_the_worktree)
           | test(=writer_terminal_refuses_sequencer_state)
           | test(=writer_production_plan_denies_outside_writes)
           | test(=writer_protected_changes_wait_for_review_and_ignore_upstream)
-          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))'
+          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
+          | (package(=provenant-fabric-runtime) & test(=graph::tests::composite_and_allowance_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source))'
       - name: Run native writer capability probes
         if: ${{ !cancelled() }}
         working-directory: tools/front-door

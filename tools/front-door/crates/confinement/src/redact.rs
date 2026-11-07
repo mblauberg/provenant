@@ -169,10 +169,20 @@ struct ActiveToken {
     emitted: bool,
 }
 
+// Interpret JSON escapes only for boundary detection; retain the original bytes.
+#[derive(Default)]
+enum Escape {
+    #[default]
+    None,
+    Slash,
+    Unicode(u16, u8),
+}
+
 struct TokenScanner {
     active: Option<ActiveToken>,
     tail: Vec<u8>,
-    last_byte: Option<u8>,
+    boundary: bool,
+    escape: Escape,
     url_authority: Option<Vec<u8>>,
     matched: bool,
 }
@@ -182,7 +192,8 @@ impl Default for TokenScanner {
         Self {
             active: None,
             tail: Vec::with_capacity(MAX_MARKER_LENGTH - 1),
-            last_byte: None,
+            boundary: true,
+            escape: Escape::None,
             url_authority: None,
             matched: false,
         }
@@ -202,7 +213,8 @@ impl TokenScanner {
         if let Some(authority) = self.url_authority.take() {
             self.finish_authority(authority, output);
         }
-        self.last_byte = None;
+        self.boundary = true;
+        self.escape = Escape::None;
         self.active = None;
         Ok(())
     }
@@ -222,7 +234,7 @@ impl TokenScanner {
                     if authority.len() > FRAME_LIMIT {
                         return Err(FilterError);
                     }
-                    self.last_byte = Some(input[index]);
+                    self.observe(input[index]);
                     index += 1;
                 }
                 if index < input.len() {
@@ -255,7 +267,7 @@ impl TokenScanner {
                         output.extend_from_slice(REDACTED);
                         self.matched = true;
                     }
-                    self.last_byte = Some(byte);
+                    self.observe(byte);
                     index += 1;
                     continue;
                 }
@@ -265,7 +277,9 @@ impl TokenScanner {
 
             if input[index..].starts_with(b"://") {
                 output.extend_from_slice(b"://");
-                self.last_byte = Some(b'/');
+                for byte in b"://" {
+                    self.observe(*byte);
+                }
                 self.url_authority = Some(Vec::new());
                 index += 3;
                 continue;
@@ -275,15 +289,11 @@ impl TokenScanner {
                 return Ok(());
             }
 
-            let preceding = if index == 0 {
-                self.last_byte
-            } else {
-                Some(input[index - 1])
-            };
-            let at_word_boundary = preceding.is_none_or(|byte| !word_byte(byte));
-            if at_word_boundary {
+            if self.boundary {
                 if let Some((marker, kind)) = token_marker_at(&input[index..]) {
-                    self.last_byte = marker.last().copied();
+                    for byte in marker {
+                        self.observe(*byte);
+                    }
                     self.active = Some(ActiveToken {
                         marker,
                         kind,
@@ -301,13 +311,38 @@ impl TokenScanner {
 
             let byte = input[index];
             output.push(byte);
-            self.last_byte = Some(byte);
+            self.observe(byte);
             index += 1;
         }
         if eof {
             self.finish_active(output);
         }
         Ok(())
+    }
+
+    fn observe(&mut self, byte: u8) {
+        match std::mem::take(&mut self.escape) {
+            Escape::None if byte == b'\\' => {
+                self.boundary = true;
+                self.escape = Escape::Slash;
+            }
+            Escape::Slash if byte == b'u' => {
+                self.boundary = false;
+                self.escape = Escape::Unicode(0, 0);
+            }
+            Escape::Slash if b"bfnrt\\\"/".contains(&byte) => self.boundary = true,
+            Escape::Unicode(value, count) if byte.is_ascii_hexdigit() => {
+                let digit = (byte as char).to_digit(16).unwrap_or_default() as u16;
+                let value = value * 16 + digit;
+                if count == 3 {
+                    self.boundary = value > 127 || !word_byte(value as u8);
+                } else {
+                    self.boundary = false;
+                    self.escape = Escape::Unicode(value, count + 1);
+                }
+            }
+            _ => self.boundary = !word_byte(byte),
+        }
     }
 
     fn finish_active(&mut self, output: &mut Vec<u8>) {
@@ -333,7 +368,6 @@ impl TokenScanner {
         } else {
             output.extend_from_slice(&authority);
         }
-        self.last_byte = authority.last().copied().or(self.last_byte);
     }
 }
 
@@ -893,6 +927,42 @@ mod tests {
             &[b"xsk-embedded sk", b"-abcdefghijklmnopqrst"],
         );
         assert_eq!(output, b"xsk-embedded [REDACTED]");
+    }
+
+    #[test]
+    fn json_escaped_boundaries_redact_all_token_shapes_across_chunks() {
+        for (marker, kind) in TOKEN_MARKERS {
+            let body = match kind {
+                TokenKind::AwsAccessKey => "0123456789ABCDEF",
+                _ => "abcdefghijklmnopqrst",
+            };
+            for prefix in [
+                " ", "\n", r"\n", r"\t", r"\r", r#"\""#, r"\u0020", r"\u000a",
+            ] {
+                let input = format!("{prefix}{}{body}!", String::from_utf8_lossy(marker));
+                let expected = if matches!(kind, TokenKind::Bearer) {
+                    format!("{prefix}Bearer [REDACTED]!")
+                } else {
+                    format!("{prefix}[REDACTED]!")
+                };
+                for split in 0..=input.len() {
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(
+                        joined(
+                            &mut redactor,
+                            &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                        ),
+                        expected.as_bytes(),
+                        "prefix {prefix:?}, marker {marker:?}, split {split}"
+                    );
+                }
+            }
+            for prefix in ["x", r"\u0061", r"\\n"] {
+                let input = format!("{prefix}{}{body}!", String::from_utf8_lossy(marker));
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(joined(&mut redactor, &[input.as_bytes()]), input.as_bytes());
+            }
+        }
     }
 
     #[test]

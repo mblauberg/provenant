@@ -102,9 +102,9 @@ The 20 slowest cases in that run's preserved native JUnit reports (seconds):
 | `command_network_is_per_task_through_manifest_and_single_task_route` (`provenant::command_adapter`) | 9.895 |
 | `graph_settlement_advances_writer_and_account_routed_review` (`provenant::dispatch_provider`) | 9.819 |
 | `command_lane_reads_its_supervisors_process_tree_through_the_cli` (`provenant::command_adapter`) | 9.586 |
-| `worktrees::lifecycle_tests::remote_base_uses_exact_advertisement_instead_of_tracking_ref` (`provenant-confinement`) | 9.470 |
+| `worktrees::lifecycle_tests::gc_pruning::remote_base_uses_exact_advertisement_instead_of_tracking_ref` (`provenant-confinement`) | 9.470 |
 | `owned_dispatch_retains_failed_attempt_and_replays` (`provenant::dispatch_provider`) | 9.343 |
-| `worktrees::lifecycle_tests::gc_merge_proof_requires_containment_in_the_pinned_default` (`provenant-confinement`) | 9.148 |
+| `worktrees::lifecycle_tests::gc_safety::gc_merge_proof_requires_containment_in_the_pinned_default` (`provenant-confinement`) | 9.148 |
 | `codex_dispatch_observes_rollout` (`provenant::dispatch_provider`) | 8.870 |
 | `writer_dispatch_edits_a_linked_worktree` (`provenant::worktrees`) | 8.805 |
 | `unconfigured_host_native_repair_launches_alias_fallback` (`provenant::dispatch_provider`) | 8.080 |

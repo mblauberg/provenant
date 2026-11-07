@@ -66,7 +66,7 @@ mid-removal, and probes each candidate again. Collection runs when a lane
 settles, when admission finds the disk below the floor, and in `provenant gc`.
 - Why: a lane's shared target filled the workshop disk with incremental sessions
   and debug objects that no existing collector owned.
-- Test: `crates/run/src/build_dir_gc.rs::tests::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`; `crates/run/src/build_dir_gc.rs::tests::least_recently_used_goes_first_and_the_cap_stops_collection`; `crates/run/src/build_dir_gc.rs::tests::the_free_space_floor_is_honoured_and_no_more_is_removed`; `crates/run/src/build_dir_gc.rs::tests::collection_waits_for_the_admission_lock_and_blocks_claims`; `crates/run/src/build_dir_gc.rs::tests::a_directory_written_within_the_grace_is_kept_though_its_locks_are_free`; `crates/run/src/build_dir_gc.rs::tests::a_write_after_the_walk_keeps_the_directory`; `crates/run/src/build_dir_gc.rs::tests::a_sweep_with_nothing_to_do_does_not_take_the_admission_lock`; `crates/run/src/build_dir_gc.rs::tests::busy_directories_count_toward_the_cap_and_idle_ones_all_go_when_it_is_exceeded`; `crates/run/src/dispatch_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`; `crates/cli/src/run/provider.rs::cargo_profile_tests`
+- Test: `crates/run/src/build_dir_gc.rs::tests::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`; `crates/run/src/build_dir_gc.rs::tests::least_recently_used_goes_first_and_the_cap_stops_collection`; `crates/run/src/build_dir_gc.rs::tests::the_free_space_floor_is_honoured_and_no_more_is_removed`; `crates/run/src/build_dir_gc.rs::tests::collection_waits_for_the_admission_lock_and_blocks_claims`; `crates/run/src/build_dir_gc.rs::tests::a_directory_written_within_the_grace_is_kept_though_its_locks_are_free`; `crates/run/src/build_dir_gc.rs::tests::a_write_after_the_walk_keeps_the_directory`; `crates/run/src/build_dir_gc.rs::tests::a_sweep_with_nothing_to_do_does_not_take_the_admission_lock`; `crates/run/src/build_dir_gc.rs::tests::busy_directories_count_toward_the_cap_and_idle_ones_all_go_when_it_is_exceeded`; `crates/run/src/dispatch_writer_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`; `crates/cli/src/run/provider.rs::cargo_profile_tests`
 - Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider.rs`
 
 ## Operation IDs
@@ -378,7 +378,7 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
   `crates/cli/src/run/children.rs::tests::{legacy_child_cannot_claim_a_chair_under_a_lane_chosen_run_id, child_chair_seals_the_validated_request_despite_a_lane_rewrite, continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run, continuation_cannot_redirect_its_source_to_another_runs_chair}`;
   `crates/cli/src/run.rs::tests::operation_replays_after_its_context_ref_moves_or_is_deleted`;
-  `crates/run/src/dispatch_tests.rs::{nested_continuation_uses_host_derived_ids, nested_continuation_preserves_legacy_replay_even_before_request_publication, nested_continuation_preflight_does_not_reuse_crashed_staging}`
+  `crates/run/src/dispatch_lifecycle_tests.rs::{nested_continuation_uses_host_derived_ids, nested_continuation_preserves_legacy_replay_even_before_request_publication, nested_continuation_preflight_does_not_reuse_crashed_staging}`
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
 
@@ -488,15 +488,15 @@ lane; silence never counts as completion or settlement.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_and_low_advisory_memory_do_not_refuse, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high}`; `crates/run/src/dispatch_core_tests.rs::{pressure_errors_and_low_advisory_memory_do_not_refuse, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
   `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock, the_slot_descriptor_is_close_on_exec, a_process_that_outlives_the_holder_does_not_keep_the_slot, a_wait_reports_progress_then_times_out_naming_the_slots, waiting_for_a_cargo_lock_reports_progress_and_times_out}`;
   `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_settings_that_cannot_be_trusted, no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory}`;
   `tests/build_slot.rs::{more_builds_than_slots_compile_serially, a_killed_build_releases_its_slot_and_the_wait_is_reported, a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot, a_wait_gives_up_after_the_configured_time_naming_the_slots, a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor, read_only_slot_files_cannot_be_unlinked_or_created_by_the_build, commands_that_do_not_compile_and_nested_cargo_never_queue, a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate, the_cargo_lock_wait_and_the_slot_wait_share_one_deadline, a_terminated_shim_passes_the_signal_to_its_build}`;
   `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values, writer_caps_and_wait_validate_and_default, automatic_build_slots_follow_cores_jobs_and_memory}`;
-  `crates/run/src/dispatch_tests.rs::{invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
+  `crates/run/src/dispatch_tests.rs::{invalid_build_settings_refuse_without_waiting}`; `crates/run/src/dispatch_core_tests.rs::{guardian_identity_unknown_retries_and_names_expiry}`;
   `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
-  `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
+  `crates/run/src/dispatch_settlement_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
@@ -551,7 +551,7 @@ the latest timestamp. Read-only fallback needs explicit opt-in and a typed
 transient failure. A writer (an attempt that may edit files) is never replayed automatically, and two writers
 never share a worktree.
 - Why: evidence must not be rewritten, and replaying a writer clobbers edits.
-- Test: `crates/run/src/dispatch_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
+- Test: `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
   `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`
 - Owner: `crates/run/src/store.rs`, `crates/run/src/launch.rs`
 
@@ -738,7 +738,7 @@ transcript except Codex's post-exit identity projection. A read-only lane (no
 `succeeded` without a handoff; only a writer must also report one.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
-  `crates/run/src/dispatch_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
+  `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
@@ -818,7 +818,7 @@ The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
 an unfinished result; the initial attempt is separate.
 The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
-- Test: `crates/run/src/dispatch_tests.rs::a_declared_stop_settles_review_required`;
+- Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`;
   `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
@@ -883,7 +883,7 @@ could not read, truncated captures and `slices_complete: false`.
 - Why: repository config is hostile input, and a lane must not run on input
   the host could not verify; slices are navigation aids into the patch, and a
   reviewer still reads the surrounding code in the checkout.
-- Test: `crates/run/src/dispatch_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
+- Test: `crates/run/src/dispatch_custody_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
   `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`;
   `::slices_cover_every_file_and_the_index_names_them`;
   `::slices_stop_at_their_limit_and_say_so`;
@@ -934,7 +934,7 @@ Absolute paths, traversal, symlinks and Git or provider configuration are
 refused, and the attempt records every granted path.
 - Why: only the user widens a read-only lane.
 - Test: `crates/confinement/src/plan/read_only.rs::policy_defaults_and_refuses_escape_control_paths_and_symlinks`;
-  `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
+  `crates/run/src/dispatch_recovery_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
 Read-only Codex and Claude lanes with open network access can use the host
@@ -1167,7 +1167,7 @@ unreserved `tmp/`; owner locks such as `writer.lock`,
 - Why: unlinking an owner lock lets two owners lock different inodes, and
   deleting under a reservation destroys a writer's work.
 - Test: `crates/run/src/holder.rs::writer_recovery_accepts_only_matching_terminal_absence`;
-  `crates/run/src/dispatch_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
+  `crates/run/src/dispatch_temporary_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
   `::reconcile_leaves_temporary_data_behind_a_writer_reservation`;
   `::reconcile_unreadable_reservation_only_retains_existing_temporary_data`;
   `::reconcile_temporary_removal_never_follows_symlinks`
@@ -1258,7 +1258,7 @@ there is no raw result copy or raw-result digest. Newly sealed holder results se
 fixed placeholder, even when no credential matched. It is not a count of
 replacements or a guarantee against unknown secret formats.
 - Test: `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
-  `crates/run/src/dispatch_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
+  `crates/run/src/dispatch_settlement_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
   `::settlement_scrubs_provider_session_history`;
   `::unredactable_result_settles_failed_with_a_placeholder`;
   `::cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails`;
@@ -1499,7 +1499,7 @@ reassigned worktrees require a new owned checkout for fresh fallback;
 `--no-fallback` refuses them.
 - Why: a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
-- Test: `crates/run/src/dispatch_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
+- Test: `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
   `::resume_continues_a_terminal_attempt_once_with_its_route`;
   `crates/run/src/controls.rs::lineage_tests::resume_preserves_explicit_unowned_and_adopted_worktrees`;
   `::resume_refuses_a_pruned_worktree_reused_by_another_lane`;

@@ -234,6 +234,7 @@ fn request_key(
     .map(|digest| format!("child:{}", digest))
     .map_err(|error| PatchError {
         cause: None,
+        admission: None,
         code: "invalid",
         message: error.to_string(),
     })
@@ -251,6 +252,7 @@ pub fn replay_child(
 ) -> Result<Option<ChildReceipt>, PatchError> {
     let invalid = |message: String| PatchError {
         cause: None,
+        admission: None,
         code: "invalid",
         message,
     };
@@ -275,6 +277,7 @@ pub fn replay_child(
     {
         return Err(PatchError {
             cause: None,
+            admission: None,
             code: "idempotency_conflict",
             message: "child idempotency key was used for a different request or parent".into(),
         });
@@ -362,6 +365,7 @@ pub fn admit_child_bound(
 ) -> Result<ChildReceipt, PatchError> {
     let invalid = |message: String| PatchError {
         cause: None,
+        admission: None,
         code: "invalid",
         message,
     };
@@ -426,6 +430,7 @@ pub fn admit_child_bound(
         if progress.state != NodeState::Running {
             return Err(PatchError {
                 cause: None,
+                admission: None,
                 code: "parent_settled",
                 message: format!("parent node {parent} is not running"),
             });
@@ -434,6 +439,7 @@ pub fn admit_child_bound(
         if depth(&node) > limit {
             return Err(PatchError {
                 cause: None,
+                admission: None,
                 code: "child_depth",
                 message: format!(
                     "child {node} is {} levels deep; limits.child_depth={limit}",
@@ -501,6 +507,7 @@ fn child_patch(
             .with(template::Layer::Inline, &launch.templates)
             .map_err(|message| PatchError {
                 cause: None,
+                admission: None,
                 code: "invalid",
                 message,
             })?;
@@ -520,6 +527,7 @@ fn child_patch(
         .lower(&node)
         .map_err(|message| PatchError {
             cause: None,
+            admission: None,
             code: "invalid",
             message,
         })?;
@@ -555,6 +563,7 @@ fn child_patch(
     } else if !request.write_scope.is_empty() {
         return Err(PatchError {
             cause: None,
+            admission: None,
             code: "invalid",
             message: "write_scope requires a writer child".into(),
         });
@@ -568,6 +577,7 @@ fn child_patch(
         if request.writer {
             return Err(PatchError {
                 cause: None,
+                admission: None,
                 code: "invalid",
                 message: "writer composite children require explicit per-node work bindings".into(),
             });
@@ -585,6 +595,7 @@ fn child_patch(
             .lower(&Value::Object(node.clone()))
             .map_err(|message| PatchError {
                 cause: None,
+                admission: None,
                 code: "invalid",
                 message,
             })?;

@@ -452,16 +452,6 @@ impl Fixture {
         )
     }
 
-    fn replace_private(&self, object: GitOid, donor: GitOid) -> TestResult {
-        let target = object_path(&self.source, object);
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
-        fs::write(
-            target,
-            fs::read(object_path(&self.common_objects(), donor))?,
-        )?;
-        Ok(())
-    }
-
     fn pack(&self) -> TestResult<PathBuf> {
         fs::write(
             self.project.join(".git/refs/heads/lane"),
@@ -588,7 +578,23 @@ fn private_loose_blob_and_commit_hash_mismatches_refuse_before_publication() -> 
             } else {
                 (fixture.blob, fixture.base_blob)
             };
-            fixture.replace_private(target, donor)?;
+            // A lane shell can replace its own loose objects. A valid zlib
+            // object under the wrong digest must still fail host receipt.
+            let target_path = object_path(&fixture.source, target);
+            let donor_path = object_path(&fixture.project.join(".git/objects"), donor);
+            let output = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "chmod u+w \"$2\" && cp \"$1\" \"$2\"",
+                    "corrupt-object",
+                ])
+                .arg(&donor_path)
+                .arg(&target_path)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .output()?;
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(fs::read(&target_path)?, fs::read(&donor_path)?);
             assert!(
                 fixture.import().is_err(),
                 "format={format}, corrupt_commit={corrupt_commit}"

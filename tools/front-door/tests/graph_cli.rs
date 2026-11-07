@@ -63,6 +63,8 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
         "topic/remedy",
         "--base",
         "HEAD",
+        "--operation-id",
+        "worktree-remedy",
         "--write-scope",
         ".",
         "--wait=10s",
@@ -97,6 +99,21 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
     let graph = refusal["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("missing graph id")?;
+    let (_, replay) = rig.run(&[
+        "run",
+        "inspect",
+        "--branch",
+        "topic/remedy",
+        "--base",
+        "HEAD",
+        "--operation-id",
+        "worktree-remedy",
+        "--write-scope",
+        ".",
+        "--wait=10s",
+    ])?;
+    assert_eq!(replay["data"]["checkpoint"]["graph_id"], graph, "{replay}");
+    assert_eq!(replay["data"]["local_worktree_remedy"], action, "{replay}");
     let (_, status) = rig.run(&["status", graph])?;
     assert!(
         status["data"]["rows"]
@@ -260,12 +277,15 @@ fn graph_secrets_are_refused_before_publication() -> Result {
     let rig = GraphProject::new()?;
     let secret = format!("ghp_{}", "a1".repeat(18));
     for explain in [false, true] {
-        for source in ["brief", "parameter", "file", "inline"] {
+        for source in ["brief", "review", "parameter", "file", "inline"] {
             let mut command = rig.command();
             command.arg("run");
             match source {
                 "brief" => {
                     command.arg(&secret);
+                }
+                "review" => {
+                    command.arg(&secret).args(["--use", "review"]);
                 }
                 "parameter" => {
                     let templates = rig.project.join(".provenant/templates");
@@ -478,6 +498,48 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         explained["data"]["document"]["integration_branch"],
         "batch/example"
     );
+    Ok(())
+}
+
+#[test]
+fn explain_shows_the_resolved_review_lens_tier() -> Result {
+    fn lenses<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("review_lens") {
+                    found.push(value);
+                }
+                for child in map.values() {
+                    lenses(child, found);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    lenses(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "review": {"shape":"quick", "lenses":[{"name":"tests", "tier":"principal"}]},
+        "nodes": [{"id":"review", "use":"review-panel"}]
+    }))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--explain")
+        .output()?;
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{result}");
+    let mut found = Vec::new();
+    lenses(&result["data"]["document"]["nodes"], &mut found);
+    assert_eq!(found.len(), 1, "{result}");
+    assert_eq!(found[0]["review_lens"], "tests");
+    assert_eq!(found[0]["routes"][0]["alias"], "principal");
+    assert!(!found[0].to_string().contains("${tier}"));
     Ok(())
 }
 
@@ -727,20 +789,273 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
-#[test]
-fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
-    let rig = GraphProject::new()?;
-    let path = rig.document(&json!({"nodes":[{"id":"swarm","use":"task","over":(0..257).map(|n|format!("area-{n}")).collect::<Vec<_>>()}]}))?;
-    for explain in [false, true] {
+/// Drive one `fabric_run` MCP tool call through a real server process.
+fn mcp_run(rig: &GraphProject, arguments: Value) -> Result<Value> {
+    use std::io::Write;
+    let frames = [
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":arguments}}),
+    ];
+    let input = frames
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .join("\n")
+        + "\n";
+    let mut command = fixture_cli();
+    command
+        .current_dir(&rig.project)
+        .env("PROVENANT_ROOT", &rig.root)
+        .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(rig.state())
+        .args(["fabric", "mcp", "--client", "codex"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("MCP stdin")?
+        .write_all(input.as_bytes())?;
+    drop(child.stdin.take());
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for line in output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let value: Value = serde_json::from_slice(line)?;
+        if value["id"] == 1 {
+            return Ok(value["result"].clone());
+        }
+    }
+    Err("missing MCP reply".into())
+}
+
+/// One state directory that a compile failure can be observed against.
+fn prepare_state(rig: &GraphProject) -> Result {
+    std::fs::create_dir_all(rig.state())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(rig.state(), std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Assert that the template CLI, a raw document on the CLI and the MCP tool
+/// all refuse the same compile failure with `expected` and journal nothing.
+fn assert_compile_refusal_matches(
+    rig: &GraphProject,
+    templates: &[(&str, String)],
+    name: &str,
+    document: &Value,
+    config: &str,
+    expected: &str,
+) -> Result {
+    let directory = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&directory)?;
+    for (file, text) in templates {
+        std::fs::write(directory.join(format!("{file}.toml")), text)?;
+    }
+    std::fs::write(rig.state().join("config.toml"), config)?;
+    let path = rig.document(document)?;
+    let mut messages = Vec::new();
+    for args in [
+        vec!["run", "--use", name, "--explain"],
+        vec!["run", "--use", name],
+    ] {
+        let (output, value) = rig.run(&args)?;
+        assert!(!output.status.success(), "{name} {args:?}: {value}");
+        messages.push(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .to_owned(),
+        );
+    }
+    for explain in [true, false] {
         let mut command = rig.command();
         command.args(["run", "--file"]).arg(&path);
         if explain {
             command.arg("--explain");
         }
         let output = command.output()?;
-        assert!(!output.status.success());
-        assert!(graph_records(&rig.state())?.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            !output.status.success(),
+            "{name} --file explain={explain}: {value}"
+        );
+        messages.push(
+            value["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .to_owned(),
+        );
     }
+    for arguments in [
+        json!({"op":"run","use":name}),
+        json!({"op":"run","use":name,"explain":true}),
+        json!({"op":"run","document":document}),
+    ] {
+        let value = mcp_run(rig, arguments.clone())?;
+        assert_eq!(value["isError"], true, "{name} {arguments}: {value}");
+        messages.push(
+            value["structuredContent"]["message"]
+                .as_str()
+                .ok_or("MCP message")?
+                .to_owned(),
+        );
+    }
+    assert!(
+        messages.iter().all(|message| message == expected),
+        "{name}: {messages:?}"
+    );
+    assert!(graph_records(&rig.state())?.is_empty(), "{name}");
+    Ok(())
+}
+
+#[test]
+fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
+    let rig = GraphProject::new()?;
+    prepare_state(&rig)?;
+    // The compiler-only fan-out cap is redacted consistently before admission.
+    let over = (0..257)
+        .map(|number| format!("'area-{number}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let template = format!("nodes = [{{ id = 'swarm', use = 'task', over = [{over}] }}]\n");
+    let document = json!({"schema_version":1,"graph_id":"swarm","nodes":[{"id":"swarm","use":"task","over":(0..257).map(|n|format!("area-{n}")).collect::<Vec<_>>()}]});
+    assert_compile_refusal_matches(
+        &rig,
+        &[("swarm", template)],
+        "swarm",
+        &document,
+        "schema_version = 1\n",
+        "graph input could not be processed",
+    )?;
+
+    // A graph that compiles to more nodes than the state admits: the template
+    // CLI, the raw document CLI and the MCP tool must read the same refusal.
+    // The template compiles to one composite boundary over two leaves, so the
+    // document carries that shape and both expand to the same node count.
+    let node_cap = provenant_fabric_runtime::config::GraphLimits {
+        nodes: 1,
+        ..Default::default()
+    };
+    assert_compile_refusal_matches(
+        &rig,
+        &[(
+            "two",
+            "nodes = [\n  { id = 'a', use = 'task', brief = 'first' },\n  { id = 'b', use = 'task', brief = 'second' },\n]\n"
+                .into(),
+        )],
+        "two",
+        &json!({"schema_version":1,"graph_id":"two","nodes":[{"id":"two","kind":"composite","access":"read_only","composite":{
+            "nodes":[
+                {"id":"a","prompt":"first","access":"read_only","route":{"alias":"senior"}},
+                {"id":"b","prompt":"second","access":"read_only","route":{"alias":"senior"}}
+            ],
+            "exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]
+        }}]}),
+        "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+        &node_cap
+            .nodes_bound()
+            .refusal(3)
+            .ok_or("node cap must refuse the expanded composite")?,
+    )?;
+
+    // A three-node chain against a one-level depth limit.
+    let depth_cap = provenant_fabric_runtime::config::GraphLimits {
+        expansion_depth: 1,
+        ..Default::default()
+    };
+    assert_compile_refusal_matches(
+        &rig,
+        &[(
+            "chain",
+            "nodes = [\n  { id = 'a', use = 'task', brief = 'one' },\n  { id = 'b', use = 'task', brief = 'two', after = ['a'] },\n  { id = 'c', use = 'task', brief = 'three', after = ['b'] },\n]\n"
+                .into(),
+        )],
+        "chain",
+        &json!({"schema_version":1,"graph_id":"chain","nodes":[
+            {"id":"a","prompt":"one","access":"read_only","route":{"alias":"senior"}},
+            {"id":"b","prompt":"two","access":"read_only","route":{"alias":"senior"},"depends_on":["a"]},
+            {"id":"c","prompt":"three","access":"read_only","route":{"alias":"senior"},"depends_on":["b"]}
+        ]}),
+        "schema_version = 1\n[domains.fabric.graph.limits]\nexpansion_depth = 1\n",
+        &depth_cap
+            .expansion_depth_bound()
+            .refusal(2)
+            .ok_or("depth cap must refuse two levels")?,
+    )?;
+
+    // Nested composites whose scoped ids pass the 200-byte node identifier
+    // limit. Every level is a separate template, as a repository would write it.
+    let first = "a".repeat(64);
+    let second = "b".repeat(64);
+    let third = "c".repeat(64);
+    let fourth = "d".repeat(64);
+    assert_compile_refusal_matches(
+        &rig,
+        &[
+            (
+                "deep",
+                format!("nodes = [{{ id = '{first}', use = 'level1' }}]\n"),
+            ),
+            (
+                "level1",
+                format!("nodes = [{{ id = '{second}', use = 'level2' }}]\n"),
+            ),
+            (
+                "level2",
+                format!("nodes = [{{ id = '{third}', use = 'level3' }}]\n"),
+            ),
+            (
+                "level3",
+                format!("nodes = [{{ id = '{fourth}', use = 'level4' }}]\n"),
+            ),
+            ("level4", "brief = 'deep'\ntier = 'junior'\n".into()),
+        ],
+        "deep",
+        &json!({"schema_version":1,"graph_id":"deep","nodes":[{"id":first,"kind":"composite","access":"read_only","composite":{
+            "nodes":[{"id":second,"kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":third,"kind":"composite","access":"read_only","composite":{
+                    "nodes":[{"id":fourth,"prompt":"deep","access":"read_only","route":{"alias":"junior"}}],
+                    "exports":[{"node":fourth,"outputs":["result"]}]
+                }}],
+                "exports":[{"node":third,"outputs":["result"]}]
+            }}],
+            "exports":[{"node":second,"outputs":["result"]}]
+        }}]}),
+        "schema_version = 1\n",
+        "graph composite or loop expansion is invalid",
+    )?;
+
+    // Composite expansion refuses duplicate exports of one member.
+    assert_compile_refusal_matches(
+        &rig,
+        &[(
+            "duplicate-export",
+            "nodes = [{ id = 'member', use = 'task' }]\nexports = [{ node = 'member', outputs = ['result'] }, { node = 'member', outputs = ['result'] }]\n"
+                .into(),
+        )],
+        "duplicate-export",
+        &json!({"schema_version":1,"graph_id":"duplicate-export","nodes":[{"id":"duplicate-export","kind":"composite","access":"read_only","composite":{
+            "nodes":[{"id":"member","prompt":"work","access":"read_only","route":{"alias":"senior"}}],
+            "exports":[{"node":"member","outputs":["result"]},{"node":"member","outputs":["result"]}]
+        }}]}),
+        "schema_version = 1\n",
+        "graph composite or loop expansion is invalid",
+    )?;
     Ok(())
 }
 
@@ -905,6 +1220,16 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             "schema-refusal",
             Some(InvalidInputDetail::Schema),
             "schema_version",
+        ),
+        (
+            "oversized-input-refusal",
+            Some(InvalidInputDetail::InputTooLarge),
+            "1 MiB",
+        ),
+        (
+            "unreadable-input-refusal",
+            Some(InvalidInputDetail::InputUnreadable),
+            "unreadable",
         ),
         ("code-only-refusal", None, "invalid_input"),
     ] {
