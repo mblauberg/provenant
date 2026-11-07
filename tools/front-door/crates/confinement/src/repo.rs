@@ -1091,6 +1091,45 @@ mod tests {
     }
 
     #[test]
+    fn git_directory_still_refuses_wrong_owner_writable_modes_and_wrong_kinds() {
+        use provenant_os::fs::{FileKind, Metadata};
+        let temp = tempfile::tempdir().unwrap();
+        let safe = Metadata::from_std(fs::metadata(temp.path()).unwrap());
+        assert!(super::verify_git_directory(safe, safe.uid).is_ok());
+        for unsafe_metadata in [
+            Metadata {
+                uid: safe.uid.wrapping_add(1),
+                ..safe
+            },
+            Metadata {
+                mode: safe.mode | 0o020,
+                ..safe
+            },
+            Metadata {
+                mode: safe.mode | 0o002,
+                ..safe
+            },
+            Metadata {
+                kind: FileKind::Regular,
+                ..safe
+            },
+            Metadata {
+                kind: FileKind::Symlink,
+                ..safe
+            },
+            Metadata {
+                kind: FileKind::Other,
+                ..safe
+            },
+        ] {
+            assert!(matches!(
+                super::verify_git_directory(unsafe_metadata, safe.uid),
+                Err(RepoError::InvalidGitDirectory)
+            ));
+        }
+    }
+
+    #[test]
     fn repo_revalidation_detects_config_changes() {
         let temp = tempfile::tempdir().unwrap();
         let git = temp.path().join(".git");
