@@ -385,15 +385,6 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
-            // The binding lives in the Git shim, never in the ambient environment.
-            for key in [
-                "GIT_DIR",
-                "GIT_COMMON_DIR",
-                "GIT_WORK_TREE",
-                "GIT_OBJECT_DIRECTORY",
-            ] {
-                assert!(spec.env.iter().all(|(name, _)| name != key), "{id} {key}");
-            }
             let bound = spec.git_wrapper.bound.as_ref();
             assert!(bound.is_some(), "{id}");
             if let Some(bound) = bound {
@@ -404,6 +395,7 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                     ("GIT_WORK_TREE", "/fixture/repo"),
                     ("GIT_OBJECT_DIRECTORY", "/fixture/scratch/git-objects"),
                 ] {
+                    assert!(spec.env.iter().any(|(name, value)| name == key && value == path), "{id} {key}");
                     assert_eq!(
                         bound
                             .env
@@ -807,7 +799,12 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
             std::fs::write(other.join("reader-upstream"), "fetched content")?;
             host_git(&other, &["add".as_ref(), "reader-upstream".as_ref()]);
             host_git(&other, &["commit".as_ref(), "-qm".as_ref(), "reader upstream".as_ref()]);
-            lane_git(&["-c".as_ref(), "protocol.file.allow=always".as_ref(), "fetch".as_ref(), "--quiet".as_ref(), "origin".as_ref(), "HEAD:refs/remotes/origin/reader".as_ref()]);
+            let direct = provenant_os::fixture::git_command_at(git)
+                .current_dir(&linked).env_clear().envs(spec.env.iter().cloned())
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .args(["-c", "protocol.file.allow=always", "fetch", "--quiet", "origin", "HEAD:refs/remotes/origin/reader"])
+                .output()?;
+            assert!(direct.status.success(), "{id}: {}", String::from_utf8_lossy(&direct.stderr));
             assert_eq!(lane_git(&["rev-parse".as_ref(), "FETCH_HEAD".as_ref()]), host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]));
             assert_eq!(host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]), bound_head);
         }

@@ -608,11 +608,10 @@ pub(crate) fn private_git_objects(
         spec.env
             .push(("GIT_CONFIG_GLOBAL".into(), config.as_os_str().to_owned()));
     }
-    // The repository binding and explicit identity variables stay out of the
-    // ambient environment. Git's private global config carries the host
+    // Git's private global config carries the host
     // identity to any Git executable, while `useConfigOnly` prevents fallback
-    // to a generated hostname identity. The wrapper keeps the private binding
-    // limited to this worktree.
+    // to a generated hostname identity. Direct Git processes inherit the
+    // private binding; the wrapper clears it when selecting another repository.
     let worktree = input
         .confined
         .permissions()
@@ -630,6 +629,9 @@ pub(crate) fn private_git_objects(
             scratch.join("git-objects").into(),
         ),
     ];
+    spec.env
+        .retain(|(key, _)| !bound.iter().any(|(name, _)| name == key));
+    spec.env.extend(bound.iter().cloned());
     spec.git_wrapper.identity_config = Some(config);
     spec.env.retain(|(key, value)| {
         let identity = matches!(

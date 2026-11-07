@@ -1777,6 +1777,52 @@ fn import_sweeps_only_aged_quarantine_and_staging_directories() -> TestResult {
 }
 
 #[test]
+fn read_only_preparation_materialises_split_index() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format)?;
+        fs::write(fixture.lane.join("staged"), "staged content")?;
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["add", "staged"],
+        )?;
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["update-index", "--split-index"],
+        )?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home)?;
+        let repo = runtime.open_read_repo(
+            &SystemExecutor::new(1)?,
+            &fixture.lane,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        let host_index = fs::read(repo.private_git_dir().join("index"))?;
+        let scratch = fixture.root.join("reader-split");
+        fs::create_dir(&scratch)?;
+        super::prepare_read_only(&fixture.git, &repo, &scratch, None, Some(fixture.base))?;
+        fixture.source = scratch.join("git-objects");
+        let status = fixture.git_overlay(&scratch, &["status", "--porcelain"])?;
+        assert!(
+            String::from_utf8(status.stdout)?.contains("A  staged"),
+            "{format}"
+        );
+        let shared = fixture.git_overlay(&scratch, &["rev-parse", "--shared-index-path"])?;
+        assert!(
+            String::from_utf8(shared.stdout)?.trim().is_empty(),
+            "{format}"
+        );
+        assert_eq!(fs::read(repo.private_git_dir().join("index"))?, host_index);
+    }
+    Ok(())
+}
+
+#[test]
 fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResult {
     let mut fixture = Fixture::new("sha1")?;
     let remote = fixture.root.join("remote");

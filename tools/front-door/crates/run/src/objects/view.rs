@@ -55,7 +55,46 @@ fn prepare_refs_from(
     directory(&common, OsStr::new("objects"))?;
     directory(&common, OsStr::new("refs"))?;
     match source_private.read_stable(OsStr::new("index"), 64 * 1024 * 1024) {
-        Ok(bytes) => write(&common, "index", &bytes)?,
+        Ok(bytes) => {
+            write(&common, "index", &bytes)?;
+            // Ask Git to parse the copied index, then read only the named
+            // shared index through the held source directory (without links).
+            let index = common.current_path()?.join("index");
+            let shared = execute_bounded(
+                git,
+                &source_private.current_path()?,
+                root_path,
+                &args(&["rev-parse", "--shared-index-path"]),
+                None,
+                Execution {
+                    index_file: Some(&index),
+                    ..Execution::default()
+                },
+            )?;
+            let shared = std::str::from_utf8(&shared).map_err(|_| invalid())?.trim();
+            if !shared.is_empty() {
+                let name = Path::new(shared)
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .ok_or_else(invalid)?;
+                let hash = name.strip_prefix("sharedindex.").ok_or_else(invalid)?;
+                if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(invalid());
+                }
+                write(
+                    &common,
+                    name,
+                    &source_private.read_stable(OsStr::new(name), 64 * 1024 * 1024)?,
+                )?;
+                execute(
+                    git,
+                    &common.current_path()?,
+                    root_path,
+                    &args(&["update-index", "--no-split-index"]),
+                    None,
+                )?;
+            }
+        }
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
