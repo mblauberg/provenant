@@ -3501,3 +3501,53 @@ fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Bo
     );
     Ok(())
 }
+
+#[test]
+fn bounded_session_keeps_policy_fence_and_positive_holders()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct ChangingPolicy {
+        changed: AtomicBool,
+        observed: bool,
+    }
+    impl WorkerObserver for ChangingPolicy {
+        fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
+            (!self.changed.load(Ordering::SeqCst)).then(CensusEpochPolicy::default)
+        }
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            self.changed.store(true, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    (
+                        root,
+                        if self.observed {
+                            Occupancy::Observed { process: None }
+                        } else {
+                            Occupancy::Available
+                        },
+                    )
+                })
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let roots = [temp.path().to_path_buf()];
+    for observed in [false, true] {
+        let workers = ChangingPolicy {
+            changed: AtomicBool::new(false),
+            observed,
+        };
+        let session = CensusSession::new(&workers, &provenant_os::clock::SystemClock);
+        let (states, _) = session
+            .observe_roots_while(&roots, &|| true)
+            .ok_or("census")?;
+        if observed {
+            assert!(states[&roots[0]].is_observed());
+        } else {
+            assert!(states[&roots[0]].is_unknown());
+        }
+    }
+    Ok(())
+}

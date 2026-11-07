@@ -1033,7 +1033,7 @@ fn shorthand_document_controls_are_not_node_overrides() {
     let library = TemplateLibrary::bundled();
     let compiler = Compiler::new(&library);
     let mut node = json!({"id":"task", "use":"task", "limits":{"nodes":10}, "templates":{}});
-    separate_document_fields(&mut node);
+    separate_document_fields(&mut node).unwrap();
     assert!(compiler.compile(&node).is_ok());
     node["unknown_node_field"] = json!(true);
     assert!(
@@ -1042,4 +1042,27 @@ fn shorthand_document_controls_are_not_node_overrides() {
             .unwrap_err()
             .contains("unknown field unknown_node_field")
     );
+}
+
+#[test]
+fn shorthand_schema_version_must_be_a_supported_integer() {
+    for version in [
+        json!(0),
+        json!(3),
+        json!(-1),
+        json!(1.5),
+        json!("1"),
+        json!(null),
+        json!(true),
+    ] {
+        let mut node = json!({"use":"task", "schema_version":version});
+        let error = separate_document_fields(&mut node).unwrap_err();
+        assert!(error.contains("schema_version"), "{error}");
+        assert_eq!(node["schema_version"], version);
+    }
+    for version in [1, 2] {
+        let mut node = json!({"use":"task", "schema_version":version});
+        separate_document_fields(&mut node).unwrap();
+        assert!(node.get("schema_version").is_none());
+    }
 }

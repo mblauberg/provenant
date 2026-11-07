@@ -298,6 +298,25 @@ pub(super) fn lock_worktree(
     cancel: &CancelToken,
     preview: bool,
 ) -> Result<LockedWorktree, WorktreeError> {
+    lock_worktree_impl(context, entry, cancel, preview, false)
+}
+
+/// Launch admission runs before taking the repository registry lock.
+pub(super) fn lock_worktree_for_launch(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    cancel: &CancelToken,
+) -> Result<LockedWorktree, WorktreeError> {
+    lock_worktree_impl(context, entry, cancel, false, true)
+}
+
+fn lock_worktree_impl(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    cancel: &CancelToken,
+    preview: bool,
+    reobserve: bool,
+) -> Result<LockedWorktree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::GitEntryHeld {
             locked: entry.locked,
@@ -344,29 +363,38 @@ pub(super) fn lock_worktree(
     if !preview {
         context.workers.invalidate();
     }
-    let (mut observations, mut details) = context
-        .workers
-        .observe_roots_with_details(std::slice::from_ref(&canonical));
-    // A sibling's inventory verification can briefly hold a directory handle
-    // in this tree. Re-observe rather than treating that snapshot as a writer;
-    // persistent holders and all other evidence still refuse normally.
-    if !preview {
-        for _ in 0..3 {
-            if !matches!(observations.get(&canonical), Some(Occupancy::Observed { process: Some(process) }) if process.kind == ProcessEvidenceKind::OtherHeldPath)
-            {
-                break;
-            }
-            use provenant_core::Pause;
-            provenant_core::ThreadPause
-                .wait(provenant_core::DurationMicros::from_micros(100_000), cancel);
-            if cancel.is_cancelled() {
-                return Err(WorktreeError::Cancelled);
-            }
-            context.workers.invalidate();
-            (observations, details) = context
-                .workers
-                .observe_roots_with_details(std::slice::from_ref(&canonical));
+    let (mut observations, details) = if reobserve {
+        let keep_going = || {
+            !cancel.is_cancelled()
+                && context
+                    .lock_budget
+                    .remaining(context.clock.mono_now())
+                    .as_micros()
+                    > 0
+        };
+        let result = context
+            .workers
+            .observe_roots_while(std::slice::from_ref(&canonical), &keep_going);
+        if cancel.is_cancelled() {
+            return Err(WorktreeError::Cancelled);
         }
+        result.ok_or(WorktreeError::LockBusy)?
+    } else {
+        context
+            .workers
+            .observe_roots_with_details(std::slice::from_ref(&canonical))
+    };
+    if reobserve && let Some(observed) = observations.get(&canonical).cloned() {
+        let state = reobserve_held_path(
+            context.workers,
+            &canonical,
+            observed,
+            context.lock_budget,
+            context.clock,
+            cancel,
+            &provenant_core::ThreadPause,
+        )?;
+        observations.insert(canonical.clone(), state);
     }
     // The writer lock establishes exclusion.
     // A census gap does not make a free lease live; only a positive
@@ -385,7 +413,12 @@ pub(super) fn lock_worktree(
         Some(Occupancy::Available | Occupancy::Unknown { .. }) => {
             Ok(LockedWorktree { verified, writer })
         }
-        Some(Occupancy::Observed { .. }) => Err(live_refusal(context.workers, &canonical)),
+        Some(Occupancy::Observed { .. }) if !reobserve => {
+            Err(live_refusal(context.workers, &canonical))
+        }
+        Some(Occupancy::Observed { process }) => Err(process
+            .clone()
+            .map_or(WorktreeError::LiveWriter, WorktreeError::LiveProcess)),
         Some(Occupancy::Held) => Err(WorktreeError::LockBusy),
         None if context.workers.requires_complete_census() => {
             Err(WorktreeError::IncompleteCensus {
@@ -394,6 +427,66 @@ pub(super) fn lock_worktree(
         }
         None => Ok(LockedWorktree { verified, writer }),
     }
+}
+
+/// Only complete evidence of a free root clears an observed holder. A gap,
+/// cancellation or deadline cannot turn that positive evidence into custody.
+fn reobserve_held_path(
+    workers: &dyn WorkerObserver,
+    root: &Path,
+    mut observed: Occupancy,
+    budget: WaitBudget,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+    pause: &dyn provenant_core::Pause,
+) -> Result<Occupancy, WorktreeError> {
+    for _ in 0..3 {
+        if !matches!(&observed, Occupancy::Observed { process: Some(process) }
+            if process.kind == ProcessEvidenceKind::OtherHeldPath)
+        {
+            break;
+        }
+        if cancel.is_cancelled() {
+            return Err(WorktreeError::Cancelled);
+        }
+        let remaining = budget.remaining(clock.mono_now()).as_micros();
+        if remaining == 0 {
+            break;
+        }
+        pause.wait(
+            provenant_core::DurationMicros::from_micros(remaining.min(100_000)),
+            cancel,
+        );
+        if cancel.is_cancelled() {
+            return Err(WorktreeError::Cancelled);
+        }
+        let keep_going =
+            || !cancel.is_cancelled() && budget.remaining(clock.mono_now()).as_micros() > 0;
+        if !keep_going() {
+            break;
+        }
+        workers.invalidate();
+        let Some((states, _)) = workers.observe_roots_while(&[root.to_path_buf()], &keep_going)
+        else {
+            if cancel.is_cancelled() {
+                return Err(WorktreeError::Cancelled);
+            }
+            break;
+        };
+        if cancel.is_cancelled() {
+            return Err(WorktreeError::Cancelled);
+        }
+        if !keep_going() {
+            break;
+        }
+        match states.get(root) {
+            Some(state @ (Occupancy::Available | Occupancy::Observed { .. } | Occupancy::Held)) => {
+                observed = state.clone()
+            }
+            Some(Occupancy::Unknown { .. }) | None => break,
+        }
+    }
+    Ok(observed)
 }
 
 pub(super) fn repository_lock<'a>(
@@ -682,5 +775,132 @@ mod dirty_tests {
         let listed: Vec<_> = names.split(", ").collect();
         assert!(listed.iter().all(|name| name.len() == 202), "{summary}");
         assert_eq!(rest, format!("{} more", 12 - listed.len()), "{summary}");
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use provenant_core::{DurationMicros, MonoTime, Pause, TimeError, WallTime};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    struct Time(AtomicU64);
+    impl Clock for Time {
+        fn wall_now(&self) -> Result<WallTime, TimeError> {
+            WallTime::from_micros(0)
+        }
+        fn mono_now(&self) -> MonoTime {
+            MonoTime::from_micros(self.0.load(Ordering::SeqCst))
+        }
+        fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError> {
+            self.0.store(deadline.as_micros(), Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    impl Pause for Time {
+        fn wait(&self, delay: DurationMicros, _: &CancelToken) {
+            self.0.fetch_add(delay.as_micros(), Ordering::SeqCst);
+        }
+    }
+    struct Retry<'a> {
+        result: Option<Occupancy>,
+        time: &'a Time,
+        census_micros: u64,
+        calls: AtomicUsize,
+    }
+    impl WorkerObserver for Retry<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.time.0.fetch_add(self.census_micros, Ordering::SeqCst);
+            self.result
+                .clone()
+                .map(|state| (roots[0].clone(), state))
+                .into_iter()
+                .collect()
+        }
+    }
+    fn holder() -> Occupancy {
+        Occupancy::Observed {
+            process: Some(ObservedProcess::new(
+                42,
+                Some("holder".into()),
+                ProcessEvidenceKind::OtherHeldPath,
+            )),
+        }
+    }
+
+    #[test]
+    fn held_path_requires_positive_free_evidence_after_retry() {
+        let root = Path::new("/worktree");
+        for result in [
+            Some(Occupancy::census_unknown(root.into(), "incomplete census")),
+            None,
+            Some(holder()),
+            Some(Occupancy::Available),
+        ] {
+            let time = Time(AtomicU64::new(0));
+            let workers = Retry {
+                result: result.clone(),
+                time: &time,
+                census_micros: 0,
+                calls: AtomicUsize::new(0),
+            };
+            let budget = WaitBudget::up_to(time.mono_now(), DurationMicros::from_micros(1_000_000));
+            let observed = reobserve_held_path(
+                &workers,
+                root,
+                holder(),
+                budget,
+                &time,
+                &CancelToken::new(),
+                &time,
+            )
+            .unwrap();
+            if result == Some(Occupancy::Available) {
+                assert_eq!(observed, Occupancy::Available);
+            } else {
+                assert_eq!(observed, holder());
+            }
+        }
+    }
+
+    #[test]
+    fn held_path_retry_bounds_pause_and_rejects_census_after_deadline() {
+        for (budget_micros, census_micros, elapsed, calls) in [
+            (0, 0, 0, 0),
+            (50_000, 0, 50_000, 0),
+            (150_000, 60_000, 160_000, 1),
+            (150_000, 0, 100_000, 1),
+        ] {
+            let time = Time(AtomicU64::new(0));
+            let workers = Retry {
+                result: Some(Occupancy::Available),
+                time: &time,
+                census_micros,
+                calls: AtomicUsize::new(0),
+            };
+            let budget =
+                WaitBudget::up_to(time.mono_now(), DurationMicros::from_micros(budget_micros));
+            let observed = reobserve_held_path(
+                &workers,
+                Path::new("/worktree"),
+                holder(),
+                budget,
+                &time,
+                &CancelToken::new(),
+                &time,
+            )
+            .unwrap();
+            assert_eq!(
+                observed,
+                if budget_micros > 100_000 && census_micros == 0 {
+                    Occupancy::Available
+                } else {
+                    holder()
+                }
+            );
+            assert_eq!(time.0.load(Ordering::SeqCst), elapsed);
+            assert_eq!(workers.calls.load(Ordering::SeqCst), calls);
+        }
     }
 }

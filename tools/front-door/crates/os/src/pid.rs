@@ -235,6 +235,19 @@ pub trait CwdObserver: Send + Sync {
         OccupancyObservation::default()
     }
 
+    /// Deadline-bound occupancy; native implementations poll during descriptor reads.
+    fn occupancy_while(&self, pid: i64, keep_going: &dyn Fn() -> bool) -> OccupancyObservation {
+        if !keep_going() {
+            return OccupancyObservation::default();
+        }
+        let observation = self.occupancy(pid);
+        if keep_going() {
+            observation
+        } else {
+            OccupancyObservation::default()
+        }
+    }
+
     /// Executable image of the process, if known.
     fn executable(&self, _pid: i64) -> Option<PathBuf> {
         None
@@ -274,6 +287,13 @@ impl CwdObserver for SystemCwdObserver {
             return OccupancyObservation::default();
         };
         crate::sys::pid::occupancy(pid)
+    }
+
+    fn occupancy_while(&self, pid: i64, keep_going: &dyn Fn() -> bool) -> OccupancyObservation {
+        let Some(pid) = i32::try_from(pid).ok().filter(|pid| *pid > 0) else {
+            return OccupancyObservation::default();
+        };
+        crate::sys::pid::occupancy_while(pid, keep_going)
     }
 
     fn executable(&self, pid: i64) -> Option<PathBuf> {

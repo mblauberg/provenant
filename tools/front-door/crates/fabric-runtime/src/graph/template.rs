@@ -59,8 +59,19 @@ fn flatten_extensions(node: &mut Map<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove graph-document controls before validating a shorthand node.
-pub fn separate_document_fields(node: &mut Value) {
+/// Validate supplied document metadata before lowering an authored document.
+pub fn validate_document_schema_version(document: &Value) -> Result<(), String> {
+    if let Some(version) = document.get("schema_version")
+        && !matches!(version.as_u64(), Some(1 | 2))
+    {
+        return Err("schema_version must be the integer 1 or 2".into());
+    }
+    Ok(())
+}
+
+/// Validate and remove graph-document controls before checking a shorthand node.
+pub fn separate_document_fields(node: &mut Value) -> Result<(), String> {
+    validate_document_schema_version(node)?;
     if let Some(fields) = node.as_object_mut() {
         for key in [
             "schema_version",
@@ -82,6 +93,7 @@ pub fn separate_document_fields(node: &mut Value) {
             fields.remove(key);
         }
     }
+    Ok(())
 }
 
 fn template_syntax(field: &str) -> bool {

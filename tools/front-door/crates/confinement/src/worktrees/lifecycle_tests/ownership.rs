@@ -1043,7 +1043,13 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
         persistent: false,
     };
     context.workers = &transient;
-    drop(lock_worktree(&context, entry, &cancel(), false)?);
+    assert!(matches!(
+        lock_worktree_for_mutation(&context, entry, &cancel()),
+        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+    ));
+    assert_eq!(transient.calls.load(Ordering::SeqCst), 1);
+    transient.calls.store(0, Ordering::SeqCst);
+    drop(lock_worktree_for_launch(&context, entry, &cancel())?);
     assert_eq!(transient.calls.load(Ordering::SeqCst), 2);
     let persistent = Holder {
         calls: AtomicUsize::new(0),
@@ -1051,7 +1057,7 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
     };
     context.workers = &persistent;
     assert!(matches!(
-        lock_worktree(&context, entry, &cancel(), false),
+        lock_worktree_for_launch(&context, entry, &cancel()),
         Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
     ));
     assert!(persistent.calls.load(Ordering::SeqCst) >= 4);

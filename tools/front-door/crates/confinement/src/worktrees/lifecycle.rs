@@ -12,7 +12,6 @@ pub fn fast_forward(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     validate_binding(context)?;
-    let _registry = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
     let path = canonicalize(path)?;
     if path == canonicalize(context.repo.root_path())? {
@@ -24,7 +23,10 @@ pub fn fast_forward(
         .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
-    let locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    // Inventory is advisory until custody and registry exclusion are both held.
+    // Waiting for a sibling's transient handle must not hold the registry.
+    let locked = lock_worktree_for_launch(context, entry, cancel)?;
+    let _registry = repository_lock(context, LockMode::Exclusive, cancel)?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
     let current = matching_worktree(&fresh, branch, context.repo.root_path())?
         .ok_or(WorktreeError::IdentityChanged)?;
