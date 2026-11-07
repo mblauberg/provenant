@@ -102,8 +102,17 @@ fn live_graph_children(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, NodeState, relay};
     for id in FileJournal::pending_graph_ids(state, project)? {
-        let checkpoint =
-            FileJournal::read_checkpoint(state, project, &id)?.ok_or("missing graph checkpoint")?;
+        let checkpoint = match FileJournal::read_checkpoint(state, project, &id) {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return Err("missing graph checkpoint".into()),
+            Err(error)
+                if error.is_unreadable()
+                    && FileJournal::unreadable_settled(state, project, &id)? =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if let Some(parent) = relay::historical_parent_of_attempt(&checkpoint, reference) {
             let prefix = format!("{parent}--");
             if checkpoint.nodes.iter().any(|node| {
@@ -278,6 +287,15 @@ mod tests {
             b"broken checkpoint",
         )?;
         assert!(live_graph_children(state, project, "host/parent-attempt").is_err());
+        std::fs::write(
+            state
+                .as_path()
+                .join("fabric/graphs")
+                .join(project.to_string())
+                .join("graph-custody.json"),
+            br#"{"checkpoint":{"nodes":[{"state":"succeeded"}]}}"#,
+        )?;
+        assert!(!live_graph_children(state, project, "host/parent-attempt")?);
         Ok(())
     }
 

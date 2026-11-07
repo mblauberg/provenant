@@ -2069,6 +2069,13 @@ esac
     let db = rusqlite::Connection::open(&db_path)?;
     db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',X'7b7d',0);")?;
     drop(db);
+    let attempt = rig.state.join("runs/run-one/attempts/lane-one");
+    fs::create_dir_all(&attempt)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+    let _lock = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
     let child_store = rig.state.join("children/child-one");
     fs::create_dir_all(&child_store)?;
     let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;
@@ -2095,17 +2102,18 @@ esac
     assert_eq!(code(&direct), 2, "{direct:?}");
     assert_eq!(fs::read(&checkpoint_path)?, old_checkpoint);
     let output = String::from_utf8(direct.stdout.bytes)?;
+    assert!(!output.contains("child-lane"), "{output}");
     for expected in [
         "old-pending-fixture",
         "finish or cancel it with the previous release before upgrading",
         "lane-one",
-        "child-lane",
         "custom.toml",
     ] {
         assert!(output.contains(expected), "{output}");
     }
     let stopped = rig.command(&["upgrade", "--json"])?;
     let stopped_value: serde_json::Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+    assert!(!stopped_value.to_string().contains("child-lane"));
     assert_eq!(
         stopped_value["data"][0]["success"], false,
         "{stopped_value}"
@@ -2115,7 +2123,6 @@ esac
         "old-pending-fixture",
         "finish or cancel it with the previous release before upgrading",
         "lane-one",
-        "child-lane",
         "custom.toml",
     ] {
         assert!(

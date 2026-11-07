@@ -282,6 +282,64 @@ fn reader_with_no_live_holder_settles_lost() -> TestResult {
     recover_rebooted_writer(false, false, false, OLD_BOOT)
 }
 #[test]
+fn reconcile_sealed_never_spawned_exit_without_a_stop_request() -> TestResult {
+    use provenant_supervisor::machine::StopReason;
+    for (reason, expected) in [
+        (None, Outcome::Rejected),
+        (Some(StopReason::WallDeadline), Outcome::TimedOut),
+        (Some(StopReason::ExplicitCancellation), Outcome::Cancelled),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let mut observed = exit();
+        observed.scope = scope;
+        observed.never_spawned = true;
+        observed.termination = None;
+        observed.stop_reason = reason;
+        observed.settlement_evidence =
+            provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
+        seal_exit(&store, &observed)?;
+        artifacts::seal(
+            &attempt,
+            "launch.json",
+            &serde_json::to_vec(
+                &serde_json::json!({"schema_version": 1, "scope": scope, "requester": context.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        assert_eq!(
+            store.reconcile_with_observer(
+                run.run_id,
+                &Fake::default(),
+                &call,
+                &provenant_supervisor::census::SystemProcessObserver
+            )?,
+            vec![(id, Reconciled::Finished)]
+        );
+        assert_eq!(terminal(&store, id, &call)?, expected);
+        assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
+    }
+    Ok(())
+}
+
+#[test]
 fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
