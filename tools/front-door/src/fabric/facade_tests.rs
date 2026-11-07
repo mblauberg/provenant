@@ -1291,7 +1291,7 @@ fn untyped_dispatch_refusal_retains_projection_or_message_without_secrets() {
     for projection in [None, Some(Box::new(Diagnostic::new("fixture")
         .detail(format!("setup script failed: missing dependency {secret}"))))] {
         let fail = provenant_cli::run::Fail {
-            status: provenant_cli::Status::Refused,
+            status: provenant_records::Outcome::Refused,
             kind: provenant_run::ErrorKind::Refused,
             message: format!("setup script failed: missing dependency {secret}"),
             detail: None,
@@ -1319,6 +1319,6 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
     assert!(fail.message.contains("setup anchor changed"));
     assert!(!fail.message.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
     let error = dispatch_refused(fail);
-    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(error).unwrap()).unwrap();
+    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
     assert!(decoded.diagnostic().detail.unwrap().contains("setup anchor changed"));
 }

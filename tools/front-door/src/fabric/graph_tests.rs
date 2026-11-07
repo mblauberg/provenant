@@ -1773,7 +1773,7 @@ mod result_tests {
         checkpoint.nodes[0].attempts.remove(0);
         checkpoint.nodes[0].attempts[0].key.route_index = 0;
         let refusal = dispatch_refused(provenant_cli::run::Fail {
-            status: provenant_cli::Status::Refused,
+            status: provenant_records::Outcome::Refused,
             kind: provenant_run::ErrorKind::Refused,
             message: "setup script failed: missing pnpm ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
             detail: None,
