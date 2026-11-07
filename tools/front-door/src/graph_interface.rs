@@ -456,6 +456,7 @@ mod tests {
         for (status, outcome, expected) in [
             ("complete", "failed", Outcome::Failed),
             ("complete", "succeeded", Outcome::Ok),
+            ("complete", "partial", Outcome::Ok),
             ("cancelled", "failed", Outcome::Cancelled),
             ("paused", "failed", Outcome::Refused),
             ("pending", "partial", Outcome::Waiting),

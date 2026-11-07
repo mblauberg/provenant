@@ -439,6 +439,8 @@ pub(crate) fn enrich_status_rows(
         if retain_collected_peer_row(row, &record, host, context.identity.host) {
             continue;
         }
+        row["preparation_failure"] = json!(record.preparation_failure);
+        row["settlement_reason"] = json!(record.settlement_reason);
         let peer_origin = record.extra.get("peer_origin_context");
         let peer_graph = record.extra.get("peer_graph");
         let origin_matches = host != context.identity.host

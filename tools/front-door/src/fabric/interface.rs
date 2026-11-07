@@ -293,6 +293,83 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
+mod launch_report_tests {
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn launch_report_distinguishes_refusal_mixed_and_fallback() {
+        let rows = vec![
+            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_reason":"pre_launch_refusal", "preparation_failure":"auth_required"}),
+            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_reason":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
+        ];
+        let attempt = |id: &str, launched: bool| json!({"attempt_ref":id,"launched":launched});
+        let mut all = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/two", false)]}]}});
+        report_launch_refusals(&mut all, &rows);
+        assert_eq!(all["outcome"], "failed");
+        assert_eq!(
+            all["launch_refusals"][0]["preparation_failure"],
+            "auth_required"
+        );
+        assert_eq!(
+            all["launch_refusals"][1]["preparation_failure"],
+            "usage_limited"
+        );
+        let mut mixed = json!({"status":"pending","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/three", true)]}]}});
+        report_launch_refusals(&mut mixed, &rows);
+        assert_eq!(mixed["outcome"], "partial");
+        let mut fallback = json!({"status":"complete","outcome":"succeeded","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false),attempt("host/three", true)]}]}});
+        report_launch_refusals(&mut fallback, &rows);
+        assert_eq!(fallback["outcome"], "succeeded");
+    }
+}
+
+// Project durable attempt facts after the owner has tried fallback routes.
+fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
+    let refusals: Vec<_> = rows
+        .iter()
+        .filter(|row| row["kind"] == "attempt" && row["settlement_reason"] == "pre_launch_refusal")
+        .cloned()
+        .collect();
+    if refusals.is_empty() {
+        return;
+    }
+    let Some(nodes) = result["checkpoint"]["nodes"].as_array() else {
+        return;
+    };
+    let mut refused = 0;
+    let mut admitted = 0;
+    let mut other_failure = false;
+    for node in nodes {
+        let Some(attempt) = node["attempts"]
+            .as_array()
+            .and_then(|attempts| attempts.last())
+        else {
+            continue;
+        };
+        if attempt["launched"] == true {
+            admitted += 1;
+            other_failure |= node["state"] == "failed" || node["state"] == "blocked";
+        } else if attempt["attempt_ref"]
+            .as_str()
+            .is_some_and(|id| refusals.iter().any(|row| row["attempt_id"] == id))
+        {
+            refused += 1;
+        } else if node["state"] == "failed" || node["state"] == "blocked" {
+            other_failure = true;
+        }
+    }
+    if refused > 0
+        && admitted > 0
+        && !other_failure
+        && matches!(result["status"].as_str(), Some("pending" | "complete"))
+    {
+        result["outcome"] = json!("partial");
+    }
+    result["launch_refusals"] = json!(refusals);
+}
+
 impl Factory {
     fn validate_host_placement(
         &self,
@@ -1133,7 +1210,31 @@ impl Factory {
         let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
             && run.status == GraphStatus::Pending
             && !cancel.is_cancelled();
+        let target = super::unified::GraphTarget {
+            graph: run.checkpoint.graph_id.clone(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = super::unified::status_rows(&run, &target);
+        rows.retain(|row| {
+            row["kind"] == "attempt"
+                && run
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.attempts)
+                    .any(|attempt| {
+                        !attempt.launched
+                            && attempt.state
+                                == provenant_fabric_runtime::graph::AttemptState::Terminal
+                            && attempt.attempt_ref.as_deref() == row["attempt_id"].as_str()
+                    })
+        });
+        if !rows.is_empty() {
+            super::unified::enrich_status_rows(&mut rows, &self.context, &self.clock, cancel)?;
+        }
         let mut result = encode(run)?;
+        report_launch_refusals(&mut result, &rows);
         result["timed_out"] = json!(timed_out);
         Ok(result)
     }
