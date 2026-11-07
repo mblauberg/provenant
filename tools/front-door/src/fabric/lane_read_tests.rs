@@ -106,7 +106,12 @@ fn lane_command_with_launch(
         })
 }
 
-fn settled_attempt(context: &Context, rig: &TestRig, success: bool) -> Result<AttemptId> {
+fn settled_attempt(
+    context: &Context,
+    rig: &TestRig,
+    success: bool,
+    graph: &str,
+) -> Result<AttemptId> {
     use provenant_records::{CanonicalV1, run::RouteRecord};
     use provenant_supervisor::custody::{
         ExitObservation, PublicationState, Scope, SettlementEvidence,
@@ -124,7 +129,13 @@ fn settled_attempt(context: &Context, rig: &TestRig, success: bool) -> Result<At
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
-    let number = if success { 51 } else { 52 };
+    let number = if graph != "lane-read-children" {
+        54
+    } else if success {
+        51
+    } else {
+        52
+    };
     let id = AttemptId::from_bytes([number; 16]);
     let run = RunId::from_bytes([number; 16]);
     let task = TaskId::from_bytes([number; 16]);
@@ -132,7 +143,7 @@ fn settled_attempt(context: &Context, rig: &TestRig, success: bool) -> Result<At
     let request = serde_json::from_value(json!({
         "schema_version":1,"concurrency":1,"parent":null,
         "tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),
-            "context":{"graph_id":"lane-read-children","node_id":if success {"parent--success"} else {"parent--failure"}},
+            "context":{"graph_id":graph,"node_id":if success {"parent--success"} else {"parent--failure"}},
             "route":{"kind":"model","provider":"codex","model":"gpt-6-luna","effort":null},
             "authority_digest":provenant_core::Digest::from_bytes([7;32]),
             "provider_timeout_seconds":30,"delivery_id":null}]
@@ -227,8 +238,10 @@ fn settled_attempt(context: &Context, rig: &TestRig, success: bool) -> Result<At
             },
             result: if success {
                 "child result reached parent"
-            } else {
+            } else if graph == "lane-read-children" {
                 "child provider failure details"
+            } else {
+                "unrelated project secret"
             },
             complete: true,
             redacted: false,
@@ -254,8 +267,8 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let mut rig = TestRig::new()?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
     let context = Context::open(roots, &rig.home, &rig.project)?;
-    let success = settled_attempt(&context, &rig, true)?;
-    let failure = settled_attempt(&context, &rig, false)?;
+    let success = settled_attempt(&context, &rig, true, "lane-read-children")?;
+    let failure = settled_attempt(&context, &rig, false, "lane-read-children")?;
     let caller = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let graph = "lane-read-children";
     let reference = |id| format!("{}/{id}", context.identity.host);
@@ -294,6 +307,40 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     })?;
     journal.save(&checkpoint)?;
     drop(journal);
+    // A graph ID can equal a permitted bare attempt ID. Its result must never
+    // replace the attempt selected by the relay's authorisation.
+    let collision = success.to_string();
+    let unrelated_attempt = settled_attempt(&context, &rig, false, &collision)?;
+    let unrelated_document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":collision,"nodes":[
+            {"id":"parent--failure","access":"read_only","prompt":"unrelated","route":{"alias":"junior"}}
+        ]
+    }))?;
+    let unrelated_checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":collision,"plan_digest":"fixture",
+        "nodes":[{"id":"parent--failure","state":"failed","attempts":[{
+            "key":{"graph_id":collision,"node_id":"parent--failure","route_index":0},
+            "launched":true,"route":{"alias":"junior"},"state":"terminal",
+            "attempt_ref":reference(unrelated_attempt),"launch_actor":"fixture","outcome":"task_failed"
+        }]}]
+    }))?;
+    let mut unrelated = FileJournal::open(
+        &context.roots.state,
+        context.identity.project,
+        &collision,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    unrelated.bind(GraphExecution {
+        review_base: None,
+        extra: Default::default(),
+        integration_base: None,
+        directory: rig.project.clone(),
+        document: unrelated_document,
+    })?;
+    unrelated.save(&unrelated_checkpoint)?;
+    drop(unrelated);
     let mut holder = provenant_run::HolderContext {
         schema_version: 1,
         roots: provenant_run::RootSeed {
@@ -398,11 +445,29 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         &provenant_confinement::worktrees::SystemWorkerObserver,
     )?;
     assert_eq!(foreign_read["bytes"]["data"], "child result reached parent");
+    let unrelated_result = super::read_lane_graph(
+        &holder,
+        json!({"op":"output","id":collision}),
+        &cancel,
+        std::time::Duration::from_secs(30),
+        &provenant_confinement::worktrees::SystemWorkerObserver,
+    )?;
+    assert_eq!(
+        unrelated_result["bytes"]["data"],
+        "unrelated project secret"
+    );
     let result = read(json!({"op":"output","id":"parent--success"}))?;
     assert_eq!(
         result["bytes"]["data"], "child result reached parent",
         "{result}"
     );
+    for selector in [success.to_string(), reference(success)] {
+        let output = read(json!({"op":"output","id":selector}))?;
+        assert_eq!(
+            output["bytes"]["data"], "child result reached parent",
+            "{output}"
+        );
+    }
     let failure_result = read(json!({"op":"output","id":"parent--failure"}))?;
     assert_eq!(
         failure_result["bytes"]["data"],

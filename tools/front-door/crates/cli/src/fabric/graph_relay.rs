@@ -167,7 +167,21 @@ pub fn serve_with_read(
             if node == found.id || input["op"] == "trace" || input["trace"] == true {
                 format!("{graph_id}/{}", found.id)
             } else {
-                requested.to_owned()
+                found
+                    .recorded_attempts()
+                    .find_map(|attempt| {
+                        attempt.attempt_ref.as_deref().filter(|reference| {
+                            *reference == requested
+                                || reference.rsplit('/').next() == Some(requested)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        refused(
+                            "not_found",
+                            "the attempt is outside the calling lane's graph",
+                        )
+                    })?
+                    .to_owned()
             }
         };
         input["id"] = selected.into();

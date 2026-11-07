@@ -2275,6 +2275,23 @@ impl BoundGraphOwner<'_> {
                         | provenant_run::OperationState::Refused
                 )
             });
+            let writer_project =
+                if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                    worktree
+                        .map(|path| selected_writer_project(self.factory, path))
+                        .transpose()?
+                } else {
+                    None
+                };
+            let writer_directory = writer_project
+                .as_ref()
+                .map_or(self.factory.cwd.as_path(), |(directory, _)| {
+                    directory.as_path()
+                });
+            let foreign_writer = writer_project
+                .as_ref()
+                .is_some_and(|(_, project)| *project != self.factory.context.identity.project);
+
             // A graph retry is a new attempt, but retains the predecessor's
             // original source pin and terminal writer head. Mark continuations
             // even when both heads agree so preparation checks dirty remnants.
@@ -2329,11 +2346,17 @@ impl BoundGraphOwner<'_> {
                     .ok_or(FacadeError::StateCorrupt)?;
                 let writer = provenant_run::resolve_writer(
                     self.factory.context.roots.state.as_path(),
-                    &self.factory.cwd,
+                    writer_directory,
                     Path::new(worktree.ok_or(FacadeError::StateCorrupt)?),
                 )
                 .map_err(run_error)?;
-                if previous_task.writer.as_ref() != Some(&writer) {
+                if !previous_task.writer.as_ref().is_some_and(|previous| {
+                    provenant_run::equivalent_writer(
+                        previous,
+                        &writer,
+                        self.factory.context.identity.project,
+                    )
+                }) {
                     return Err(FacadeError::Conflict);
                 }
                 store
@@ -2484,23 +2507,6 @@ impl BoundGraphOwner<'_> {
                     commit: None,
                 });
             }
-            let writer_project = if !accepted
-                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-            {
-                worktree
-                    .map(|path| selected_writer_project(self.factory, path))
-                    .transpose()?
-            } else {
-                None
-            };
-            let writer_directory = writer_project
-                .as_ref()
-                .map_or(self.factory.cwd.as_path(), |(directory, _)| {
-                    directory.as_path()
-                });
-            let foreign_writer = writer_project
-                .as_ref()
-                .is_some_and(|(_, project)| *project != self.factory.context.identity.project);
             // Preserve the specific detached-writer refusal in node status.
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite

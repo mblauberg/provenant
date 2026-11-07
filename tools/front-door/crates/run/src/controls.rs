@@ -2406,8 +2406,13 @@ impl RunStore {
             .head
             .map(|head| head.to_string())
             .or_else(|| previous_task.head.clone());
-        if task.writer.is_none()
-            || task.writer != previous_task.writer
+        if !task
+            .writer
+            .as_ref()
+            .zip(previous_task.writer.as_ref())
+            .is_some_and(|(writer, previous)| {
+                equivalent_writer(previous, writer, self.context.project_id)
+            })
             || task.source_head.is_none()
             || task.source_head.as_ref() != source
             || task.head.is_none()

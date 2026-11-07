@@ -188,7 +188,7 @@ impl<'a> Service<'a> {
                     "delivery requires a writer worktree",
                 ));
             }
-            let writer = task
+            let mut writer = task
                 .worktree
                 .as_ref()
                 .map(|path| {
@@ -202,6 +202,23 @@ impl<'a> Service<'a> {
                     Ok::<_, RunError>(writer)
                 })
                 .transpose()?;
+            // Preserve the sealed request and authority digest across custody metadata
+            // upgrades. Only the absent legacy attribution binding is equivalent.
+            if let Some(saved) = previous
+                .as_ref()
+                .and_then(|request| {
+                    request
+                        .tasks
+                        .iter()
+                        .find(|prior| prior.task_id == task.task_id)
+                })
+                .and_then(|task| task.writer.as_ref())
+                && writer.as_ref().is_some_and(|resolved| {
+                    equivalent_writer(saved, resolved, self.store.context.project_id)
+                })
+            {
+                writer = Some(saved.clone());
+            }
             if input.parent_attempt.is_none() {
                 let branch = match &writer {
                     Some(writer) => Some(

@@ -519,6 +519,24 @@ pub(crate) fn writer_project_id(
         .map(|project| project.unwrap_or(attribution))
 }
 
+/// Compare persisted writer identity, interpreting legacy custody as attribution.
+/// Callers retain the original request bytes when replaying an equivalent writer.
+pub fn equivalent_writer(
+    saved: &WriterRequest,
+    resolved: &WriterRequest,
+    attribution: ProjectId,
+) -> bool {
+    let mut saved = saved.clone();
+    let mut resolved = resolved.clone();
+    for writer in [&mut saved, &mut resolved] {
+        writer
+            .extra
+            .entry("custody_project".into())
+            .or_insert_with(|| serde_json::json!(attribution));
+    }
+    saved == resolved
+}
+
 impl crate::RunStore {
     pub(crate) fn writer_slot(
         &self,
