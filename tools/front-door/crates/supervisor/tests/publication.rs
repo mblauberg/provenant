@@ -43,6 +43,7 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         &clock,
     )?;
     let command = ProviderCommand {
+        profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),

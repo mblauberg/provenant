@@ -88,6 +88,8 @@ pub enum PermissionError {
     Cancelled,
     #[error("safe filesystem operation failed: {0}")]
     Filesystem(#[source] provenant_os::fs::FsError),
+    #[error("sandbox profile transport failed: {0}")]
+    ProfileTransport(#[source] std::io::Error),
     #[error("sandbox probe execution failed")]
     Execution(#[source] provenant_os::exec::ExecError),
     #[error("verified repository authority could not be revalidated: {kind}: {0}", kind = .0.variant())]

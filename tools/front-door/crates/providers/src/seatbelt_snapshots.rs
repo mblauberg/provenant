@@ -709,23 +709,33 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     };
     let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
     let sandboxed =
-        |argv: &[std::ffi::OsString]| -> Result<std::process::Command, Box<dyn std::error::Error>> {
-            let command =
-                compiled.command(argv, &provenant_core::AttemptId::from_bytes([1; 16]))?;
+        |argv: &[std::ffi::OsString]| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+            let command = compiled.command(
+                argv,
+                &provenant_core::AttemptId::from_bytes([1; 16]),
+                &provenant_os::fs::Directory::open_anchor(&root)?,
+            )?;
             let mut process = std::process::Command::new(&command[0]);
             process
                 .args(&command[1..])
                 .current_dir(&worktree)
                 .env_clear()
                 .envs(spec.env.iter().cloned());
-            Ok(process)
+            use std::os::fd::AsFd;
+            provenant_os::sys::child::configure_command(
+                &mut process,
+                &[command.profile.file().as_fd()],
+                Some(&spec.env),
+                false,
+            )?;
+            Ok(process.output()?)
         };
     for args in [&["log", "-1"][..], &["diff", "HEAD~1"][..]] {
         let argv: Vec<std::ffi::OsString> =
             std::iter::once(root.join("scratch/read-only-git/git").into_os_string())
                 .chain(args.iter().map(Into::into))
                 .collect();
-        let output = sandboxed(&argv)?.output()?;
+        let output = sandboxed(&argv)?;
         assert!(
             output.status.success(),
             "{}",
@@ -733,7 +743,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         );
     }
     std::fs::write(worktree.join("file"), "changed\n")?;
-    let output = sandboxed(&[git.into(), "add".into(), "file".into()])?.output()?;
+    let output = sandboxed(&[git.into(), "add".into(), "file".into()])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
@@ -742,8 +752,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     );
     let input = root.join("scratch/object-input");
     std::fs::write(&input, b"unique lane object")?;
-    let output =
-        sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?.output()?;
+    let output = sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),

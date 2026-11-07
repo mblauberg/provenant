@@ -169,7 +169,8 @@ fn profiles_above_former_thresholds_render_without_truncation()
 }
 
 #[test]
-fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), PermissionError> {
+fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), Box<dyn std::error::Error>>
+{
     let launch = ConfinedLaunch {
         enforcement: Enforcement::MacOsSandboxExec,
         profile: b"(version 1)\n(deny default)\n".to_vec(),
@@ -177,9 +178,14 @@ fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), Permiss
         native_controls: Vec::new(),
     };
     let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
-    let command = launch.command(&["tool".into()], &attempt)?;
+    let command = launch.command(
+        &["tool".into()],
+        &attempt,
+        &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+    )?;
     assert_eq!(command[3], "tool");
-    let profile = command[2].to_string_lossy();
+    assert_eq!(command[1], "-f");
+    let profile = std::fs::read_to_string(command[2].clone())?;
     assert!(profile.starts_with("(version 1)\n(deny default)\n"));
     assert!(profile.ends_with(&format!(
         "(allow mach-lookup (global-name \"dev.provenant.attempt.{attempt}\"))\n"

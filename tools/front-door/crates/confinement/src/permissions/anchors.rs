@@ -238,6 +238,7 @@ pub enum Enforcement {
 
 /// A compiled launch profile. Discard and recompile it after any writable root
 /// changes; callers hold writer exclusion from compilation through handoff.
+#[derive(Clone)]
 pub struct ConfinedLaunch {
     pub enforcement: Enforcement,
     pub profile: Vec<u8>,
@@ -253,21 +254,54 @@ impl ConfinedLaunch {
     /// grants nothing. The sandbox is inherited and cannot be dropped, so the
     /// supervisor uses that allowance to find processes that left the
     /// provider's process tree.
+    /// The launch owner supplies a host-private staging directory denied to lanes.
     pub fn command(
         &self,
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
-    ) -> Result<Vec<OsString>, PermissionError> {
+        directory: &Directory,
+    ) -> Result<ConfinedCommand, PermissionError> {
         let profile =
             std::str::from_utf8(&self.profile).map_err(|_| PermissionError::InvalidFixture)?;
         let profile = format!(
             "{profile}(allow mach-lookup (global-name \"{}\"))\n",
             attempt.sandbox_lookup_name()
         );
-        let mut command = Vec::with_capacity(argv.len() + 3);
-        command.extend(["/usr/bin/sandbox-exec", "-p", &profile].map(OsString::from));
+        let profile = provenant_supervisor::ProfileFile::create(profile.as_bytes(), directory)
+            .map_err(PermissionError::ProfileTransport)?;
+        let mut command = vec!["/usr/bin/sandbox-exec".into(), "-f".into(), profile.path()];
         command.extend(argv.iter().cloned());
-        Ok(command)
+        Ok(ConfinedCommand {
+            argv: command,
+            profile,
+        })
+    }
+}
+
+/// Own the anonymous profile until the consumer has inherited its descriptor.
+#[derive(Debug)]
+pub struct ConfinedCommand {
+    pub argv: Vec<OsString>,
+    pub profile: provenant_supervisor::ProfileFile,
+}
+impl ConfinedCommand {
+    pub fn options<'a>(
+        &'a self,
+        cwd: &'a Path,
+        timeout: std::time::Duration,
+    ) -> Result<provenant_os::exec::ExecOptions<'a>, PermissionError> {
+        self.profile
+            .verify_command(&self.argv)
+            .map_err(PermissionError::ProfileTransport)?;
+        let mut options = provenant_os::exec::ExecOptions::new(&self.argv, cwd, timeout);
+        options.inherited_profile = Some(self.profile.file());
+        Ok(options)
+    }
+}
+impl std::ops::Deref for ConfinedCommand {
+    type Target = [OsString];
+    fn deref(&self) -> &Self::Target {
+        &self.argv
     }
 }
 

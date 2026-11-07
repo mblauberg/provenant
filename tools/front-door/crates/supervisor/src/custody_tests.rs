@@ -1145,6 +1145,7 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     let failure = launch(
         OwnedLaunch {
             command: ProviderCommand {
+                profile_file: None,
                 priority: 0,
                 lane_ports: None,
                 resolved_route: "fixture/provider".into(),

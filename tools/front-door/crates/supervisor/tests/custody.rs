@@ -457,6 +457,17 @@ fn start_with_custody_identity(
     extra: &[OsString],
     plan: CapturePlan,
 ) -> Result<(CustodyLease, CustodyHandle, provenant_os::fs::Metadata)> {
+    start_with_profile(root, name, scenario, extra, plan, None)
+}
+
+fn start_with_profile(
+    root: &Path,
+    name: &str,
+    scenario: &str,
+    extra: &[OsString],
+    plan: CapturePlan,
+    confined: Option<(Vec<OsString>, provenant_supervisor::ProfileFile)>,
+) -> Result<(CustodyLease, CustodyHandle, provenant_os::fs::Metadata)> {
     let writer = root.join(format!("{name}-writer"));
     let attempt = root.join(format!("{name}-attempt"));
     std::fs::create_dir(&writer)?;
@@ -477,7 +488,8 @@ fn start_with_custody_identity(
         &clock,
     )?;
     let identity = publication.custody_metadata()?;
-    let command = ProviderCommand {
+    let mut command = ProviderCommand {
+        profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
@@ -493,6 +505,10 @@ fn start_with_custody_identity(
         secret_input: None,
         holder_context: Vec::new(),
     };
+    if let Some((argv, profile)) = confined {
+        command.argv = argv;
+        command.profile_file = Some(profile);
+    }
     let handle = launch(
         OwnedLaunch {
             command,
@@ -1222,6 +1238,7 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
@@ -1279,6 +1296,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
@@ -2810,8 +2828,136 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
     Ok(())
 }
 
+// Medium: intentionally omit the sixth descriptor at the real first exec.
+// This does not require Seatbelt; refusal happens before the native backend.
+fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    for (name, fault) in [
+        ("guardian", "s2-drop-profile-descriptor"),
+        ("provider", "s2-close-provider-profile-descriptor"),
+    ] {
+        std::fs::write(state.join(fault), b"enabled")?;
+        let profile = provenant_supervisor::ProfileFile::create(
+            b"(version 1)(allow default)",
+            &Directory::open_anchor(root)?,
+        )?;
+        let marker = root.join(format!("{name}-must-not-launch"));
+        let argv = vec![
+            "/usr/bin/sandbox-exec".into(),
+            "-f".into(),
+            profile.path(),
+            "/usr/bin/touch".into(),
+            marker.clone().into_os_string(),
+        ];
+        let launched = start_with_profile(
+            root,
+            name,
+            "bytes",
+            &[],
+            CapturePlan::default(),
+            Some((argv, profile)),
+        );
+        if name == "guardian" {
+            let error = launched
+                .err()
+                .ok_or("profile descriptor loss unexpectedly launched")?;
+            assert!(
+                error.to_string().contains("sandbox profile transport"),
+                "{error}"
+            );
+            assert!(!root.join(format!("{name}-attempt/launch.json")).exists());
+        } else {
+            let (_writer, handle, _) = launched?;
+            let exit = exited(&handle)?;
+            assert!(exit.never_spawned, "{exit:?}");
+            assert_eq!(exit.termination, None);
+            assert!(
+                exit.warnings
+                    .iter()
+                    .any(|warning| warning
+                        == "sandbox profile transport refused before provider launch"),
+                "{exit:?}"
+            );
+        }
+        assert!(!marker.exists());
+        std::fs::remove_file(state.join(fault))?;
+    }
+    Ok(())
+}
+
+// Medium native integration: both exec handoffs consume the exact complete
+// profile, including a mandatory denial after the former 512 KiB boundary.
+fn native_profile_file_survives_both_handoffs_above_former_limit(root: &Path) -> Result<()> {
+    let probe = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .output()?;
+    if !probe.status.success() {
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "ProbeFailed: guardian profile transport: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        ))?;
+        return Ok(());
+    }
+    let directory = Directory::open_anchor(root)?;
+    for padding in [0, 600 * 1024] {
+        let name = format!("profile-{padding}");
+        let denied = root.join(format!("{name}-mandatory"));
+        let marker = root.join(format!("{name}-allowed"));
+        std::fs::write(&denied, b"mandatory")?;
+        let mut source = "(version 1)\n(allow default)\n".to_owned();
+        source.push_str(&format!(";{}\n", "padding".repeat(padding / 7)));
+        source.push_str(&format!("(deny file-read-data (literal \"{}\"))\n(deny file-write* (literal \"{}\"))\n(allow mach-lookup (global-name \"{}\"))\n", denied.display(), denied.display(), scope().attempt.sandbox_lookup_name()));
+        let profile = provenant_supervisor::ProfileFile::create(source.as_bytes(), &directory)?;
+        let identity = serde_json::to_value(profile.identity())?;
+        let argv = vec!["/usr/bin/sandbox-exec".into(), "-f".into(), profile.path(),
+            "/bin/sh".into(), "-c".into(),
+            "if /bin/cat \"$1\"; then exit 21; fi; if printf changed > \"$1\"; then exit 22; fi; printf applied > \"$2\"".into(),
+            "probe".into(), denied.into_os_string(), marker.clone().into_os_string()];
+        let (_writer, handle, _) = start_with_profile(
+            root,
+            &name,
+            "bytes",
+            &[],
+            CapturePlan::default(),
+            Some((argv, profile)),
+        )?;
+        let exit = exited(&handle)?;
+        assert_eq!(
+            exit.termination,
+            Some(provenant_os::exec::Termination::Exit(0)),
+            "{exit:?}"
+        );
+        assert!(!exit.never_spawned);
+        assert_eq!(std::fs::read(marker)?, b"applied");
+        assert_eq!(
+            std::fs::read(root.join(format!("{name}-mandatory")))?,
+            b"mandatory"
+        );
+        let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            root.join(format!("{name}-attempt/launch.json")),
+        )?)?;
+        assert_eq!(summary["profile"], identity);
+        assert_eq!(summary["profile"]["bytes"], serde_json::json!(source.len()));
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            summary["profile"]["sha256"],
+            serde_json::json!(Sha256::digest(source.as_bytes()).to_vec())
+        );
+    }
+    Ok(())
+}
+
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
+    (
+        "profile_transport_pass_failure_never_launches_provider",
+        profile_transport_pass_failure_never_launches_provider,
+    ),
+    (
+        "native_profile_file_survives_both_handoffs_above_former_limit",
+        native_profile_file_survives_both_handoffs_above_former_limit,
+    ),
     (
         "idle_supervisor_does_no_census_per_wake",
         idle_supervisor_does_no_census_per_wake,

@@ -441,15 +441,26 @@ fn lease_descriptors<'a>(
     pass
 }
 
+struct SpawnDescriptors<'a> {
+    lease: &'a provenant_os::fs::LockGuard,
+    secret: Option<&'a child::SecretPipe>,
+    ports: Option<&'a provenant_os::fs::LockGuard>,
+    profile: Option<&'a std::fs::File>,
+}
+
 fn spawn_identified(
     mut command: Command,
-    lease: &provenant_os::fs::LockGuard,
     env: &[(OsString, OsString)],
     boot: &str,
     permit: Permit,
-    secret: Option<&child::SecretPipe>,
-    ports: Option<&provenant_os::fs::LockGuard>,
+    descriptors: SpawnDescriptors<'_>,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
+    let SpawnDescriptors {
+        lease,
+        secret,
+        ports,
+        profile,
+    } = descriptors;
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
     let (mut parent, channel) = UnixStream::pair()?;
@@ -462,12 +473,34 @@ fn spawn_identified(
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
     let mut pass = lease_descriptors(lease, ports);
+    if let Some(profile) = profile {
+        pass.push(profile.as_fd());
+    }
     if let Some(pipe) = secret {
         pass.push(pipe.fd());
     }
     // SAFETY: the hook runs only after fork and calls only umask.
     unsafe {
         command.pre_exec(private_umask);
+    }
+    #[cfg(feature = "fixture")]
+    if let Some(profile) = profile
+        && env
+            .iter()
+            .find(|(name, _)| name == "PROVENANT_STATE_DIR")
+            .is_some_and(|(_, path)| {
+                std::path::Path::new(path)
+                    .join("s2-close-provider-profile-descriptor")
+                    .is_file()
+            })
+    {
+        let fd = profile.as_raw_fd();
+        // SAFETY: fixture-only fault injection runs after fork. close is
+        // async-signal-safe and affects only the child's inherited descriptor;
+        // the parent keeps its owning File. The exec boundary must refuse it.
+        unsafe {
+            command.pre_exec(move || close_fixture_profile(fd));
+        }
     }
     child::configure_command(&mut command, &pass, Some(env), false)?;
     let worker = std::thread::Builder::new()
@@ -488,7 +521,13 @@ fn spawn_identified(
                 }
             }
         })?;
-    let spawned = command.spawn();
+    let spawned = command.spawn().map_err(|error| {
+        if profile.is_some() {
+            super::profile::failure(format!("confined provider exec failed: {error}"))
+        } else {
+            error
+        }
+    });
     // On pre-exec failure, closing the child's socket wakes the helper too.
     drop(command);
     let identity = worker
@@ -503,6 +542,14 @@ fn spawn_identified(
         }
         (Err(error), _) => Err(error),
     }
+}
+
+#[cfg(feature = "fixture")]
+fn close_fixture_profile(fd: i32) -> io::Result<()> {
+    // SAFETY: called only in the forked fixture child, with its own inherited
+    // profile fd. close is async-signal-safe and leaves the parent unchanged.
+    unsafe { libc::close(fd) };
+    Ok(())
 }
 
 /// Provider-created state is private from creation; the parent keeps its mask.
@@ -692,12 +739,15 @@ impl ProviderGroup {
             });
         let (child, identity, permit) = spawn_identified(
             command,
-            lease,
             &env,
             boot,
             permit,
-            secret.as_ref(),
-            spec.inherited_ports,
+            SpawnDescriptors {
+                lease,
+                secret: secret.as_ref(),
+                ports: spec.inherited_ports,
+                profile: spec.inherited_profile,
+            },
         )?;
         drop(secret);
         drop(priority_writer);
@@ -1412,6 +1462,7 @@ mod tests {
                 input: true,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_profile: None,
                 inherited_ports: None,
                 process_group: false,
                 capture_stdout: true,
@@ -1538,6 +1589,7 @@ mod tests {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_profile: None,
                 inherited_ports: None,
                 process_group: false,
                 capture_stdout: true,
@@ -1616,6 +1668,7 @@ mod tests {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_profile: None,
                 inherited_ports: None,
                 process_group: false,
                 capture_stdout: true,

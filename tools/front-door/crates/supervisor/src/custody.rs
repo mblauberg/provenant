@@ -38,6 +38,8 @@ pub enum CustodyError {
     InvalidRecord,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
     HandoffUnknown,
+    #[error("sandbox profile transport handoff is unconfirmed; reservation remains fenced")]
+    ProfileHandoffUnknown,
     #[error("operation was cancelled; custody is retained")]
     Cancelled,
     #[error("wait budget expired; custody is retained")]
@@ -883,6 +885,8 @@ impl PublicationReservation {
 /// Ephemeral launch input. Environment and prompt bytes travel only on a pipe.
 #[derive(Debug)]
 pub struct ProviderCommand {
+    /// Immutable, anonymous profile retained through both exec handoffs.
+    pub profile_file: Option<crate::ProfileFile>,
     /// Nice value inherited by the provider and its descendants.
     pub priority: u8,
     pub resolved_route: String,

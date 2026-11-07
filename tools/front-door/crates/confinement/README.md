@@ -40,7 +40,14 @@ Shared config, tracking refs and packed refs stay host-owned. Hard links
 are denied; symlinks are denied only in provider and private state. Toolchain, network and write-root
 policy is in the [supervisor spec](../../../../docs/specs/supervisor.md#permission-policy).
 
-No provider profile files are loaded here. Unsupported or nested enforcement refuses before launch. Linux builds
+`ConfinedLaunch::command` takes a host-private staging directory denied to lanes.
+It returns an owned `ConfinedCommand`: keep its anonymous read-only profile file
+through launch, and use `options` for direct fixture execution. Run stages under
+the selected host state root and passes the file into guardian custody. The
+profile never enters exec argv: `sandbox-exec -f /dev/fd/N` consumes the held file.
+The applied digest includes the attempt's Mach lookup rule.
+
+No provider profile files are loaded from configuration here. Unsupported or nested enforcement refuses before launch. Linux builds
 and tests policy/evidence/worktree code but has no enforcing backend.
 
 Safe Git requires a pinned executable supporting `--attr-source`; it disables

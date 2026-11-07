@@ -26,7 +26,15 @@ never treats capture failure or silence as a reason to stop. `custody` owns
 generation-scoped records, reservation fencing, recovery and release. `internal supervise` is
 private descriptor handoff, not a raw launch API. Run composes provider decoding
 and its children journal through `GuardianHooks` in its same-binary entry point.
-The hidden invocation carries five validated descriptor numbers in argv.
+The hidden invocation carries five validated descriptor numbers in argv, plus
+an optional sixth for the anonymous Seatbelt profile. `ProfileFile` opens a
+separate read-only description in a host-private staging directory, unlinks the
+file and drops the writer before verification. Darwin cannot widen that
+read-only description through `/dev/fd`. Both handoffs explicitly pass it;
+identity, length, digest and command binding are checked before ACK and again
+before provider spawn. `launch.json` records the exact applied profile identity,
+length and SHA-256. Creation, verification and descriptor failures refuse launch;
+uncertain handoffs retain the reservation fence.
 Provider-update locks are held only during preparation and are never passed to
 the guardian or provider. Writer and lane-port locks retain their lifecycle roles.
 Its private socket carries the bounded launch message; provider arguments, prompt and environment values never enter the
