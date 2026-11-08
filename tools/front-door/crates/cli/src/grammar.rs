@@ -650,7 +650,7 @@ pub struct GraphRunArgs {
     /// Place attempts on this peer name or host ID
     #[arg(long)]
     pub host: Option<String>,
-    /// Use this exact adapter/model instead of a route tier
+    /// Use this exact adapter/model instead of a route tier; a bare model name works when one provider offers it
     #[arg(long, conflicts_with = "tier")]
     pub model: Option<String>,
     /// Override model reasoning effort

@@ -4,6 +4,7 @@ use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandResult, Outcome};
+use provenant_routing::BareModelError;
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::Path;
@@ -238,14 +239,53 @@ pub(crate) fn run(
     invoke("run", run_input(request), globals, workers)
 }
 
+/// A `--model` without an adapter names the one catalogued model that carries
+/// it. `ADAPTER/ID` passes through unchanged for the facade to check.
+fn model_selector(model: String) -> Result<String, Box<provenant_records::diagnostic::Diagnostic>> {
+    if model.contains('/') {
+        return Ok(model);
+    }
+    let catalogue = provenant_routing::Catalogue::bundled()
+        .map_err(|_| cli_input_error("the model catalogue could not be loaded"))?;
+    catalogue
+        .resolve_bare_model(&model)
+        .map(|id| id.as_str().to_owned())
+        .map_err(|error| cli_input_error(&bare_model_detail(&model, &error)))
+}
+
+fn bare_model_detail(model: &str, error: &BareModelError) -> String {
+    // Echo the name only when it is identifier-shaped, so a pasted secret is
+    // never repeated.
+    let shown = if !model.is_empty()
+        && model.len() <= 64
+        && model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        format!("`{model}`")
+    } else {
+        "the model".into()
+    };
+    match error {
+        BareModelError::Ambiguous { candidates } => format!(
+            "model {shown} is offered by several providers: {}; name one as provider/model",
+            candidates.join(", ")
+        ),
+        BareModelError::Unknown => format!(
+            "unknown model {shown}; no catalogued provider offers it, so name it in the provider/model form"
+        ),
+    }
+}
+
 fn run_input(
     request: GraphRunArgs,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
+        let model = request.model.map(model_selector).transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [
             ("host", request.host),
-            ("model", request.model),
+            ("model", model),
             ("effort", request.effort),
             ("account", request.account),
             (
@@ -549,6 +589,47 @@ mod tests {
         assert_eq!(input["set"]["attempt.confidential"], true);
         assert_eq!(input["set"]["attempt.provider_timeout"], 42);
         assert_eq!(input["set"]["attempt.host"], "other");
+    }
+
+    #[test]
+    fn bare_model_resolves_to_its_provider_and_refuses_otherwise() {
+        let with_model = |model: &str| {
+            let mut request = run_request();
+            request.model = Some(model.into());
+            run_input(request)
+        };
+        // One provider offers it: the bare name becomes ADAPTER/ID.
+        let input = with_model("claude-sonnet-5-5").unwrap();
+        assert_eq!(input["model"], "claude/claude-sonnet-5-5");
+        // The provider-qualified form is passed through unchanged.
+        let input = with_model("codex/gpt-6.1-terra").unwrap();
+        assert_eq!(input["model"], "codex/gpt-6.1-terra");
+        // No provider offers it: refused as invalid input, naming the form to use.
+        let refusal = with_model("no-such-model-9").unwrap_err();
+        assert_eq!(refusal.code, "invalid_input");
+        let detail = refusal.detail.unwrap_or_default();
+        assert!(
+            detail.contains("unknown model `no-such-model-9`"),
+            "{detail}"
+        );
+        assert!(detail.contains("provider/model form"), "{detail}");
+    }
+
+    #[test]
+    fn ambiguous_bare_model_names_each_provider_form() {
+        let detail = bare_model_detail(
+            "gpt-6.1-terra",
+            &BareModelError::Ambiguous {
+                candidates: vec!["codex/gpt-6.1-terra".into(), "cursor/gpt-6.1-terra".into()],
+            },
+        );
+        assert_eq!(
+            detail,
+            "model `gpt-6.1-terra` is offered by several providers: codex/gpt-6.1-terra, cursor/gpt-6.1-terra; name one as provider/model"
+        );
+        // A name that is not identifier-shaped is never echoed.
+        let secret = bare_model_detail("sk-x y", &BareModelError::Unknown);
+        assert!(!secret.contains("sk-x y"), "{secret}");
     }
 
     #[test]
