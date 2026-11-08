@@ -61,6 +61,9 @@ pub enum ProviderEvent {
     /// Claude assistant text, held by the stream state as a fallback answer.
     /// It never leaves the stream state.
     AssistantText(String),
+    /// A tool call or tool result. It invalidates earlier assistant text as the
+    /// fallback answer and never leaves the stream state.
+    ToolActivity,
     /// The final result was empty, so the last assistant text stands in for it.
     ResultFallback,
 }
@@ -288,6 +291,7 @@ impl StreamState {
                 ProviderEvent::AssistantText(text) => {
                     self.last_assistant_text = Some(text.clone());
                 }
+                ProviderEvent::ToolActivity => self.last_assistant_text = None,
                 ProviderEvent::Text(text) if self.adapter == "claude" => {
                     self.result_text_seen |= !text.trim().is_empty();
                     if let Some(model) = self.resolve_answer_model(text)? {
@@ -310,7 +314,10 @@ impl StreamState {
                 _ => {}
             }
         }
-        events.retain(|event| !matches!(event, ProviderEvent::AssistantText(_)));
+        events.retain(|event| !matches!(
+                event,
+                ProviderEvent::AssistantText(_) | ProviderEvent::ToolActivity
+            ));
         if let Some(model) = answer_model {
             events.push(ProviderEvent::Model(model));
         }
