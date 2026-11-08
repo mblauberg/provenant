@@ -255,13 +255,13 @@ fn overlaps_source(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum SourceRootsError {
+pub(super) enum SourceRootOverlap {
     #[error("product assets overlap the live graph source checkout")]
-    AssetsOverlap,
+    Assets,
     #[error("an access grant overlaps the live graph source checkout")]
-    AccessOverlap,
+    Access,
     #[error("a system read grant overlaps the live graph source checkout")]
-    SystemReadOverlap,
+    SystemRead,
 }
 
 /// Explicit grants must not reopen the live source beside the pinned view.
@@ -269,14 +269,14 @@ pub(super) fn ensure_source_roots(
     source: &std::path::Path,
     access: &super::run::LaneAccess,
     assets: &std::path::Path,
-) -> Result<(), SourceRootsError> {
+) -> Result<(), SourceRootOverlap> {
     use provenant_confinement::permissions::{PathGrant, PathScope};
     let asset = PathGrant {
         path: assets.to_owned(),
         scope: PathScope::Subtree,
     };
     if overlaps_source(source, &asset) {
-        return Err(SourceRootsError::AssetsOverlap);
+        return Err(SourceRootOverlap::Assets);
     }
     if access
         .read_roots
@@ -302,14 +302,14 @@ pub(super) fn ensure_source_roots(
             )
         })
     {
-        return Err(SourceRootsError::AccessOverlap);
+        return Err(SourceRootOverlap::Access);
     }
     if cfg!(target_os = "macos")
         && ["/usr/share", "/private/var/db/timezone"]
             .iter()
             .any(|path| source.starts_with(path))
     {
-        return Err(SourceRootsError::SystemReadOverlap);
+        return Err(SourceRootOverlap::SystemRead);
     }
     Ok(())
 }

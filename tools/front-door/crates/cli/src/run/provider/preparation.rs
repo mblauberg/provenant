@@ -538,7 +538,7 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     SourceAuthority(String),
     #[error(transparent)]
-    SourceRoots(#[from] super::source_tree::SourceRootsError),
+    SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
     WriterContinuation(String),
     #[error(transparent)]
@@ -756,8 +756,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
             .into_refusal();
     assert_eq!(source.boundary_class, BoundaryClass::Authority);
     let source_roots =
-        PrepareError::SourceRoots(super::source_tree::SourceRootsError::AssetsOverlap)
-            .into_refusal();
+        PrepareError::SourceRoots(super::source_tree::SourceRootOverlap::Assets).into_refusal();
     assert_eq!(source_roots.boundary_class, BoundaryClass::Authority);
     assert_eq!(
         source_roots.terminal_note.as_deref(),
