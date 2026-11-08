@@ -304,6 +304,7 @@ pub enum InvalidInputDetail {
     LandingLock,
     UnresolvableBase(String),
     Field(String),
+    FieldDecode { field: String, missing: bool },
     FieldTooLarge { field: String, limit: usize },
     FieldTitle(String),
     InputUnreadable,
@@ -343,6 +344,9 @@ impl InvalidInputDetail {
             Self::Field(path) => {
                 safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
             }
+            Self::FieldDecode { field, missing } => safe_input_field(field).map(|path| {
+                format!("invalid input field `{path}`: {}", if *missing { "required field is missing" } else { "invalid type or value" })
+            }),
             Self::FieldTooLarge { field, limit } => safe_input_field(field)
                 .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
@@ -982,6 +986,19 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
         "name",
         "host",
         "attempt",
+        "nodes",
+        "graph_id",
+        "access",
+        "placement",
+        "cloud",
+        "environment",
+        "repository",
+        "deadline_seconds",
+        "provider_timeout",
+        "confidential",
+        "capabilities",
+        "build_heavy",
+        "write_roots",
         "digest",
         "encoding",
         "generation",
