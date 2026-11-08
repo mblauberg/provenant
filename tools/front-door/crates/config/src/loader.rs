@@ -561,6 +561,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "update_interval_seconds",
             "update_timeout_seconds",
             "runtime_deadline_seconds",
+            "cloud.transport",
+            "cloud.command",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }

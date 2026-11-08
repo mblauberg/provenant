@@ -1,6 +1,13 @@
 //! Bounded command transport for installed cloud clients.
+use provenant_config::{CodexCloudTransport, ProviderCloudSettings};
 use provenant_os::exec::{ExecOptions, Executor, Termination, run_text};
 use std::{ffi::OsString, path::PathBuf, time::Duration};
+
+#[path = "cloud_thread.rs"]
+mod thread;
+#[cfg(test)]
+#[path = "cloud_thread_tests.rs"]
+mod thread_tests;
 
 /// The only process boundary used by cloud adapters. Arguments must not contain credentials.
 pub trait CloudCli {
@@ -248,14 +255,24 @@ mod tests {
     }
 }
 
-fn result_prompt(request: crate::cloud::CloudSubmission<'_>, claude: bool) -> String {
+enum ResultChannel {
+    ClaudeBranch,
+    CodexDiff,
+    CodexThread,
+}
+
+fn result_prompt(request: crate::cloud::CloudSubmission<'_>, channel: ResultChannel) -> String {
     let job = request.job;
-    let channel = if claude {
-        "Commit only the result file as a single commit on top of the tested commit and push your claude working branch to origin."
-    } else {
-        "Include the result file as a new file in your cloud diff."
+    let instruction = match channel {
+        ResultChannel::ClaudeBranch => {
+            "Commit only the result file as a single commit on top of the tested commit and push your claude working branch to origin."
+        }
+        ResultChannel::CodexDiff => "Include the result file as a new file in your cloud diff.",
+        ResultChannel::CodexThread => {
+            "This transport has no file diff channel. Include the complete contents of .provenant-cloud-result.json as JSON in your final agent message. Report tracked_files_changed truthfully; do not change tracked files. Verify the requested full commit before running any tests."
+        }
     };
-    let model = if claude {
+    let model = if matches!(channel, ResultChannel::ClaudeBranch) {
         format!(
             " Requested model: {:?}; requested effort: {:?}.",
             job.requested_model, job.requested_effort
@@ -264,7 +281,7 @@ fn result_prompt(request: crate::cloud::CloudSubmission<'_>, claude: bool) -> St
         String::new()
     };
     format!(
-        "{}\n\nUse repository source {:?} and branch {:?}, and test commit {}. Record your result in .provenant-cloud-result.json as JSON with job_id {:?}, nonce {:?}, commit (the full tested commit), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string), tracked_files_changed (boolean, excluding the result file), and observed_model (string or null). Do not include credentials in the result. {channel}{model}",
+        "{}\n\nUse repository source {:?} and branch {:?}, and test commit {}. Record your result in .provenant-cloud-result.json as JSON with job_id {:?}, nonce {:?}, commit (the full tested commit), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string), tracked_files_changed (boolean, excluding the result file), and observed_model (string or null). Do not include credentials in the result. {instruction}{model}",
         request.task, job.repository, job.branch, job.commit, job.job_id, job.nonce
     )
 }
@@ -281,7 +298,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
         Ok(())
     }
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
-        let prompt = result_prompt(request, true);
+        let prompt = result_prompt(request, ResultChannel::ClaudeBranch);
         // Without an environment the CLI uses the hosted Claude cloud.
         let environment = request.job.environment.trim();
         let mut args = vec!["--cloud", prompt.as_str()];
@@ -390,16 +407,38 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
 /// Codex cloud transport.
 pub struct CodexCloud<C> {
     pub cli: C,
+    pub settings: ProviderCloudSettings,
 }
 
 impl<C: CloudCli> CodexCloud<C> {
+    pub fn new(cli: C, settings: ProviderCloudSettings) -> Self {
+        Self { cli, settings }
+    }
+
+    fn program(&self) -> String {
+        self.settings
+            .command
+            .clone()
+            .unwrap_or_else(|| match self.settings.transport {
+                CodexCloudTransport::Official => "codex".into(),
+                CodexCloudTransport::Thread => "codex-cloud-task".into(),
+            })
+    }
+
     /// Recover only an unambiguous list entry carrying the caller's correlation marker.
     /// A list without that marker cannot safely distinguish concurrent submissions.
     pub fn recover(&mut self, marker: &str) -> Result<Option<String>, String> {
         if marker.trim().is_empty() {
             return Err("empty cloud recovery marker".into());
         }
-        let out = self.cli.run("codex", &["cloud", "list", "--json"], None)?;
+        // Thread `list` enumerates environments, not submitted jobs. Never use
+        // one of those IDs to recover or retry an uncertain submission.
+        if self.settings.transport == CodexCloudTransport::Thread {
+            return Ok(None);
+        }
+        let out = self
+            .cli
+            .run(&self.program(), &["cloud", "list", "--json"], None)?;
         let value: serde_json::Value = serde_json::from_str(&out)
             .map_err(|_| format!("could not parse codex cloud list: {out}"))?;
         fn collect(value: &serde_json::Value, marker: &str, ids: &mut Vec<String>) {
@@ -453,9 +492,25 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
         Ok(())
     }
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
-        let prompt = result_prompt(request, false);
+        if self.settings.transport == CodexCloudTransport::Thread {
+            let prompt = result_prompt(request, ResultChannel::CodexThread);
+            // Cloud placement accepts verification jobs only; writers are
+            // rejected by the graph's placement contract before dispatch.
+            let out = self.cli.run(
+                &self.program(),
+                &[
+                    "submit",
+                    "--env",
+                    request.job.environment.trim(),
+                    "--read-only",
+                ],
+                Some(&prompt),
+            )?;
+            return thread::submission_id(&out);
+        }
+        let prompt = result_prompt(request, ResultChannel::CodexDiff);
         let out = self.cli.run(
-            "codex",
+            &self.program(),
             &[
                 "cloud",
                 "exec",
@@ -475,9 +530,15 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
         &mut self,
         job: &crate::cloud::RemoteJob,
     ) -> Result<crate::cloud::RemoteState, String> {
+        if self.settings.transport == CodexCloudTransport::Thread {
+            let out = self
+                .cli
+                .run(&self.program(), &["status", &job.remote_id], None)?;
+            return thread::observe(&out, job);
+        }
         let out = self
             .cli
-            .run("codex", &["cloud", "status", &job.remote_id], None)?;
+            .run(&self.program(), &["cloud", "status", &job.remote_id], None)?;
         let lower = out.to_ascii_lowercase();
         if [
             "environment setup failed",
@@ -498,7 +559,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
         {
             let diff = self
                 .cli
-                .run("codex", &["cloud", "diff", &job.remote_id], None)?;
+                .run(&self.program(), &["cloud", "diff", &job.remote_id], None)?;
             let mut result = crate::cloud_result::result_from_diff(&diff)?;
             // Codex cannot honour a requested model; do not infer one from the request.
             result.observed_model = None;
@@ -644,6 +705,7 @@ mod adapter_tests {
             }
         }
         let mut adapter = CodexCloud {
+            settings: ProviderCloudSettings::default(),
             cli: LostCli { execs: 0 },
         };
         let mut store = Store::default();
@@ -673,6 +735,7 @@ mod adapter_tests {
             job.commit
         );
         let mut adapter = CodexCloud {
+            settings: ProviderCloudSettings::default(),
             cli: Script(["completed".into(), diff.clone()].into()),
         };
         let RemoteState::Finished { result } = adapter.observe(&job).unwrap() else {
@@ -686,6 +749,7 @@ mod adapter_tests {
         let mut wrong = job;
         wrong.nonce = "other".into();
         let mut adapter = CodexCloud {
+            settings: ProviderCloudSettings::default(),
             cli: Script(["completed".into(), diff].into()),
         };
         assert!(adapter.observe(&wrong).is_err());
@@ -773,6 +837,7 @@ mod adapter_tests {
         assert_eq!(claude.cli.calls[1].1.len(), 2);
         assert!(!claude.cli.calls[1].1.iter().any(|a| a == "--environment"));
         let mut codex_without = CodexCloud {
+            settings: ProviderCloudSettings::default(),
             cli: FakeCli::default(),
         };
         assert!(
@@ -794,6 +859,7 @@ mod adapter_tests {
         ));
         assert!(!claude.cancel(&job).unwrap());
         let mut codex = CodexCloud {
+            settings: ProviderCloudSettings::default(),
             cli: FakeCli {
                 response: "{\"id\":\"task-1\"}".into(),
                 ..Default::default()

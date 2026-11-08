@@ -179,6 +179,7 @@ pub(super) fn reconcile_inner(
                 .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             match job {
                 Some(job) => match cloud_owner::observe_installed(
+                    edge.roots,
                     &session.store,
                     record.attempt_id,
                     &job,
