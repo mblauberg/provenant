@@ -118,16 +118,23 @@ The lane's reason names the retry and its attempt number.
 
 Resolution runs once against immutable catalogue, availability and quota
 snapshots and returns one route with at most two ordered alternatives, each
-passing the same checks; Run never rebuilds candidates. Fallback to
-another route during provider preparation requires a typed auth, quota or
-adapter-unavailable refusal before handoff, released custody, remaining budget
-and compatible pins. Separately, a configured read-only result-quality check may
+passing the same checks; Run never rebuilds candidates. A candidate that
+local provider preparation excludes before handoff has not run, so preparation
+advances past it, whatever the exclusion, to the next alternative or, for a
+named pool, the next untried permitted member; each excluded candidate is
+listed in `skipped_routes` with its typed kind and cause. Pins still apply, and
+`settlement_retries` bounds launched attempts, not these candidates. A missing
+access context is `confinement_unavailable`; only an explicit disclosure refusal
+is `disclosure_denied`. Separately, a configured read-only result-quality check may
 escalate an invalid successful result after custody release; task failures and
 uncertain outcomes cannot trigger that escalation. Unsupported effort fails; where clamping is permitted, the requested,
 applied and observed values are recorded. `route list` and `resolve` start no
 process and mutate nothing.
 - Why: the fallback plan is decided once and visible.
 - Test: `crates/routing/src/tests.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
+  `crates/routing/src/fallback.rs::tests::switching_requires_safe_outcome_and_every_guard`;
+  `crates/routing/src/tests/availability.rs::availability_access_and_scoped_quota_are_independent_gates`;
+  `crates/cli/src/run/provider/tests_writer_scratch.rs::provider_fence_preparation_reports_causes_and_selects_available_candidate`;
   `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
 - Owner: `crates/routing/src/`
 

@@ -83,8 +83,10 @@ The refusal is scoped to `opencode-go`, or
 interval with a unit (or a bare `retry-after` header value, in seconds) sets
 the refusal expiry.
 
-A graph node can move to its next configured route after the host verifies a
-local preparation refusal and released custody. The earlier attempt remains in
+Within one dispatch, a named route tries its next permitted member whenever
+local preparation excludes a candidate, and `skipped_routes` names each
+exclusion and its cause. A graph node can move to its next configured route
+after the host verifies a local preparation refusal and released custody. The earlier attempt remains in
 the receipt history. Once a provider has launched, the graph does not switch
 routes automatically for a writer; a confirmed read-only attempt may switch on
 an authentication or usage-limit outcome within its retry budget. A quota-stopped

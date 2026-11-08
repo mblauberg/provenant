@@ -2127,48 +2127,48 @@ pub(super) fn prepare_candidates(
             ));
         }
     }
-    // Candidate preparation happens before writer custody or guardian handoff.
-    // Advance only for a typed provider outcome, within the sealed alternatives,
-    // and never substitute a differently pinned account.
+    // Candidate preparation happens before writer custody or guardian handoff,
+    // so no excluded candidate has run. Advance past every exclusion, whatever
+    // its cause, through the sealed alternatives and a named pool's remaining
+    // members, and never substitute a differently pinned account. Settlement
+    // retries bound launched attempts, not candidates that never launched.
     let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
     let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
     let mut rejected = Vec::new();
     let mut reprobed_accounts = std::collections::BTreeSet::new();
     let mut candidate = 0usize;
-    let mut redraws = 0u8;
+    let preparation_switch = |outcome, pinned| {
+        provenant_routing::FallbackPolicy {
+            outcome,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+            read_only: false,
+            budget_remaining: true,
+            pinned,
+        }
+        .allows_preparation_switch()
+    };
     loop {
         if queue.is_empty() {
-            let allowed = provenant_routing::FallbackPolicy {
-                outcome: previous_outcome,
-                handoff: provenant_routing::FallbackHandoff::Local,
-                custody_released: true,
-                read_only: false,
-                budget_remaining: named_pool && redraws < config.domains.routing.settlement_retries,
-                pinned: false,
-            }
-            .allows_switch();
-            if !allowed {
-                if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
-                    && let Some(last) = reasons.last_mut()
-                {
-                    last.detail.push_str(if named_pool {
-                        "; fallback retry budget exhausted"
-                    } else {
-                        "; no eligible fallback remains"
-                    });
-                }
-                break;
-            }
-            let Ok(next) = resolve(&availability, &rejected) else {
+            let next = named_pool
+                .then(|| resolve(&availability, &rejected).ok())
+                .flatten()
+                .map(candidates)
+                .unwrap_or_default();
+            // Each redraw excludes every candidate already tried, so a pool
+            // ends when no untried member remains.
+            queue.extend(next.into_iter().filter(|route| {
+                provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+                    .is_ok_and(|model| !rejected.contains(&model))
+            }));
+            if queue.is_empty() {
                 if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
                     && let Some(last) = reasons.last_mut()
                 {
                     last.detail.push_str("; no eligible fallback remains");
                 }
                 break;
-            };
-            redraws += 1;
-            queue.extend(candidates(next));
+            }
         }
         let Some(mut route) = queue.pop_front() else {
             break;
@@ -2185,25 +2185,12 @@ pub(super) fn prepare_candidates(
             route.account_key.as_deref(),
             &route.adapter,
         );
-        if candidate > 0
-            && !(provenant_routing::FallbackPolicy {
-                outcome: previous_outcome,
-                handoff: provenant_routing::FallbackHandoff::Local,
-                custody_released: true,
-                read_only: false,
-                budget_remaining: true,
-                pinned,
-            })
-            .allows_switch()
-        {
+        if candidate > 0 && !preparation_switch(previous_outcome, pinned) {
             if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
                 && let Some(last) = reasons.last_mut()
             {
-                last.detail.push_str(if pinned {
-                    "; fallback unavailable because the account is pinned"
-                } else {
-                    "; fallback unavailable under the route policy"
-                });
+                last.detail
+                    .push_str("; fallback unavailable because the account is pinned");
             }
             break;
         }
