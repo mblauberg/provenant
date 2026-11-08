@@ -1109,7 +1109,9 @@ impl Driver<'_> {
                     );
                 }
             }
-            if io_ready {
+            // Exit can race a timer-only wake. Keep the final drain even
+            // when the last poll saw no bytes, including a zero flush budget.
+            if io_ready || exit.is_some() {
                 out.read(&mut child.stdout);
                 err.read(&mut child.stderr);
             }
