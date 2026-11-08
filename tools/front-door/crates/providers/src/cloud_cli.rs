@@ -10,8 +10,24 @@ mod thread;
 mod thread_tests;
 
 /// The only process boundary used by cloud adapters. Arguments must not contain credentials.
+const REFUSAL: &str = "\u{1e}cloud-refusal:";
+
 pub trait CloudCli {
     fn run(&mut self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>;
+    /// Submit errors are uncertain unless the transport proves a refusal.
+    fn submit(
+        &mut self,
+        program: &str,
+        args: &[&str],
+        stdin: Option<&str>,
+        tty: bool,
+    ) -> Result<String, String> {
+        if tty {
+            self.run_tty(program, args)
+        } else {
+            self.run(program, args, stdin)
+        }
+    }
     /// Run with a pseudo-terminal and no stdin, for CLIs that refuse a plain pipe.
     fn run_tty(&mut self, program: &str, args: &[&str]) -> Result<String, String> {
         self.run(program, args, None)
@@ -83,6 +99,26 @@ impl CloudCli for InstalledCloudCli<'_> {
             stdin,
         )
     }
+    fn submit(
+        &mut self,
+        program: &str,
+        args: &[&str],
+        stdin: Option<&str>,
+        tty: bool,
+    ) -> Result<String, String> {
+        let argv = if tty {
+            pty_argv(program, args)
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        } else {
+            std::iter::once(program)
+                .chain(args.iter().copied())
+                .map(OsString::from)
+                .collect()
+        };
+        self.exec_inner(program, argv, stdin, true)
+    }
     fn run_tty(&mut self, program: &str, args: &[&str]) -> Result<String, String> {
         let argv = pty_argv(program, args)
             .into_iter()
@@ -99,6 +135,15 @@ impl InstalledCloudCli<'_> {
         argv: Vec<OsString>,
         stdin: Option<&str>,
     ) -> Result<String, String> {
+        self.exec_inner(program, argv, stdin, false)
+    }
+    fn exec_inner(
+        &self,
+        program: &str,
+        argv: Vec<OsString>,
+        stdin: Option<&str>,
+        submission: bool,
+    ) -> Result<String, String> {
         let mut options = ExecOptions::new(&argv, &self.cwd, self.timeout);
         options.process_group = true;
         options.stdin = stdin.map(str::as_bytes);
@@ -106,6 +151,7 @@ impl InstalledCloudCli<'_> {
         if output.outcome.timed_out
             || output.outcome.cancelled
             || output.outcome.drain_truncated
+            || output.outcome.overflow_stopped
             || output.outcome.stdout.truncated
             || output.outcome.stderr.truncated
             || output.outcome.stdout.read_failed
@@ -119,7 +165,16 @@ impl InstalledCloudCli<'_> {
             } else {
                 &output.stderr
             };
-            return Err(format!("{program} failed: {}", failure_excerpt(text)));
+            let detail = failure_excerpt(text);
+            let refusal = submission
+                && matches!(output.outcome.termination, Termination::Exit(code) if (1..128).contains(&code))
+                && !detail.is_empty()
+                && parse_identity(&output.stdout).is_err()
+                && parse_identity(&output.stderr).is_err();
+            return Err(format!(
+                "{}{program} failed: {detail}",
+                if refusal { REFUSAL } else { "" }
+            ));
         }
         Ok(output.stdout)
     }
@@ -306,10 +361,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
             args.extend(["--environment", environment]);
         }
         // `claude --cloud` refuses a non-terminal, so only this call needs a PTY.
-        let out = self
-            .cli
-            .run_tty("claude", &args)
-            .map_err(|error| format!("claude --cloud refused: {error}"))?;
+        let out = self.cli.submit("claude", &args, None, true)?;
         parse_identity(&out).map_err(|_| {
             format!(
                 "claude --cloud returned no session identity: {}",
@@ -318,7 +370,12 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
         })
     }
     fn failure_detail(&self, error: &String) -> Option<String> {
-        Some(failure_excerpt(error))
+        Some(failure_excerpt(
+            error.strip_prefix(REFUSAL).unwrap_or(error),
+        ))
+    }
+    fn submission_refused(&self, error: &String) -> bool {
+        error.starts_with(REFUSAL)
     }
     fn observe(
         &mut self,
@@ -496,7 +553,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
             let prompt = result_prompt(request, ResultChannel::CodexThread);
             // Cloud placement accepts verification jobs only; writers are
             // rejected by the graph's placement contract before dispatch.
-            let out = self.cli.run(
+            let out = self.cli.submit(
                 &self.program(),
                 &[
                     "submit",
@@ -505,11 +562,12 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
                     "--read-only",
                 ],
                 Some(&prompt),
+                false,
             )?;
             return thread::submission_id(&out);
         }
         let prompt = result_prompt(request, ResultChannel::CodexDiff);
-        let out = self.cli.run(
+        let out = self.cli.submit(
             &self.program(),
             &[
                 "cloud",
@@ -520,8 +578,17 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
                 &request.job.branch,
             ],
             Some(&prompt),
+            false,
         )?;
         parse_identity(&out)
+    }
+    fn failure_detail(&self, error: &String) -> Option<String> {
+        Some(failure_excerpt(
+            error.strip_prefix(REFUSAL).unwrap_or(error),
+        ))
+    }
+    fn submission_refused(&self, error: &String) -> bool {
+        error.starts_with(REFUSAL)
     }
     fn recover(&mut self, job: &crate::cloud::RemoteJob) -> Result<Option<String>, String> {
         CodexCloud::recover(self, &job.nonce)
@@ -756,6 +823,138 @@ mod adapter_tests {
     }
     const CAPTURED: &str = "\u{1b}[>4m\u{1b}]0;claude\u{7}\u{1b}[?25lCreated cloud session: Fix the thing\r\nView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\nResume with: claude --teleport session_01ABC\r\n\u{1b}[?25h";
     #[test]
+    fn cloud_submission_classifies_only_complete_nonzero_refusals() {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+        struct FakeExec {
+            termination: Termination,
+            stdout: &'static str,
+            stderr: &'static str,
+            timed_out: bool,
+        }
+        impl Executor for FakeExec {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: self.termination,
+                    stdout: CapturedStream {
+                        bytes: self.stdout.as_bytes().to_vec(),
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream {
+                        bytes: self.stderr.as_bytes().to_vec(),
+                        ..Default::default()
+                    },
+                    timed_out: self.timed_out,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        for (termination, stdout, stderr, timed_out, refused) in [
+            (
+                Termination::Exit(1),
+                "",
+                "no cloud environments are available",
+                false,
+                true,
+            ),
+            (
+                Termination::Exit(1),
+                "",
+                "--cloud requires an interactive terminal",
+                false,
+                true,
+            ),
+            (
+                Termination::Exit(1),
+                "session_id: remote-1",
+                "error",
+                false,
+                false,
+            ),
+            (Termination::Signal(9), "", "error", false, false),
+            (Termination::Exit(137), "", "error", false, false),
+            (Termination::Exit(1), "", "error", true, false),
+            (Termination::Exit(1), "", "", false, false),
+        ] {
+            let executor = FakeExec {
+                termination,
+                stdout,
+                stderr,
+                timed_out,
+            };
+            let mut cli = InstalledCloudCli {
+                executor: &executor,
+                cwd: PathBuf::from("."),
+                timeout: Duration::from_secs(1),
+            };
+            let error = CloudCli::submit(&mut cli, "fixture", &[], None, false).unwrap_err();
+            assert_eq!(
+                error.starts_with(REFUSAL),
+                refused,
+                "{termination:?} {stdout} {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_adapters_settle_refusals_and_keep_unparseable_success_uncertain() {
+        use crate::cloud::{CloudJobError, CloudJobStore};
+        #[derive(Default)]
+        struct Store(Option<RemoteJob>);
+        impl CloudJobStore for Store {
+            type Error = ();
+            fn begin(&mut self, job: &RemoteJob) -> Result<(), ()> {
+                self.0 = Some(job.clone());
+                Ok(())
+            }
+            fn save(&mut self, job: &RemoteJob) -> Result<(), ()> {
+                self.0 = Some(job.clone());
+                Ok(())
+            }
+        }
+        struct Response(bool);
+        impl CloudCli for Response {
+            fn run(&mut self, _: &str, _: &[&str], _: Option<&str>) -> Result<String, String> {
+                if self.0 {
+                    Err(format!("{REFUSAL}no cloud environments are available"))
+                } else {
+                    Ok("unparseable".into())
+                }
+            }
+        }
+        for refused in [true, false] {
+            let mut claude = ClaudeCloud {
+                cli: Response(refused),
+                pending_cleanup: None,
+            };
+            let mut codex = CodexCloud::new(Response(refused), ProviderCloudSettings::default());
+            let mut a = Store::default();
+            let mut b = Store::default();
+            let first = crate::cloud::submit(&mut claude, &mut a, job(), "test");
+            let second = crate::cloud::submit(&mut codex, &mut b, job(), "test");
+            if refused {
+                for saved in [first.unwrap(), second.unwrap()] {
+                    assert_eq!(
+                        saved.state,
+                        RemoteState::Failed {
+                            detail: "no cloud environments are available".into()
+                        }
+                    );
+                }
+            } else {
+                assert!(matches!(first, Err(CloudJobError::SubmitUnknown(_))));
+                assert!(matches!(second, Err(CloudJobError::SubmitUnknown(_))));
+                assert_eq!(a.0.unwrap().state, RemoteState::Submitting);
+                assert_eq!(b.0.unwrap().state, RemoteState::Submitting);
+            }
+        }
+    }
+
+    #[test]
     fn cloud_claude_parses_pty_capture() {
         assert_eq!(parse_identity(CAPTURED).unwrap(), "session_01ABC");
         let view_only = "\u{1b}[>4mView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\n";
@@ -797,7 +996,6 @@ mod adapter_tests {
                 task: "t",
             })
             .unwrap_err();
-        assert!(error.contains("refused"));
         assert!(error.contains("--cloud requires an interactive terminal."));
         let detail = claude.failure_detail(&error).unwrap();
         assert!(detail.contains("--cloud requires an interactive terminal."));

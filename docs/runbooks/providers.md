@@ -650,9 +650,9 @@ Resume with: claude --teleport session_<id>
 ```
 
 The owner records `session_<id>` from the `--teleport` line, or the View URL
-when that line is absent. A refused or unparseable submission keeps the first
-lines of the CLI's text in the saved job as `submit_error`, which `status` and
-`output` show; the job stays `submitting`.
+when that line is absent. A definite refusal without an identity fails the job with a bounded CLI error.
+An uncertain submission, including unparseable successful output, stays
+`submitting` for recovery.
 
 Codex defaults to the official `codex cloud exec/status/list` transport and
 returns the result in its cloud diff. It cannot request model or effort.

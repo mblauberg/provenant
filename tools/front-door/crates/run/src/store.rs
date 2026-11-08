@@ -918,6 +918,7 @@ impl RunStore {
             "submitting",
             "running",
             "finished",
+            "failed",
             "setup_failed",
             "cancelled",
             "cancellation_unconfirmed",

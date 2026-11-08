@@ -603,3 +603,58 @@ fn local_lanes_read_and_show_capacity_cooldowns() -> Result<(), Box<dyn std::err
     assert!(human.contains("capacity cooldown codex/model [work]:"));
     Ok(())
 }
+
+#[test]
+fn cloud_retained_submission_repair_preserves_reason() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{CloudJobStore, RemoteState};
+    for (saved_error, expected) in [
+        ("refused by provider", "refused by provider"),
+        ("", "submission unknown"),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|e| e.message)?;
+        let store = trace_store(&temp, &call)?;
+        let mut input = trace_run(44, AttemptId::from_bytes([1; 16]), clock.wall_now()?)?;
+        input.request.parent_attempt = None;
+        input.request.tasks[0].head = Some("a".repeat(40));
+        input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+            target: "target".into(),
+            provider: "fake".into(),
+            environment: "env".into(),
+            repository: "repository".into(),
+            branch: "main".into(),
+            model: "small".into(),
+            effort: None,
+            deadline_seconds: 3600,
+        });
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let target = crate::domains::CloudTarget {
+            provider: "fake".into(),
+            environment: "env".into(),
+            model: "small".into(),
+            effort: None,
+            repository: "repository".into(),
+            branch: "main".into(),
+            deadline_seconds: 3600,
+        };
+        let mut job = cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?;
+        job.submit_error = Some(saved_error.into());
+        cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |s| s.begin(&job))??;
+        let settled = cloud_owner::settle_saved_submission(&store, id, &call)?;
+        assert_eq!(
+            settled.state,
+            RemoteState::Failed {
+                detail: expected.into()
+            }
+        );
+        assert_eq!(cloud_owner::load(&store, id, &call)?.unwrap(), settled);
+        assert_eq!(
+            cloud_owner::settle_saved_submission(&store, id, &call)?,
+            settled
+        );
+    }
+    Ok(())
+}

@@ -1107,7 +1107,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 &inv.leaf,
                 Outcome::Refused,
                 "GRAPH_REQUIRED",
-                "retained non-graph lanes are read-only",
+                "retained non-graph lanes are read-only; use reconcile --id <attempt> for a retained cloud submission",
                 globals,
             )
         }

@@ -315,6 +315,10 @@ pub trait CloudProvider {
     fn failure_detail(&self, _error: &Self::Error) -> Option<String> {
         None
     }
+    /// True only for a completed, definite refusal without a remote identity.
+    fn submission_refused(&self, _error: &Self::Error) -> bool {
+        false
+    }
     /// Recover a submission only when the provider can identify it unambiguously.
     fn recover(&mut self, _job: &RemoteJob) -> Result<Option<String>, Self::Error> {
         Ok(None)
@@ -381,11 +385,15 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     job.remote_id = match provider.submit(CloudSubmission { job: &job, task }) {
         Ok(id) => id,
         Err(error) => {
-            if let Some(detail) = provider.failure_detail(&error) {
-                // Best effort: the saved intent stays `submitting`, now with the reason.
-                job.remote_id.clear();
-                job.submit_error = Some(detail);
-                let _ = store.save(&job);
+            if provider.submission_refused(&error) {
+                let detail = provider
+                    .failure_detail(&error)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "submission unknown".into());
+                job.submit_error = Some(detail.clone());
+                job.state = RemoteState::Failed { detail };
+                store.save(&job).map_err(CloudJobError::Store)?;
+                return Ok(job);
             }
             return Err(CloudJobError::SubmitUnknown(error));
         }
@@ -562,6 +570,49 @@ mod lifecycle_tests {
             tracked_files_changed: false,
             observed_model: None,
         }
+    }
+
+    #[test]
+    fn cloud_definite_refusal_is_saved_as_failed() {
+        struct Refusal(bool);
+        impl CloudProvider for Refusal {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Err(())
+            }
+            fn failure_detail(&self, _: &()) -> Option<String> {
+                Some("no environment".into())
+            }
+            fn submission_refused(&self, _: &()) -> bool {
+                self.0
+            }
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
+                panic!("unexpected observation")
+            }
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
+                panic!("unexpected cancellation")
+            }
+        }
+        let mut store = FakeStore::default();
+        let failed = submit(&mut Refusal(true), &mut store, job(), "run tests").unwrap();
+        assert_eq!(
+            failed.state,
+            RemoteState::Failed {
+                detail: "no environment".into()
+            }
+        );
+        assert_eq!(store.saved, Some(failed));
+        let mut store = FakeStore::default();
+        assert!(matches!(
+            submit(&mut Refusal(false), &mut store, job(), "run tests"),
+            Err(CloudJobError::SubmitUnknown(()))
+        ));
+        let saved = store.saved.unwrap();
+        assert_eq!(saved.state, RemoteState::Submitting);
+        assert_eq!(saved.submit_error, None);
     }
 
     #[test]

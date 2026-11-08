@@ -282,6 +282,44 @@ pub fn codex_settings(
     )
 }
 
+/// Settle a legacy submission only after the caller proves its owner terminal.
+pub(super) fn settle_saved_submission(
+    store: &provenant_run::RunStore,
+    id: AttemptId,
+    call: &provenant_run::Request<'_>,
+) -> Result<RemoteJob, String> {
+    use provenant_providers::cloud::CloudJobStore;
+    super::cloud_store::AttemptCloudStore::with_attempt(
+        store,
+        id,
+        false,
+        call,
+        |cloud_store| -> Result<RemoteJob, String> {
+            let mut current = cloud_store
+                .load()
+                .map_err(|e| e.to_string())?
+                .ok_or("missing cloud job")?;
+            validate_intent(store, id, &current, call)?;
+            if current.state == RemoteState::Submitting
+                && current.remote_id.trim().is_empty()
+                && current.submit_error.is_some()
+            {
+                let detail = current
+                    .submit_error
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("submission unknown")
+                    .to_owned();
+                current.state = RemoteState::Failed { detail };
+                cloud_store.save(&current).map_err(|e| e.to_string())?;
+            }
+            note_state(store, id, &current, call)?;
+            Ok(current)
+        },
+    )
+    .map_err(|e| e.to_string())?
+}
+
 /// Reconcile or request cancellation with the installed cloud client.
 pub(super) fn observe_installed(
     roots: &provenant_core::Roots,
@@ -293,6 +331,44 @@ pub(super) fn observe_installed(
     cancel_job: bool,
 ) -> Result<RemoteJob, String> {
     use provenant_providers::cloud_cli::{ClaudeCloud, CodexCloud, InstalledCloudCli};
+    // Old submissions saved errors even when their outcome was uncertain. Only
+    // repair them after their owner has settled, never while it can still act.
+    if job.state == RemoteState::Submitting
+        && job.remote_id.trim().is_empty()
+        && job.submit_error.is_some()
+    {
+        let record = store.record(id, call).map_err(|e| e.to_string())?;
+        let closed = store
+            .run(record.run_id, call)
+            .map_err(|e| e.to_string())?
+            .closure
+            == provenant_records::run::Closure::Closed;
+        let graph_terminal = if !closed
+            && let Some(graph) = record.context.as_ref().and_then(|c| c.graph_id.as_deref())
+        {
+            provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                &roots.state,
+                record.project_id,
+                graph,
+            )
+            .map_err(|e| e.to_string())?
+            .is_some_and(|checkpoint| {
+                !checkpoint.nodes.is_empty()
+                    && checkpoint.nodes.iter().all(|node| {
+                        !matches!(
+                            node.state,
+                            provenant_fabric_runtime::graph::NodeState::Pending
+                                | provenant_fabric_runtime::graph::NodeState::Running
+                        )
+                    })
+            })
+        } else {
+            false
+        };
+        if closed || graph_terminal {
+            return settle_saved_submission(store, id, call);
+        }
+    }
     let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let cli = InstalledCloudCli {
         executor: &executor,
