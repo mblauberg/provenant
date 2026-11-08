@@ -732,8 +732,8 @@ pub(super) fn resolve_dispatch_excluding(
                     let reason = error.to_string();
                     refusals.push(reason.clone());
                     excluded_members.push(model);
-                    let mut replacement =
-                        match provenant_routing::resolve_for_account_with_seed_excluding(
+                    let mut replacement = match admission_replacement(
+                        provenant_routing::resolve_for_account_with_seed_excluding(
                             request,
                             context,
                             account,
@@ -741,28 +741,44 @@ pub(super) fn resolve_dispatch_excluding(
                             seed.1,
                             &excluded_members,
                             rules,
-                        ) {
-                            Ok(route)
-                                if matches!(&route.readiness, RouteReadiness::Ready { .. }) =>
-                            {
-                                route
+                        ),
+                    )? {
+                        Some(route) => route,
+                        None => {
+                            if is_go_refusal && has_fallback {
+                                return Ok(resolved);
                             }
-                            Ok(_) | Err(_) => {
-                                if is_go_refusal && has_fallback {
-                                    return Ok(resolved);
-                                }
-                                if refusals.len() == 1 {
-                                    return Err(error);
-                                }
-                                return Err(EdgeError::GoAllowance(refusals.join("; ")));
+                            if refusals.len() == 1 {
+                                return Err(error);
                             }
-                        };
+                            return Err(EdgeError::GoAllowance(refusals.join("; ")));
+                        }
+                    };
                     if replacement.adapter == resolved.adapter
                         && replacement.model == resolved.model
                     {
                         return Err(error);
                     }
                     record_pool_redraw(&resolved, &mut replacement, &reason)?;
+                    if let Some(redraw) = replacement
+                        .pool_selection
+                        .as_mut()
+                        .and_then(|selection| selection.redraws.last_mut())
+                    {
+                        let cause = match &error {
+                            EdgeError::Quota(provenant_quota::QuotaError::Refused(
+                                "allowance exhausted",
+                            )) => provenant_records::RouteExclusionReason::Exhausted,
+                            EdgeError::Quota(provenant_quota::QuotaError::Refused(
+                                "uncalibrated partial coverage",
+                            )) => provenant_records::RouteExclusionReason::UnknownPartialHeadroom,
+                            _ => provenant_records::RouteExclusionReason::AdmissionRefused,
+                        };
+                        redraw.extra.insert(
+                            "cause".into(),
+                            serde_json::to_value(cause).map_err(|_| RoutingError::Catalogue)?,
+                        );
+                    }
                     resolved = replacement;
                     continue;
                 }
@@ -771,6 +787,17 @@ pub(super) fn resolve_dispatch_excluding(
             Ok(resolved)
         },
     )
+}
+
+/// Keep an unavailable member for preparation, which can re-probe it.
+pub(super) fn admission_replacement(
+    result: Result<provenant_records::ResolvedRoute, RoutingError>,
+) -> Result<Option<provenant_records::ResolvedRoute>, EdgeError> {
+    match result {
+        Ok(route) => Ok(Some(route)),
+        Err(RoutingError::NoEligiblePoolMember { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn record_pool_redraw(

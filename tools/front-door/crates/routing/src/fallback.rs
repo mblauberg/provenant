@@ -78,6 +78,16 @@ impl FallbackPolicy {
             && self.budget_remaining
             && !self.pinned
     }
+
+    /// A candidate that local preparation excluded never ran, so any typed
+    /// exclusion may advance to the next permitted candidate. Pins and budget
+    /// still apply; uncertain or launched handoff never qualifies.
+    pub fn allows_preparation_switch(self) -> bool {
+        self.handoff == FallbackHandoff::Local
+            && self.custody_released
+            && self.budget_remaining
+            && !self.pinned
+    }
 }
 
 #[cfg(test)]
@@ -113,15 +123,44 @@ mod tests {
                 "{reason:?}"
             );
         }
-        assert!(
-            !FallbackPolicy {
-                outcome: FallbackOutcome::from_exclusion(
-                    &provenant_records::RouteExclusionReason::DisclosureDenied,
-                ),
-                ..base
+        let denied = FallbackPolicy {
+            outcome: FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::DisclosureDenied,
+            ),
+            ..base
+        };
+        assert!(!denied.allows_switch());
+        // Preparation exclusions never ran, so even an untyped one advances
+        // locally; pins, budget and uncertain handoff still stop it.
+        for outcome in [FallbackOutcome::Other, denied.outcome] {
+            let local = FallbackPolicy { outcome, ..base };
+            assert!(local.allows_preparation_switch());
+            for refused in [
+                FallbackPolicy {
+                    pinned: true,
+                    ..local
+                },
+                FallbackPolicy {
+                    budget_remaining: false,
+                    ..local
+                },
+                FallbackPolicy {
+                    custody_released: false,
+                    ..local
+                },
+                FallbackPolicy {
+                    handoff: FallbackHandoff::UncertainOrLaunched,
+                    ..local
+                },
+                FallbackPolicy {
+                    handoff: FallbackHandoff::Launched,
+                    read_only: true,
+                    ..local
+                },
+            ] {
+                assert!(!refused.allows_preparation_switch(), "{refused:?}");
             }
-            .allows_switch()
-        );
+        }
         for outcome in [
             FallbackOutcome::AuthRequired,
             FallbackOutcome::UsageLimited,
