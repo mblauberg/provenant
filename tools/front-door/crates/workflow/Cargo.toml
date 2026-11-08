@@ -1,6 +1,6 @@
 [package]
 name = "provenant-workflow"
-version = "1.6.16"
+version = "1.6.17"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
