@@ -318,6 +318,24 @@ impl InvalidInputDetail {
         Self::GraphReason(reason.to_string())
     }
 
+    /// The fact with any field path reduced to its disclosable form.
+    fn redacted(&self) -> Self {
+        let clean = |field: &String| safe_input_field(field).unwrap_or_default();
+        match self {
+            Self::Field(path) => Self::Field(clean(path)),
+            Self::FieldDecode { field, missing } => Self::FieldDecode {
+                field: safe_decoded_field(field).unwrap_or_default(),
+                missing: *missing,
+            },
+            Self::FieldTooLarge { field, limit } => Self::FieldTooLarge {
+                field: clean(field),
+                limit: *limit,
+            },
+            Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
+            other => other.clone(),
+        }
+    }
+
     fn safe_text(&self) -> Option<String> {
         match self {
             // Parser and transport errors may contain input, prompts or source
@@ -344,7 +362,7 @@ impl InvalidInputDetail {
             Self::Field(path) => {
                 safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
             }
-            Self::FieldDecode { field, missing } => safe_input_field(field).map(|path| {
+            Self::FieldDecode { field, missing } => safe_decoded_field(field).map(|path| {
                 format!("invalid input field `{path}`: {}", if *missing { "required field is missing" } else { "invalid type or value" })
             }),
             Self::FieldTooLarge { field, limit } => safe_input_field(field)
@@ -913,7 +931,76 @@ fn safe_base_ref(name: &str) -> Option<&str> {
     .then_some(name)
 }
 
-pub(super) fn safe_input_field(field: &str) -> Option<&str> {
+/// Fields whose children are caller-chosen map keys rather than schema names.
+/// The key under each is replaced with `*`; every other component is a struct
+/// field or index and is kept, so the schema needs no allowlist here.
+const MAP_KEY_PARENTS: [&str; 12] = [
+    "set",
+    "templates",
+    "parameters",
+    "capability_sources",
+    "extra",
+    "env",
+    "commands",
+    "host_native",
+    "home_hosts",
+    "peers",
+    "projects",
+    "ci_poll_overrides",
+];
+
+/// A bounded decoder-derived path safe to disclose: snake_case names and indexes only,
+/// with user-controlled map keys replaced by `*`. A supplied value is never
+/// part of a path.
+pub(super) fn safe_decoded_field(field: &str) -> Option<String> {
+    if field.is_empty() || field.len() > 128 {
+        return None;
+    }
+    if !field.bytes().all(|b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'[' | b']')
+    }) {
+        return None;
+    }
+    let mut out = String::with_capacity(field.len());
+    let mut redact_next = false;
+    let mut rest = field;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix('.') {
+            out.push('.');
+            rest = tail;
+            continue;
+        }
+        if let Some(tail) = rest.strip_prefix('[') {
+            let (index, tail) = tail.split_once(']')?;
+            if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            out.push('[');
+            out.push_str(index);
+            out.push(']');
+            redact_next = false;
+            rest = tail;
+            continue;
+        }
+        let end = rest.find(['.', '[']).unwrap_or(rest.len());
+        let (part, tail) = rest.split_at(end);
+        if part.contains(']') {
+            return None;
+        }
+        if redact_next {
+            out.push('*');
+            redact_next = false;
+        } else {
+            out.push_str(part);
+            redact_next = MAP_KEY_PARENTS.contains(&part);
+        }
+        rest = tail;
+    }
+    Some(out)
+}
+
+/// Allowlist for paths written by hand in code (not derived from a decoder).
+pub(super) fn safe_input_field(field: &str) -> Option<String> {
     let allowed = [
         "scope",
         "use",
@@ -1013,7 +1100,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
             .filter(|part| !part.is_empty())
             .all(|part| part.bytes().all(|b| b.is_ascii_digit()) || allowed.contains(&part))
     {
-        return Some(field);
+        return Some(field.to_owned());
     }
     None
 }
@@ -1037,7 +1124,7 @@ mod invalid_detail_wire {
                 InvalidInputDetail::GraphReason(_) => {
                     InvalidInputDetail::GraphReason(String::new())
                 }
-                fact => fact.clone(),
+                fact => fact.redacted(),
             };
             map.serialize_entry("detail_fact", &safe_fact)?;
         }
