@@ -98,13 +98,94 @@ const HOME_SHELL_STARTUP: &[&str] = &[
 const CREDENTIAL_WALK_MAX_DEPTH: usize = 8;
 const CREDENTIAL_WALK_MAX_ENTRIES: usize = 4096;
 
+#[derive(Default)]
+struct InventorySummary {
+    unresolved: std::collections::BTreeMap<PathBuf, usize>,
+    unresolved_paths: std::collections::BTreeSet<PathBuf>,
+    depth: std::collections::BTreeMap<PathBuf, usize>,
+    entries: std::collections::BTreeMap<PathBuf, usize>,
+    outside_home: std::collections::BTreeMap<PathBuf, usize>,
+    unrepresentable: std::collections::BTreeMap<PathBuf, usize>,
+    inspection: std::collections::BTreeMap<PathBuf, usize>,
+    covering_work: std::collections::BTreeMap<PathBuf, usize>,
+    endpoint_outside_home: std::collections::BTreeMap<PathBuf, usize>,
+    endpoint_covering_work: std::collections::BTreeMap<PathBuf, usize>,
+    endpoint_unrepresentable: std::collections::BTreeMap<PathBuf, usize>,
+}
+
+impl InventorySummary {
+    fn record(counts: &mut std::collections::BTreeMap<PathBuf, usize>, root: &Path) {
+        *counts.entry(root.to_owned()).or_default() += 1;
+    }
+
+    fn record_unresolved(&mut self, root: &Path, path: &Path) {
+        if self.unresolved_paths.insert(path.to_owned()) {
+            Self::record(&mut self.unresolved, root);
+        }
+    }
+
+    fn report(&self, warnings: &mut impl Write) {
+        for (label, counts) in [
+            ("cannot resolve credential symlink", &self.unresolved),
+            (
+                "skipping credential symlink directory outside home",
+                &self.outside_home,
+            ),
+            (
+                "cannot represent credential symlink target",
+                &self.unrepresentable,
+            ),
+            ("cannot inspect credential inventory", &self.inspection),
+            (
+                "skipping credential symlink target covering source or scratch",
+                &self.covering_work,
+            ),
+            (
+                "skipping credential endpoint directory outside home",
+                &self.endpoint_outside_home,
+            ),
+            (
+                "skipping credential endpoint target covering source or scratch",
+                &self.endpoint_covering_work,
+            ),
+            (
+                "cannot represent credential endpoint target",
+                &self.endpoint_unrepresentable,
+            ),
+            (
+                "credential symlink inventory depth limit reached",
+                &self.depth,
+            ),
+            (
+                "credential symlink inventory entry limit reached",
+                &self.entries,
+            ),
+        ] {
+            if counts.is_empty() {
+                continue;
+            }
+            let total: usize = counts.values().sum();
+            let mut roots: Vec<_> = counts.iter().collect();
+            roots.sort_by(|(a_path, a), (b_path, b)| b.cmp(a).then_with(|| a_path.cmp(b_path)));
+            let top = roots
+                .iter()
+                .take(3)
+                .map(|(path, count)| format!("{} ({count})", path.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(warnings, "warning: {label}: {total}; top roots: {top}");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn inventory_links(
     mandatory: &mut MandatoryRoots,
     root: &PathGrant,
     home: &Path,
     source: &Path,
     scratch: &Path,
-    warnings: &mut impl Write,
+    summary: &mut InventorySummary,
 ) -> Result<(), PermissionError> {
     let mut pending = vec![(root.path.clone(), 0)];
     let mut count = 0;
@@ -120,38 +201,22 @@ fn inventory_links(
                 continue;
             }
             Err(_) => {
-                let _ = writeln!(
-                    warnings,
-                    "warning: cannot inspect credential directory {}",
-                    directory.display()
-                );
+                InventorySummary::record(&mut summary.inspection, &root.path);
                 continue;
             }
         };
         for entry in entries {
             let Ok(entry) = entry else {
-                let _ = writeln!(
-                    warnings,
-                    "warning: cannot inspect an entry in credential directory {}",
-                    directory.display()
-                );
+                InventorySummary::record(&mut summary.inspection, &root.path);
                 continue;
             };
             if count == CREDENTIAL_WALK_MAX_ENTRIES {
-                let _ = writeln!(
-                    warnings,
-                    "warning: credential symlink inventory entry limit reached at {}",
-                    root.path.display()
-                );
+                InventorySummary::record(&mut summary.entries, &root.path);
                 return Ok(());
             }
             count += 1;
             let Ok(kind) = entry.file_type() else {
-                let _ = writeln!(
-                    warnings,
-                    "warning: cannot inspect credential entry in {}",
-                    directory.display()
-                );
+                InventorySummary::record(&mut summary.inspection, &root.path);
                 continue;
             };
             let path = entry.path();
@@ -159,11 +224,7 @@ fn inventory_links(
                 let (Ok(target), Ok(metadata)) =
                     (resolve_boundary_path(&path), std::fs::metadata(&path))
                 else {
-                    let _ = writeln!(
-                        warnings,
-                        "warning: cannot resolve credential symlink {}",
-                        path.display()
-                    );
+                    summary.record_unresolved(&root.path, &path);
                     continue;
                 };
                 let scope = if metadata.is_dir() {
@@ -186,21 +247,13 @@ fn inventory_links(
                     continue;
                 }
                 if scope == PathScope::Subtree && !target.starts_with(home) {
-                    let _ = writeln!(
-                        warnings,
-                        "warning: skipping credential symlink directory outside home: {}",
-                        path.display()
-                    );
+                    InventorySummary::record(&mut summary.outside_home, &root.path);
                     continue;
                 }
                 if scope == PathScope::Subtree
                     && (source.starts_with(&target) || scratch.starts_with(&target))
                 {
-                    let _ = writeln!(
-                        warnings,
-                        "warning: skipping credential symlink target covering source or scratch: {}",
-                        path.display()
-                    );
+                    InventorySummary::record(&mut summary.covering_work, &root.path);
                     continue;
                 }
                 if !profile_path_representable(&path)
@@ -218,11 +271,7 @@ fn inventory_links(
                     .validate()
                     .is_err()
                 {
-                    let _ = writeln!(
-                        warnings,
-                        "warning: cannot represent credential symlink target: {}",
-                        path.display()
-                    );
+                    InventorySummary::record(&mut summary.unrepresentable, &root.path);
                     continue;
                 }
                 for path in [path, target] {
@@ -243,11 +292,7 @@ fn inventory_links(
                     continue;
                 }
                 if depth + 1 >= CREDENTIAL_WALK_MAX_DEPTH {
-                    let _ = writeln!(
-                        warnings,
-                        "warning: credential symlink inventory depth limit reached at {}",
-                        path.display()
-                    );
+                    InventorySummary::record(&mut summary.depth, &root.path);
                 } else {
                     pending.push((path, depth + 1));
                 }
@@ -334,6 +379,7 @@ impl MandatoryRoots {
         let resolved_source = resolve_boundary_path(source)?;
         let resolved_scratch = resolve_boundary_path(scratch)?;
         let resolved_home = resolve_boundary_path(home)?;
+        let mut summary = InventorySummary::default();
         for root in mandatory.credentials().to_vec() {
             let alias = resolve_boundary_path(&root.path)?;
             if alias != root.path {
@@ -352,24 +398,16 @@ impl MandatoryRoots {
                     &resolved_home,
                     &resolved_source,
                     &resolved_scratch,
-                    &mut std::io::stderr().lock(),
+                    &mut summary,
                 )?;
                 for endpoint in &endpoints {
                     let path = root.path.join(endpoint);
                     let Ok(target) = resolve_boundary_path(&path) else {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: cannot resolve credential endpoint {}",
-                            path.display()
-                        );
+                        summary.record_unresolved(&root.path, &path);
                         continue;
                     };
                     if target != path && target.is_dir() && !target.starts_with(&resolved_home) {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: skipping credential endpoint directory outside home: {}",
-                            path.display()
-                        );
+                        InventorySummary::record(&mut summary.endpoint_outside_home, &root.path);
                         continue;
                     }
                     if target != path
@@ -377,11 +415,7 @@ impl MandatoryRoots {
                         && (resolved_source.starts_with(&target)
                             || resolved_scratch.starts_with(&target))
                     {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: skipping credential endpoint target covering source or scratch: {}",
-                            path.display()
-                        );
+                        InventorySummary::record(&mut summary.endpoint_covering_work, &root.path);
                         continue;
                     }
                     if target != path
@@ -394,11 +428,7 @@ impl MandatoryRoots {
                             .validate()
                             .is_err())
                     {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: cannot represent credential endpoint target: {}",
-                            path.display()
-                        );
+                        InventorySummary::record(&mut summary.endpoint_unrepresentable, &root.path);
                         continue;
                     }
                     // Also retain regular and missing endpoints for the final
@@ -423,6 +453,7 @@ impl MandatoryRoots {
                 }
             }
         }
+        summary.report(&mut std::io::stderr().lock());
         let state = resolve_boundary_path(roots.state.as_path())?;
         if state != roots.state.as_path() {
             mandatory.add_state_alias(subtree(&state))?;
@@ -618,6 +649,183 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn inventory_summarises_walk_failures_across_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let target = base.join("credential");
+        std::fs::create_dir(&home)?;
+        std::fs::write(&target, b"fixture")?;
+        let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
+        let mut summary = InventorySummary::default();
+        let mut warnings = Vec::new();
+        for name in ["first", "second"] {
+            let store = home.join(name);
+            std::fs::create_dir(&store)?;
+            for index in 0..2 {
+                std::os::unix::fs::symlink(
+                    base.join("missing"),
+                    store.join(format!("dangling{index}")),
+                )?;
+            }
+            std::os::unix::fs::symlink(&target, store.join("valid"))?;
+            let mut deep = store.clone();
+            for _ in 0..CREDENTIAL_WALK_MAX_DEPTH {
+                deep.push("nested");
+                std::fs::create_dir(&deep)?;
+            }
+            let grant = PathGrant {
+                path: store,
+                scope: PathScope::Subtree,
+            };
+            inventory_links(
+                &mut mandatory,
+                &grant,
+                &home,
+                &base.join("source"),
+                &base.join("scratch"),
+                &mut summary,
+            )?;
+        }
+        assert!(warnings.is_empty());
+        summary.report(&mut warnings);
+        let output = String::from_utf8(warnings)?;
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "{output}");
+        assert!(
+            lines[0].contains("cannot resolve credential symlink: 4;"),
+            "{output}"
+        );
+        assert!(lines[1].contains("depth limit reached: 2;"), "{output}");
+        assert!(output.contains("first (2)"));
+        assert!(output.contains("second (2)"));
+        assert!(mandatory.credentials().contains(&PathGrant {
+            path: target,
+            scope: PathScope::Exact
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_summarises_skipped_links_and_inspection_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let outside = base.join("outside");
+        std::fs::create_dir(&home)?;
+        std::fs::create_dir(&outside)?;
+        let target = home.join("bad\u{1}name");
+        std::fs::write(&target, b"fixture")?;
+        let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
+        let mut summary = InventorySummary::default();
+        let mut warnings = Vec::new();
+        for index in 0..4 {
+            let store = home.join(format!("store{index}"));
+            std::fs::create_dir(&store)?;
+            for link in 0..(4 - index) {
+                std::os::unix::fs::symlink(&outside, store.join(format!("outside{link}")))?;
+                std::os::unix::fs::symlink(&target, store.join(format!("bad{link}")))?;
+                std::os::unix::fs::symlink(&home, store.join(format!("covering{link}")))?;
+                InventorySummary::record(&mut summary.inspection, &store);
+            }
+            inventory_links(
+                &mut mandatory,
+                &PathGrant {
+                    path: store,
+                    scope: PathScope::Subtree,
+                },
+                &home,
+                &home.join("source"),
+                &home.join("scratch"),
+                &mut summary,
+            )?;
+        }
+        assert!(warnings.is_empty());
+        summary.report(&mut warnings);
+        let output = String::from_utf8(warnings)?;
+        assert_eq!(output.lines().count(), 4, "{output}");
+        for line in output.lines() {
+            assert!(line.contains(": 10; top roots:"), "{line}");
+            for index in 0..3 {
+                assert!(
+                    line.contains(&format!("store{index} ({})", 4 - index)),
+                    "{line}"
+                );
+            }
+            assert!(!line.contains("store3"), "{line}");
+        }
+        assert!(
+            !mandatory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == target || grant.path == outside)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_summarises_directory_inspection_errors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        // Linux returns NotFound for a missing parent before inspecting the
+        // overlong component; create it so both platforms reach that error.
+        std::fs::create_dir(&home)?;
+        let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
+        let root = PathGrant {
+            path: home.join("x".repeat(1024)),
+            scope: PathScope::Subtree,
+        };
+        let mut summary = InventorySummary::default();
+        let mut warnings = Vec::new();
+        for _ in 0..2 {
+            inventory_links(
+                &mut mandatory,
+                &root,
+                &home,
+                &base.join("source"),
+                &base.join("scratch"),
+                &mut summary,
+            )?;
+        }
+        assert!(warnings.is_empty());
+        summary.report(&mut warnings);
+        let output = String::from_utf8(warnings)?;
+        assert_eq!(output.lines().count(), 1);
+        assert!(
+            output.contains("cannot inspect credential inventory: 2;"),
+            "{output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_summary_limits_roots_and_deduplicates_unresolved_paths() {
+        let mut summary = InventorySummary::default();
+        for index in 0..5 {
+            let root = PathBuf::from(format!("/root{index}"));
+            summary.record_unresolved(&root, &root.join("missing"));
+            summary.record_unresolved(&root, &root.join("missing"));
+            InventorySummary::record(&mut summary.entries, &root);
+            InventorySummary::record(&mut summary.endpoint_outside_home, &root);
+            InventorySummary::record(&mut summary.endpoint_covering_work, &root);
+            InventorySummary::record(&mut summary.endpoint_unrepresentable, &root);
+        }
+        let mut warnings = Vec::new();
+        summary.report(&mut warnings);
+        let output = String::from_utf8(warnings).unwrap();
+        assert_eq!(output.lines().count(), 5);
+        assert!(output.contains("cannot resolve credential symlink: 5;"));
+        assert!(output.contains("entry limit reached: 5;"));
+        assert!(output.contains("endpoint directory outside home: 5;"));
+        assert!(output.contains("endpoint target covering source or scratch: 5;"));
+        assert!(output.contains("cannot represent credential endpoint target: 5;"));
+        assert!(!output.contains("/root3"));
+    }
+
     // Medium: real filesystem inventory, no native sandbox required.
     #[test]
     fn inventory_skips_opencode_runtime_trees() -> Result<(), Box<dyn std::error::Error>> {
@@ -643,6 +851,7 @@ mod tests {
             &root.join("source"),
         )?;
         let mut warnings = Vec::new();
+        let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
             &PathGrant {
@@ -652,8 +861,9 @@ mod tests {
             &home,
             &root.join("source"),
             &root.join("scratch"),
-            &mut warnings,
+            &mut summary,
         )?;
+        summary.report(&mut warnings);
         assert!(
             warnings.is_empty(),
             "{}",
@@ -726,14 +936,16 @@ mod tests {
         let huge = subtree(huge);
         let mut mandatory = MandatoryRoots::new(&home, &root.join("state"), &root.join("source"))?;
         let mut warnings = Vec::new();
+        let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
             &huge,
             &home,
             &root.join("source"),
             &root.join("scratch"),
-            &mut warnings,
+            &mut summary,
         )?;
+        summary.report(&mut warnings);
         let warnings = String::from_utf8(warnings)?;
         assert!(warnings.contains("credential symlink inventory entry limit reached"));
         assert!(warnings.contains(&huge.path.display().to_string()));
@@ -796,7 +1008,7 @@ mod tests {
             &root.join("home"),
             &root.join("source"),
             &root.join("scratch"),
-            &mut std::io::stderr().lock(),
+            &mut InventorySummary::default(),
         )?;
         assert!(
             mandatory

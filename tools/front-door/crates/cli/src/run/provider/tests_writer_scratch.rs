@@ -2,6 +2,17 @@
 #[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false)
+}
+
+// Medium: real provider fences, routing and preparation, with synthetic CLIs.
+#[test]
+fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(true)
+}
+
+fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{
         AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
@@ -22,10 +33,21 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     if std::env::var_os(CHILD).is_none() {
         // Each auth layout runs the real preparation boundary in an isolated
         // process; neither depends on another test's host credential state.
-        for layout in ["missing", "symlink", "symlink-xdg"] {
+        let (test, layouts): (&str, &[&str]) = if fence_only {
+            (
+                "provider_fence_preparation_reports_causes_and_selects_available_candidate",
+                &["missing"],
+            )
+        } else {
+            (
+                "writer_plan_stages_scratch_in_private_temporary_directory",
+                &["missing", "symlink", "symlink-xdg"],
+            )
+        };
+        for layout in layouts {
             #[allow(clippy::disallowed_methods)]
             let status = std::process::Command::new(std::env::current_exe()?)
-                .arg("writer_plan_stages_scratch_in_private_temporary_directory")
+                .arg(test)
                 .env(CHILD, layout)
                 .env("GH_TOKEN", "fixture-host-token")
                 .env_remove("GIT_CONFIG_GLOBAL")
@@ -170,6 +192,178 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         cancel: Some(&cancel),
         repo_facts: Default::default(),
     };
+    // An exhausted fence wait must never probe the updating CLI,
+    // including when the lease map is empty.
+    if fence_only {
+        let _updating = provenant_os::provider_fence::acquire(
+            &state,
+            "codex",
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let mut blocked = task.clone();
+        blocked.route = run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "codex".into(),
+            model: "codex/gpt-6.1-sol".into(),
+            effort: None,
+        };
+        let refusal = prepare_with_wait(
+            &registry,
+            &blocked,
+            "provider fence fixture",
+            &paths,
+            None,
+            |_| panic!("an updating provider must not be probed"),
+            None,
+            Some(0),
+        )
+        .err()
+        .ok_or("updating provider was admitted")?;
+        let PrepareError::Candidates {
+            skipped_routes,
+            fallback_outcome,
+            ..
+        } = &refusal
+        else {
+            return Err(format!("provider fence lost its candidate diagnosis: {refusal}").into());
+        };
+        assert_eq!(skipped_routes.len(), 1);
+        assert_eq!(skipped_routes[0].route, "codex/gpt-6.1-sol");
+        assert_eq!(
+            skipped_routes[0].cause,
+            Some(provenant_records::RouteExclusionReason::ProviderUpdating)
+        );
+        assert!(skipped_routes[0].detail.contains("provider update in progress for codex"));
+        assert_eq!(
+            *fallback_outcome,
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+        );
+
+        // A pool whose first member is updating must still consider its other
+        // eligible providers. The existing route policy controls the pool.
+        let saved_config = std::fs::read(state.join("config.toml")).ok();
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.fence-fixture]]\nmodel='codex/gpt-6.1-sol'\nweight=1\nefforts=[]\n[[domains.routing.pools.fence-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
+        )?;
+        let mut pool = task.clone();
+        pool.route = run::RequestedRoute::Named {
+            extra: Default::default(),
+            name: "fence-fixture".into(),
+            effort: None,
+        };
+        let pool_paths = run::LaunchPaths {
+            scratch: attempt.join("fence-scratch"),
+            provider_state: attempt.join("fence-provider-state"),
+            temporary: attempt.join("fence-tmp"),
+            attempt_id: paths.attempt_id,
+            operation_id: paths.operation_id.clone(),
+            task_index: paths.task_index,
+            lane_depth: paths.lane_depth,
+            run_id: paths.run_id,
+            deadline_unix_ms: paths.deadline_unix_ms,
+            temporary_alias: None,
+        };
+        for path in [
+            &pool_paths.scratch,
+            &pool_paths.provider_state,
+            &pool_paths.temporary,
+        ] {
+            std::fs::DirBuilder::new().mode(0o700).create(path)?;
+        }
+        let prepared = prepare_with_wait(
+            &registry,
+            &pool,
+            "provider fence fixture",
+            &pool_paths,
+            None,
+            |adapter| {
+                assert_eq!(adapter, "cursor", "updating provider was probed");
+                Ok(executable.clone())
+            },
+            None,
+            Some(0),
+        )?;
+        assert_eq!(prepared.route.provider.as_deref(), Some("cursor"));
+        assert_eq!(
+            prepared.route.model.as_deref(),
+            Some("cursor/gpt-5.3-codex-low")
+        );
+        let selection = prepared.route.pool_selection.as_ref().ok_or("pool receipt")?;
+        let updating = selection
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "codex/gpt-6.1-sol")
+            .ok_or("updating pool member disappeared")?;
+        assert!(matches!(
+            updating.readiness,
+            Some(provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::ProviderUpdating,
+                ..
+            })
+        ));
+        assert!(
+            updating
+                .exclusion
+                .as_deref()
+                .is_some_and(|detail| detail.contains("update"))
+        );
+        drop(prepared);
+        match saved_config {
+            Some(config) => std::fs::write(state.join("config.toml"), config)?,
+            None => std::fs::remove_file(state.join("config.toml"))?,
+        }
+
+        // A separate access omission retains the confinement guard that
+        // refused the plan, rather than being labelled a disclosure denial.
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version = 1\n[domains.run]\nwriter_writes = ['{}']\n",
+                paths.scratch.display(),
+            ),
+        )?;
+        let error = prepare_with_wait(
+            &registry,
+            &task,
+            "confinement refusal fixture",
+            &paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+            Some(0),
+        )
+        .err()
+        .ok_or("unconfinable worktree accepted")?;
+        let PrepareError::Candidates {
+            skipped_routes,
+            plans,
+            ..
+        } = &error
+        else {
+            return Err(format!("confinement failure lost its candidate diagnosis: {error}").into());
+        };
+        assert!(plans.iter().any(|plan| matches!(
+            plan,
+            provenant_confinement::PlanError::Permission(
+                provenant_confinement::permissions::PermissionError::ProtectedOverlap
+            )
+        )));
+        assert_eq!(skipped_routes.len(), 1);
+        assert_eq!(
+            skipped_routes[0].cause,
+            Some(provenant_records::RouteExclusionReason::ConfinementUnavailable)
+        );
+        assert_eq!(skipped_routes[0].extra["guard_boundary"], "authority");
+        assert_eq!(skipped_routes[0].extra["confinement_guard"], "protected_path_overlap");
+        assert_eq!(skipped_routes[0].extra["plan_error"], "protected_overlap");
+        assert_eq!(
+            skipped_routes[0].diagnostic().detail.as_deref(),
+            Some(provenant_records::diagnostic::PlanFailure::ProtectedOverlap.detail()),
+        );
+        assert!(skipped_routes[0].detail.contains("protected path"));
+        return Ok(());
+    }
     // A recorded sign-out followed by a healthy account-scoped status probe
     // must permit preparation without waiting for the quota backoff.
     let now = clock.unix_seconds();

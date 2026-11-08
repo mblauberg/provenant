@@ -537,6 +537,8 @@ pub(super) enum PrepareError {
     GraphInputsAuthority(String),
     #[error("{0}")]
     SourceAuthority(String),
+    #[error(transparent)]
+    SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
     WriterContinuation(String),
     #[error(transparent)]
@@ -554,12 +556,24 @@ pub(super) enum PrepareError {
         skipped_routes: Vec<SkippedRoute>,
         fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
+    #[error("{error}")]
+    RouteResolution {
+        error: crate::route::DispatchError,
+        checks: Vec<SkippedRoute>,
+    },
     #[error("{0}")]
     Other(String),
 }
 impl PrepareError {
-    fn into_refusal(self) -> run::PrepareRefusal {
+    pub(super) fn into_refusal(self) -> run::PrepareRefusal {
         match self {
+            Self::RouteResolution { error, checks } => {
+                let mut refusal = route_resolution_refusal(error).into_refusal();
+                // These checks explain why adapters were denied access; they
+                // do not establish the cause of an unrelated router failure.
+                refusal.skipped_routes = checks;
+                refusal
+            }
             Self::Refusal {
                 message,
                 cause,
@@ -595,7 +609,7 @@ impl PrepareError {
                     && plans.len() == skipped_routes.len()
                     && skipped_routes.iter().all(|route| {
                         route.cause
-                            == Some(provenant_records::RouteExclusionReason::DisclosureDenied)
+                            == Some(provenant_records::RouteExclusionReason::ConfinementUnavailable)
                     })
                 {
                     let mut classes = plans.iter().map(|error| error.boundary_class());
@@ -616,17 +630,18 @@ impl PrepareError {
                     fallback_outcome,
                 }
             }
+            Self::SourceRoots(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.terminal_note = Some(error.to_string());
+                refusal
+            }
             Self::SourceCwd(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = error.boundary_class();
                 refusal
             }
-            Self::Permission(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
-                refusal.boundary_class = error.boundary_class();
-                refusal.resource = error.resource_fact();
-                refusal
-            }
+            Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -642,12 +657,11 @@ impl PrepareError {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
             }
-            Self::ReadOnly(error) => {
-                let boundary_class = error.boundary_class();
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
-                refusal.boundary_class = boundary_class;
-                refusal
+            Self::ReadOnly(error) => PlanCheckError::ReadOnly(error).into_refusal(),
+            Self::Run(run::RunError::Confinement(error)) => {
+                PlanCheckError::Permission(error).into_refusal()
             }
+            Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
@@ -699,6 +713,15 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     )
     .into_refusal();
     assert_eq!(permission.boundary_class, BoundaryClass::LaneGit);
+    assert_eq!(
+        permission.skipped_routes[0].extra["plan_error"],
+        "permission"
+    );
+    assert_eq!(
+        permission.skipped_routes[0].extra["guard_boundary"],
+        "lane_git"
+    );
+    assert!(permission.terminal_note.is_some());
     let prompt = PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge {
         limit: 32,
         origin: "shipped default",
@@ -732,6 +755,13 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
             .into_refusal();
     assert_eq!(source.boundary_class, BoundaryClass::Authority);
+    let source_roots =
+        PrepareError::SourceRoots(super::source_tree::SourceRootOverlap::Assets).into_refusal();
+    assert_eq!(source_roots.boundary_class, BoundaryClass::Authority);
+    assert_eq!(
+        source_roots.terminal_note.as_deref(),
+        Some("product assets overlap the live graph source checkout")
+    );
     let unavailable =
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
@@ -764,7 +794,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     }
     let candidate = || {
         let mut route = skip("fixture/model", SkipKind::Unavailable, "plan refused");
-        route.set_cause(provenant_records::RouteExclusionReason::DisclosureDenied);
+        route.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
         route
     };
     let aggregate = |skipped_routes| {
@@ -901,6 +931,170 @@ pub(super) enum PlanCheckError {
     ReadOnly(#[from] ReadOnlyPlanError),
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
+}
+
+impl PlanCheckError {
+    fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        match self {
+            Self::Plan(error) => error.boundary_class(),
+            Self::Permission(error) => error.boundary_class(),
+            Self::ReadOnly(error) => error.boundary_class(),
+            Self::SourceHead(_) => provenant_records::diagnostic::BoundaryClass::Authority,
+        }
+    }
+
+    fn skipped(&self, route: &str) -> SkippedRoute {
+        use provenant_confinement::{PlanError, permissions::PermissionError};
+        use provenant_records::diagnostic::PlanFailure;
+        let permission = match self {
+            Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => Some(error),
+            _ => None,
+        };
+        fn permission_failure(error: &PermissionError) -> PlanFailure {
+            match error {
+                PermissionError::ConfigOrigin { source, .. } => permission_failure(source),
+                PermissionError::ProtectedOverlap => PlanFailure::ProtectedOverlap,
+                PermissionError::InvalidPath(_) => PlanFailure::InvalidPath,
+                PermissionError::CredentialRoot
+                | PermissionError::CredentialRootAt { .. }
+                | PermissionError::CredentialGrant { .. } => PlanFailure::CredentialRoot,
+                PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
+                    PlanFailure::AnchorMismatch
+                }
+                PermissionError::BroadRoot => PlanFailure::BroadRoot,
+                _ => PlanFailure::Permission,
+            }
+        }
+        let failure = match self {
+            Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => {
+                permission_failure(error)
+            }
+            Self::Plan(PlanError::InvalidRoots) => PlanFailure::InvalidRoots,
+            Self::Plan(PlanError::UnconfinedExtensions) => PlanFailure::UnconfinedExtensions,
+            Self::Plan(PlanError::Home(_)) => PlanFailure::Home,
+            Self::ReadOnly(_) => PlanFailure::ReadOnly,
+            Self::SourceHead(_) => PlanFailure::SourceHead,
+        };
+        let mut skipped = skip(route, SkipKind::Refused, failure.detail());
+        skipped
+            .extra
+            .insert("plan_error".into(), serde_json::json!(failure));
+        skipped.extra.insert(
+            "guard_boundary".into(),
+            serde_json::json!(self.boundary_class()),
+        );
+        if let Some(fact) = permission.and_then(PermissionError::resource_fact) {
+            skipped
+                .extra
+                .insert("guard_resource".into(), serde_json::json!(fact));
+        }
+        skipped.extra.insert(
+            "confinement_guard".into(),
+            serde_json::json!(self.guard_fact()),
+        );
+        skipped.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
+        skipped
+    }
+
+    fn into_refusal(self) -> run::PrepareRefusal {
+        let skipped = self.skipped("preparation");
+        let mut refusal = run::PrepareRefusal::from(skipped.detail.clone());
+        refusal.boundary_class = self.boundary_class();
+        refusal.terminal_note = Some(skipped.detail.clone());
+        refusal.resource = skipped
+            .extra
+            .get("guard_resource")
+            .and_then(|fact| serde_json::from_value(fact.clone()).ok());
+        refusal.skipped_routes.push(skipped);
+        refusal
+    }
+
+    /// A closed guard fact can leave the host; paths and captured errors cannot.
+    fn guard_fact(&self) -> provenant_records::diagnostic::ConfinementGuard {
+        use provenant_confinement::PlanError;
+        use provenant_confinement::permissions::{AvailabilityReason, PermissionError};
+        use provenant_records::diagnostic::ConfinementGuard as G;
+        fn permission(error: &PermissionError) -> G {
+            match error {
+                PermissionError::ConfigOrigin { source, .. } => permission(source),
+                PermissionError::InvalidReadOnlyPolicy => G::InvalidReadOnlyPolicy,
+                PermissionError::InvalidPath(_) => G::InvalidPermissionPath,
+                PermissionError::BroadRoot => G::PermissionRootTooBroad,
+                PermissionError::CredentialRoot
+                | PermissionError::CredentialRootAt { .. }
+                | PermissionError::CredentialGrant { .. } => G::CredentialRootRefused,
+                PermissionError::ProtectedOverlap => G::ProtectedPathOverlap,
+                PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
+                    G::PathAnchorChanged
+                }
+                PermissionError::GitControlHardLinked(_) => G::GitControlHardLinked,
+                PermissionError::NonUtf8Path => G::PathNotUtf8,
+                PermissionError::InvalidFixture => G::InvalidProfileFixture,
+                PermissionError::PermissionNotRecorded => G::PermissionNotRecorded,
+                PermissionError::ProcessPolicyMissing => G::ProcessPolicyMissing,
+                PermissionError::GitWriteAuthorityMissing => G::GitWriteAuthorityMissing,
+                PermissionError::NestedConfinementUnsupported => G::NestedConfinementUnsupported,
+                PermissionError::ProfileTooLarge { .. } => G::ProfileLimitExceeded,
+                PermissionError::GrantLimitExceeded { .. } => G::GrantLimitExceeded,
+                PermissionError::GitControlEntriesExceeded { .. } => G::GitControlEntriesExceeded,
+                PermissionError::BackendUnavailable => G::SandboxBackendUnavailable,
+                PermissionError::BackendNotAvailable(reason) => match reason {
+                    AvailabilityReason::UnsupportedPlatform => G::UnsupportedSandboxPlatform,
+                    AvailabilityReason::SandboxExecutableMissing => G::SandboxExecutableMissing,
+                    AvailabilityReason::SandboxExecutableUntrusted => G::SandboxExecutableUntrusted,
+                    AvailabilityReason::ProbeFailed => G::SandboxProbeFailed,
+                },
+                PermissionError::Cancelled => G::SandboxProbeCancelled,
+                PermissionError::Filesystem(_) => G::ConfinementFilesystemFailed,
+                PermissionError::ProfileTransport(_) => G::ProfileTransportFailed,
+                PermissionError::Execution(_) => G::SandboxExecutionFailed,
+                PermissionError::Repository(_) => G::RepositoryAuthorityRevalidationFailed,
+                PermissionError::HeadRead(_) => G::GitHeadReadFailed,
+                PermissionError::CacheSweepIo(_) | PermissionError::CacheSweepFilesystem { .. } => {
+                    G::CacheSweepFailed
+                }
+                PermissionError::CacheSweepDepth => G::CacheSweepDepthExceeded,
+            }
+        }
+        fn plan(error: &PlanError) -> G {
+            match error {
+                PlanError::Permission(error) => permission(error),
+                PlanError::InvalidRoots => G::InvalidPlanRoots,
+                PlanError::UnconfinedExtensions => G::UnconfinedExtensions,
+                PlanError::Home(error) => match error {
+                    provenant_os::home::HomeError::InvalidRecipe => G::InvalidPrivateHomeRecipe,
+                    provenant_os::home::HomeError::UnsafeEntry => G::UnsafePrivateHomeEntry,
+                    provenant_os::home::HomeError::TooLarge => G::PrivateHomeLimitExceeded,
+                    provenant_os::home::HomeError::UnsupportedState => {
+                        G::PrivateHomeStateUnsupported
+                    }
+                    provenant_os::home::HomeError::Conflict { .. } => G::PrivateHomeConflict,
+                    provenant_os::home::HomeError::DurabilityUnconfirmed(_) => {
+                        G::PrivateHomeDurabilityUnconfirmed
+                    }
+                    provenant_os::home::HomeError::Filesystem(_) => G::PrivateHomeFilesystemFailed,
+                    provenant_os::home::HomeError::Read(_) => G::PrivateHomeReadFailed,
+                },
+            }
+        }
+        match self {
+            Self::Permission(error) => permission(error),
+            Self::Plan(error) => plan(error),
+            Self::SourceHead(error) => match error {
+                SourceHeadError::Missing => G::SourceHeadMissing,
+                SourceHeadError::Invalid => G::SourceHeadInvalid,
+                SourceHeadError::Moved(_) => G::SourceHeadMoved,
+            },
+            Self::ReadOnly(error) => match error {
+                ReadOnlyPlanError::Plan(error) => plan(error),
+                ReadOnlyPlanError::Run(_) => G::ReadOnlyRunRefused,
+                ReadOnlyPlanError::BindingMismatch => G::ProjectBindingMismatch,
+                ReadOnlyPlanError::MissingBinding => G::ProjectBindingMissing,
+                ReadOnlyPlanError::PinnedSourceRequiresGit => G::PinnedSourceRequiresGit,
+                ReadOnlyPlanError::Other(_) => G::ReadOnlyPreparationFailed,
+            },
+        }
+    }
 }
 
 #[cfg(any(test, feature = "fixture"))]
@@ -1335,7 +1529,7 @@ mod stale_readiness_tests {
         assert!(matches!(
             denied.readiness,
             provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::DisclosureDenied,
+                reason: provenant_records::RouteExclusionReason::ConfinementUnavailable,
                 ..
             }
         ));
@@ -1457,8 +1651,7 @@ pub(super) fn prepare_candidates(
     let isolated =
         writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
-        super::source_tree::ensure_source_roots(&source, &task.access, assets)
-            .map_err(PrepareError::SourceAuthority)?;
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
@@ -1534,7 +1727,7 @@ pub(super) fn prepare_candidates(
     {
         eligible.push(registration.adapter.id());
     }
-    // Exclude updates during preparation when the bounded wait succeeds.
+    // Hold shared fences throughout preparation. An exhausted wait never grants access.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
     let fallback_cancel = provenant_core::CancelToken::new();
@@ -1542,7 +1735,7 @@ pub(super) fn prepare_candidates(
     let provider_leases =
         available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
             .map_err(|error| error.to_string())?;
-    let eligible = |name: &str| provider_leases.is_empty() || provider_leases.contains_key(name);
+    let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.with_derived_accounts();
     let credential_roots = credential_roots(registry, &home, &settings)?;
     let github_roots = github_roots(registry);
@@ -1894,8 +2087,36 @@ pub(super) fn prepare_candidates(
                 Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
             }),
         )
+        .map(|mut resolved| {
+            // The router cannot observe host fences. Preserve the known
+            // preparation refusal in its pool receipt instead of unknown
+            // availability for providers we deliberately did not probe.
+            if let Some(selection) = &mut resolved.pool_selection {
+                for candidate in &mut selection.candidates {
+                    if candidate
+                        .model
+                        .split_once('/')
+                        .is_some_and(|(adapter, _)| !eligible(adapter))
+                    {
+                        candidate.readiness =
+                            Some(provenant_records::RouteReadiness::Unavailable {
+                                extra: Default::default(),
+                                reason: provenant_records::RouteExclusionReason::ProviderUpdating,
+                            });
+                        candidate.exclusion = Some("provider update in progress".into());
+                    }
+                }
+            }
+            resolved
+        })
     };
-    let resolved = resolve(&availability, &[]).map_err(route_resolution_refusal)?;
+    let resolved = resolve(&availability, &[]).map_err(|error| PrepareError::RouteResolution {
+        error,
+        checks: plan_errors
+            .iter()
+            .map(|(adapter, error)| error.skipped(adapter))
+            .collect(),
+    })?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
@@ -1993,11 +2214,13 @@ pub(super) fn prepare_candidates(
         let label = format!("{}/{}", route.adapter, route.model);
         if !eligible(&route.adapter) {
             previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
-            reasons.push(skip(
-                &label,
-                SkipKind::Unavailable,
-                "provider lease unavailable",
+            let mut skipped = skip(&label, SkipKind::Unavailable, "provider updating");
+            skipped.set_cause(provenant_records::RouteExclusionReason::ProviderUpdating);
+            skipped.detail = provenant_records::diagnostic::safe_text(&format!(
+                "provider update in progress for {}; wait for the update to finish or select another eligible route",
+                route.adapter
             ));
+            reasons.push(skipped);
             continue;
         }
         if let Some(spec) = AdapterSpec::get(&route.adapter)
@@ -2229,51 +2452,19 @@ pub(super) fn prepare_candidates(
                 continue;
             }
             previous_outcome = outcome;
-            // An adapter left out of `access` names its confinement error, not the router's denial.
-            let detail = plan_errors
-                .get(route.adapter.as_str())
-                .filter(|_| {
-                    matches!(
-                        reason,
-                        provenant_records::RouteExclusionReason::DisclosureDenied
-                    )
-                })
-                .map_or_else(
-                    || {
-                        route
-                            .extra
-                            .get("account_exclusions")
-                            .and_then(|v| v.as_array())
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(|v| v.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("; ")
-                            })
-                            .unwrap_or_else(|| provenant_routing::exclusion_detail(reason))
-                    },
-                    |error| {
-                        reported_plan_errors.insert(route.adapter.clone());
-                        format!("confinement plan: {error}")
-                    },
-                );
             if matches!(
                 reason,
-                provenant_records::RouteExclusionReason::DisclosureDenied
+                provenant_records::RouteExclusionReason::ConfinementUnavailable
             ) && let Some(error) = plan_errors.get(route.adapter.as_str())
             {
-                let class = match error {
-                    PlanCheckError::Plan(error) => error.boundary_class(),
-                    PlanCheckError::Permission(error) => error.boundary_class(),
-                    PlanCheckError::ReadOnly(error) => error.boundary_class(),
-                    PlanCheckError::SourceHead(_) => {
-                        provenant_records::diagnostic::BoundaryClass::Authority
-                    }
-                };
-                if class != provenant_records::diagnostic::BoundaryClass::None {
-                    reason_boundaries.insert(reasons.len(), class);
-                }
+                reported_plan_errors.insert(route.adapter.clone());
+                reason_boundaries.insert(reasons.len(), error.boundary_class());
+                let mut skipped = error.skipped(&label);
+                // Keep the router's readiness classification alongside the plan fact.
+                skipped.kind = SkipKind::Unavailable;
+                skipped.set_cause(reason.clone());
+                reasons.push(skipped);
+                continue;
             }
             if matches!(
                 reason,
@@ -2290,7 +2481,11 @@ pub(super) fn prepare_candidates(
                     resolve_pacing_source(fact, &route.adapter, &config.origins),
                 );
             }
-            let mut skipped = skip(&label, SkipKind::Unavailable, detail);
+            let mut skipped = skip(
+                &label,
+                SkipKind::Unavailable,
+                provenant_routing::exclusion_detail(reason),
+            );
             skipped.set_cause(reason.clone());
             reasons.push(skipped);
             continue;
@@ -2527,20 +2722,8 @@ pub(super) fn prepare_candidates(
         }) {
             Ok(planned) => planned,
             Err(error) => {
-                let class = match &error {
-                    PlanCheckError::Plan(cause) => cause.boundary_class(),
-                    PlanCheckError::Permission(cause) => cause.boundary_class(),
-                    PlanCheckError::ReadOnly(cause) => cause.boundary_class(),
-                    PlanCheckError::SourceHead(_) => {
-                        provenant_records::diagnostic::BoundaryClass::Authority
-                    }
-                };
-                {
-                    if class != provenant_records::diagnostic::BoundaryClass::None {
-                        reason_boundaries.insert(reasons.len(), class);
-                    }
-                }
-                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                reason_boundaries.insert(reasons.len(), error.boundary_class());
+                reasons.push(error.skipped(&label));
                 continue;
             }
         };

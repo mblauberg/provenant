@@ -193,6 +193,8 @@ pub struct RouteExclusion {
 pub enum RouteExclusionReason {
     Disabled,
     MissingExecutable,
+    /// The provider's exclusive update fence prevented preparation.
+    ProviderUpdating,
     UnknownAvailability,
     StaleAvailability,
     UnknownAccount,
@@ -228,6 +230,10 @@ impl RouteExclusionReason {
             Self::MissingExecutable => (
                 "the selected adapter executable is unavailable",
                 "install the adapter or select an available route",
+            ),
+            Self::ProviderUpdating => (
+                "a provider update is in progress",
+                "wait for the provider update to finish or select another eligible route",
             ),
             Self::UnknownAvailability => (
                 "the selected account's readiness has not been verified",

@@ -254,33 +254,44 @@ fn overlaps_source(
     path.starts_with(source) || (grant.scope == PathScope::Subtree && source.starts_with(path))
 }
 
-/// An explicit access or asset grant must not reopen the live source beside
-/// the pinned view. The existing policy may still grant other project roots.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SourceRootOverlap {
+    #[error("product assets overlap the live graph source checkout")]
+    Assets,
+    #[error("an access grant overlaps the live graph source checkout")]
+    Access,
+    #[error("a system read grant overlaps the live graph source checkout")]
+    SystemRead,
+}
+
+/// Explicit grants must not reopen the live source beside the pinned view.
 pub(super) fn ensure_source_roots(
     source: &std::path::Path,
     access: &super::run::LaneAccess,
     assets: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<(), SourceRootOverlap> {
     use provenant_confinement::permissions::{PathGrant, PathScope};
     let asset = PathGrant {
         path: assets.to_owned(),
         scope: PathScope::Subtree,
     };
-    if overlaps_source(source, &asset)
-        || access
-            .read_roots
-            .iter()
-            .chain(&access.write_roots)
-            .chain(&access.inputs_root)
-            .any(|path| {
-                overlaps_source(
-                    source,
-                    &PathGrant {
-                        path: path.clone(),
-                        scope: PathScope::Subtree,
-                    },
-                )
-            })
+    if overlaps_source(source, &asset) {
+        return Err(SourceRootOverlap::Assets);
+    }
+    if access
+        .read_roots
+        .iter()
+        .chain(&access.write_roots)
+        .chain(&access.inputs_root)
+        .any(|path| {
+            overlaps_source(
+                source,
+                &PathGrant {
+                    path: path.clone(),
+                    scope: PathScope::Subtree,
+                },
+            )
+        })
         || access.attachments.iter().any(|path| {
             overlaps_source(
                 source,
@@ -290,12 +301,15 @@ pub(super) fn ensure_source_roots(
                 },
             )
         })
-        || (cfg!(target_os = "macos")
-            && ["/usr/share", "/private/var/db/timezone"]
-                .iter()
-                .any(|path| source.starts_with(path)))
     {
-        return Err("an access grant overlaps the live graph source checkout".into());
+        return Err(SourceRootOverlap::Access);
+    }
+    if cfg!(target_os = "macos")
+        && ["/usr/share", "/private/var/db/timezone"]
+            .iter()
+            .any(|path| source.starts_with(path))
+    {
+        return Err(SourceRootOverlap::SystemRead);
     }
     Ok(())
 }

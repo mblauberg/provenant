@@ -628,6 +628,17 @@ fn fixture() -> Result {
         format!(
             "{lens}\nwrite denied: {denied}\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n{verdict}{DONE_FENCE}"
         )
+    } else if prompt.contains("fixture commit source verdict") {
+        assert_eq!(
+            fs::read_to_string("review-subject.txt")?,
+            "pinned review subject\n"
+        );
+        assert!(fs::write("review-write-sentinel", b"forbidden").is_err());
+        // Session writes above and temporary writes here must remain available
+        // when the provider's working directory is an immutable source view.
+        let scratch = PathBuf::from(std::env::var_os("TMPDIR").ok_or("TMPDIR")?);
+        fs::write(scratch.join("review-started"), b"started")?;
+        format!("VERDICT: PASS{DONE_FENCE}")
     } else if prompt.contains("Review commit ") {
         let lens = prompt
             .lines()
@@ -2772,6 +2783,9 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let output = rig.command(&["output", &target, "--json"])?;
     let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(code(&output), 0, "{data}");
+    assert!(data["data"]["changed_files"].is_null(), "{data}");
+    let human = rig.command(&["output", &target])?;
+    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("changed files: unavailable"));
     assert_eq!(data["data"]["state"], "failed");
     assert_eq!(
         data["data"]["provider_error"],
@@ -3506,6 +3520,29 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         assert_eq!(head.stdout.bytes, b"edited by lane shell\n");
         let run = lane["run_id"].as_str().ok_or("run")?;
         let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+        let output = rig.command(&["output", id, "--json"])?;
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(code(&output), 0, "{data}");
+        let paths = data["data"]["changed_files"]
+            .as_array()
+            .ok_or("changed files")?;
+        let paths = paths
+            .iter()
+            .map(|path| {
+                let path: provenant_records::StructuredPathWire =
+                    serde_json::from_value(path.clone())?;
+                path.to_path_buf().map_err(Into::into)
+            })
+            .collect::<Result<Vec<std::path::PathBuf>>>()?;
+        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+            assert!(paths.contains(&tree.join(name)), "{paths:?}");
+        }
+        let human = rig.command(&["output", id])?;
+        let human = String::from_utf8_lossy(&human.stdout.bytes);
+        assert!(
+            human.contains(&tree.join("AGENTS.md").display().to_string()),
+            "{human}"
+        );
         let attempt = rig.state.join("runs").join(run).join("attempts").join(id);
         let result = fs::read_to_string(attempt.join("result.md"))?;
         assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
@@ -3810,10 +3847,7 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
 }
 
 #[cfg(target_os = "macos")]
-fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
-    if !graph_fixture_available()? {
-        return Ok(());
-    }
+fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
     let mut rig = TestRig::new()?;
     let _cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
@@ -3845,16 +3879,60 @@ fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
         "1s",
     )?;
     assert!(started.elapsed() < std::time::Duration::from_secs(8));
-    let run = lane["run_id"].as_str().ok_or("run id")?;
-    let lanes = rig.command(&["status", run, "--wait=60s", "--json"])?;
-    assert_eq!(code(&lanes), 0, "{lanes:?}");
-    let output = rig.command(&["output", run, "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stdout.bytes).contains("lease-free provider started"),
-        "{output:?}"
+    assert_eq!(lane["state"], "rejected", "{lane}");
+    assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+    assert!(lane["started_at"].is_null(), "{lane}");
+    assert!(lane["applied_route"].is_null(), "{lane}");
+    assert_eq!(
+        lane["skipped_routes"][0]["cause"], "provider_updating",
+        "{lane}"
     );
     drop(lock);
+    Ok(())
+}
+
+fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = policy_codex_fixture()?;
+    let assets = rig.root.join("product-assets");
+    fs::create_dir(&assets)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.project.join("review-subject.txt"),
+        "pinned review subject\n",
+    )?;
+    provenant_os::fixture::run_git(&rig.project, &["add", "review-subject.txt"])?;
+    provenant_os::fixture::run_git(&rig.project, &["commit", "-qm", "fixture subject"])?;
+    let head = provenant_os::fixture::run_git(&rig.project, &["rev-parse", "HEAD"])?;
+    let head = std::str::from_utf8(&head)?.trim();
+    let lane = run_graph_provider(
+        &rig,
+        "codex-commit-source",
+        json!({
+            "id":"review", "use":"task", "brief":"fixture commit source verdict",
+            "access":"read_only", "source":{"type":"commit", "commit":head},
+            "route":{"adapter":"codex", "model":"gpt-6-luna", "effort":"low"}
+        }),
+    )?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let result = rig
+        .state
+        .join("runs")
+        .join(lane["run_id"].as_str().ok_or("run id")?)
+        .join("attempts")
+        .join(lane["attempt_id"].as_str().ok_or("attempt id")?)
+        .join("result.md");
+    assert!(
+        fs::read_to_string(result)?.contains("VERDICT: PASS"),
+        "{lane}"
+    );
+    assert!(!rig.project.join("review-write-sentinel").exists());
+    cleanup.disarm();
     Ok(())
 }
 
@@ -3978,8 +4056,8 @@ fn main() -> ExitCode {
             ),
             #[cfg(target_os = "macos")]
             (
-                "graph_launch_proceeds_when_provider_update_is_busy",
-                graph_launch_proceeds_when_provider_update_is_busy,
+                "graph_launch_reports_provider_update_after_wait_budget",
+                graph_launch_reports_provider_update_after_wait_budget,
             ),
             (
                 "graph_settlement_records_a_failed_advance_for_status",
@@ -4029,6 +4107,10 @@ fn main() -> ExitCode {
             (
                 "graph_host_native_launch_uses_the_provider_contract",
                 graph_host_native_launch_uses_the_provider_contract,
+            ),
+            (
+                "graph_codex_commit_source_starts_and_returns_a_verdict",
+                graph_codex_commit_source_starts_and_returns_a_verdict,
             ),
             (
                 "graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit",

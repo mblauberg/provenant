@@ -2,7 +2,7 @@
 use super::*;
 use provenant_os::fs::Directory;
 use provenant_supervisor::{Holder, custody, machine::StopReason};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Bound to the admitted route, never provider-controlled output.
 #[derive(Default)]
@@ -110,7 +110,47 @@ pub struct HostHolder<'a> {
     stdout_frames: QuotaFrames,
     stderr_frames: QuotaFrames,
     fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
+    fabric: OnceLock<BoundFabric>,
     settled: Mutex<Option<run::HolderContext>>,
+}
+
+/// Resolve host identity and configuration once, sharing the context with the
+/// relay. Only the graph journal is reread during census, including after exit.
+struct BoundFabric {
+    holder_context: Vec<u8>,
+    source: Result<Option<HolderFabric>, String>,
+}
+struct HolderFabric {
+    context: Arc<crate::fabric::Context>,
+    reference: String,
+}
+impl HolderFabric {
+    fn open(raw: &[u8]) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let context: run::HolderContext = serde_json::from_slice(raw)?;
+        let Some(launch) = &context.launch else {
+            return Ok(None);
+        };
+        let mut inputs = provenant_core::RootInputs::new(
+            context.roots.home.clone(),
+            context.roots.checkout.clone(),
+        );
+        inputs.state_dir = Some(launch.configuration_root.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
+        let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, directory)?;
+        if ctx.identity.project != context.project_id {
+            return Err("Fabric custody project mismatch".into());
+        }
+        let reference = format!("{}/{}", ctx.identity.host, context.attempt_id);
+        ctx.identity.inbox = provenant_fabric_runtime::identity::Address::new(
+            ctx.identity.host,
+            &format!("lane-{}", context.attempt_id),
+        )?;
+        Ok(Some(Self {
+            context: Arc::new(ctx),
+            reference,
+        }))
+    }
 }
 impl<'a> HostHolder<'a> {
     pub fn new(inner: &'a dyn Holder) -> Self {
@@ -129,6 +169,7 @@ impl<'a> HostHolder<'a> {
                 ..Default::default()
             },
             fabric_relay: Mutex::new(None),
+            fabric: OnceLock::new(),
             settled: Mutex::new(None),
         }
     }
@@ -171,6 +212,22 @@ impl<'a> HostHolder<'a> {
             .lock()
             .map_err(|_| custody::CustodyError::InvalidRecord)?
             .take())
+    }
+    fn fabric(&self, raw: &[u8]) -> custody::Result<Option<&HolderFabric>> {
+        let bound = self.fabric.get_or_init(|| BoundFabric {
+            holder_context: raw.to_vec(),
+            source: HolderFabric::open(raw).map_err(|error| error.to_string()),
+        });
+        // A holder belongs to one supervisor. Never reuse its identity for a
+        // different attempt, even if a caller mistakenly supplies other bytes.
+        if bound.holder_context != raw {
+            return Err(custody::CustodyError::InvalidRecord);
+        }
+        bound
+            .source
+            .as_ref()
+            .map(Option::as_ref)
+            .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error.clone())))
     }
     fn stop(&self) -> custody::Result<()> {
         drop(
@@ -224,23 +281,14 @@ fn live_graph_children(
 impl Holder for HostHolder<'_> {
     fn has_live_children(&self, raw: &[u8]) -> custody::Result<bool> {
         let read = || -> Result<bool, Box<dyn std::error::Error>> {
-            let context: run::HolderContext = serde_json::from_slice(raw)?;
-            let Some(launch) = &context.launch else {
+            let Some(fabric) = self.fabric(raw)? else {
                 return Ok(false);
             };
-            let mut inputs = provenant_core::RootInputs::new(
-                context.roots.home.clone(),
-                context.roots.checkout.clone(),
-            );
-            inputs.state_dir = Some(launch.configuration_root.clone());
-            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let directory = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
-            let ctx = crate::fabric::Context::open(roots, &context.roots.home, directory)?;
-            if ctx.identity.project != context.project_id {
-                return Err("Fabric custody project mismatch".into());
-            }
-            let reference = format!("{}/{}", ctx.identity.host, context.attempt_id);
-            live_graph_children(&ctx.roots.state, context.project_id, &reference)
+            live_graph_children(
+                &fabric.context.roots.state,
+                fabric.context.identity.project,
+                &fabric.reference,
+            )
         };
         read().map_err(|error| custody::CustodyError::Io(std::io::Error::other(error.to_string())))
     }
@@ -299,15 +347,16 @@ impl Holder for HostHolder<'_> {
                 recorded: false,
             });
         }
-        if context.launch.is_none() {
+        let Some(fabric) = self.fabric(raw)? else {
             return Ok(());
-        }
+        };
         *self
             .fabric_relay
             .lock()
             .map_err(|_| custody::CustodyError::InvalidRecord)? = Some(
             provider::start_fabric_relay(
                 &context,
+                Arc::clone(&fabric.context),
                 self.graph_wake.clone(),
                 self.graph_read.clone(),
             )
@@ -542,17 +591,69 @@ mod tests {
     #[test]
     fn custody_reads_live_graph_children_after_parent_exit()
     -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::tests::reexec_test_in_lane(
+            "run::holder::tests::custody_reads_live_graph_children_after_parent_exit",
+        )? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph::{
             FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
         };
         use serde_json::json;
         let temp = tempfile::tempdir()?;
         let clock = SystemClock::new();
-        let (context, _) = child_fixture(temp.path(), &clock)?;
-        let state = &context.state_root;
-        let project = context.project_id;
-        std::fs::create_dir_all(state.as_path())?;
-        assert!(!live_graph_children(state, project, "host/parent-attempt")?);
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let checkout = root.join("checkout");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&checkout)?;
+        let mut inputs = RootInputs::new(home.clone(), checkout.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let ctx = crate::fabric::Context::open(roots.clone(), &home, &checkout)?;
+        let state = &roots.state;
+        let project = ctx.identity.project;
+        let holder_context = run::HolderContext {
+            schema_version: 1,
+            roots: run::RootSeed {
+                home,
+                checkout: checkout.clone(),
+                state_root: state.as_path().into(),
+            },
+            project_id: project,
+            actor_id: ActorId::from_bytes([2; 16]),
+            run_id: RunId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            sealed: None,
+            launch: Some(run::HostLaunchContext::from_environment(
+                state.as_path(),
+                &checkout,
+                provenant_os::git::git_executable().ok_or("Git unavailable")?,
+            )),
+        };
+        struct UnusedHolder;
+        impl Holder for UnusedHolder {
+            fn admit(&self, _: &[u8], _: &Directory) -> custody::Result<()> {
+                Err(custody::CustodyError::InvalidRecord)
+            }
+            fn terminal(
+                &self,
+                _: &[u8],
+                _: &Directory,
+                _: &custody::ExitObservation,
+                _: &custody::Recovery,
+            ) -> custody::Result<()> {
+                Err(custody::CustodyError::InvalidRecord)
+            }
+        }
+        let holder = HostHolder::new(&UnusedHolder);
+        let raw = serde_json::to_vec(&holder_context)?;
+        let reference = format!("{}/{}", ctx.identity.host, holder_context.attempt_id);
+        assert!(!holder.has_live_children(&raw)?);
+        // Once resolved, census must not need Git, the checkout or config again.
+        std::fs::rename(&checkout, root.join("moved-checkout"))?;
+        std::fs::write(state.as_path().join("config.toml"), b"invalid = [")?;
         let cancel = CancelToken::new();
         let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
         let mut journal = FileJournal::open(state, project, "custody", budget, &cancel, &clock)?;
@@ -579,14 +680,14 @@ mod tests {
                 "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
                     "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0},
-                    "route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/parent-attempt",
+                    "route":{"alias":"senior"},"state":"terminal","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
                 {"id":"parental--other","state":"running","attempts":[]}]
             }))?;
             journal.save(&checkpoint)?;
             assert_eq!(
-                live_graph_children(state, project, "host/parent-attempt")?,
+                holder.has_live_children(&raw)?,
                 matches!(status, "pending" | "running"),
                 "{status}"
             );
@@ -601,7 +702,7 @@ mod tests {
                 .join("graph-custody.json"),
             b"broken checkpoint",
         )?;
-        assert!(live_graph_children(state, project, "host/parent-attempt").is_err());
+        assert!(holder.has_live_children(&raw).is_err());
         std::fs::write(
             state
                 .as_path()
@@ -610,7 +711,13 @@ mod tests {
                 .join("graph-custody.json"),
             br#"{"checkpoint":{"nodes":[{"state":"succeeded"}]}}"#,
         )?;
-        assert!(!live_graph_children(state, project, "host/parent-attempt")?);
+        assert!(!holder.has_live_children(&raw)?);
+        let mut other = holder_context;
+        other.attempt_id = AttemptId::from_bytes([5; 16]);
+        assert!(matches!(
+            holder.fabric(&serde_json::to_vec(&other)?),
+            Err(custody::CustodyError::InvalidRecord)
+        ));
         Ok(())
     }
 

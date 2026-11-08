@@ -1056,7 +1056,9 @@ fn account_reason<'q>(
             RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
         )
     });
-    if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
+    // Missing access means preparation did not establish confinement. Only an
+    // explicit disclosure refusal may be reported as a disclosure-policy denial.
+    if reason.is_none() && access.is_some_and(|a| a.disclosure_ref.is_empty()) {
         reason = Some(RouteExclusionReason::DisclosureDenied);
     }
     if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {

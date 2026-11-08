@@ -1,7 +1,7 @@
 use super::*;
 use crate::Mode;
 
-fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+pub(super) fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
     if !crate::fabric::in_lane() {
         return Ok(false);
     }

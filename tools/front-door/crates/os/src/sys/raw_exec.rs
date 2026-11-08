@@ -155,7 +155,14 @@ pub(super) fn child_exited(pid: u32) -> io::Result<bool> {
 
 impl OwnedPid {
     pub fn spawn(permit: Permit, spec: SpawnSpec<'_>) -> io::Result<Self> {
-        Self::spawn_with_setup(permit, spec, |result| {
+        Self::spawn_with_watchdog(permit, spec, None)
+    }
+    pub(crate) fn spawn_with_watchdog(
+        permit: Permit,
+        spec: SpawnSpec<'_>,
+        watchdog: Option<std::time::Duration>,
+    ) -> io::Result<Self> {
+        Self::spawn_with_setup_inner(permit, spec, watchdog, |result| {
             if let Some(pipe) = &result.stdin {
                 nonblocking(pipe)?;
             }
@@ -171,6 +178,14 @@ impl OwnedPid {
     pub fn spawn_with_setup(
         permit: Permit,
         spec: SpawnSpec<'_>,
+        setup: impl FnOnce(&mut Self) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        Self::spawn_with_setup_inner(permit, spec, None, setup)
+    }
+    fn spawn_with_setup_inner(
+        permit: Permit,
+        spec: SpawnSpec<'_>,
+        watchdog: Option<std::time::Duration>,
         setup: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<Self> {
         let profile = spec
@@ -225,11 +240,12 @@ impl OwnedPid {
             environment = pipe.environment(input, &environment);
             pass.push(pipe.fd());
         }
-        super::child::configure_command(
+        super::child::configure_command_with_watchdog(
             &mut command,
             &pass,
             Some(&environment),
             spec.process_group,
+            watchdog,
         )?;
         let child = command.spawn().map_err(|error| {
             if profile.is_some() {

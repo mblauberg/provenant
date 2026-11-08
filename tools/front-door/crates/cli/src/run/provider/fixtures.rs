@@ -84,29 +84,17 @@ pub fn prepare_fixture(
 /// The attempt determines the actor, regardless of request or environment labels.
 pub(crate) fn start_fabric_relay(
     context: &run::HolderContext,
+    ctx: std::sync::Arc<crate::fabric::Context>,
     graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
     graph_read: Option<std::sync::Arc<super::super::holder::GraphRead>>,
 ) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
     use provenant_core::{CancelToken, Clock};
-    use provenant_fabric_runtime::{coordination::CoordinationService, identity::Address};
+    use provenant_fabric_runtime::coordination::CoordinationService;
     let launch = context
         .launch
         .as_ref()
         .ok_or("host launch context missing")?;
-    let mut inputs =
-        provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
-    inputs.state_dir = Some(launch.configuration_root.clone());
-    let roots = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|e| e.to_string())?;
     let relay_cwd = launch.graph_directory.as_deref().unwrap_or(&launch.cwd);
-    let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, relay_cwd)
-        .map_err(|e| e.to_string())?;
-    if ctx.identity.project != context.project_id {
-        return Err("Fabric relay project mismatch".into());
-    }
-    ctx.identity.inbox = Address::new(ctx.identity.host, &format!("lane-{}", context.attempt_id))
-        .map_err(|e| e.to_string())?;
     let home = context.roots.home.clone();
     let cwd = relay_cwd.to_path_buf();
     let clock = provenant_os::clock::SystemClock::new();
@@ -128,7 +116,6 @@ pub(crate) fn start_fabric_relay(
         )
         .map_err(|e| e.to_string())?,
     );
-    let ctx = std::sync::Arc::new(ctx);
     let graph_ctx = std::sync::Arc::clone(&ctx);
     let attempt = context.attempt_id.to_string();
     let graph_clock = provenant_os::clock::SystemClock::new();

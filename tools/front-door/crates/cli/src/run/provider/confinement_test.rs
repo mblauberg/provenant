@@ -50,3 +50,129 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
     assert!(target_seeds_protected(Path::new("/state"), &[]));
     Ok(())
 }
+
+#[test]
+fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::{AuthenticationProfile, ProviderProfile};
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let source = base.join("repo");
+    let assets = base.join("assets");
+    let scratch = state.join("runs/run/attempts/attempt/tmp/candidate-0");
+    let private_state = state.join("runs/run/attempts/attempt/provider-state/candidate-0");
+    let view = state.join("runs/run/attempts/attempt/tmp/source-snapshot");
+    for path in [
+        &home,
+        &state,
+        &source,
+        &assets,
+        &scratch,
+        &private_state,
+        &view,
+    ] {
+        provenant_os::fixture::private_state_dir(path)?;
+    }
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let grant = |path: &Path| PathGrant {
+        path: path.into(),
+        scope: PathScope::Subtree,
+    };
+    for adapter in ["codex", "claude", "cursor", "agy", "opencode", "command"] {
+        let mut task_writes = None;
+        for kind in ["task", "live", "commit"] {
+            let mut access = run::LaneAccess::default();
+            if kind != "task" {
+                access.source_root = Some(source.clone());
+                access.source_live = kind == "live";
+            }
+            let cwd = if kind == "commit" { &view } else { &source };
+            let request = confinement_request(
+                ProjectId::from_bytes([1; 16]),
+                ConfinementRoots {
+                    host_roots: Some(&roots),
+                    cwd,
+                    home: &home,
+                    state: &state,
+                    credential_roots: &[],
+                    github_roots: &[],
+                    protected_worktrees: &[],
+                    scratch: &scratch,
+                    private_state: &private_state,
+                    assets: &assets,
+                    prompt_file: None,
+                },
+                None,
+                &access,
+                &Default::default(),
+                adapter,
+                false,
+            )?;
+            let plan = ConfinedPlan::new(request)?;
+            let permissions = plan.permissions();
+            let mandatory = permissions.policy.as_ref().ok_or("policy")?.mandatory();
+            let expected = if kind == "commit" {
+                vec![grant(&view)]
+            } else {
+                vec![]
+            };
+            assert_eq!(mandatory.state_reads(), expected, "{adapter}/{kind}");
+            assert!(mandatory.state_exec().is_empty(), "{adapter}/{kind}");
+            assert_eq!(permissions.private_state, Some(grant(&private_state)));
+            assert_eq!(permissions.scratch, grant(&scratch));
+
+            let mut profile = ProviderProfile {
+                spec: Default::default(),
+                observations: Default::default(),
+            };
+            if let Some(mechanism) = &permissions.selected_authentication {
+                profile.spec.authentication.push(AuthenticationProfile {
+                    mechanism: mechanism.clone(),
+                    roots: vec![],
+                    in_place_writes: vec![],
+                    keychain: None,
+                });
+            }
+            let writes = provenant_confinement::write_grants(permissions, &profile);
+            if let Some(task) = &task_writes {
+                assert_eq!(&writes, task, "{adapter}/{kind}");
+            } else {
+                task_writes = Some(writes);
+            }
+            let rendered =
+                provenant_confinement::permissions::snapshot::render(permissions, &profile, &home)?;
+            if kind == "commit" {
+                let state_read = rendered
+                    .lines()
+                    .find(|line| {
+                        line.starts_with("(deny file-read* (require-all")
+                            && line.contains(state.to_str().unwrap())
+                    })
+                    .ok_or("state read denial")?;
+                assert!(
+                    state_read.contains(&format!("(require-not (subpath \"{}\"))", view.display()))
+                );
+                assert!(rendered.contains(&format!(
+                    "(deny file-write* (subpath \"{}\"))",
+                    view.display()
+                )));
+                for line in rendered.lines().filter(|line| {
+                    line.starts_with("(deny file-write* (require-all")
+                        || line.starts_with("(deny process-exec (require-all")
+                }) {
+                    assert!(!line.contains(view.to_str().unwrap()), "{line}");
+                }
+                assert!(rendered.contains(&format!(
+                    "(deny file-read* (subpath \"{}/.ssh\"))",
+                    home.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}

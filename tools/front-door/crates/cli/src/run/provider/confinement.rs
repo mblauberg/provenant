@@ -229,6 +229,12 @@ pub(super) fn confinement_request(
         roots.github_roots,
         roots.protected_worktrees,
     )?;
+    if writer.is_none() && access.source_root.is_some() && !access.source_live {
+        // The host materialises a commit source beside candidate scratch under
+        // state. Its ordinary read root cannot override the state denial, and
+        // every adapter starts in this cwd; keep the view immutable.
+        mandatory.add_state_read(grant(roots.cwd))?;
+    }
     for path in roots
         .prompt_file
         .into_iter()
