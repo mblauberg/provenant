@@ -857,3 +857,55 @@ fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
     .unwrap();
     assert!(run.checkpoint.successful());
 }
+
+fn settle_single(node: GraphNode, result: &str) -> NodeProgress {
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, result)].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    run.checkpoint.nodes[0].clone()
+}
+
+#[test]
+fn writer_without_findings_contract_settles_empty_result_without_findings_warning() {
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/writer".into());
+    let settled = settle_single(writer, "");
+    assert_eq!(settled.state, NodeState::Succeeded);
+    assert!(
+        !settled
+            .outputs
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("findings block"))
+    );
+}
+
+#[test]
+fn findings_required_and_review_nodes_still_fail_on_a_missing_block() {
+    let mut required = node("required", route("first"));
+    required.require_findings = true;
+    let settled = settle_single(required, "");
+    assert_eq!(settled.state, NodeState::Failed);
+    assert_eq!(settled.advance_error_code.as_deref(), Some("findings_required"));
+
+    let mut lens = node("lens", route("first"));
+    lens.role = Some("lens.security".into());
+    let settled = settle_single(lens, "prose only");
+    assert!(
+        settled
+            .outputs
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("findings block"))
+    );
+}

@@ -753,8 +753,10 @@ impl Registry<'_> {
         };
         let mut has_usage = false;
         let mut early_stop = false;
+        let mut result_fallback = false;
         for event in &events {
             match event {
+                ProviderEvent::ResultFallback => result_fallback = true,
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
                 ProviderEvent::MessageStart => {
                     if !decoded.result.is_empty() && !decoded.result.ends_with('\n') {
@@ -882,6 +884,11 @@ impl Registry<'_> {
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
+        }
+        if result_fallback && decoded.outcome == run::Outcome::Succeeded {
+            decoded.reason.get_or_insert_with(|| {
+                "result event was empty; used the last non-empty assistant message".into()
+            });
         }
         if decoded.outcome == run::Outcome::Succeeded && early_stop {
             decoded.terminal_cause = Some(run::TerminalCause::ProviderEarlyStop);

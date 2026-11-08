@@ -288,6 +288,20 @@ pub(super) fn apply_attempt_observation(
                     }
                 }
                 outputs.warnings.truncate(MAX_WARNINGS);
+                // A node that neither promises findings nor reviews has no block to miss.
+                if !node.require_findings
+                    && node.dispositions.is_empty()
+                    && !template::review_node(node)
+                    && node.kind != Some(NodeKind::Synthesise)
+                    && !node
+                        .inputs
+                        .iter()
+                        .any(|input| input.outputs.contains(&OutputKind::Findings))
+                {
+                    outputs
+                        .warnings
+                        .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
+                }
                 if outcome == AttemptOutcome::UsageLimited {
                     outputs.findings_available = Some(false);
                     outputs
