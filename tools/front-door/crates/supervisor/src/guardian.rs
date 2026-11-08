@@ -1075,6 +1075,9 @@ impl Driver<'_> {
         let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
+        // Try once at launch, then only after readiness. A failed reactor
+        // retains the former nonblocking IO fallback.
+        let mut io_ready = true;
         loop {
             let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             // WNOWAIT always runs before cancellation, signals or deadlines.
@@ -1106,8 +1109,10 @@ impl Driver<'_> {
                     );
                 }
             }
-            out.read(&mut child.stdout);
-            err.read(&mut child.stderr);
+            if io_ready {
+                out.read(&mut child.stdout);
+                err.read(&mut child.stderr);
+            }
             let stdout_bytes = out.outcome().total_bytes;
             let stderr_bytes = err.outcome().total_bytes;
             let output_progress =
@@ -1139,7 +1144,7 @@ impl Driver<'_> {
             } else {
                 false
             };
-            if let Some(stdin) = child.stdin.as_mut() {
+            if io_ready && let Some(stdin) = child.stdin.as_mut() {
                 if input_offset == input.len() {
                     child.stdin = None;
                 } else {
@@ -1686,6 +1691,7 @@ impl Driver<'_> {
             }
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
                 Ok(event) => {
+                    io_ready = event.io_ready;
                     cancel_pending |= event.cancel_changed;
                     cancel_watched &= !event.cancel_watch_failed;
                     signal_pending |= event.supervisor_signal;
@@ -1701,6 +1707,7 @@ impl Driver<'_> {
                     cancel_watched = false;
                     census_event_failed = true;
                     census_reactor_failed = true;
+                    io_ready = true;
                     provenant_os::sys::wait_pause(Duration::from_millis(CENSUS_INTERVAL_MS));
                     if !reactor_warning_recorded {
                         warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");
