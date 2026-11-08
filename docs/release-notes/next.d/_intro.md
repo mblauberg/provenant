@@ -1,1 +1,1 @@
-A writer's result no longer reports an interim message as its answer, budget stops leave a handoff, and cloud placement submits on real hosts: Claude through a pseudo-terminal, and Codex through an optional thread-API client. There are no breaking changes.
+Claude cloud placement from a graph now submits under the pseudo-terminal it needs, and a cloud job whose submission outcome is unknown can be settled with `provenant reconcile --abandon`. There are no breaking changes.
