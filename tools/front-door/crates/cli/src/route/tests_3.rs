@@ -741,3 +741,86 @@
         );
         Ok(())
     }
+
+    #[test]
+    fn admission_redraw_onto_an_unready_member_is_returned_for_preparation()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        // The opencode Go member is ready to the resolver, but the monthly
+        // allowance floor refuses it only at admission. The other member has
+        // no availability, so the redraw lands on an unready route.
+        let fixture = ReviewFixture::new()?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n[domains.routing.pools]\nprincipal=[{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1,efforts=[]},{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let opencode = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/provider".into(),
+            version: "fixture".into(),
+            fixture_ref: "fixture".into(),
+            catalogue_revision: super::Catalogue::bundled()?.revision().into(),
+            account_key: Some("opencode-account".into()),
+            observed_models: vec!["opencode-go/deepseek-v4.1-flash".into()],
+            observed_unix_seconds: fixture.now,
+            expires_unix_seconds: fixture.now + 300,
+            last_update: None,
+        };
+        let access = [
+            provenant_routing::AccessContext {
+                adapter: "opencode",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+            provenant_routing::AccessContext {
+                adapter: "codex",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+        ];
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("principal".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let route = super::resolve_dispatch_excluding(
+            &request,
+            &fixture.roots,
+            super::REGISTRY,
+            None,
+            ("fixture", 0),
+            std::slice::from_ref(&opencode),
+            &access,
+            "fixture",
+            &[],
+            &[],
+            None,
+        )?;
+        // The redraw is not an error and not a Ready route: preparation
+        // re-probes the unready member and decides whether it may launch.
+        assert_eq!(route.adapter, "codex");
+        assert!(
+            matches!(route.readiness, RouteReadiness::Unavailable { .. }),
+            "{:?}",
+            route.readiness
+        );
+        let receipt = route.pool_selection.ok_or("pool selection")?;
+        assert_eq!(receipt.redraws.len(), 1, "{receipt:?}");
+        assert_eq!(
+            receipt.redraws[0].rejected_pick,
+            "opencode/opencode-go/deepseek-v4.1-flash"
+        );
+        assert_eq!(
+            receipt.redraws[0].extra.get("cause"),
+            Some(&serde_json::json!("admission_refused"))
+        );
+        Ok(())
+    }

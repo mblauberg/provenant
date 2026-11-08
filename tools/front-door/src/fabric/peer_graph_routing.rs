@@ -819,6 +819,18 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
                     let selected = provenant_cli::route::fixture_resolve_dispatch(&route, &fixture.roots, None,
                         (operation.operation_id.as_str(), 0), &availability, &access, "fixture",
                         Some((excluded_families, *require_distinct, preferred_families)), &rules)?;
+                    // The fixture launches its pick synthetically, so an unready
+                    // redraw must fail here rather than publish as a launched route.
+                    if !matches!(
+                        selected.readiness,
+                        provenant_records::RouteReadiness::Ready { .. }
+                    ) {
+                        return Err(format!(
+                            "fixture selected an unready route: {:?}",
+                            selected.readiness
+                        )
+                        .into());
+                    }
                     let model = format!("{}/{}", selected.adapter, selected.model);
                     let family = provenant_cli::run::model_family(&model).ok_or("model family")?;
                     assert_ne!(family, "openai");
