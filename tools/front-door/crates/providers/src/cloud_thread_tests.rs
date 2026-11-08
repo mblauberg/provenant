@@ -49,6 +49,7 @@ fn job() -> RemoteJob {
         requested_model: "requested-model".into(),
         requested_effort: Some("high".into()),
         state: RemoteState::Running,
+        submit_error: None,
     }
 }
 
