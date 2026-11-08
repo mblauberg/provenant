@@ -3324,11 +3324,13 @@ impl BoundGraphOwner<'_> {
                 ),
                 false,
             )
-            .map_err(|_| FacadeError::DispatchRefused {
+            .map_err(|error| FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,
-                reason: "cloud submission or observation failed; inspect the cloud job state"
-                    .into(),
+                reason: format!(
+                    "cloud submission or observation failed: {}",
+                    provenant_confinement::redact::bounded_line(&error, 600)
+                ),
             })? {
                 return Ok(observation);
             }

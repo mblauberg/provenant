@@ -162,6 +162,20 @@ impl provenant_providers::cloud_cli::CloudCli for BudgetCli<'_> {
             .ok_or("cloud graph tick timed out")?;
         provenant_providers::cloud_cli::CloudCli::run(&mut self.inner, program, args, stdin)
     }
+    fn submit(
+        &mut self,
+        program: &str,
+        args: &[&str],
+        stdin: Option<&str>,
+        tty: bool,
+    ) -> Result<String, String> {
+        self.inner.timeout = self
+            .deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or("cloud graph tick timed out")?;
+        provenant_providers::cloud_cli::CloudCli::submit(&mut self.inner, program, args, stdin, tty)
+    }
 }
 
 /// The production graph edge selects a transport from the sealed placement.
@@ -224,5 +238,50 @@ pub fn installed(
             "cloud target {} has unsupported provider {}",
             placement.target, placement.provider
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    use provenant_providers::cloud_cli::CloudCli;
+
+    struct PtyExecutor;
+    impl Executor for PtyExecutor {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[0], "script");
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream {
+                    bytes: b"Resume with: claude --teleport session_123\n".to_vec(),
+                    ..Default::default()
+                },
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    #[test]
+    fn budget_submit_forwards_pty_and_identity() {
+        let mut cli = BudgetCli {
+            inner: provenant_providers::cloud_cli::InstalledCloudCli {
+                executor: &PtyExecutor,
+                cwd: ".".into(),
+                timeout: std::time::Duration::from_secs(10),
+            },
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        };
+        let output = cli.submit("client", &["--cloud"], None, true).unwrap();
+        assert_eq!(
+            provenant_providers::cloud_cli::parse_identity(&output).unwrap(),
+            "session_123"
+        );
     }
 }

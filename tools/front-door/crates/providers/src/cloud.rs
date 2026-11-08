@@ -416,6 +416,11 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
                 store.save(&job).map_err(CloudJobError::Store)?;
                 return Ok(job);
             }
+            let detail = provider
+                .failure_detail(&error)
+                .unwrap_or_else(|| "submission outcome unknown".into());
+            job.submit_error = Some(provenant_confinement::redact::bounded_line(&detail, 600));
+            store.save(&job).map_err(CloudJobError::Store)?;
             return Err(CloudJobError::SubmitUnknown(error));
         }
     };
@@ -636,7 +641,7 @@ mod lifecycle_tests {
         ));
         let saved = store.saved.unwrap();
         assert_eq!(saved.state, RemoteState::Submitting);
-        assert_eq!(saved.submit_error, None);
+        assert_eq!(saved.submit_error.as_deref(), Some("no environment"));
     }
 
     #[test]
