@@ -1,1 +1,1 @@
-Writer lanes launch again on projects whose `writer_writes` names a directory inside another checkout, and named routes now try their remaining members when the first is excluded before launch. There are no breaking changes.
+Claude writer lanes that commit but end on a tool call no longer settle as failed, hosted Claude cloud placement no longer needs an environment, and invalid graph input names the field to fix. There are no breaking changes.
