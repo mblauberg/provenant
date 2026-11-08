@@ -461,6 +461,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
         let mut recovered = job.clone();
         recovered.remote_id = id;
         recovered.state = RemoteState::Running;
+        recovered.submit_error = None;
         store.save(&recovered).map_err(CloudJobError::Store)?;
         *job = recovered;
     }

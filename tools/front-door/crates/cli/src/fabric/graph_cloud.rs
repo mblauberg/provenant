@@ -271,6 +271,7 @@ mod tests {
         }
     }
     #[test]
+    #[allow(clippy::disallowed_methods)] // BudgetCli takes a real deadline.
     fn budget_submit_forwards_pty_and_identity() {
         let mut cli = BudgetCli {
             inner: provenant_providers::cloud_cli::InstalledCloudCli {

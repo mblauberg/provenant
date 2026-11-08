@@ -103,8 +103,8 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     cloud_seen = true;
                     let cloud = cloud_owner::load(&session.store, id, &call)
                         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
-                    let observed = match cloud {
-                        Some(job) => cloud_owner::observe_installed(edge.roots, &session.store, id, &job, &call, edge.cwd, true),
+                    let observed = match &cloud {
+                        Some(job) => cloud_owner::observe_installed(edge.roots, &session.store, id, job, &call, edge.cwd, true),
                         None => Err("cloud submission identity is not recorded; cancellation is unconfirmed".into()),
                     };
                     match observed {
@@ -115,11 +115,32 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                         }
                         Err(error) => {
                             status = Status::Failed;
+                            // Abandon only settles a submission whose remote outcome is unknown.
+                            let abandonable = cloud.as_ref().is_none_or(|job| {
+                                matches!(
+                                    job.state,
+                                    provenant_providers::cloud::RemoteState::Submitting
+                                ) || job.is_unresolved_submission()
+                            });
+                            let remedy = abandonable.then(|| {
+                                format!(
+                                    "provenant reconcile --abandon {}/{id} --reason 'REASON'",
+                                    record.run_id
+                                )
+                            });
                             human.push_str(&format!(
-                                "{id} cloud cancellation unconfirmed: {}; to abandon tracking, run `provenant reconcile --abandon {}/{id} --reason 'REASON'`\n",
-                                plain_text(&error, usize::MAX), record.run_id
+                                "{id} cloud cancellation unconfirmed: {}",
+                                plain_text(&error, usize::MAX)
                             ));
-                            receipts.push(json!({"attempt_id": id, "error": {"message": error}, "cancellation_unconfirmed": true, "remedy": format!("provenant reconcile --abandon {}/{id} --reason 'REASON'", record.run_id)}));
+                            match &remedy {
+                                Some(remedy) => human
+                                    .push_str(&format!("; to abandon tracking, run `{remedy}`\n")),
+                                None => human.push_str(&format!(
+                                    "; retry `provenant reconcile --id {}/{id}`\n",
+                                    record.run_id
+                                )),
+                            }
+                            receipts.push(json!({"attempt_id": id, "error": {"message": error}, "cancellation_unconfirmed": true, "remedy": remedy}));
                         }
                     }
                     continue;
