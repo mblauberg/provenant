@@ -36,6 +36,7 @@ pub fn prepare_job(
         requested_model: target.model.clone(),
         requested_effort: target.effort.clone(),
         state: RemoteState::Submitting,
+        submit_error: None,
     })
 }
 
@@ -389,6 +390,9 @@ pub fn view(job: &RemoteJob) -> serde_json::Value {
         "remote_id": job.remote_id, "commit": job.commit,
         "requested_model": job.requested_model, "requested_effort": job.requested_effort, "state": job.state,
     });
+    if let Some(error) = &job.submit_error {
+        value["submit_error"] = serde_json::json!(error);
+    }
     if let Some(diagnostic) = job.environment_diagnostic() {
         value["remedy"] = serde_json::json!(diagnostic.remedy);
     }
