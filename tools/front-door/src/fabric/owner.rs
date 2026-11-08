@@ -2345,13 +2345,14 @@ impl BoundGraphOwner<'_> {
                         return Err(invalid(issue));
                     }
                 }
-                if provenant_records::AdapterSpec::get(&cloud.provider)
+                let Some(transport) = provenant_records::AdapterSpec::get(&cloud.provider)
                     .and_then(|spec| spec.cloud_transport)
-                    .is_none()
-                {
+                else {
                     return Err(invalid(Issue::Provider));
-                }
-                if cloud.provider == "codex" && cloud.environment.trim().is_empty() {
+                };
+                if transport == provenant_records::CloudTransport::Codex
+                    && cloud.environment.trim().is_empty()
+                {
                     return Err(invalid(Issue::Environment));
                 }
                 if cloud.deadline_seconds == 0 {
