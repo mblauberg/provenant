@@ -40,8 +40,60 @@ impl CloudCli for InstalledCloudCli<'_> {
     }
 }
 
+/// Remove CSI and OSC terminal escape sequences, keeping the visible text.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// The session ID in Claude's `Resume with: claude --teleport <id>` line.
+fn teleport_id(line: &str) -> Option<&str> {
+    let (label, command) = line.split_once(':')?;
+    if !label.trim().eq_ignore_ascii_case("resume with") {
+        return None;
+    }
+    let mut words = command.split_whitespace();
+    words.find(|word| *word == "--teleport")?;
+    words.next().filter(|id| !id.starts_with('-'))
+}
+
 /// Parse an explicitly labelled ID or session URL; never guess from arbitrary prose.
 pub fn parse_identity(output: &str) -> Result<String, String> {
+    let output = strip_ansi(output);
+    let output = output.as_str();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
         for key in ["id", "session_id", "task_id", "url"] {
             if let Some(id) = value
@@ -55,6 +107,9 @@ pub fn parse_identity(output: &str) -> Result<String, String> {
     }
     for line in output.lines() {
         let trimmed = line.trim();
+        if let Some(id) = teleport_id(trimmed) {
+            return Ok(id.to_owned());
+        }
         if let Some((label, value)) = trimmed.split_once(':') {
             let label = label.trim().to_ascii_lowercase();
             if matches!(
@@ -87,6 +142,16 @@ mod tests {
         assert_eq!(
             parse_identity("https://example.invalid/session/123").unwrap(),
             "https://example.invalid/session/123"
+        );
+        let claude = "Created cloud session: Measurement task\nView: https://claude.ai/code/session_01EXAMPLEEXAMPLEEXAMPLE?from=cli&m=0\nResume with: claude --teleport session_01EXAMPLEEXAMPLEEXAMPLE\n";
+        assert_eq!(
+            parse_identity(claude).unwrap(),
+            "session_01EXAMPLEEXAMPLEEXAMPLE"
+        );
+        let coloured = "\u{1b}[2K\u{1b}[1mCreated cloud session: Measurement task\u{1b}[0m\n\u{1b}]8;;https://claude.ai/x\u{7}View\u{1b}]8;;\u{7}: https://claude.ai/code/session_01EXAMPLEEXAMPLEEXAMPLE?from=cli&m=0\n\u{1b}[32mResume with:\u{1b}[0m claude --teleport \u{1b}[1msession_01EXAMPLEEXAMPLEEXAMPLE\u{1b}[0m\r\n";
+        assert_eq!(
+            parse_identity(coloured).unwrap(),
+            "session_01EXAMPLEEXAMPLEEXAMPLE"
         );
         assert!(
             parse_identity("unrecognised response")
@@ -130,16 +195,13 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
     }
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
         let prompt = result_prompt(request, true);
-        let out = self.cli.run(
-            "claude",
-            &[
-                "--cloud",
-                &prompt,
-                "--environment",
-                &request.job.environment,
-            ],
-            None,
-        )?;
+        // Without an environment the CLI uses the hosted Claude cloud.
+        let environment = request.job.environment.trim();
+        let mut args = vec!["--cloud", prompt.as_str()];
+        if !environment.is_empty() {
+            args.extend(["--environment", environment]);
+        }
+        let out = self.cli.run("claude", &args, None)?;
         parse_identity(&out)
     }
     fn observe(
@@ -282,7 +344,13 @@ impl<C: CloudCli> CodexCloud<C> {
 
 impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
     type Error = String;
-    fn check_environment(&mut self, _: crate::cloud::CloudSubmission<'_>) -> Result<(), String> {
+    fn check_environment(
+        &mut self,
+        request: crate::cloud::CloudSubmission<'_>,
+    ) -> Result<(), String> {
+        if request.job.environment.trim().is_empty() {
+            return Err("codex cloud targets require an environment".into());
+        }
         Ok(())
     }
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
@@ -293,7 +361,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
                 "cloud",
                 "exec",
                 "--env",
-                &request.job.environment,
+                request.job.environment.trim(),
                 "--branch",
                 &request.job.branch,
             ],
@@ -545,6 +613,28 @@ mod adapter_tests {
         assert!(claude.cli.calls[0].1[1].contains("test task"));
         assert!(claude.cli.calls[0].1[1].contains(&job.nonce));
         assert_eq!(&claude.cli.calls[0].1[2..], ["--environment", "env"]);
+        let mut hosted = job.clone();
+        hosted.environment.clear();
+        claude
+            .submit(CloudSubmission {
+                job: &hosted,
+                task: "test task",
+            })
+            .unwrap();
+        assert_eq!(claude.cli.calls[1].1.len(), 2);
+        assert!(!claude.cli.calls[1].1.iter().any(|a| a == "--environment"));
+        let mut codex_without = CodexCloud {
+            cli: FakeCli::default(),
+        };
+        assert!(
+            codex_without
+                .check_environment(CloudSubmission {
+                    job: &hosted,
+                    task: "test task"
+                })
+                .unwrap_err()
+                .contains("require an environment")
+        );
         claude.cli.response.clear();
         assert_eq!(claude.observe(&job).unwrap(), RemoteState::Running);
         let mut expired = job.clone();
