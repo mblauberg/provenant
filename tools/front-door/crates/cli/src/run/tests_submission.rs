@@ -761,3 +761,86 @@ fn cloud_abandonment_preserves_submission_evidence() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+fn abandon_fixture(
+    temp: &tempfile::TempDir,
+    clock: &SystemClock,
+    call: &provenant_run::Request<'_>,
+    head: Option<String>,
+) -> Result<(provenant_run::RunStore, AttemptId), Box<dyn std::error::Error>> {
+    let store = trace_store(temp, call)?;
+    let mut input = trace_run(44, AttemptId::from_bytes([1; 16]), clock.wall_now()?)?;
+    input.request.parent_attempt = None;
+    input.request.tasks[0].head = head;
+    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+        target: "target".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "repository".into(),
+        branch: "main".into(),
+        model: "small".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    });
+    store.create(&input, call)?;
+    Ok((store, input.attempts[0].attempt_id))
+}
+
+#[test]
+fn cloud_abandonment_settles_a_record_without_a_pinned_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::RemoteState;
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let (store, id) = abandon_fixture(&temp, &clock, &call, None)?;
+    let job = cloud_owner::abandon(&store, id, "operator decision", &call)?;
+    assert_eq!(
+        job.state,
+        RemoteState::Abandoned {
+            reason: "operator decision".into()
+        }
+    );
+    assert!(job.commit.is_empty());
+    assert_eq!(cloud_owner::load(&store, id, &call)?, Some(job.clone()));
+    assert_eq!(
+        cloud_owner::abandon(&store, id, "operator decision", &call)?,
+        job
+    );
+    Ok(())
+}
+
+#[test]
+fn cloud_abandonment_refuses_a_job_with_a_remote_id() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{CloudJobStore, RemoteState};
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let head = "a".repeat(40);
+    let (store, id) = abandon_fixture(&temp, &clock, &call, Some(head.clone()))?;
+    let target = crate::domains::CloudTarget {
+        provider: "fake".into(),
+        environment: "env".into(),
+        model: "small".into(),
+        effort: None,
+        repository: "repository".into(),
+        branch: "main".into(),
+        deadline_seconds: 3600,
+    };
+    let mut job = cloud_owner::prepare_job(id, "target", &target, &head, &clock)?;
+    cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |s| {
+        s.begin(&job)?;
+        job.remote_id = "remote-1".into();
+        job.state = RemoteState::Running;
+        s.save(&job)
+    })??;
+    let error = cloud_owner::abandon(&store, id, "operator decision", &call).unwrap_err();
+    assert_eq!(error, "cloud submission is not unresolved");
+    assert_eq!(
+        cloud_owner::load(&store, id, &call)?.map(|j| j.state),
+        Some(RemoteState::Running)
+    );
+    Ok(())
+}

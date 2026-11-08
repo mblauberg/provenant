@@ -414,6 +414,7 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
                 let detail = provider
                     .failure_detail(&error)
                     .filter(|s| !s.trim().is_empty())
+                    .map(|detail| provenant_confinement::redact::bounded_line(&detail, 600))
                     .unwrap_or_else(|| "submission unknown".into());
                 job.submit_error = Some(detail.clone());
                 job.submit_refused = true;
@@ -648,6 +649,43 @@ mod lifecycle_tests {
         let saved = store.saved.unwrap();
         assert_eq!(saved.state, RemoteState::Submitting);
         assert_eq!(saved.submit_error.as_deref(), Some("no environment"));
+    }
+
+    #[test]
+    fn cloud_submit_error_never_keeps_a_credential_on_either_path() {
+        struct Leaky(bool);
+        impl CloudProvider for Leaky {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Err(())
+            }
+            fn failure_detail(&self, _: &()) -> Option<String> {
+                Some(format!("denied for sk-{}", "a1b2c3d4".repeat(6)))
+            }
+            fn submission_refused(&self, _: &()) -> bool {
+                self.0
+            }
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
+                panic!("unexpected observation")
+            }
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
+                panic!("unexpected cancellation")
+            }
+        }
+        for refused in [true, false] {
+            let mut store = FakeStore::default();
+            let _ = submit(&mut Leaky(refused), &mut store, job(), "run tests");
+            let saved = store.saved.unwrap();
+            let error = saved.submit_error.unwrap();
+            assert!(error.starts_with("denied for"), "{error}");
+            assert!(!error.contains("a1b2c3d4"), "{error}");
+            if let RemoteState::Failed { detail } = &saved.state {
+                assert!(refused && !detail.contains("a1b2c3d4"), "{detail}");
+            }
+        }
     }
 
     #[test]

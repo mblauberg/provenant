@@ -64,7 +64,7 @@ fn validate_intent(
         .as_ref()
         .ok_or("attempt has no cloud placement")?;
     if job.job_id != id.to_string()
-        || task.head.as_deref() != Some(job.commit.as_str())
+        || task.head.as_deref().unwrap_or_default() != job.commit
         || placement.target != job.target
         || placement.provider != job.provider
         || placement.environment != job.environment
@@ -218,9 +218,9 @@ pub(super) fn abandon(
                     id,
                     &placement.target,
                     &target,
-                    task.head
-                        .as_deref()
-                        .ok_or("cloud node requires a pinned source commit")?,
+                    // Records from before source pinning have no commit.
+                    // Giving up on a submission needs no commit.
+                    task.head.as_deref().unwrap_or_default(),
                     call.clock,
                 )?;
                 cloud.begin(&job).map_err(|e| e.to_string())?;
