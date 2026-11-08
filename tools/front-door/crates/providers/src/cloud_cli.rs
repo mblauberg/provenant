@@ -169,8 +169,11 @@ impl InstalledCloudCli<'_> {
             let refusal = submission
                 && matches!(output.outcome.termination, Termination::Exit(code) if (1..128).contains(&code))
                 && !detail.is_empty()
-                && parse_identity(&output.stdout).is_err()
-                && parse_identity(&output.stderr).is_err();
+                && ![&output.stdout, &output.stderr].iter().any(|text| {
+                    // The transport is unknown here, so any transport's identity
+                    // proves the remote may hold the submission.
+                    parse_identity(text).is_ok() || thread::submission_id(text).is_ok()
+                });
             return Err(format!(
                 "{}{program} failed: {detail}",
                 if refusal { REFUSAL } else { "" }
@@ -472,6 +475,14 @@ impl<C: CloudCli> CodexCloud<C> {
         Self { cli, settings }
     }
 
+    /// Apply the transport saved at submission, not the current host config.
+    fn adopt(&mut self, job: &crate::cloud::RemoteJob) {
+        self.settings = ProviderCloudSettings {
+            transport: job.cloud_transport,
+            command: job.cloud_command.clone(),
+        };
+    }
+
     fn program(&self) -> String {
         self.settings
             .command
@@ -590,13 +601,19 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
     fn submission_refused(&self, error: &String) -> bool {
         error.starts_with(REFUSAL)
     }
+    fn stamp(&self, job: &mut crate::cloud::RemoteJob) {
+        job.cloud_transport = self.settings.transport;
+        job.cloud_command = self.settings.command.clone();
+    }
     fn recover(&mut self, job: &crate::cloud::RemoteJob) -> Result<Option<String>, String> {
+        self.adopt(job);
         CodexCloud::recover(self, &job.nonce)
     }
     fn observe(
         &mut self,
         job: &crate::cloud::RemoteJob,
     ) -> Result<crate::cloud::RemoteState, String> {
+        self.adopt(job);
         if self.settings.transport == CodexCloudTransport::Thread {
             let out = self
                 .cli
@@ -684,6 +701,9 @@ mod adapter_tests {
             requested_effort: None,
             state: RemoteState::Running,
             submit_error: None,
+            submit_refused: false,
+            cloud_transport: Default::default(),
+            cloud_command: None,
         }
     }
     #[test]
@@ -872,6 +892,20 @@ mod adapter_tests {
                 Termination::Exit(1),
                 "session_id: remote-1",
                 "error",
+                false,
+                false,
+            ),
+            (
+                Termination::Exit(1),
+                "Created cloud thread thr_1\nSubmitting message ...",
+                "",
+                false,
+                false,
+            ),
+            (
+                Termination::Exit(1),
+                "",
+                "{\"threadId\":\"thr_1\"}",
                 false,
                 false,
             ),

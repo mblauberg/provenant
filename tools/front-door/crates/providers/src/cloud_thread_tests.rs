@@ -50,6 +50,9 @@ fn job() -> RemoteJob {
         requested_effort: Some("high".into()),
         state: RemoteState::Running,
         submit_error: None,
+        submit_refused: false,
+        cloud_transport: CodexCloudTransport::Thread,
+        cloud_command: None,
     }
 }
 

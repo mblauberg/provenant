@@ -706,7 +706,8 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn cloud_host_transport_configuration_is_reloaded() -> Result<(), Box<dyn std::error::Error>> {
+fn cloud_saved_transport_ignores_later_host_configuration() -> Result<(), Box<dyn std::error::Error>>
+{
     use provenant_providers::cloud::{CloudProvider, RemoteState};
     use provenant_providers::cloud_cli::{CloudCli, CodexCloud};
     #[derive(Default)]
@@ -748,6 +749,8 @@ fn cloud_host_transport_configuration_is_reloaded() -> Result<(), Box<dyn std::e
     )?;
     job.remote_id = "thread-1".into();
     job.state = RemoteState::Running;
+    job.cloud_transport = provenant_config::CodexCloudTransport::Thread;
+    job.cloud_command = Some("first-thread-client".into());
     for command in ["first-thread-client", "replacement-thread-client"] {
         std::fs::write(
             roots.state.as_path().join("config.toml"),
@@ -755,7 +758,7 @@ fn cloud_host_transport_configuration_is_reloaded() -> Result<(), Box<dyn std::e
                 "schema_version=1\n[providers.codex.cloud]\ntransport='thread'\ncommand='{command}'\n"
             ),
         )?;
-        // Each fresh observer reloads the host selection while retaining the same remote job.
+        // Later host config applies to new submissions only; the job keeps its saved command.
         let mut provider = CodexCloud::new(
             FakeCli::default(),
             cloud_owner::cloud_settings(&roots, &job.provider)?,
@@ -763,7 +766,10 @@ fn cloud_host_transport_configuration_is_reloaded() -> Result<(), Box<dyn std::e
         assert_eq!(provider.observe(&job)?, RemoteState::Running);
         assert_eq!(
             provider.cli.0,
-            [(command.into(), vec!["status".into(), "thread-1".into()])]
+            [(
+                "first-thread-client".into(),
+                vec!["status".into(), "thread-1".into()]
+            )]
         );
     }
     Ok(())

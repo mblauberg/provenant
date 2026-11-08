@@ -37,6 +37,9 @@ pub fn prepare_job(
         requested_effort: target.effort.clone(),
         state: RemoteState::Submitting,
         submit_error: None,
+        submit_refused: false,
+        cloud_transport: Default::default(),
+        cloud_command: None,
     })
 }
 
@@ -311,7 +314,15 @@ pub(super) fn settle_saved_submission(
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or("submission unknown")
                     .to_owned();
-                current.state = RemoteState::Failed { detail };
+                // Only a recorded definite refusal is Failed; anything else may
+                // still exist remotely, so it stays unresolved and visible.
+                current.state = if current.submit_refused {
+                    RemoteState::Failed { detail }
+                } else {
+                    RemoteState::Unknown {
+                        detail: format!("submission outcome unknown: {detail}"),
+                    }
+                };
                 cloud_store.save(&current).map_err(|e| e.to_string())?;
             }
             note_state(store, id, &current, call)?;
