@@ -444,7 +444,7 @@ fn observe_for_view(
         saved: &RemoteJob,
     ) -> Result<RemoteJob, String> {
         let mut job = saved.clone();
-        if matches!(job.state, RemoteState::Submitting) {
+        if matches!(job.state, RemoteState::Submitting) || job.is_unresolved_submission() {
             job.remote_id = provider
                 .recover(&job)?
                 .filter(|id| !id.trim().is_empty())

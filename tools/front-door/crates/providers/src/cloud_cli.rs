@@ -897,7 +897,7 @@ mod adapter_tests {
             ),
             (
                 Termination::Exit(1),
-                "Created cloud thread thr_1\nSubmitting message ...",
+                "Created cloud thread thread-1\nSubmitting message ...",
                 "",
                 false,
                 false,
@@ -905,7 +905,14 @@ mod adapter_tests {
             (
                 Termination::Exit(1),
                 "",
-                "{\"threadId\":\"thr_1\"}",
+                "{\"threadId\":\"thread-1\"}",
+                false,
+                false,
+            ),
+            (
+                Termination::Exit(1),
+                "{\"threadId\":\"thread-2\"}\nwarning: monitor not started",
+                "",
                 false,
                 false,
             ),

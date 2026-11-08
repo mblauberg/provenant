@@ -21,7 +21,10 @@ pub(super) fn submission_id(output: &str) -> Result<String, String> {
     // Progress lines precede a possibly pretty-printed JSON object. Prefer its
     // explicit threadId over any progress-line identity.
     for (offset, _) in output.match_indices('{').take(64) {
-        if let Ok(value) = serde_json::from_str::<Value>(&output[offset..])
+        // Read one complete value; diagnostics may follow it.
+        if let Some(Ok(value)) = serde_json::Deserializer::from_str(&output[offset..])
+            .into_iter::<Value>()
+            .next()
             && let Some(id) = value.get("threadId").and_then(Value::as_str)
             && !id.trim().is_empty()
         {
