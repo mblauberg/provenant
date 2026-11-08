@@ -5,6 +5,58 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 /// The only process boundary used by cloud adapters. Arguments must not contain credentials.
 pub trait CloudCli {
     fn run(&mut self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>;
+    /// Run with a pseudo-terminal and no stdin, for CLIs that refuse a plain pipe.
+    fn run_tty(&mut self, program: &str, args: &[&str]) -> Result<String, String> {
+        self.run(program, args, None)
+    }
+}
+
+const FAILURE_LINES: usize = 3;
+const FAILURE_BYTES: usize = 600;
+
+/// The first lines of a CLI failure, without terminal controls, bounded.
+pub fn failure_excerpt(text: &str) -> String {
+    let clean = strip_ansi(text).replace('\r', "");
+    let mut out = clean
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(FAILURE_LINES)
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if out.len() > FAILURE_BYTES {
+        let mut end = FAILURE_BYTES;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push('…');
+    }
+    out
+}
+
+/// Wrap `program args` so it runs under a pseudo-terminal via `script(1)`.
+fn pty_argv(program: &str, args: &[&str]) -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        // BSD script: `script -q /dev/null command args...`.
+        let mut argv = vec![
+            "script".to_owned(),
+            "-q".into(),
+            "/dev/null".into(),
+            program.into(),
+        ];
+        argv.extend(args.iter().map(|a| (*a).to_owned()));
+        argv
+    } else {
+        // util-linux script runs one shell command line.
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let line = std::iter::once(program)
+            .chain(args.iter().copied())
+            .map(quote)
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec!["script".into(), "-qec".into(), line, "/dev/null".into()]
+    }
 }
 
 pub struct InstalledCloudCli<'a> {
@@ -15,10 +67,31 @@ pub struct InstalledCloudCli<'a> {
 
 impl CloudCli for InstalledCloudCli<'_> {
     fn run(&mut self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
-        let argv: Vec<OsString> = std::iter::once(program)
-            .chain(args.iter().copied())
+        self.exec(
+            program,
+            std::iter::once(program)
+                .chain(args.iter().copied())
+                .map(OsString::from)
+                .collect(),
+            stdin,
+        )
+    }
+    fn run_tty(&mut self, program: &str, args: &[&str]) -> Result<String, String> {
+        let argv = pty_argv(program, args)
+            .into_iter()
             .map(OsString::from)
             .collect();
+        self.exec(program, argv, None)
+    }
+}
+
+impl InstalledCloudCli<'_> {
+    fn exec(
+        &self,
+        program: &str,
+        argv: Vec<OsString>,
+        stdin: Option<&str>,
+    ) -> Result<String, String> {
         let mut options = ExecOptions::new(&argv, &self.cwd, self.timeout);
         options.process_group = true;
         options.stdin = stdin.map(str::as_bytes);
@@ -34,7 +107,12 @@ impl CloudCli for InstalledCloudCli<'_> {
             return Err(format!("{program} returned incomplete output or timed out"));
         }
         if output.outcome.termination != Termination::Exit(0) {
-            return Err(format!("{program} failed: {}", output.stderr.trim()));
+            let text = if output.stderr.trim().is_empty() {
+                &output.stdout
+            } else {
+                &output.stderr
+            };
+            return Err(format!("{program} failed: {}", failure_excerpt(text)));
         }
         Ok(output.stdout)
     }
@@ -42,6 +120,8 @@ impl CloudCli for InstalledCloudCli<'_> {
 
 /// Remove CSI and OSC terminal escape sequences, keeping the visible text.
 fn strip_ansi(text: &str) -> String {
+    // `script` echoes a closed stdin's EOF as `^D` plus two backspaces.
+    let text = text.replace("^D\u{8}\u{8}", "");
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -92,7 +172,7 @@ fn teleport_id(line: &str) -> Option<&str> {
 
 /// Parse an explicitly labelled ID or session URL; never guess from arbitrary prose.
 pub fn parse_identity(output: &str) -> Result<String, String> {
-    let output = strip_ansi(output);
+    let output = strip_ansi(output).replace('\r', "");
     let output = output.as_str();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
         for key in ["id", "session_id", "task_id", "url"] {
@@ -105,16 +185,23 @@ pub fn parse_identity(output: &str) -> Result<String, String> {
             }
         }
     }
+    // The resume line is the stable ID; the View URL is only a fallback.
+    if let Some(id) = output.lines().find_map(|line| teleport_id(line.trim())) {
+        return Ok(id.to_owned());
+    }
     for line in output.lines() {
         let trimmed = line.trim();
-        if let Some(id) = teleport_id(trimmed) {
-            return Ok(id.to_owned());
-        }
         if let Some((label, value)) = trimmed.split_once(':') {
             let label = label.trim().to_ascii_lowercase();
             if matches!(
                 label.as_str(),
-                "id" | "session id" | "session_id" | "task id" | "task_id" | "url" | "session url"
+                "id" | "session id"
+                    | "session_id"
+                    | "task id"
+                    | "task_id"
+                    | "url"
+                    | "session url"
+                    | "view"
             ) && !value.trim().is_empty()
             {
                 return Ok(value.trim().to_owned());
@@ -201,8 +288,20 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
         if !environment.is_empty() {
             args.extend(["--environment", environment]);
         }
-        let out = self.cli.run("claude", &args, None)?;
-        parse_identity(&out)
+        // `claude --cloud` refuses a non-terminal, so only this call needs a PTY.
+        let out = self
+            .cli
+            .run_tty("claude", &args)
+            .map_err(|error| format!("claude --cloud refused: {error}"))?;
+        parse_identity(&out).map_err(|_| {
+            format!(
+                "claude --cloud returned no session identity: {}",
+                failure_excerpt(&out)
+            )
+        })
+    }
+    fn failure_detail(&self, error: &String) -> Option<String> {
+        Some(failure_excerpt(error))
     }
     fn observe(
         &mut self,
@@ -456,6 +555,7 @@ mod adapter_tests {
             requested_model: "model".into(),
             requested_effort: None,
             state: RemoteState::Running,
+            submit_error: None,
         }
     }
     #[test]
@@ -589,6 +689,55 @@ mod adapter_tests {
             cli: Script(["completed".into(), diff].into()),
         };
         assert!(adapter.observe(&wrong).is_err());
+    }
+    const CAPTURED: &str = "\u{1b}[>4m\u{1b}]0;claude\u{7}\u{1b}[?25lCreated cloud session: Fix the thing\r\nView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\nResume with: claude --teleport session_01ABC\r\n\u{1b}[?25h";
+    #[test]
+    fn cloud_claude_parses_pty_capture() {
+        assert_eq!(parse_identity(CAPTURED).unwrap(), "session_01ABC");
+        let view_only = "\u{1b}[>4mView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\n";
+        assert_eq!(
+            parse_identity(view_only).unwrap(),
+            "https://claude.ai/code/session_01ABC?from=cli&m=0"
+        );
+        let job = job();
+        let mut claude = ClaudeCloud {
+            pending_cleanup: None,
+            cli: FakeCli {
+                response: CAPTURED.into(),
+                ..Default::default()
+            },
+        };
+        let request = CloudSubmission {
+            job: &job,
+            task: "t",
+        };
+        assert_eq!(claude.submit(request).unwrap(), "session_01ABC");
+        assert!(claude.cli.calls[0].2.is_none());
+    }
+    #[test]
+    fn cloud_claude_non_tty_refusal_quotes_first_error_line() {
+        struct Refuses;
+        impl CloudCli for Refuses {
+            fn run(&mut self, _: &str, _: &[&str], _: Option<&str>) -> Result<String, String> {
+                Err("claude failed: Error: --cloud requires an interactive terminal.\nNon-interactive invocations run locally".into())
+            }
+        }
+        let job = job();
+        let mut claude = ClaudeCloud {
+            pending_cleanup: None,
+            cli: Refuses,
+        };
+        let error = claude
+            .submit(CloudSubmission {
+                job: &job,
+                task: "t",
+            })
+            .unwrap_err();
+        assert!(error.contains("refused"));
+        assert!(error.contains("--cloud requires an interactive terminal."));
+        let detail = claude.failure_detail(&error).unwrap();
+        assert!(detail.contains("--cloud requires an interactive terminal."));
+        assert!(failure_excerpt(&"x\n".repeat(1000)).len() < 700);
     }
     #[test]
     fn cloud_adapters_submit_and_cancel_unconfirmed() {

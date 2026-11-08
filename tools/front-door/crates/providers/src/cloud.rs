@@ -230,6 +230,9 @@ pub struct RemoteJob {
     pub requested_model: String,
     pub requested_effort: Option<String>,
     pub state: RemoteState,
+    /// Why the last submission attempt failed, kept so status can show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_error: Option<String>,
 }
 
 /// An actionable failure observed while the provider prepared the VM.
@@ -301,6 +304,10 @@ pub trait CloudProvider {
     /// Check the target before a model turn when the provider supports it.
     fn check_environment(&mut self, request: CloudSubmission<'_>) -> Result<(), Self::Error>;
     fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
+    /// Bounded text explaining a failed submission, saved with the job.
+    fn failure_detail(&self, _error: &Self::Error) -> Option<String> {
+        None
+    }
     /// Recover a submission only when the provider can identify it unambiguously.
     fn recover(&mut self, _job: &RemoteJob) -> Result<Option<String>, Self::Error> {
         Ok(None)
@@ -364,9 +371,19 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
             error,
         })?;
     store.begin(&job).map_err(CloudJobError::Store)?;
-    job.remote_id = provider
-        .submit(CloudSubmission { job: &job, task })
-        .map_err(CloudJobError::SubmitUnknown)?;
+    job.remote_id = match provider.submit(CloudSubmission { job: &job, task }) {
+        Ok(id) => id,
+        Err(error) => {
+            if let Some(detail) = provider.failure_detail(&error) {
+                // Best effort: the saved intent stays `submitting`, now with the reason.
+                job.remote_id.clear();
+                job.submit_error = Some(detail);
+                let _ = store.save(&job);
+            }
+            return Err(CloudJobError::SubmitUnknown(error));
+        }
+    };
+    job.submit_error = None;
     if job.remote_id.trim().is_empty() {
         return Err(CloudJobError::SubmissionUnknown);
     }
@@ -523,6 +540,7 @@ mod lifecycle_tests {
             requested_model: "model".into(),
             requested_effort: Some("low".into()),
             state: RemoteState::Running,
+            submit_error: None,
         }
     }
     fn result(commit: &str) -> CloudResult {

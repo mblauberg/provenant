@@ -638,8 +638,25 @@ Claude has no status CLI: an unfinished job stays running until its deadline,
 then becomes unknown. It publishes a result-only commit on a `claude/*`
 branch, which the owner removes on a best-effort basis after saving the result.
 Codex returns the result in its cloud diff and cannot request model or effort.
-Cancellation is unconfirmed for both providers. CLI output formats have not
-yet been captured on real hosts; a parsing failure reports what was seen.
+Cancellation is unconfirmed for both providers.
+
+`claude --cloud` refuses a non-terminal (`Error: --cloud requires an
+interactive terminal.`, exit 1), so the owner runs only the submit under a
+pseudo-terminal through `script(1)` with stdin closed. Captured on Claude Code
+2.1.319, after terminal control sequences and carriage returns, which the owner
+strips:
+
+```text
+Created cloud session: <title>
+View: https://claude.ai/code/session_<id>?from=cli&m=0
+Resume with: claude --teleport session_<id>
+```
+
+The owner records `session_<id>` from the `--teleport` line, or the View URL
+when that line is absent. A refused or unparseable submission keeps the first
+lines of the CLI's text in the saved job as `submit_error`, which `status` and
+`output` show; the job stays `submitting`. Codex output formats have not yet
+been captured on real hosts; a parsing failure reports what was seen.
 
 The job can use `scripts/cloud-verify` to run its named verification command.
 It requires the job ID, nonce and full commit from the request, a test name,

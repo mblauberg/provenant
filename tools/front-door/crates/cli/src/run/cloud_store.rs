@@ -209,6 +209,7 @@ mod tests {
             requested_model: "model".into(),
             requested_effort: Some("low".into()),
             state: RemoteState::Running,
+            submit_error: None,
         }
     }
 
