@@ -58,6 +58,11 @@ pub enum ProviderEvent {
     Error,
     TransientError,
     Terminal,
+    /// Claude assistant text, held by the stream state as a fallback answer.
+    /// It never leaves the stream state.
+    AssistantText(String),
+    /// The final result was empty, so the last assistant text stands in for it.
+    ResultFallback,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExitObservation {
@@ -143,6 +148,8 @@ pub struct StreamState {
     auth_required: bool,
     malformed: bool,
     tail_truncated: bool,
+    last_assistant_text: Option<String>,
+    result_text_seen: bool,
 }
 impl StreamState {
     pub(crate) fn new(adapter: &'static str, decoder: Decoder) -> Self {
@@ -164,6 +171,8 @@ impl StreamState {
             auth_required: false,
             malformed: false,
             tail_truncated: false,
+            last_assistant_text: None,
+            result_text_seen: false,
         }
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
@@ -274,7 +283,11 @@ impl StreamState {
                     }
                     self.answer_models.push((model.clone(), *digest));
                 }
+                ProviderEvent::AssistantText(text) => {
+                    self.last_assistant_text = Some(text.clone());
+                }
                 ProviderEvent::Text(text) if self.adapter == "claude" => {
+                    self.result_text_seen |= !text.trim().is_empty();
                     let digest =
                         *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes();
                     let mut models = self
@@ -313,6 +326,7 @@ impl StreamState {
                 _ => {}
             }
         }
+        events.retain(|event| !matches!(event, ProviderEvent::AssistantText(_)));
         if let Some(model) = answer_model {
             events.push(ProviderEvent::Model(model));
         }
@@ -365,6 +379,17 @@ impl StreamState {
                     protocol_error = Some(error.to_string());
                 }
             }
+        }
+        // A final turn that is a tool call leaves the result event empty. The
+        // last assistant text is then the best answer there is.
+        if self.adapter == "claude"
+            && self.terminal
+            && !self.error
+            && !self.result_text_seen
+            && let Some(text) = self.last_assistant_text.take()
+        {
+            final_events.push(ProviderEvent::Text(text));
+            final_events.push(ProviderEvent::ResultFallback);
         }
         let status = if self.malformed {
             OutcomeStatus::Malformed

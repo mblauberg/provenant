@@ -989,6 +989,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         _ => None,
                     })
                     .collect();
+                if !text.trim().is_empty() {
+                    events.push(E::AssistantText(text.clone()));
+                }
                 if !text.is_empty() {
                     events.push(E::AnswerModel {
                         model: message.model.clone(),
@@ -1099,6 +1102,46 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
 #[cfg(test)]
 mod overload_tests {
     use super::*;
+
+    fn finish_text(input: &str) -> Vec<E> {
+        let mut stream = StreamState::new("claude", decode);
+        let mut events = stream.observe(input.as_bytes()).unwrap();
+        let outcome = stream
+            .finish(crate::ExitObservation {
+                code: Some(0),
+                timed_out: false,
+            })
+            .unwrap();
+        events.extend(outcome.final_events().iter().cloned());
+        events
+    }
+
+    #[test]
+    fn empty_result_falls_back_to_the_last_assistant_text_with_a_marker() {
+        let input = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"first\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"committed the work\"},{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Bash\",\"input\":{}}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
+            "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\"}\n"
+        );
+        let events = finish_text(input);
+        assert!(events.contains(&E::Text("committed the work".into())));
+        assert!(events.contains(&E::ResultFallback));
+        assert!(!events.iter().any(|e| matches!(e, E::AssistantText(_))));
+    }
+
+    #[test]
+    fn non_empty_result_is_not_replaced() {
+        let input = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
+            "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"answer\"}\n"
+        );
+        let events = finish_text(input);
+        assert!(!events.contains(&E::ResultFallback));
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, E::Text(_))).count(),
+            1
+        );
+    }
 
     #[test]
     fn final_answer_identifies_its_model_despite_helper_messages() {

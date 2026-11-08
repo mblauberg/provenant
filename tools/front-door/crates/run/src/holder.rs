@@ -1939,8 +1939,18 @@ impl RunStore {
         if decoded.result.is_empty()
             && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
         {
-            decoded.outcome = Outcome::Failed;
-            decoded.reason = Some("provider result is empty or incomplete".into());
+            if task.writer.is_some() {
+                // A writer's work is its commit. A provider that exited cleanly
+                // with no final message needs review; it has not failed.
+                decoded.result = EMPTY_WRITER_RESULT.into();
+                if decoded.outcome == Outcome::Succeeded {
+                    decoded.outcome = Outcome::ReviewRequired;
+                }
+                decoded.reason = Some(EMPTY_WRITER_REASON.into());
+            } else {
+                decoded.outcome = Outcome::Failed;
+                decoded.reason = Some("provider result is empty or incomplete".into());
+            }
         }
         // Decoding can reveal credential markers hidden by JSON escapes in
         // the already-filtered capture. Seal only a filtered rendering.
@@ -2233,6 +2243,10 @@ pub(crate) fn seal_manifest(
 }
 
 /// The cause shown for a lane that ended without a final handoff.
+/// Placeholder result for a writer whose provider sent no final message.
+pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";
+pub const EMPTY_WRITER_REASON: &str =
+    "the provider ended with an empty final message; its commit is kept for review";
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
 /// A final verdict reports a result even without a handoff.

@@ -161,9 +161,7 @@
         "findings_available": false,
         "branch": null,
         "commit": null,
-        "warnings": [
-          "findings block missing or invalid: field findings: block missing"
-        ]
+        "warnings": []
       },
       "attempts": [
         {
@@ -203,9 +201,7 @@
         "findings_available": false,
         "branch": null,
         "commit": null,
-        "warnings": [
-          "findings block missing or invalid: field findings: block missing"
-        ]
+        "warnings": []
       },
       "attempts": [
         {
@@ -245,9 +241,7 @@
         "findings_available": false,
         "branch": null,
         "commit": null,
-        "warnings": [
-          "findings block missing or invalid: field findings: block missing"
-        ]
+        "warnings": []
       },
       "attempts": [
         {
@@ -287,9 +281,7 @@
         "findings_available": false,
         "branch": null,
         "commit": null,
-        "warnings": [
-          "findings block missing or invalid: field findings: block missing"
-        ]
+        "warnings": []
       },
       "attempts": [
         {
