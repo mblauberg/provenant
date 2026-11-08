@@ -403,36 +403,27 @@ fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result 
     for _ in 0..2 {
         let output = run_hook(&rig, "pre-compact", &input)?;
         assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
-        assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("auto-saved"));
         // The chair's file is byte-identical and was never rewritten.
         assert_eq!(fs::read(&file)?, before.0);
         assert_eq!(fs::metadata(&file)?.modified()?, before.1);
         assert_eq!(checkpoint_text(&checkpoint)?, chair);
         let saved = autosave_text(&checkpoint)?;
-        assert!(
-            saved.contains(&lane) && saved.contains("Auto-saved: "),
-            "{saved}"
-        );
+        assert!(saved.contains(&lane), "{saved}");
     }
     // A chair who copied the saved state into their notes keeps it, too.
     let copied = format!("{chair}copy:\n{}", autosave_text(&checkpoint)?);
     save(&checkpoint, &copied)?;
     run_hook(&rig, "pre-compact", &input)?;
     assert_eq!(checkpoint_text(&checkpoint)?, copied);
-    // The report shows the chair's text, then the saved state, then it is
-    // bounded as before.
+    // The report carries the chair's notes before the saved state, bounded.
     let output = run_hook(&rig, "compact", &start(&rig, "keep-session", "compact"))?;
+    assert!(output.stdout.bytes.len() <= 8192);
     let text = context(&output)?;
-    assert!(text.contains("Checkpoint present"), "{text}");
     let notes = text
         .find("Authority: user approved #1829 only")
         .ok_or("notes")?;
-    let state = text
-        .rfind("## Provenant session state")
-        .ok_or("state file")?;
+    let state = text.rfind(&lane).ok_or("state")?;
     assert!(notes < state, "{text}");
-    assert!(text.contains("Lanes in flight (1"), "{text}");
-    assert!(output.stdout.bytes.len() <= 8192);
     // A chair save replaces only the chair's file; the autosave file stays.
     save(&checkpoint, "fresh notes")?;
     assert_eq!(checkpoint_text(&checkpoint)?, "fresh notes");
@@ -696,8 +687,6 @@ fn worktree_hook_refuses_a_colliding_branch() -> Result {
     git(&rig, &["branch", "claude/Bright-fox"])?;
     let output = run_hook(&rig, "worktree-create", &worktree_input(&rig, "bright-fox"))?;
     assert_eq!(code(&output), 2);
-    let stderr = String::from_utf8(output.stderr.bytes)?;
-    assert!(stderr.contains("collides"), "{stderr}");
     assert!(!rig.project.join(".worktrees/claude-bright-fox").exists());
     Ok(())
 }

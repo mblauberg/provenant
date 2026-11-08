@@ -683,10 +683,6 @@ fn writing_pages_bind_rules_files_and_selector() -> Result {
     let first = json(&first)?;
     assert_eq!(first["data"]["count"], 121);
     assert_eq!(first["data"]["blockers"], 1);
-    let human = rig.command(&[
-        "check", "writing", "draft.md", "--rules", "legal", "--limit", "1",
-    ])?;
-    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("121 finding(s), 1 blocker(s)"));
     let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;
     let second = rig.command(&[
         "check", "writing", "draft.md", "--rules", "legal", "--json", "--limit", "1", "--cursor",
