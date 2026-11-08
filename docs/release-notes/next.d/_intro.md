@@ -1,1 +1,1 @@
-Cloud placement set on a run or graph node now reaches submission, and `--model` accepts a bare model name. There are no breaking changes.
+A writer's result no longer reports an interim message as its answer, budget stops leave a handoff, and cloud placement submits on real hosts: Claude through a pseudo-terminal, and Codex through an optional thread-API client. There are no breaking changes.
