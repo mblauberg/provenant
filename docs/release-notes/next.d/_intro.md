@@ -1,1 +1,1 @@
-Review lanes on a pinned commit start again, supervisors use far less CPU while their lanes wait, and refusals before launch now name their real cause. There are no breaking changes.
+Writer lanes launch again on projects whose `writer_writes` names a directory inside another checkout, and named routes now try their remaining members when the first is excluded before launch. There are no breaking changes.
