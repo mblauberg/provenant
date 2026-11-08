@@ -283,6 +283,7 @@ pub struct TaskRequest {
 pub struct CloudPlacement {
     pub target: String,
     pub provider: String,
+    #[serde(default)]
     pub environment: String,
     pub repository: String,
     pub branch: String,

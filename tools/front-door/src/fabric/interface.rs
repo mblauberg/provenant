@@ -11,6 +11,39 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+// Do not expose serde's message: it can contain supplied values. Preserve only
+// a schema path and a bounded reason, both filtered at the diagnostic boundary.
+fn decode_input<T: serde::de::DeserializeOwned>(
+    value: Value,
+    prefix: &str,
+) -> Result<T, FacadeError> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let message = error.inner().to_string();
+        let missing = message
+            .strip_prefix("missing field `")
+            .and_then(|s| s.split_once('`'))
+            .map(|(field, _)| field);
+        let mut field = prefix.to_owned();
+        if path != "." && !path.is_empty() {
+            if !field.is_empty() && !path.starts_with('[') {
+                field.push('.');
+            }
+            field.push_str(&path);
+        }
+        if let Some(missing) = missing {
+            if !field.is_empty() {
+                field.push('.');
+            }
+            field.push_str(missing);
+        }
+        FacadeError::invalid(InvalidInputDetail::FieldDecode {
+            field,
+            missing: missing.is_some(),
+        })
+    })
+}
+
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
     let cause = if error.message.starts_with("unknown node ") {
@@ -118,10 +151,23 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         }
     }
     let typed: provenant_fabric_runtime::graph::AttemptSpec =
-        serde_json::from_value(attempt.clone()).map_err(|_| invalid())?;
-    if typed.provider_timeout == Some(0) || typed.host.as_ref().is_some_and(|host| host.is_empty())
-    {
-        return Err(invalid());
+        decode_input(attempt.clone(), "attempt")?;
+    for (field, invalid_value) in [
+        (
+            "attempt.provider_timeout",
+            typed.provider_timeout == Some(0),
+        ),
+        (
+            "attempt.host",
+            typed.host.as_ref().is_some_and(|host| host.is_empty()),
+        ),
+    ] {
+        if invalid_value {
+            return Err(FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                field: field.into(),
+                missing: false,
+            }));
+        }
     }
     input["attempt"] = attempt;
     if let Some(value) = input.get("operation_id").filter(|value| !value.is_null()) {
@@ -1119,15 +1165,13 @@ impl Factory {
             {
                 let patch = Patch {
                     schema_version: patch::PATCH_SCHEMA_VERSION,
-                    nodes: serde_json::from_value(raw["nodes"].clone())
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?,
+                    nodes: decode_input(raw["nodes"].clone(), "nodes")?,
                     ..Default::default()
                 };
                 patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
                     .map_err(graph_patch_error)?
             } else {
-                serde_json::from_value::<GraphDocument>(raw.clone())
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                decode_input::<GraphDocument>(raw.clone(), "document")?
             }
         } else {
             let mut node = match lane_document {

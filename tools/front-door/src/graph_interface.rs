@@ -294,8 +294,27 @@ fn run_input(
             let (key, value) = item
                 .split_once('=')
                 .ok_or_else(|| cli_input_error("--set expects NAME=TOML_VALUE"))?;
-            let parsed: Value = toml_edit::de::from_str(&format!("value = {value}"))
-                .map_err(|_| cli_input_error("--set value is not valid TOML"))?;
+            let parsed: Value =
+                toml_edit::de::from_str(&format!("value = {value}")).map_err(|_| {
+                    let safe = matches!(
+                        key,
+                        "attempt"
+                            | "attempt.cloud"
+                            | "attempt.placement"
+                            | "attempt.host"
+                            | "attempt.account"
+                            | "attempt.confidential"
+                            | "attempt.provider_timeout"
+                            | "attempt.capabilities"
+                            | "attempt.build_heavy"
+                            | "attempt.write_roots"
+                    );
+                    if safe {
+                        cli_input_error(&format!("--set `{key}`: value is not valid TOML"))
+                    } else {
+                        cli_input_error("--set value is not valid TOML")
+                    }
+                })?;
             if key.is_empty() {
                 return Err(cli_input_error("--set parameter name is empty"));
             }
