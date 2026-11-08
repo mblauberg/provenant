@@ -683,10 +683,28 @@ The client's `list` returns environments, so it cannot recover a lost
 submission response by correlation marker. Such a submission remains unknown
 instead of being retried automatically.
 
-Cancellation is unconfirmed for both providers. Thread parsing uses offline
-fixtures from the supplied command shapes; successful thread-job output
-has not yet been captured on a real host. A parsing failure reports a bounded
-excerpt of what was seen.
+Cancellation is unconfirmed for both providers. A thread parsing failure
+reports a bounded excerpt of what was seen.
+
+One real verification run per provider was captured on 8 and 9 November 2026.
+Both ran `scripts/cloud-verify` for `test-check-adr-index` and settled
+`cloud_passed` with exit status 0, no failed tests and no tracked-file changes:
+
+| Provider | Transport | Commit | Requested model | Observed model | Time |
+|---|---|---|---|---|---|
+| Codex | thread, environment `provenant` | `669a116cd` | `gpt-6.1-sol` | `gpt-6.1-sol` (`matches`) | about 5 minutes |
+| Claude | hosted, `claude --cloud` under `script(1)` | `17ba7c628` | `claude-sonnet-5-5` | `claude-opus-5-5` (`differs`) | about 1 minute |
+
+Neither recorded result carried a token count, so tokens per verified run
+remain unmeasured.
+
+The Claude CLI selects a hosted environment from the account, and its
+`--environment` option names only self-hosted pools. The requested model is a
+prompt instruction there, so compare `observed_model_status` before relying on
+a model. If the account's environment has a setup script tied to another
+repository, the remote session stops before Claude Code starts and pushes no
+result branch. Provenant cannot see that failure and reports `cloud_unknown`
+after the deadline; open the session URL to read the setup log.
 
 The job can use `scripts/cloud-verify` to run its named verification command.
 It requires the job ID, nonce and full commit from the request, a test name,
