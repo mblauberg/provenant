@@ -268,15 +268,16 @@ pub fn placement(
         .and_then(|task| task.cloud.clone()))
 }
 
-/// Resolve Codex cloud transport from the current host configuration.
-pub fn codex_settings(
+/// Resolve a provider's cloud transport settings from the current host configuration.
+pub fn cloud_settings(
     roots: &provenant_core::Roots,
+    provider: &str,
 ) -> Result<provenant_config::ProviderCloudSettings, String> {
     Ok(
         provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?
             .providers
-            .get("codex")
+            .get(provider)
             .map(|provider| provider.cloud.clone())
             .unwrap_or_default(),
     )
@@ -391,7 +392,7 @@ pub(super) fn observe_installed(
             pending_cleanup: None
         }),
         Some(provenant_records::CloudTransport::Codex) => {
-            observe!(CodexCloud::new(cli, codex_settings(roots)?))
+            observe!(CodexCloud::new(cli, cloud_settings(roots, &job.provider)?))
         }
         _ => Err(format!(
             "cloud target {} has unsupported provider {}",
@@ -472,9 +473,10 @@ fn observe_for_view(
             },
             job,
         ),
-        Some(provenant_records::CloudTransport::Codex) => {
-            observe(&mut CodexCloud::new(cli, codex_settings(roots)?), job)
-        }
+        Some(provenant_records::CloudTransport::Codex) => observe(
+            &mut CodexCloud::new(cli, cloud_settings(roots, &job.provider)?),
+            job,
+        ),
         _ => Err(format!("unsupported cloud provider {}", job.provider)),
     }
 }

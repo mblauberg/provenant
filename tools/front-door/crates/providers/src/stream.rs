@@ -314,10 +314,12 @@ impl StreamState {
                 _ => {}
             }
         }
-        events.retain(|event| !matches!(
+        events.retain(|event| {
+            !matches!(
                 event,
                 ProviderEvent::AssistantText(_) | ProviderEvent::ToolActivity
-            ));
+            )
+        });
         if let Some(model) = answer_model {
             events.push(ProviderEvent::Model(model));
         }

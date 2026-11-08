@@ -756,8 +756,10 @@ fn cloud_host_transport_configuration_is_reloaded() -> Result<(), Box<dyn std::e
             ),
         )?;
         // Each fresh observer reloads the host selection while retaining the same remote job.
-        let mut provider =
-            CodexCloud::new(FakeCli::default(), cloud_owner::codex_settings(&roots)?);
+        let mut provider = CodexCloud::new(
+            FakeCli::default(),
+            cloud_owner::cloud_settings(&roots, &job.provider)?,
+        );
         assert_eq!(provider.observe(&job)?, RemoteState::Running);
         assert_eq!(
             provider.cli.0,

@@ -209,7 +209,10 @@ pub fn installed(
             cancelling,
         ),
         Some(provenant_records::CloudTransport::Codex) => advance(
-            &mut CodexCloud::new(cli, cloud_owner::codex_settings(roots)?),
+            &mut CodexCloud::new(
+                cli,
+                cloud_owner::cloud_settings(roots, &placement.provider)?,
+            ),
             store,
             id,
             brief,
