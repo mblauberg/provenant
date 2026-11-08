@@ -299,6 +299,10 @@ pub enum RemoteState {
         detail: String,
     },
     Cancelled,
+    /// Tracking ended without confirming remote custody.
+    Abandoned {
+        reason: String,
+    },
     CancellationUnconfirmed,
 }
 
@@ -310,6 +314,7 @@ impl RemoteState {
                 | Self::Failed { .. }
                 | Self::SetupFailed { .. }
                 | Self::Cancelled
+                | Self::Abandoned { .. }
         )
     }
 }
@@ -416,6 +421,11 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
                 store.save(&job).map_err(CloudJobError::Store)?;
                 return Ok(job);
             }
+            let detail = provider
+                .failure_detail(&error)
+                .unwrap_or_else(|| "submission outcome unknown".into());
+            job.submit_error = Some(provenant_confinement::redact::bounded_line(&detail, 600));
+            store.save(&job).map_err(CloudJobError::Store)?;
             return Err(CloudJobError::SubmitUnknown(error));
         }
     };
@@ -451,6 +461,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
         let mut recovered = job.clone();
         recovered.remote_id = id;
         recovered.state = RemoteState::Running;
+        recovered.submit_error = None;
         store.save(&recovered).map_err(CloudJobError::Store)?;
         *job = recovered;
     }
@@ -636,7 +647,7 @@ mod lifecycle_tests {
         ));
         let saved = store.saved.unwrap();
         assert_eq!(saved.state, RemoteState::Submitting);
-        assert_eq!(saved.submit_error, None);
+        assert_eq!(saved.submit_error.as_deref(), Some("no environment"));
     }
 
     #[test]

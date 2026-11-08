@@ -157,6 +157,8 @@ impl CloudJobStore for AttemptCloudStore<'_> {
             }
             if old.state == RemoteState::Submitting
                 && !(job.state == RemoteState::Submitting && job.remote_id.is_empty()
+                    || matches!(job.state, RemoteState::Abandoned { .. })
+                        && job.remote_id == old.remote_id
                     || job.state == RemoteState::Running && !job.remote_id.trim().is_empty()
                     || matches!(
                         job.state,

@@ -160,13 +160,94 @@ where
                 return Ok(existing);
             }
             let submitted = provenant_providers::cloud::submit(provider, cloud_store, job, task)
-                .map_err(|error| format!("{error:?}"))?;
+                .map_err(|error| match error {
+                    provenant_providers::cloud::CloudJobError::SubmitUnknown(error) => {
+                        let detail = provider.failure_detail(&error).unwrap_or_default();
+                        format!(
+                            "cloud submission outcome unknown; a remote session may exist: {}",
+                            provenant_confinement::redact::bounded_line(&detail, 600)
+                        )
+                    }
+                    other => format!("{other:?}"),
+                })?;
             note_state(store, id, &submitted, call)?;
             Ok(submitted)
         },
     )
     .map_err(|error| error.to_string())??;
     Ok(job)
+}
+
+/// Stop tracking an uncertain submission while retaining its evidence.
+pub(super) fn abandon(
+    store: &provenant_run::RunStore,
+    id: AttemptId,
+    reason: &str,
+    call: &provenant_run::Request<'_>,
+) -> Result<RemoteJob, String> {
+    use provenant_providers::cloud::CloudJobStore;
+    if reason.trim().is_empty() || reason.len() > 4096 {
+        return Err("abandonment reason must contain 1..4096 bytes".into());
+    }
+    let reason = provenant_confinement::redact::bounded_line(reason, 4096);
+    super::cloud_store::AttemptCloudStore::with_attempt(store, id, true, call, |cloud| {
+        let mut job = match cloud.load().map_err(|e| e.to_string())? {
+            Some(job) => job,
+            None => {
+                let record = store.record(id, call).map_err(|e| e.to_string())?;
+                let placement =
+                    placement(store, &record, call)?.ok_or("attempt has no cloud placement")?;
+                let request = store
+                    .request(record.run_id, call)
+                    .map_err(|e| e.to_string())?;
+                let task = request
+                    .tasks
+                    .iter()
+                    .find(|t| t.task_id == record.task_id)
+                    .ok_or("cloud task is missing")?;
+                let target = crate::domains::CloudTarget {
+                    provider: placement.provider,
+                    environment: placement.environment,
+                    repository: placement.repository,
+                    branch: placement.branch,
+                    model: placement.model,
+                    effort: placement.effort,
+                    deadline_seconds: placement.deadline_seconds,
+                };
+                let job = prepare_job(
+                    id,
+                    &placement.target,
+                    &target,
+                    task.head
+                        .as_deref()
+                        .ok_or("cloud node requires a pinned source commit")?,
+                    call.clock,
+                )?;
+                cloud.begin(&job).map_err(|e| e.to_string())?;
+                job
+            }
+        };
+        validate_intent(store, id, &job, call)?;
+        if let RemoteState::Abandoned { reason: previous } = &job.state {
+            if previous != &reason {
+                return Err("conflicting abandonment reason".into());
+            }
+        } else {
+            if job.state != RemoteState::Submitting && !job.is_unresolved_submission() {
+                return Err("cloud submission is not unresolved".into());
+            }
+            job.state = RemoteState::Abandoned { reason };
+            cloud.save(&job).map_err(|e| e.to_string())?;
+        }
+        if !matches!(
+            store.record(id, call).map_err(|e| e.to_string())?.state,
+            provenant_run::AttemptState::Terminal { .. }
+        ) {
+            note_state(store, id, &job, call)?;
+        }
+        Ok(job)
+    })
+    .map_err(|e| e.to_string())?
 }
 
 /// Observe a durable job after a restart and save any validated result.
@@ -593,6 +674,7 @@ pub(super) fn hydrate_within(
                 RemoteState::SetupFailed { .. } => State::SetupFailed,
                 RemoteState::Failed { .. } => State::Failed,
                 RemoteState::Cancelled => State::Cancelled,
+                RemoteState::Abandoned { .. } => State::Abandoned,
                 RemoteState::CancellationUnconfirmed => State::CancellationUnconfirmed,
                 RemoteState::Finished { result } => {
                     let checked = result
