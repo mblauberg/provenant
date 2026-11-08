@@ -148,7 +148,12 @@ fn explicit_graph_file_keeps_nodes_and_dependencies_with_route_override() -> Res
     assert!(output.status.success(), "{value}");
     let document = &value["data"]["document"];
     assert_eq!(document["graph_id"], "routed-file-graph");
-    let nodes = document["nodes"].as_array().ok_or("missing nodes")?;
+    // Routed graph documents compile through the existing composite path.
+    // Its children must remain executable tasks, rather than graph JSON text.
+    assert_eq!(document["nodes"][0]["kind"], "composite");
+    let nodes = document["nodes"][0]["composite"]["nodes"]
+        .as_array()
+        .ok_or("missing graph tasks")?;
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0]["id"], "first");
     assert_eq!(nodes[0]["prompt"], "first task");

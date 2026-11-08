@@ -942,6 +942,7 @@ mod tests {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 let update = options.process_group;
                 let timeout = options.timeout;
+                #[allow(clippy::disallowed_methods)] // Measure the real process timeout boundary.
                 let started = std::time::Instant::now();
                 let result = self.0.execute(options);
                 if update {
