@@ -932,8 +932,7 @@ fn safe_base_ref(name: &str) -> Option<&str> {
 }
 
 /// Fields whose children are caller-chosen map keys rather than schema names.
-/// The key under each is replaced with `*`; every other component is a struct
-/// field or index and is kept, so the schema needs no allowlist here.
+/// A decode path stops at one of these: nothing beneath it is disclosed.
 const MAP_KEY_PARENTS: [&str; 12] = [
     "set",
     "templates",
@@ -949,54 +948,45 @@ const MAP_KEY_PARENTS: [&str; 12] = [
     "ci_poll_overrides",
 ];
 
-/// A bounded decoder-derived path safe to disclose: snake_case names and indexes only,
-/// with user-controlled map keys replaced by `*`. A supplied value is never
+/// Whether `name` is a field whose children are user-chosen map keys.
+pub fn is_map_key_parent(name: &str) -> bool {
+    MAP_KEY_PARENTS.contains(&name)
+}
+
+/// A bounded decoder-derived path safe to disclose: snake_case schema field
+/// names and indexes only. It ends at a user map field, so no key can appear;
+/// a path that continues beneath one is refused. A supplied value is never
 /// part of a path.
 pub(super) fn safe_decoded_field(field: &str) -> Option<String> {
     if field.is_empty() || field.len() > 128 {
         return None;
     }
-    if !field.bytes().all(|b| {
-        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'[' | b']')
-    }) {
-        return None;
-    }
-    let mut out = String::with_capacity(field.len());
-    let mut redact_next = false;
+    let mut after_map = false;
     let mut rest = field;
     while !rest.is_empty() {
-        if let Some(tail) = rest.strip_prefix('.') {
-            out.push('.');
-            rest = tail;
-            continue;
-        }
         if let Some(tail) = rest.strip_prefix('[') {
             let (index, tail) = tail.split_once(']')?;
-            if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+            if after_map || index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
-            out.push('[');
-            out.push_str(index);
-            out.push(']');
-            redact_next = false;
             rest = tail;
             continue;
         }
-        let end = rest.find(['.', '[']).unwrap_or(rest.len());
-        let (part, tail) = rest.split_at(end);
-        if part.contains(']') {
+        let tail = rest.strip_prefix('.').unwrap_or(rest);
+        let end = tail.find(['.', '[']).unwrap_or(tail.len());
+        let (part, tail) = tail.split_at(end);
+        if after_map
+            || part.is_empty()
+            || !part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
             return None;
         }
-        if redact_next {
-            out.push('*');
-            redact_next = false;
-        } else {
-            out.push_str(part);
-            redact_next = MAP_KEY_PARENTS.contains(&part);
-        }
+        after_map = is_map_key_parent(part);
         rest = tail;
     }
-    Some(out)
+    Some(field.to_owned())
 }
 
 /// Allowlist for paths written by hand in code (not derived from a decoder).
