@@ -1,5 +1,6 @@
 //! Document-based graph service shared by the CLI and MCP transports.
 use super::*;
+use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
@@ -17,20 +18,33 @@ fn decode_input<T: serde::de::DeserializeOwned>(
     value: Value,
     prefix: &str,
 ) -> Result<T, FacadeError> {
+    use serde_path_to_error::Segment;
     serde_path_to_error::deserialize(value).map_err(|error| {
-        let path = error.path().to_string();
         let message = error.inner().to_string();
         let missing = message
             .strip_prefix("missing field `")
             .and_then(|s| s.split_once('`'))
             .map(|(field, _)| field);
         let mut field = prefix.to_owned();
-        if path != "." && !path.is_empty() {
-            if !field.is_empty() && !path.starts_with('[') {
-                field.push('.');
+        // Build from segments, stopping at a user map field so no key is kept.
+        let mut in_map = false;
+        for segment in error.path().iter() {
+            match segment {
+                Segment::Seq { index } => field.push_str(&format!("[{index}]")),
+                Segment::Map { key } => {
+                    if !field.is_empty() {
+                        field.push('.');
+                    }
+                    field.push_str(key);
+                    if is_map_key_parent(key) {
+                        in_map = true;
+                        break;
+                    }
+                }
+                Segment::Enum { .. } | Segment::Unknown => {}
             }
-            field.push_str(&path);
         }
+        let missing = missing.filter(|_| !in_map);
         if let Some(missing) = missing {
             if !field.is_empty() {
                 field.push('.');
@@ -1985,36 +1999,48 @@ mod tests {
             ("role", "nodes[0].role"),
         ] {
             let error = super::decode_input::<GraphDocument>(node(field, json!(7)), "")
-                .err()
-                .unwrap_or_else(|| {
-                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
-                        field: path.into(),
-                        missing: false,
-                    })
-                });
+                .expect_err("decode must fail");
             let text = error.diagnostic().detail.unwrap_or_default();
             assert!(text.contains(path), "{text}");
             assert!(text.contains("invalid type or value"), "{text}");
         }
         let secret = "ghp_TOKEN_SENTINEL";
-        let error = super::decode_input::<GraphDocument>(
-            {
-                let mut doc = node("role", json!("fine"));
-                doc["nodes"][0]["access"] = json!(secret);
-                doc
-            },
-            "",
-        )
-        .expect_err("decode must fail");
+        let mut doc = node("role", json!("fine"));
+        doc["nodes"][0]["access"] = json!(secret);
+        let error = super::decode_input::<GraphDocument>(doc, "").expect_err("decode must fail");
         let wire = serde_json::to_string(&error).unwrap();
         assert!(!wire.contains(secret), "{wire}");
-        let error = FacadeError::invalid(InvalidInputDetail::FieldDecode {
-            field: "set.userkey.value".into(),
-            missing: false,
-        });
-        let wire = serde_json::to_string(&error).unwrap();
-        assert!(wire.contains("set.*.value"), "{wire}");
-        assert!(!wire.contains("userkey"), "{wire}");
+        assert!(wire.contains("nodes[0].access"), "{wire}");
+        // Map keys never appear, whatever characters they contain.
+        for key in ["foo.secret", "k[0]secret", "userkey"] {
+            #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
+            struct Doc {
+                nodes: Vec<Node>,
+            }
+            #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
+            struct Node {
+                attempt: Attempt,
+            }
+            #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
+            struct Attempt {
+                extra: BTreeMap<String, u8>,
+            }
+            let doc = json!({"nodes":[{"attempt":{"extra":{key: "not a number"}}}]});
+            let error = super::decode_input::<Doc>(doc, "").expect_err("decode must fail");
+            let wire = serde_json::to_string(&error).unwrap();
+            assert!(
+                !wire.contains("secret") && !wire.contains("userkey"),
+                "{wire}"
+            );
+            let back: FacadeError = serde_json::from_str(&wire).unwrap();
+            assert_eq!(back, error);
+            assert_eq!(serde_json::to_string(&back).unwrap(), wire);
+            let text = back.diagnostic().detail.unwrap_or_default();
+            assert!(text.contains("nodes[0].attempt.extra`"), "{text}");
+        }
         Ok(())
     }
 
