@@ -167,7 +167,7 @@ impl InstalledCloudCli<'_> {
             };
             let detail = failure_excerpt(text);
             let refusal = submission
-                && matches!(output.outcome.termination, Termination::Exit(code) if code != 0)
+                && matches!(output.outcome.termination, Termination::Exit(code) if (1..128).contains(&code))
                 && !detail.is_empty()
                 && parse_identity(&output.stdout).is_err()
                 && parse_identity(&output.stderr).is_err();
@@ -876,6 +876,7 @@ mod adapter_tests {
                 false,
             ),
             (Termination::Signal(9), "", "error", false, false),
+            (Termination::Exit(137), "", "error", false, false),
             (Termination::Exit(1), "", "error", true, false),
             (Termination::Exit(1), "", "", false, false),
         ] {
