@@ -70,6 +70,7 @@ jobs:
           save-if: false
       - name: Install nextest
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: cargo-nextest@0.9.149
       - name: Stress-run changed tests
@@ -99,6 +100,7 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Install nextest
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: cargo-nextest@0.9.149
       - name: Stress harness binaries
@@ -145,6 +147,7 @@ jobs:
           save-if: false
       - name: Install nextest and cargo-mutants
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 6
         with:
           tool: cargo-nextest@0.9.149,cargo-mutants@25.3.1
       - name: Run mutation testing

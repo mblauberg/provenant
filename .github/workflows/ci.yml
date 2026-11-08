@@ -198,6 +198,7 @@ jobs:
           save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
       - name: Install nextest
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: cargo-nextest@0.9.149
       - name: Check literal nextest test filters
@@ -288,6 +289,7 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Install dependency tools
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 6
         with:
           tool: cargo-deny@0.20.2,cargo-shear@1.14.0
       - name: Check advisories, licences and dependency allowlist
@@ -327,6 +329,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Install nextest
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: cargo-nextest@0.9.149
       - name: Lint Rust workspace
@@ -503,7 +506,9 @@ jobs:
   generic-checks:
     name: Spelling, workflows and Markdown links
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Covers the worst case of the download budgets below: two tool downloads
+    # at 3 minutes each, plus the install-action budgets and the checks.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -513,29 +518,50 @@ jobs:
           persist-credentials: false
       - name: Install spelling checker
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: typos-cli@1.51.1
       - name: Install ShellCheck
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: shellcheck@0.11.0
           fallback: none
+      # Cache the pinned archives; the key names their versions and checksums,
+      # so changing a pin also changes the key. Checksums are verified on every
+      # run, cached or not.
+      - name: Restore actionlint and lychee archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/generic-tools/downloads
+          key: generic-tools-actionlint-1.7.12-8aca8db9-lychee-0.24.2-1f4e0ef7
       # actionlint and lychee are not in install-action's supported catalogue.
       # Verify the pinned upstream release archives before executing them.
+      # Each download retries transient failures within a 3-minute budget.
       - name: Install actionlint and lychee
+        timeout-minutes: 7
         env:
           TOOL_DIR: ${{ runner.temp }}/generic-tools
         run: |
-          mkdir -p "$TOOL_DIR/bin"
-          cd "$TOOL_DIR"
-          curl --fail --silent --show-error --location --output actionlint.tar.gz \
-            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
-          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
-          tar -xzf actionlint.tar.gz -C bin actionlint
-          curl --fail --silent --show-error --location --output lychee.tar.gz \
-            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz
-          echo '1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a  lychee.tar.gz' | sha256sum --check
-          tar -xzf lychee.tar.gz --strip-components=1 -C bin lychee-x86_64-unknown-linux-gnu/lychee
+          downloads="$TOOL_DIR/downloads"
+          mkdir -p "$downloads" "$TOOL_DIR/bin"
+          # Reuse a cached archive only if its checksum still matches the pin.
+          fetch_verified() {
+            if ! echo "$3  $2" | sha256sum --check --status; then
+              scripts/download-with-retry "$1" "$2"
+              echo "$3  $2" | sha256sum --check
+            fi
+          }
+          fetch_verified \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            "$downloads/actionlint.tar.gz" \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          tar -xzf "$downloads/actionlint.tar.gz" -C "$TOOL_DIR/bin" actionlint
+          fetch_verified \
+            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz \
+            "$downloads/lychee.tar.gz" \
+            1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
+          tar -xzf "$downloads/lychee.tar.gz" --strip-components=1 -C "$TOOL_DIR/bin" lychee-x86_64-unknown-linux-gnu/lychee
           echo "$TOOL_DIR/bin" >> "$GITHUB_PATH"
       - name: Check spelling
         run: git ls-files | typos --file-list - --force-exclude
@@ -553,6 +579,7 @@ jobs:
           scripts/test-select-macos-checks
           scripts/test-check-ci-status
           scripts/test-verify-tier
+          scripts/test-download-with-retry
       - name: Test native inventory evidence
         run: scripts/test-check-native-inventory
       - name: Test flaky-test quarantine
