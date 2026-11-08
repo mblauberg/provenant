@@ -154,8 +154,15 @@ fn select_unseen(
         query.unseen_after = Some(seen);
         let page = session.service().lanes(&query, call)?;
         for mut lane in page.lanes {
-            cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut lane), call)
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            cloud_owner::hydrate(
+                &Roots {
+                    state: session.context.state_root.clone(),
+                },
+                &session.store,
+                std::slice::from_mut(&mut lane),
+                call,
+            )
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             if lane
                 .cloud_observation
                 .0
@@ -326,8 +333,15 @@ fn candidates_with_backlog<'a>(
                 lanes.push(lane);
             }
         }
-        cloud_owner::hydrate(&session.store, &mut lanes, &call)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+        cloud_owner::hydrate(
+            &Roots {
+                state: session.context.state_root.clone(),
+            },
+            &session.store,
+            &mut lanes,
+            &call,
+        )
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
         let waits = session.store.lane_waits(&lanes, &call);
         apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)

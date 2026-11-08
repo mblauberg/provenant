@@ -134,7 +134,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 }
                 rows.sort_by_key(|lane| std::cmp::Reverse(lane.queued_at));
             }
-            cloud_owner::hydrate(&session.store, &mut rows, &call)
+            cloud_owner::hydrate(edge.roots, &session.store, &mut rows, &call)
                 .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
@@ -1037,8 +1037,13 @@ pub fn project_retained_attempt(
         .attempt
         .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
     let mut record = session.store.record(id, &call)?;
-    cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut record), &call)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+    cloud_owner::hydrate(
+        edge.roots,
+        &session.store,
+        std::slice::from_mut(&mut record),
+        &call,
+    )
+    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     if target.run.is_some_and(|run| run != record.run_id)
         || target.task.is_some_and(|task| task != record.task_id)
     {
@@ -1743,6 +1748,7 @@ pub(super) fn lanes_inner(
             let page = session.service().lanes(&query, &call)?;
             for mut lane in page.lanes {
                 cloud_owner::hydrate_within(
+                    edge.roots,
                     &session.store,
                     std::slice::from_mut(&mut lane),
                     &call,
@@ -1781,7 +1787,7 @@ pub(super) fn lanes_inner(
         let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
         (lanes, page.next)
     };
-    cloud_owner::hydrate_within(&session.store, &mut lanes, &call, budget_end)
+    cloud_owner::hydrate_within(edge.roots, &session.store, &mut lanes, &call, budget_end)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());

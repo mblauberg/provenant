@@ -399,8 +399,13 @@ fn output_read(
             )
         })?;
     let mut record = session.service().status(id, call)?;
-    cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut record), call)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+    cloud_owner::hydrate(
+        edge.roots,
+        &session.store,
+        std::slice::from_mut(&mut record),
+        call,
+    )
+    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session
         .store
         .lane_waits(std::slice::from_ref(&record), call);

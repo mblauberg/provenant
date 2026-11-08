@@ -676,7 +676,11 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
     let _ = cloud_owner::reconcile(&mut Fake { running: false }, &store, id, &call)?;
     assert_eq!(store.last_event_sequence(id, &call)?, event);
     let mut lanes = vec![store.record(id, &call)?];
-    cloud_owner::hydrate(&store, &mut lanes, &call)?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    roots.state_dir = Some(root.join("state"));
+    let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+    cloud_owner::hydrate(&roots, &store, &mut lanes, &call)?;
     assert_eq!(status::lane_display_state(&lanes[0]), "cloud_passed");
     assert!(condition_met(&lanes, Condition::All));
     let mut data = json!({});
@@ -698,5 +702,67 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
             .as_str()
             .is_some_and(|text| text.contains("repair"))
     );
+    Ok(())
+}
+
+#[test]
+fn cloud_host_transport_configuration_is_reloaded() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{CloudProvider, RemoteState};
+    use provenant_providers::cloud_cli::{CloudCli, CodexCloud};
+    #[derive(Default)]
+    struct FakeCli(Vec<(String, Vec<String>)>);
+    impl CloudCli for FakeCli {
+        fn run(
+            &mut self,
+            program: &str,
+            args: &[&str],
+            stdin: Option<&str>,
+        ) -> Result<String, String> {
+            assert!(stdin.is_none());
+            self.0
+                .push((program.into(), args.iter().map(|s| (*s).into()).collect()));
+            Ok(r#"{"thread":{"id":"thread-1","status":{"active":{}}},"turns":{"data":{"values":[{"id":"turn-1","status":"TURN_STATUS_IN_PROGRESS"}]}}}"#.into())
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    std::fs::create_dir_all(root.join("state"))?;
+    let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let target = crate::domains::CloudTarget {
+        provider: "codex".into(),
+        environment: "env".into(),
+        model: "requested".into(),
+        effort: None,
+        repository: "repository".into(),
+        branch: "main".into(),
+        deadline_seconds: 3600,
+    };
+    let mut job = cloud_owner::prepare_job(
+        AttemptId::from_bytes([41; 16]),
+        "target",
+        &target,
+        &"a".repeat(40),
+        &SystemClock::new(),
+    )?;
+    job.remote_id = "thread-1".into();
+    job.state = RemoteState::Running;
+    for command in ["first-thread-client", "replacement-thread-client"] {
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            format!(
+                "schema_version=1\n[providers.codex.cloud]\ntransport='thread'\ncommand='{command}'\n"
+            ),
+        )?;
+        // Each fresh observer reloads the host selection while retaining the same remote job.
+        let mut provider =
+            CodexCloud::new(FakeCli::default(), cloud_owner::codex_settings(&roots)?);
+        assert_eq!(provider.observe(&job)?, RemoteState::Running);
+        assert_eq!(
+            provider.cli.0,
+            [(command.into(), vec!["status".into(), "thread-1".into()])]
+        );
+    }
     Ok(())
 }

@@ -104,7 +104,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     let cloud = cloud_owner::load(&session.store, id, &call)
                         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
                     let observed = match cloud {
-                        Some(job) => cloud_owner::observe_installed(&session.store, id, &job, &call, edge.cwd, true),
+                        Some(job) => cloud_owner::observe_installed(edge.roots, &session.store, id, &job, &call, edge.cwd, true),
                         None => Err("cloud submission identity is not recorded; cancellation is unconfirmed".into()),
                     };
                     match observed {

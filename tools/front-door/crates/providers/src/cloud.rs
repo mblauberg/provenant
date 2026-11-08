@@ -270,6 +270,10 @@ pub enum RemoteState {
     Finished {
         result: CloudResult,
     },
+    /// The provider ended the turn without a verification result.
+    Failed {
+        detail: String,
+    },
     /// The provider reported a terminal environment setup failure.
     SetupFailed {
         detail: String,
@@ -282,7 +286,10 @@ impl RemoteState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Finished { .. } | Self::SetupFailed { .. } | Self::Cancelled
+            Self::Finished { .. }
+                | Self::Failed { .. }
+                | Self::SetupFailed { .. }
+                | Self::Cancelled
         )
     }
 }

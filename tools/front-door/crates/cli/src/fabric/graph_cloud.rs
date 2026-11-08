@@ -142,6 +142,7 @@ fn observation(job: &RemoteJob, reference: &str) -> Result<AttemptObservation, S
         RemoteState::SetupFailed { .. } => {
             terminal(reference, AttemptOutcome::OtherFailure, false, None)
         }
+        RemoteState::Failed { .. } => terminal(reference, AttemptOutcome::TaskFailed, true, None),
         RemoteState::Cancelled => terminal(reference, AttemptOutcome::OtherFailure, true, None),
     })
 }
@@ -167,6 +168,7 @@ impl provenant_providers::cloud_cli::CloudCli for BudgetCli<'_> {
 #[allow(clippy::disallowed_methods)] // The installed transport consumes a real-time graph budget.
 #[allow(clippy::too_many_arguments)] // One boundary carries the sealed attempt, transport budget and stop state.
 pub fn installed(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     id: AttemptId,
     brief: &str,
@@ -207,7 +209,7 @@ pub fn installed(
             cancelling,
         ),
         Some(provenant_records::CloudTransport::Codex) => advance(
-            &mut CodexCloud { cli },
+            &mut CodexCloud::new(cli, cloud_owner::codex_settings(roots)?),
             store,
             id,
             brief,

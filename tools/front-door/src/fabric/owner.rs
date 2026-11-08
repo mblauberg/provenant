@@ -2005,6 +2005,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
                 let call = owner.call(self.cancel);
                 if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                    &self.factory.context.roots,
                     &store,
                     target.attempt,
                     "",
@@ -2068,6 +2069,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         self.factory.context.identity.host, record.attempt_id
                     );
                     if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                        &self.factory.context.roots,
                         &store,
                         record.attempt_id,
                         "",
@@ -3308,6 +3310,7 @@ impl BoundGraphOwner<'_> {
             let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
             let call = owner.call(self.cancel);
             if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                &self.factory.context.roots,
                 &store,
                 target.attempt,
                 node.prompt,

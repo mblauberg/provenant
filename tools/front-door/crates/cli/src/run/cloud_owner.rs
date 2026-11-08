@@ -267,8 +267,23 @@ pub fn placement(
         .and_then(|task| task.cloud.clone()))
 }
 
+/// Resolve Codex cloud transport from the current host configuration.
+pub fn codex_settings(
+    roots: &provenant_core::Roots,
+) -> Result<provenant_config::ProviderCloudSettings, String> {
+    Ok(
+        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?
+            .providers
+            .get("codex")
+            .map(|provider| provider.cloud.clone())
+            .unwrap_or_default(),
+    )
+}
+
 /// Reconcile or request cancellation with the installed cloud client.
 pub(super) fn observe_installed(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     id: AttemptId,
     job: &RemoteJob,
@@ -298,7 +313,9 @@ pub(super) fn observe_installed(
             cli,
             pending_cleanup: None
         }),
-        Some(provenant_records::CloudTransport::Codex) => observe!(CodexCloud { cli }),
+        Some(provenant_records::CloudTransport::Codex) => {
+            observe!(CodexCloud::new(cli, codex_settings(roots)?))
+        }
         _ => Err(format!(
             "cloud target {} has unsupported provider {}",
             job.target, job.provider
@@ -326,6 +343,7 @@ impl provenant_providers::cloud_cli::CloudCli for ViewCli<'_> {
 // Read-only status observation: do not save the result or modify the run store.
 #[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
 fn observe_for_view(
+    roots: &provenant_core::Roots,
     job: &RemoteJob,
     cwd: &std::path::Path,
     budget_end: std::time::Instant,
@@ -377,7 +395,9 @@ fn observe_for_view(
             },
             job,
         ),
-        Some(provenant_records::CloudTransport::Codex) => observe(&mut CodexCloud { cli }, job),
+        Some(provenant_records::CloudTransport::Codex) => {
+            observe(&mut CodexCloud::new(cli, codex_settings(roots)?), job)
+        }
         _ => Err(format!("unsupported cloud provider {}", job.provider)),
     }
 }
@@ -421,15 +441,17 @@ pub(super) fn view_observation_budget() -> std::time::Instant {
 }
 
 pub(super) fn hydrate(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     lanes: &mut [provenant_run::AttemptRecord],
     call: &provenant_run::Request<'_>,
 ) -> Result<(), String> {
-    hydrate_within(store, lanes, call, view_observation_budget())
+    hydrate_within(roots, store, lanes, call, view_observation_budget())
 }
 
 /// Hydrate under a budget the caller shares across a view that hydrates in parts.
 pub(super) fn hydrate_within(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     lanes: &mut [provenant_run::AttemptRecord],
     call: &provenant_run::Request<'_>,
@@ -443,12 +465,7 @@ pub(super) fn hydrate_within(
         let mut job = load(store, lane.attempt_id, call)?;
         let mut stale = false;
         if let Some(saved) = &job
-            && !matches!(
-                saved.state,
-                RemoteState::Finished { .. }
-                    | RemoteState::Cancelled
-                    | RemoteState::SetupFailed { .. }
-            )
+            && !saved.state.is_terminal()
         {
             // A spent budget starts no more providers. A timed-out call costs its
             // termination grace on top, so starting each remaining job would still
@@ -459,7 +476,7 @@ pub(super) fn hydrate_within(
             } else {
                 match std::env::current_dir()
                     .map_err(|error| error.to_string())
-                    .and_then(|cwd| observe_for_view(saved, &cwd, budget_end))
+                    .and_then(|cwd| observe_for_view(roots, saved, &cwd, budget_end))
                 {
                     Ok(observed) => job = Some(observed),
                     Err(_) => stale = true,
@@ -481,6 +498,7 @@ pub(super) fn hydrate_within(
                 RemoteState::Running => State::Running,
                 RemoteState::Unknown { .. } => State::Unknown,
                 RemoteState::SetupFailed { .. } => State::SetupFailed,
+                RemoteState::Failed { .. } => State::Failed,
                 RemoteState::Cancelled => State::Cancelled,
                 RemoteState::CancellationUnconfirmed => State::CancellationUnconfirmed,
                 RemoteState::Finished { result } => {

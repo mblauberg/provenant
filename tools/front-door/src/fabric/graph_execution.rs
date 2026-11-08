@@ -1181,6 +1181,7 @@ impl Factory {
                 let call = owner.call(cancel);
                 let reference = format!("{}/{}", self.context.identity.host, target.attempt);
                 match provenant_cli::fabric::graph_cloud::installed(
+                    &self.context.roots,
                     &store,
                     target.attempt,
                     "",
