@@ -607,9 +607,35 @@ fn local_lanes_read_and_show_capacity_cooldowns() -> Result<(), Box<dyn std::err
 #[test]
 fn cloud_retained_submission_repair_preserves_reason() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::cloud::{CloudJobStore, RemoteState};
-    for (saved_error, expected) in [
-        ("refused by provider", "refused by provider"),
-        ("", "submission unknown"),
+    for (saved_error, refused, expected) in [
+        (
+            "refused by provider",
+            true,
+            RemoteState::Failed {
+                detail: "refused by provider".into(),
+            },
+        ),
+        (
+            "",
+            true,
+            RemoteState::Failed {
+                detail: "submission unknown".into(),
+            },
+        ),
+        (
+            "timed out",
+            false,
+            RemoteState::Unknown {
+                detail: "submission outcome unknown: timed out".into(),
+            },
+        ),
+        (
+            "",
+            false,
+            RemoteState::Unknown {
+                detail: "submission outcome unknown: submission unknown".into(),
+            },
+        ),
     ] {
         let temp = tempfile::tempdir()?;
         let clock = SystemClock::new();
@@ -642,14 +668,10 @@ fn cloud_retained_submission_repair_preserves_reason() -> Result<(), Box<dyn std
         };
         let mut job = cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?;
         job.submit_error = Some(saved_error.into());
+        job.submit_refused = refused;
         cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |s| s.begin(&job))??;
         let settled = cloud_owner::settle_saved_submission(&store, id, &call)?;
-        assert_eq!(
-            settled.state,
-            RemoteState::Failed {
-                detail: expected.into()
-            }
-        );
+        assert_eq!(settled.state, expected);
         assert_eq!(cloud_owner::load(&store, id, &call)?.unwrap(), settled);
         assert_eq!(
             cloud_owner::settle_saved_submission(&store, id, &call)?,

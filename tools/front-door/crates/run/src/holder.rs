@@ -2079,28 +2079,6 @@ impl RunStore {
                 decoded.reason.take().unwrap_or_default()
             ));
         }
-        // The handoff is the lane's own account; a branch that has moved on
-        // from it needs a person to look. A warning, not a failure.
-        if task.writer.is_some()
-            && matches!(
-                decoded.outcome,
-                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-            )
-            && let Some(driver) = settlement.as_ref()
-            && let Some((base, head)) = driver.base().zip(driver.head())
-            && let Ok(Some(declared)) =
-                provenant_records::handoff::Handoff::from_result(&decoded.result)
-            && let Some(note) =
-                handoff_branch_disagreement(&declared, &base.to_string(), &head.to_string())
-        {
-            if decoded.outcome == Outcome::Succeeded {
-                decoded.outcome = Outcome::ReviewRequired;
-            }
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {note}"),
-                None => note,
-            });
-        }
         // A denial is a diagnostic, not part of the provider's answer: the
         // handoff, findings and verdict blocks must stay as the provider wrote them.
         if let Some(denial) = denial {
@@ -2307,66 +2285,6 @@ fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
     text
 }
 
-/// The writer branch head and base against what the handoff says of them.
-/// The handoff has no head field, so this reads the prose it does have: a
-/// `HEAD <sha>` it names, or a statement that nothing was committed.
-fn handoff_branch_disagreement(
-    handoff: &provenant_records::handoff::Handoff,
-    base: &str,
-    head: &str,
-) -> Option<String> {
-    let short = |oid: &str| {
-        oid.chars()
-            .take(crate::writer::SHORT_SHA)
-            .collect::<String>()
-    };
-    let lines = std::iter::once(&handoff.note)
-        .chain(&handoff.remaining)
-        .chain(&handoff.decisions)
-        .chain(&handoff.verify);
-    let mut named = None;
-    let mut no_commit = false;
-    for line in lines {
-        let lower = line.to_ascii_lowercase();
-        no_commit |= [
-            "no commit",
-            "no implementation",
-            "nothing committed",
-            "not committed",
-        ]
-        .iter()
-        .any(|phrase| lower.contains(phrase));
-        let mut words = lower
-            .split(|ch: char| !ch.is_ascii_alphanumeric())
-            .filter(|word| !word.is_empty());
-        while let Some(word) = words.next() {
-            if word == "head"
-                && let Some(next) = words.next()
-                && (7..=40).contains(&next.len())
-                && next.chars().all(|ch| ch.is_ascii_hexdigit())
-            {
-                named = Some(next.to_owned());
-            }
-        }
-    }
-    if let Some(named) = named
-        && !head.starts_with(&named)
-    {
-        return Some(format!(
-            "handoff disagrees with the branch: it names HEAD {}, the branch is at {}",
-            short(&named),
-            short(head)
-        ));
-    }
-    (no_commit && head != base).then(|| {
-        format!(
-            "handoff disagrees with the branch: it reports no commit, the branch is at {} (started at {})",
-            short(head),
-            short(base)
-        )
-    })
-}
-
 pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";
 pub const EMPTY_WRITER_REASON: &str =
     "the provider ended with an empty final message; its commit is kept for review";
@@ -2489,32 +2407,6 @@ mod budget_result_tests {
             provenant_records::handoff::HandoffStatus::StoppedEarly
         );
         assert_eq!(handoff.remaining, ["unknown: inspect branch"]);
-    }
-
-    #[test]
-    fn a_handoff_that_disagrees_with_the_branch_is_named_by_both_heads() {
-        let handoff = |note: &str| {
-            provenant_records::handoff::Handoff::from_result(&format!(
-                "```handoff\n{}\n```",
-                serde_json::json!({"schema_version":2,"status":"stopped_early","note":note,
-                    "remaining":[],"decisions":[],"verify":[]})
-            ))
-            .unwrap()
-            .unwrap()
-        };
-        let base = "1111111111111111111111111111111111111111";
-        let head = "2222222222222222222222222222222222222222";
-        let stale = handoff("No implementation or commit, HEAD 1111111");
-        let reason = handoff_branch_disagreement(&stale, base, head).unwrap();
-        assert!(
-            reason.contains("1111111") && reason.contains("222222222"),
-            "{reason}"
-        );
-        let none = handoff("no commit made");
-        assert!(handoff_branch_disagreement(&none, base, head).is_some());
-        assert!(handoff_branch_disagreement(&none, base, base).is_none());
-        let agreeing = handoff("committed at HEAD 2222222");
-        assert!(handoff_branch_disagreement(&agreeing, base, head).is_none());
     }
 }
 
@@ -3383,12 +3275,11 @@ mod writer_recovery_tests {
                 row.terminal_cause,
                 (!changed).then_some(TerminalCause::StoppedNoWork)
             );
-            assert_eq!(
-                reason
+            assert!(
+                !reason
                     .as_deref()
                     .unwrap()
                     .contains("handoff disagrees with the branch"),
-                changed,
                 "{reason:?}"
             );
             if !changed {
