@@ -209,7 +209,11 @@ fn account_quota_is_unavailable_inside_a_lane() -> Result {
 
     let missing = rig.state.join("missing-project");
     let missing = missing.to_str().ok_or("non-UTF-8 fixture path")?;
-    for args in [&["quota"][..], &["quota", "--json"], &["--project", missing, "quota"]] {
+    for args in [
+        &["quota"][..],
+        &["quota", "--json"],
+        &["--project", missing, "quota"],
+    ] {
         let output = rig.command(args)?;
         assert_ne!(code(&output), 0, "{args:?}");
         if !args.contains(&"--json") {

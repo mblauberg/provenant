@@ -128,6 +128,41 @@ fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
 }
 
 #[test]
+fn explicit_graph_file_keeps_nodes_and_dependencies_with_route_override() -> Result {
+    let rig = GraphProject::new()?;
+    let graph = rig.document(&json!({
+        "schema_version": 2,
+        "graph_id": "routed-file-graph",
+        "nodes": [
+            {"id":"first","prompt":"first task","access":"read_only","route":{"alias":"junior"}},
+            {"id":"second","prompt":"second task","access":"read_only","route":{"alias":"junior"},"depends_on":["first"]}
+        ]
+    }))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(graph)
+        .args(["--route", "senior", "--explain"])
+        .output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{value}");
+    let document = &value["data"]["document"];
+    assert_eq!(document["graph_id"], "routed-file-graph");
+    let nodes = document["nodes"].as_array().ok_or("missing nodes")?;
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["id"], "first");
+    assert_eq!(nodes[0]["prompt"], "first task");
+    assert_eq!(nodes[1]["id"], "second");
+    assert_eq!(nodes[1]["prompt"], "second task");
+    assert_eq!(nodes[1]["depends_on"], json!(["first"]));
+    for node in nodes {
+        assert_eq!(node["route"]["alias"], "senior");
+    }
+    assert!(graph_records(&rig.state())?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn malformed_graph_reports_safe_output_field_and_action() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({

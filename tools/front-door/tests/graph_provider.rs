@@ -3883,7 +3883,10 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
     assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
     assert!(lane["started_at"].is_null(), "{lane}");
     assert!(lane["applied_route"].is_null(), "{lane}");
-    assert_eq!(lane["skipped_routes"][0]["cause"], "provider_updating", "{lane}");
+    assert_eq!(
+        lane["skipped_routes"][0]["cause"], "provider_updating",
+        "{lane}"
+    );
     drop(lock);
     Ok(())
 }

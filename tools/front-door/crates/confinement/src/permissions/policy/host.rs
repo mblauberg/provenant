@@ -107,6 +107,10 @@ struct InventorySummary {
     outside_home: std::collections::BTreeMap<PathBuf, usize>,
     unrepresentable: std::collections::BTreeMap<PathBuf, usize>,
     inspection: std::collections::BTreeMap<PathBuf, usize>,
+    covering_work: std::collections::BTreeMap<PathBuf, usize>,
+    endpoint_outside_home: std::collections::BTreeMap<PathBuf, usize>,
+    endpoint_covering_work: std::collections::BTreeMap<PathBuf, usize>,
+    endpoint_unrepresentable: std::collections::BTreeMap<PathBuf, usize>,
 }
 
 impl InventorySummary {
@@ -132,6 +136,22 @@ impl InventorySummary {
                 &self.unrepresentable,
             ),
             ("cannot inspect credential inventory", &self.inspection),
+            (
+                "skipping credential symlink target covering source or scratch",
+                &self.covering_work,
+            ),
+            (
+                "skipping credential endpoint directory outside home",
+                &self.endpoint_outside_home,
+            ),
+            (
+                "skipping credential endpoint target covering source or scratch",
+                &self.endpoint_covering_work,
+            ),
+            (
+                "cannot represent credential endpoint target",
+                &self.endpoint_unrepresentable,
+            ),
             (
                 "credential symlink inventory depth limit reached",
                 &self.depth,
@@ -165,7 +185,6 @@ fn inventory_links(
     home: &Path,
     source: &Path,
     scratch: &Path,
-    warnings: &mut impl Write,
     summary: &mut InventorySummary,
 ) -> Result<(), PermissionError> {
     let mut pending = vec![(root.path.clone(), 0)];
@@ -234,11 +253,7 @@ fn inventory_links(
                 if scope == PathScope::Subtree
                     && (source.starts_with(&target) || scratch.starts_with(&target))
                 {
-                    let _ = writeln!(
-                        warnings,
-                        "warning: skipping credential symlink target covering source or scratch: {}",
-                        path.display()
-                    );
+                    InventorySummary::record(&mut summary.covering_work, &root.path);
                     continue;
                 }
                 if !profile_path_representable(&path)
@@ -383,7 +398,6 @@ impl MandatoryRoots {
                     &resolved_home,
                     &resolved_source,
                     &resolved_scratch,
-                    &mut std::io::stderr().lock(),
                     &mut summary,
                 )?;
                 for endpoint in &endpoints {
@@ -393,11 +407,7 @@ impl MandatoryRoots {
                         continue;
                     };
                     if target != path && target.is_dir() && !target.starts_with(&resolved_home) {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: skipping credential endpoint directory outside home: {}",
-                            path.display()
-                        );
+                        InventorySummary::record(&mut summary.endpoint_outside_home, &root.path);
                         continue;
                     }
                     if target != path
@@ -405,11 +415,7 @@ impl MandatoryRoots {
                         && (resolved_source.starts_with(&target)
                             || resolved_scratch.starts_with(&target))
                     {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: skipping credential endpoint target covering source or scratch: {}",
-                            path.display()
-                        );
+                        InventorySummary::record(&mut summary.endpoint_covering_work, &root.path);
                         continue;
                     }
                     if target != path
@@ -422,11 +428,7 @@ impl MandatoryRoots {
                             .validate()
                             .is_err())
                     {
-                        let _ = writeln!(
-                            std::io::stderr().lock(),
-                            "warning: cannot represent credential endpoint target: {}",
-                            path.display()
-                        );
+                        InventorySummary::record(&mut summary.endpoint_unrepresentable, &root.path);
                         continue;
                     }
                     // Also retain regular and missing endpoints for the final
@@ -683,7 +685,6 @@ mod tests {
                 &home,
                 &base.join("source"),
                 &base.join("scratch"),
-                &mut warnings,
                 &mut summary,
             )?;
         }
@@ -726,6 +727,7 @@ mod tests {
             for link in 0..(4 - index) {
                 std::os::unix::fs::symlink(&outside, store.join(format!("outside{link}")))?;
                 std::os::unix::fs::symlink(&target, store.join(format!("bad{link}")))?;
+                std::os::unix::fs::symlink(&home, store.join(format!("covering{link}")))?;
                 InventorySummary::record(&mut summary.inspection, &store);
             }
             inventory_links(
@@ -735,16 +737,15 @@ mod tests {
                     scope: PathScope::Subtree,
                 },
                 &home,
-                &base.join("source"),
-                &base.join("scratch"),
-                &mut warnings,
+                &home.join("source"),
+                &home.join("scratch"),
                 &mut summary,
             )?;
         }
         assert!(warnings.is_empty());
         summary.report(&mut warnings);
         let output = String::from_utf8(warnings)?;
-        assert_eq!(output.lines().count(), 3, "{output}");
+        assert_eq!(output.lines().count(), 4, "{output}");
         for line in output.lines() {
             assert!(line.contains(": 10; top roots:"), "{line}");
             for index in 0..3 {
@@ -770,6 +771,9 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let home = base.join("home");
+        // Linux returns NotFound for a missing parent before inspecting the
+        // overlong component; create it so both platforms reach that error.
+        std::fs::create_dir(&home)?;
         let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
         let root = PathGrant {
             path: home.join("x".repeat(1024)),
@@ -784,7 +788,6 @@ mod tests {
                 &home,
                 &base.join("source"),
                 &base.join("scratch"),
-                &mut warnings,
                 &mut summary,
             )?;
         }
@@ -807,13 +810,19 @@ mod tests {
             summary.record_unresolved(&root, &root.join("missing"));
             summary.record_unresolved(&root, &root.join("missing"));
             InventorySummary::record(&mut summary.entries, &root);
+            InventorySummary::record(&mut summary.endpoint_outside_home, &root);
+            InventorySummary::record(&mut summary.endpoint_covering_work, &root);
+            InventorySummary::record(&mut summary.endpoint_unrepresentable, &root);
         }
         let mut warnings = Vec::new();
         summary.report(&mut warnings);
         let output = String::from_utf8(warnings).unwrap();
-        assert_eq!(output.lines().count(), 2);
+        assert_eq!(output.lines().count(), 5);
         assert!(output.contains("cannot resolve credential symlink: 5;"));
         assert!(output.contains("entry limit reached: 5;"));
+        assert!(output.contains("endpoint directory outside home: 5;"));
+        assert!(output.contains("endpoint target covering source or scratch: 5;"));
+        assert!(output.contains("cannot represent credential endpoint target: 5;"));
         assert!(!output.contains("/root3"));
     }
 
@@ -852,7 +861,6 @@ mod tests {
             &home,
             &root.join("source"),
             &root.join("scratch"),
-            &mut warnings,
             &mut summary,
         )?;
         summary.report(&mut warnings);
@@ -935,7 +943,6 @@ mod tests {
             &home,
             &root.join("source"),
             &root.join("scratch"),
-            &mut warnings,
             &mut summary,
         )?;
         summary.report(&mut warnings);
@@ -1001,7 +1008,6 @@ mod tests {
             &root.join("home"),
             &root.join("source"),
             &root.join("scratch"),
-            &mut std::io::stderr().lock(),
             &mut InventorySummary::default(),
         )?;
         assert!(

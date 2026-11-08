@@ -313,8 +313,13 @@ fn run_input(
             }
             match decode(&text) {
                 Ok(value)
-                    if !brief_selected
-                        && value.as_object().is_some_and(|object| !object.is_empty()) =>
+                    if value.as_object().is_some_and(|object| {
+                        // A route override must not turn an explicit graph
+                        // into the prompt of a newly generated task.
+                        object.contains_key("nodes")
+                            || object.contains_key("graph_id")
+                            || (!brief_selected && !object.is_empty())
+                    }) =>
                 {
                     input["document"] = value;
                 }

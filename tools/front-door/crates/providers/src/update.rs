@@ -941,11 +941,24 @@ mod tests {
         impl Executor for Observe {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 let update = options.process_group;
+                let timeout = options.timeout;
+                let started = std::time::Instant::now();
                 let result = self.0.execute(options);
                 if update {
+                    // The independent watchdog may deliver KILL before the
+                    // executor's timeout loop delivers TERM and sets timed_out.
                     assert!(
-                        matches!(&result, Ok(outcome) if outcome.timed_out),
+                        matches!(&result, Ok(outcome) if outcome.timed_out
+                            || outcome.termination == Termination::Signal(9)),
                         "updater timeout result: {result:?}"
+                    );
+                    assert!(
+                        started.elapsed() >= timeout,
+                        "updater stopped before its deadline"
+                    );
+                    assert!(
+                        started.elapsed() < timeout + Duration::from_secs(5),
+                        "updater did not complete within its cleanup budget"
                     );
                 }
                 result
