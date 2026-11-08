@@ -467,7 +467,9 @@ impl MandatoryRoots {
                 .find(|path| path.join(".git").exists())
                 .unwrap_or(source),
         )?;
-        let mut controls = protected.to_vec();
+        // Common Git directories are flagged so no host write can open them.
+        let mut controls: Vec<(PathGrant, bool)> =
+            protected.iter().map(|root| (root.clone(), false)).collect();
         for binding in provenant_config::registered_projects(roots)
             .map_err(|_| inventory_error(roots.state.as_path(), "registered project inventory"))?
         {
@@ -477,10 +479,13 @@ impl MandatoryRoots {
             if !git {
                 continue;
             }
-            controls.push(subtree(common));
-            controls.push(subtree(
-                &crate::worktrees::allocation_directory(common)
-                    .map_err(|_| inventory_error(common, "worktree allocation inventory"))?,
+            controls.push((subtree(common), true));
+            controls.push((
+                subtree(
+                    &crate::worktrees::allocation_directory(common)
+                        .map_err(|_| inventory_error(common, "worktree allocation inventory"))?,
+                ),
+                false,
             ));
             let project_state = roots
                 .state
@@ -517,20 +522,24 @@ impl MandatoryRoots {
                 crate::worktrees::owned_worktree_paths(common, &slots)
                     .map_err(|_| inventory_error(common, "owned worktree inventory"))?
                     .into_iter()
-                    .map(|path| subtree(&path)),
+                    .map(|path| (subtree(&path), false)),
             );
         }
-        for root in controls {
+        for (root, git) in controls {
             let alias = resolve_boundary_path(&root.path)?;
             if alias == selected {
                 continue;
             }
-            mandatory.add_protected(root.clone())?;
-            if alias != root.path {
-                mandatory.add_protected(PathGrant {
-                    path: alias,
-                    scope: root.scope,
-                })?;
+            let alias = (alias != root.path).then_some(PathGrant {
+                path: alias,
+                scope: root.scope,
+            });
+            for root in std::iter::once(root).chain(alias) {
+                if git {
+                    mandatory.add_protected_git(root)?;
+                } else {
+                    mandatory.add_protected(root)?;
+                }
             }
         }
         Ok(mandatory)

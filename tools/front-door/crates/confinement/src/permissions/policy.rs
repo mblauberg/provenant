@@ -79,6 +79,10 @@ pub struct MandatoryRoots {
     git: Vec<PathGrant>,
     home: PathBuf,
     protected: Vec<PathGrant>,
+    /// Other registered projects' common Git directories within `protected`.
+    protected_git: Vec<PathGrant>,
+    /// Host-configured writer roots carved out of the `protected` write denial.
+    host_writes: Vec<PathGrant>,
     state_reads: Vec<PathGrant>,
     state_exec: Vec<PathGrant>,
     github: Vec<PathGrant>,
@@ -127,6 +131,8 @@ impl MandatoryRoots {
             git: Vec::new(),
             home: home.to_owned(),
             protected: Vec::new(),
+            protected_git: Vec::new(),
+            host_writes: Vec::new(),
             state_reads: Vec::new(),
             state_exec: Vec::new(),
             github: [".config/gh", "Library/Application Support/GitHub CLI"]
@@ -187,6 +193,44 @@ impl MandatoryRoots {
         root.validate()?;
         self.protected.push(root);
         Ok(())
+    }
+
+    /// Another project's common Git directory: protected, and never opened by
+    /// a host-configured writer root.
+    pub fn add_protected_git(&mut self, root: PathGrant) -> Result<(), PermissionError> {
+        self.add_protected(root.clone())?;
+        self.protected_git.push(root);
+        Ok(())
+    }
+
+    /// The host owner's `[domains.run] writer_writes` may name a directory
+    /// inside another checkout, such as its ignored lock or build directory.
+    /// Record it as an exception to that checkout's write denial when it is
+    /// strictly inside a protected root, encloses none and touches no Git
+    /// metadata. Anything else stays for `validate_extra_write` to refuse.
+    /// Dispatch-requested write roots never come through here.
+    pub fn add_host_write(&mut self, grant: &PathGrant) -> Result<(), PermissionError> {
+        grant.validate()?;
+        let inside = self.protected.iter().any(|root| {
+            root.scope == PathScope::Subtree
+                && grant.path.starts_with(&root.path)
+                && grant.path != root.path
+        });
+        let encloses = self
+            .protected
+            .iter()
+            .any(|root| root.path.starts_with(&grant.path));
+        let git = grant.path.components().any(|c| c.as_os_str() == ".git")
+            || self.protected_git.iter().any(|root| root.overlaps(grant));
+        if inside && !encloses && !git && !self.host_writes.contains(grant) {
+            self.host_writes.push(grant.clone());
+        }
+        Ok(())
+    }
+
+    /// Host-configured writer roots excepted from the protected write denial.
+    pub fn host_writes(&self) -> &[PathGrant] {
+        &self.host_writes
     }
 
     pub fn add_state_alias(&mut self, root: PathGrant) -> Result<(), PermissionError> {
@@ -333,9 +377,11 @@ impl MandatoryRoots {
         &self.git
     }
 
-    /// Extra writes cannot overlap credentials, host state, the source tree or
-    /// host Git in either direction. Applies to requested extra roots, not
-    /// host-derived scratch, private state or writer checkout exceptions.
+    /// Extra writes cannot overlap credentials, host state, the source tree,
+    /// host Git or another protected checkout in either direction, apart from a
+    /// recorded host write (`add_host_write`) inside a checkout. Applies to
+    /// requested extra roots, not host-derived scratch, private state or writer
+    /// checkout exceptions.
     pub fn validate_extra_write(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         grant.validate()?;
         if refuses_lane_root(&grant.path, false, Some(&self.home))
@@ -346,10 +392,14 @@ impl MandatoryRoots {
                 Some(&self.home),
             ));
         }
+        // A recorded host write is excepted from other checkouts only; Git,
+        // state, source and credentials still refuse it.
+        let excepted = self.host_writes.contains(grant);
+        let protected = self.protected.iter().filter(|_| !excepted);
         if self
             .git
             .iter()
-            .chain(&self.protected)
+            .chain(protected)
             .chain(&self.state_aliases)
             .chain(&self.source_aliases)
             .chain([&self.state, &self.source])

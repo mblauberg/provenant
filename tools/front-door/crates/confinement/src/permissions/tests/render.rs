@@ -1260,3 +1260,90 @@ fn enforcing_backend_refuses_missing_host_policy_before_inspecting_grants() {
         Err(PermissionError::PermissionNotRecorded)
     ));
 }
+
+// Small: the host owner's writer roots inside another checkout are carved out
+// of that checkout's write denial; the rest of it stays immutable, and only a
+// worktree writer receives the exception.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result<(), PermissionError>
+{
+    let subtree = |path: &str| PathGrant {
+        path: path.into(),
+        scope: PathScope::Subtree,
+    };
+    let home = Path::new("/fixture/home");
+    let state = Path::new("/fixture/host-state");
+    let mut mandatory =
+        MandatoryRoots::new(home, state, Path::new("/fixture/primary/.worktrees/lane"))?;
+    mandatory.add_protected(subtree("/fixture/primary"))?;
+    mandatory.add_protected(subtree("/fixture/primary/.worktrees/other"))?;
+    mandatory.add_protected_git(subtree("/fixture/elsewhere/.git"))?;
+    let locks = subtree("/fixture/primary/.agent-run/locks");
+    let target = subtree("/fixture/primary/.worktrees/other/target");
+    for grant in [&locks, &target] {
+        mandatory.add_host_write(grant)?;
+        mandatory.validate_extra_write(grant)?;
+    }
+    assert_eq!(mandatory.host_writes(), [locks.clone(), target.clone()]);
+    // Equal, enclosing, Git and dispatch-only roots are not exceptions.
+    for path in [
+        "/fixture/primary",
+        "/fixture/primary/.worktrees",
+        "/fixture/primary/tools/.git",
+        "/fixture/elsewhere/.git/hooks",
+    ] {
+        mandatory.add_host_write(&subtree(path))?;
+        assert!(
+            matches!(
+                mandatory.validate_extra_write(&subtree(path)),
+                Err(PermissionError::ProtectedOverlap)
+            ),
+            "{path}"
+        );
+    }
+    assert!(matches!(
+        mandatory.validate_extra_write(&subtree("/fixture/primary/scripts")),
+        Err(PermissionError::ProtectedOverlap)
+    ));
+    assert_eq!(mandatory.host_writes().len(), 2);
+
+    let (mut plan, profile) = write_grants_fixture();
+    plan.read_only = None;
+    plan.policy =
+        Some(crate::run_config::RunConfig::default().policy_for_launch(state, mandatory.clone()));
+    plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+        git_grants_digest: [0; 32],
+        publishing: false,
+        common_git_dir: Some("/fixture/primary/.git".into()),
+        cargo_cache: subtree("/fixture/cache"),
+    }));
+    plan.write_roots = vec![locks, target];
+    let worktree = WorktreeWriteGrants::from_paths(
+        Path::new("/fixture/primary/.worktrees/lane"),
+        Path::new("/fixture/primary/.git/worktrees/lane"),
+        Path::new("/fixture/primary/.git"),
+        "lane",
+    );
+    let writer = render(&GrantSet::build(&plan, &profile, home, Some(worktree))?)?;
+    for denial in [
+        "(deny file-write* (require-all (subpath \"/fixture/primary\") (require-not (subpath \"/fixture/primary/.worktrees/lane\")) (require-not (subpath \"/fixture/primary/.agent-run/locks\")) (require-not (subpath \"/fixture/primary/.worktrees/other/target\"))))",
+        "(deny file-write* (require-all (subpath \"/fixture/primary/.worktrees/other\") (require-not (subpath \"/fixture/primary/.worktrees/other/target\"))))",
+        "(deny file-write* (subpath \"/fixture/elsewhere/.git\"))",
+        "(deny file-write* (subpath \"/fixture/primary/.git\"))",
+    ] {
+        assert!(writer.contains(denial), "{denial}");
+    }
+
+    plan.mode = AccessMode::ReadOnly;
+    plan.write_roots.clear();
+    let reader = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+    for denial in [
+        "(deny file-write* (subpath \"/fixture/primary\"))",
+        "(deny file-write* (subpath \"/fixture/primary/.worktrees/other\"))",
+    ] {
+        assert!(reader.contains(denial), "{denial}");
+    }
+    assert!(!reader.contains("/fixture/primary/.agent-run/locks"));
+    Ok(())
+}
