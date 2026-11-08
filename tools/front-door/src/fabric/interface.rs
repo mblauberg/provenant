@@ -1969,6 +1969,56 @@ fn add(row: &mut Value, key: &str, value: u64) {
 )]
 mod tests {
     #[test]
+    fn decode_errors_name_schema_paths_without_keys_or_values() -> Result<()> {
+        use provenant_fabric_runtime::graph::GraphDocument;
+        let node = |field: &str, value: Value| {
+            let mut node = json!({"id":"one","access":"read_only","prompt":"p","route":{"adapter":"mock","model":"m"}});
+            match field {
+                "role" => node["role"] = value,
+                other => node["attempt"] = json!({ other: value }),
+            }
+            json!({"schema_version":1,"graph_id":"g","nodes":[node]})
+        };
+        for (field, path) in [
+            ("directory", "nodes[0].attempt.directory"),
+            ("new_worktree", "nodes[0].attempt.new_worktree"),
+            ("role", "nodes[0].role"),
+        ] {
+            let error = super::decode_input::<GraphDocument>(node(field, json!(7)), "")
+                .err()
+                .unwrap_or_else(|| {
+                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                        field: path.into(),
+                        missing: false,
+                    })
+                });
+            let text = error.diagnostic().detail.unwrap_or_default();
+            assert!(text.contains(path), "{text}");
+            assert!(text.contains("invalid type or value"), "{text}");
+        }
+        let secret = "ghp_TOKEN_SENTINEL";
+        let error = super::decode_input::<GraphDocument>(
+            {
+                let mut doc = node("role", json!("fine"));
+                doc["nodes"][0]["access"] = json!(secret);
+                doc
+            },
+            "",
+        )
+        .expect_err("decode must fail");
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains(secret), "{wire}");
+        let error = FacadeError::invalid(InvalidInputDetail::FieldDecode {
+            field: "set.userkey.value".into(),
+            missing: false,
+        });
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(wire.contains("set.*.value"), "{wire}");
+        assert!(!wire.contains("userkey"), "{wire}");
+        Ok(())
+    }
+
+    #[test]
     fn relay_refusals_preserve_named_code_and_detail() -> Result<()> {
         for (code, detail) in [
             ("parent_settled", "parent has already settled"),
