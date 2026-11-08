@@ -1442,6 +1442,7 @@ pub enum CloudObservation {
     Failed,
     SetupFailed,
     Cancelled,
+    Abandoned,
     CancellationUnconfirmed,
     Unknown,
 }
@@ -1449,7 +1450,7 @@ impl CloudObservation {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Passed | Self::Failed | Self::SetupFailed | Self::Cancelled
+            Self::Passed | Self::Failed | Self::SetupFailed | Self::Cancelled | Self::Abandoned
         )
     }
     pub fn state(self) -> &'static str {
@@ -1460,6 +1461,7 @@ impl CloudObservation {
             Self::Failed => "cloud_failed",
             Self::SetupFailed => "cloud_setup_failed",
             Self::Cancelled => "cloud_cancelled",
+            Self::Abandoned => "cloud_abandoned",
             Self::CancellationUnconfirmed => "cloud_cancellation_unconfirmed",
             Self::Unknown => "cloud_unknown",
         }

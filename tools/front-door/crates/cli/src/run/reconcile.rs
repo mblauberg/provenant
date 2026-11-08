@@ -48,6 +48,26 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
     out
 }
 
+fn cloud_abandon_warning(remote_id: &str) -> String {
+    if remote_id.trim().is_empty() {
+        "a remote session may exist".to_owned()
+    } else {
+        format!(
+            "a remote session may exist: {}",
+            plain_text(remote_id, usize::MAX)
+        )
+    }
+}
+
+#[test]
+fn abandonment_warning_includes_known_remote_identity() {
+    assert_eq!(cloud_abandon_warning(""), "a remote session may exist");
+    assert_eq!(
+        cloud_abandon_warning("remote-1"),
+        "a remote session may exist: remote-1"
+    );
+}
+
 pub(super) const SCAN: u64 = 320;
 
 fn reservation_root(context: &run::ExecutionContext) -> PathBuf {
@@ -90,6 +110,20 @@ pub(super) fn reconcile_inner(
         let reason = command
             .reason
             .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
+        let call = request(&clock, &cancel)?;
+        let record = session.store.record(id, &call)?;
+        if cloud_owner::placement(&session.store, &record, &call)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+            .is_some()
+        {
+            let job = cloud_owner::abandon(&session.store, id, &reason, &call)
+                .map_err(|error| Fail::new(Status::Refused, ErrorKind::Io, error))?;
+            let warning = cloud_abandon_warning(&job.remote_id);
+            return Ok((
+                json!({"run_id": selected.run, "attempt_id": id, "found": cloud_owner::view(&job), "warning": warning}),
+                format!("{id} abandoned; {warning}\n"),
+            ));
+        }
         let state =
             session
                 .service()
@@ -209,7 +243,7 @@ pub(super) fn reconcile_inner(
                 },
                 None => {
                     *fenced = true;
-                    human.push_str(&format!("{run}/{} cloud target {} has no recorded submission; retry the original run\n", record.attempt_id, plain_text(&placement.target, usize::MAX)));
+                    human.push_str(&format!("{run}/{} cloud target {} has no recorded submission; to stop tracking, run `provenant reconcile --abandon {run}/{} --reason 'REASON'`\n", record.attempt_id, plain_text(&placement.target, usize::MAX), record.attempt_id));
                     cloud_jobs.push(json!({"attempt_id": record.attempt_id, "state": "submission_not_recorded"}));
                 }
             }

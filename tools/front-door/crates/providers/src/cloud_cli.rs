@@ -142,7 +142,7 @@ impl InstalledCloudCli<'_> {
         program: &str,
         argv: Vec<OsString>,
         stdin: Option<&str>,
-        submission: bool,
+        _submission: bool,
     ) -> Result<String, String> {
         let mut options = ExecOptions::new(&argv, &self.cwd, self.timeout);
         options.process_group = true;
@@ -166,18 +166,8 @@ impl InstalledCloudCli<'_> {
                 &output.stderr
             };
             let detail = failure_excerpt(text);
-            let refusal = submission
-                && matches!(output.outcome.termination, Termination::Exit(code) if (1..128).contains(&code))
-                && !detail.is_empty()
-                && ![&output.stdout, &output.stderr].iter().any(|text| {
-                    // The transport is unknown here, so any transport's identity
-                    // proves the remote may hold the submission.
-                    parse_identity(text).is_ok() || thread::submission_id(text).is_ok()
-                });
-            return Err(format!(
-                "{}{program} failed: {detail}",
-                if refusal { REFUSAL } else { "" }
-            ));
+            // A non-zero exit does not prove the provider rejected a request.
+            return Err(format!("{program} failed: {detail}"));
         }
         Ok(output.stdout)
     }
@@ -843,7 +833,7 @@ mod adapter_tests {
     }
     const CAPTURED: &str = "\u{1b}[>4m\u{1b}]0;claude\u{7}\u{1b}[?25lCreated cloud session: Fix the thing\r\nView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\nResume with: claude --teleport session_01ABC\r\n\u{1b}[?25h";
     #[test]
-    fn cloud_submission_classifies_only_complete_nonzero_refusals() {
+    fn cloud_submission_never_infers_refusal_from_process_exit() {
         use provenant_os::exec::{
             CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
         };
@@ -879,14 +869,14 @@ mod adapter_tests {
                 "",
                 "no cloud environments are available",
                 false,
-                true,
+                false,
             ),
             (
                 Termination::Exit(1),
                 "",
                 "--cloud requires an interactive terminal",
                 false,
-                true,
+                false,
             ),
             (
                 Termination::Exit(1),

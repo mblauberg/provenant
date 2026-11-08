@@ -143,7 +143,9 @@ fn observation(job: &RemoteJob, reference: &str) -> Result<AttemptObservation, S
             terminal(reference, AttemptOutcome::OtherFailure, false, None)
         }
         RemoteState::Failed { .. } => terminal(reference, AttemptOutcome::TaskFailed, true, None),
-        RemoteState::Cancelled => terminal(reference, AttemptOutcome::OtherFailure, true, None),
+        RemoteState::Cancelled | RemoteState::Abandoned { .. } => {
+            terminal(reference, AttemptOutcome::OtherFailure, true, None)
+        }
     })
 }
 

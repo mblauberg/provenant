@@ -921,6 +921,7 @@ impl RunStore {
             "failed",
             "setup_failed",
             "cancelled",
+            "abandoned",
             "cancellation_unconfirmed",
             "unknown",
         ]

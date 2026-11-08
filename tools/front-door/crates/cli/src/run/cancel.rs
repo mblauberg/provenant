@@ -116,10 +116,10 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                         Err(error) => {
                             status = Status::Failed;
                             human.push_str(&format!(
-                                "{id} cloud cancellation unconfirmed: {}\n",
-                                plain_text(&error, usize::MAX)
+                                "{id} cloud cancellation unconfirmed: {}; to abandon tracking, run `provenant reconcile --abandon {}/{id} --reason 'REASON'`\n",
+                                plain_text(&error, usize::MAX), record.run_id
                             ));
-                            receipts.push(json!({"attempt_id": id, "error": {"message": error}, "cancellation_unconfirmed": true}));
+                            receipts.push(json!({"attempt_id": id, "error": {"message": error}, "cancellation_unconfirmed": true, "remedy": format!("provenant reconcile --abandon {}/{id} --reason 'REASON'", record.run_id)}));
                         }
                     }
                     continue;

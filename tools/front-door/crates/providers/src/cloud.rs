@@ -299,6 +299,10 @@ pub enum RemoteState {
         detail: String,
     },
     Cancelled,
+    /// Tracking ended without confirming remote custody.
+    Abandoned {
+        reason: String,
+    },
     CancellationUnconfirmed,
 }
 
@@ -310,6 +314,7 @@ impl RemoteState {
                 | Self::Failed { .. }
                 | Self::SetupFailed { .. }
                 | Self::Cancelled
+                | Self::Abandoned { .. }
         )
     }
 }

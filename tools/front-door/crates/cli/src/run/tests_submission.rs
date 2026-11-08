@@ -31,6 +31,9 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
             }
             Ok("graph-remote-id".into())
         }
+        fn failure_detail(&self, _: &()) -> Option<String> {
+            Some("transport timed out".into())
+        }
         fn recover(&mut self, job: &RemoteJob) -> Result<Option<String>, ()> {
             assert_eq!(job.state, RemoteState::Submitting);
             assert!(job.remote_id.is_empty());
@@ -111,7 +114,21 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
         let observation =
             graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false);
         if uncertain_submission {
-            assert!(observation.is_err());
+            let reason = observation.unwrap_err();
+            assert!(reason.contains("submission outcome unknown"));
+            let facade =
+                provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                    reason,
+                    disk: None,
+                    fact: None,
+                };
+            assert!(
+                facade
+                    .diagnostic()
+                    .detail
+                    .unwrap()
+                    .contains("transport timed out")
+            );
             let saved = cloud_owner::load(&store, id, &call)?.ok_or("missing submission intent")?;
             assert_eq!(saved.state, RemoteState::Submitting);
             drop(store);
@@ -677,6 +694,70 @@ fn cloud_retained_submission_repair_preserves_reason() -> Result<(), Box<dyn std
             cloud_owner::settle_saved_submission(&store, id, &call)?,
             settled
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn cloud_abandonment_preserves_submission_evidence() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{CloudJobStore, RemoteState};
+    for mode in 0..3 {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|e| e.message)?;
+        let store = trace_store(&temp, &call)?;
+        let mut input = trace_run(44, AttemptId::from_bytes([1; 16]), clock.wall_now()?)?;
+        input.request.parent_attempt = None;
+        input.request.tasks[0].head = Some("a".repeat(40));
+        input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+            target: "target".into(),
+            provider: "fake".into(),
+            environment: "env".into(),
+            repository: "repository".into(),
+            branch: "main".into(),
+            model: "small".into(),
+            effort: None,
+            deadline_seconds: 3600,
+        });
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        if mode != 0 {
+            let target = crate::domains::CloudTarget {
+                provider: "fake".into(),
+                environment: "env".into(),
+                model: "small".into(),
+                effort: None,
+                repository: "repository".into(),
+                branch: "main".into(),
+                deadline_seconds: 3600,
+            };
+            let mut job = cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?;
+            job.submit_error = Some("timed out".into());
+            cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |s| {
+                s.begin(&job)
+            })??;
+            if mode == 2 {
+                cloud_owner::settle_saved_submission(&store, id, &call)?;
+            }
+        }
+        let job = cloud_owner::abandon(&store, id, "operator decision", &call)?;
+        assert_eq!(
+            job.state,
+            RemoteState::Abandoned {
+                reason: "operator decision".into()
+            }
+        );
+        assert_eq!(
+            job.submit_error.as_deref(),
+            if mode == 0 { None } else { Some("timed out") }
+        );
+        assert_eq!(cloud_owner::load(&store, id, &call)?, Some(job.clone()));
+        assert_eq!(
+            cloud_owner::abandon(&store, id, "operator decision", &call)?,
+            job
+        );
+        assert!(cloud_owner::abandon(&store, id, "different", &call).is_err());
     }
     Ok(())
 }
