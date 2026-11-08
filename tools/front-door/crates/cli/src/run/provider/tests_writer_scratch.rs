@@ -463,8 +463,10 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             "{skipped_routes:?}"
         );
         for skipped in skipped_routes {
+            assert!(skipped.cause.is_some(), "{skipped:?}");
             if skipped.route.starts_with("cursor/") {
                 assert_eq!(skipped.kind, SkipKind::Setup, "{skipped:?}");
+                assert_eq!(skipped.cause, Some(provenant_records::RouteExclusionReason::SetupFailed));
             } else {
                 assert!(skipped.cause.is_some(), "{skipped:?}");
             }

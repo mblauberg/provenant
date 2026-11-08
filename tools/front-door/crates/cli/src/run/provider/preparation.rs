@@ -1537,6 +1537,102 @@ mod stale_readiness_tests {
     }
 }
 
+fn setup_skip(route: &str, detail: impl Into<String>) -> SkippedRoute {
+    let mut skipped = skip(route, SkipKind::Setup, detail);
+    skipped.set_cause(provenant_records::RouteExclusionReason::SetupFailed);
+    skipped
+}
+
+fn record_admission_redraws(
+    resolved: &provenant_records::ResolvedRoute,
+    reasons: &mut Vec<SkippedRoute>,
+    rejected: &mut Vec<provenant_routing::ModelId>,
+) -> Result<(), PrepareError> {
+    if let Some(selection) = &resolved.pool_selection {
+        for redraw in &selection.redraws {
+            let model = provenant_routing::ModelId::parse(&redraw.rejected_pick)
+                .map_err(|error| error.to_string())?;
+            if rejected.contains(&model) {
+                continue;
+            }
+            rejected.push(model);
+            let cause = redraw
+                .extra
+                .get("cause")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or(provenant_records::RouteExclusionReason::AdmissionRefused);
+            let mut skipped = skip(&redraw.rejected_pick, SkipKind::Unavailable, &redraw.reason);
+            skipped.set_cause(cause);
+            reasons.push(skipped);
+        }
+    }
+    Ok(())
+}
+
+fn next_permitted_candidate(
+    queue: &mut std::collections::VecDeque<provenant_records::ResolvedRoute>,
+    rejected: &mut Vec<provenant_routing::ModelId>,
+    reasons: &mut Vec<SkippedRoute>,
+    pin: (Option<&str>, Option<&str>),
+    switched: bool,
+    outcome: provenant_routing::FallbackOutcome,
+) -> Result<Option<provenant_records::ResolvedRoute>, PrepareError> {
+    while let Some(route) = queue.pop_front() {
+        let label = format!("{}/{}", route.adapter, route.model);
+        let model = provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
+        if rejected.contains(&model) {
+            continue;
+        }
+        rejected.push(model);
+        let pinned =
+            violates_account_pin(pin.0, pin.1, route.account_key.as_deref(), &route.adapter);
+        let allowed = provenant_routing::FallbackPolicy {
+            outcome,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+            read_only: false,
+            budget_remaining: true,
+            pinned,
+        }
+        .allows_preparation_switch();
+        if switched && !allowed {
+            let mut skipped = skip(&label, SkipKind::Account, "account pinned");
+            skipped.set_cause(provenant_records::RouteExclusionReason::AccountPinned);
+            reasons.push(skipped);
+            continue;
+        }
+        return Ok(Some(route));
+    }
+    Ok(None)
+}
+
+fn redraw_candidates(
+    result: Result<provenant_records::ResolvedRoute, crate::route::DispatchError>,
+    reasons: &mut Vec<SkippedRoute>,
+    rejected: &mut Vec<provenant_routing::ModelId>,
+) -> Result<Vec<provenant_records::ResolvedRoute>, PrepareError> {
+    match result {
+        Ok(resolved) => {
+            record_admission_redraws(&resolved, reasons, rejected)?;
+            Ok(candidates(resolved))
+        }
+        Err(crate::route::DispatchError::Edge(error))
+            if matches!(
+                error.as_ref(),
+                crate::route::EdgeError::Routing(
+                    provenant_routing::RoutingError::NoEligiblePoolMember { .. }
+                )
+            ) =>
+        {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(PrepareError::RouteResolution {
+            error,
+            checks: std::mem::take(reasons),
+        }),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_candidates(
     registry: &Registry<'_>,
@@ -2118,15 +2214,8 @@ pub(super) fn prepare_candidates(
             .collect(),
     })?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
-    if let Some(selection) = &resolved.pool_selection {
-        for redraw in &selection.redraws {
-            reasons.push(skip(
-                &redraw.rejected_pick,
-                SkipKind::Unavailable,
-                &redraw.reason,
-            ));
-        }
-    }
+    let mut rejected = Vec::new();
+    record_admission_redraws(&resolved, &mut reasons, &mut rejected)?;
     // Candidate preparation happens before writer custody or guardian handoff,
     // so no excluded candidate has run. Advance past every exclusion, whatever
     // its cause, through the sealed alternatives and a named pool's remaining
@@ -2134,27 +2223,30 @@ pub(super) fn prepare_candidates(
     // retries bound launched attempts, not candidates that never launched.
     let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
     let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
-    let mut rejected = Vec::new();
     let mut reprobed_accounts = std::collections::BTreeSet::new();
     let mut candidate = 0usize;
-    let preparation_switch = |outcome, pinned| {
-        provenant_routing::FallbackPolicy {
-            outcome,
-            handoff: provenant_routing::FallbackHandoff::Local,
-            custody_released: true,
-            read_only: false,
-            budget_remaining: true,
-            pinned,
-        }
-        .allows_preparation_switch()
-    };
     loop {
         if queue.is_empty() {
-            let next = named_pool
-                .then(|| resolve(&availability, &rejected).ok())
-                .flatten()
-                .map(candidates)
-                .unwrap_or_default();
+            let next = if named_pool {
+                match redraw_candidates(
+                    resolve(&availability, &rejected),
+                    &mut reasons,
+                    &mut rejected,
+                ) {
+                    Ok(next) => next,
+                    Err(PrepareError::RouteResolution { error, mut checks }) => {
+                        attach_candidate_guard_facts(
+                            &mut checks,
+                            &reason_boundaries,
+                            &reason_resources,
+                        )?;
+                        return Err(PrepareError::RouteResolution { error, checks });
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                Vec::new()
+            };
             // Each redraw excludes every candidate already tried, so a pool
             // ends when no untried member remains.
             queue.extend(next.into_iter().filter(|route| {
@@ -2170,31 +2262,17 @@ pub(super) fn prepare_candidates(
                 break;
             }
         }
-        let Some(mut route) = queue.pop_front() else {
-            break;
-        };
-        let model =
-            provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
-                .map_err(|error| error.to_string())?;
-        if rejected.contains(&model) {
+        let Some(mut route) = next_permitted_candidate(
+            &mut queue,
+            &mut rejected,
+            &mut reasons,
+            (selected, selected_adapter),
+            candidate > 0,
+            previous_outcome,
+        )?
+        else {
             continue;
-        }
-        let pinned = violates_account_pin(
-            selected,
-            selected_adapter,
-            route.account_key.as_deref(),
-            &route.adapter,
-        );
-        if candidate > 0 && !preparation_switch(previous_outcome, pinned) {
-            if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
-                && let Some(last) = reasons.last_mut()
-            {
-                last.detail
-                    .push_str("; fallback unavailable because the account is pinned");
-            }
-            break;
-        }
-        rejected.push(model);
+        };
         let current_candidate = candidate;
         candidate += 1;
         previous_outcome = provenant_routing::FallbackOutcome::Other;
@@ -2541,7 +2619,7 @@ pub(super) fn prepare_candidates(
         let (scratch_directory, scratch_name) = match scratch_claim {
             Ok(scratch) => scratch,
             Err(error) => {
-                reasons.push(skip(&label, SkipKind::Setup, error));
+                reasons.push(setup_skip(&label, error));
                 continue;
             }
         };
@@ -2554,7 +2632,7 @@ pub(super) fn prepare_candidates(
             &[&paths.provider_state],
             None,
         ) {
-            reasons.push(skip(&label, SkipKind::Setup, error));
+            reasons.push(setup_skip(&label, error));
             continue;
         }
         let continuation = match resume {
@@ -2968,7 +3046,7 @@ pub(super) fn prepare_candidates(
                 if class != provenant_records::diagnostic::BoundaryClass::None {
                     reason_boundaries.insert(reasons.len(), class);
                 }
-                reasons.push(skip(&label, SkipKind::Setup, error.to_string()));
+                reasons.push(setup_skip(&label, error.to_string()));
                 continue;
             }
         }
@@ -3016,11 +3094,7 @@ pub(super) fn prepare_candidates(
             provenant_records::SetupRoot::None => {}
         }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
-            reasons.push(skip(
-                &label,
-                SkipKind::Setup,
-                format!("setup failed: {error}"),
-            ));
+            reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
@@ -3909,4 +3983,105 @@ fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::
     assert!(!encoded.contains("PROMPT_SECRET_SENTINEL"));
     assert!(!encoded.contains(root.to_str().unwrap()));
     Ok(())
+}
+
+#[cfg(test)]
+mod candidate_walk_regressions {
+    use super::*;
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+        RouteSelectionReceipt, RouteSelectionRedraw,
+    };
+
+    fn route(model: &str, account: &str) -> ResolvedRoute {
+        ResolvedRoute {
+            extra: Default::default(),
+            adapter: "cursor".into(),
+            model: model.into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: Some(account.into()),
+            host: "fixture".into(),
+            alternatives: Default::default(),
+            exclusions: vec![],
+            eligibility: RouteEligibility::Eligible,
+            readiness: RouteReadiness::stale(),
+            confidentiality: RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        }
+    }
+
+    #[test]
+    fn pin_incompatible_candidate_does_not_hide_later_compatible_candidate()
+    -> Result<(), PrepareError> {
+        let mut queue = [route("wrong", "other"), route("right", "pinned")].into();
+        let mut rejected = vec![];
+        let mut reasons = vec![];
+        let selected = next_permitted_candidate(
+            &mut queue,
+            &mut rejected,
+            &mut reasons,
+            (Some("pinned"), Some("cursor")),
+            true,
+            provenant_routing::FallbackOutcome::Other,
+        )?
+        .expect("compatible route");
+        assert_eq!(selected.model, "right");
+        assert_eq!(reasons[0].route, "cursor/wrong");
+        assert_eq!(
+            reasons[0].cause,
+            Some(provenant_records::RouteExclusionReason::AccountPinned)
+        );
+        assert!(queue.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn redraw_receipt_and_admission_error_survive_candidate_walk() -> Result<(), PrepareError> {
+        let mut stale = route("stale", "pinned");
+        stale.pool_selection = Some(RouteSelectionReceipt {
+            extra: Default::default(),
+            pool: "fixture".into(),
+            candidates: vec![],
+            roll: 0,
+            total_weight: 1,
+            pick: "cursor/stale".into(),
+            reason: None,
+            redraws: vec![RouteSelectionRedraw {
+                extra: [("cause".into(), serde_json::json!("exhausted"))].into(),
+                rejected_pick: "cursor/spent".into(),
+                roll: 0,
+                total_weight: 1,
+                reason: "private detail".into(),
+            }],
+        });
+        let mut reasons = vec![];
+        let mut rejected = vec![];
+        let next = redraw_candidates(Ok(stale), &mut reasons, &mut rejected)?;
+        assert_eq!(next[0].model, "stale");
+        assert!(matches!(
+            next[0].readiness,
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::StaleAvailability,
+                ..
+            }
+        ));
+        assert_eq!(reasons[0].route, "cursor/spent");
+        assert_eq!(
+            reasons[0].cause,
+            Some(provenant_records::RouteExclusionReason::Exhausted)
+        );
+        assert!(!reasons[0].detail.contains("private detail"));
+        let error = crate::route::DispatchError::from(crate::route::EdgeError::Quota(
+            provenant_quota::QuotaError::Refused("allowance exhausted"),
+        ));
+        let refusal = redraw_candidates(Err(error), &mut reasons, &mut rejected).unwrap_err();
+        assert!(
+            matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))) && checks.len() == 1)
+        );
+        Ok(())
+    }
 }

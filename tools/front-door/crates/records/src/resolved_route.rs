@@ -191,6 +191,9 @@ pub struct RouteExclusion {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteExclusionReason {
+    SetupFailed,
+    AccountPinned,
+    AdmissionRefused,
     Disabled,
     MissingExecutable,
     /// The provider's exclusive update fence prevented preparation.
@@ -223,6 +226,18 @@ impl RouteExclusionReason {
     pub fn diagnostic_parts(&self) -> (&'static str, &'static str) {
         use crate::diagnostic::ProviderFailureFact;
         match self {
+            Self::SetupFailed => (
+                "the selected route could not be prepared",
+                "inspect local setup and retry after correcting it",
+            ),
+            Self::AccountPinned => (
+                "the candidate does not use the pinned account",
+                "select a route using the pinned account",
+            ),
+            Self::AdmissionRefused => (
+                "admission refused the selected route",
+                "check account allowance and select an eligible route",
+            ),
             Self::Disabled => (
                 "the selected route is disabled",
                 "enable an eligible route in the host configuration",

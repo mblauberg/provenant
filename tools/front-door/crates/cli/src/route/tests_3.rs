@@ -38,6 +38,18 @@
         Ok(())
     }
     #[test]
+    fn admission_redraw_keeps_a_stale_member_for_preparation() -> Result<(), Box<dyn Error>> {
+        let first = resolved("codex", "paid", 17);
+        let mut stale = resolved("claude", "stale", 3);
+        stale.readiness = RouteReadiness::stale();
+        let mut replacement = super::admission_replacement(Ok(stale))?
+            .ok_or("stale member was treated as exhaustion")?;
+        super::record_pool_redraw(&first, &mut replacement, "admission refused")?;
+        assert!(matches!(replacement.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::StaleAvailability, .. }));
+        assert_eq!(replacement.pool_selection.unwrap().redraws[0].rejected_pick, "codex/paid");
+        Ok(())
+    }
+    #[test]
     fn review_uses_unused_families_and_substitutes_when_exhausted() -> Result<(), Box<dyn Error>> {
         assert!(!super::review_family_excluded(None, &[]));
         assert!(super::review_family_excluded(None, &["openai".into()]));
