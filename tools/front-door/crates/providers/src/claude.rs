@@ -1130,6 +1130,62 @@ mod overload_tests {
     }
 
     #[test]
+    fn fallback_observes_and_checks_answering_model() {
+        let input = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
+            "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\"}\n"
+        );
+        let mut stream = StreamState::new("claude", decode);
+        stream.bind_identity("s", "m");
+        stream.observe(input.as_bytes()).unwrap();
+        let outcome = stream
+            .finish(crate::ExitObservation {
+                code: Some(0),
+                timed_out: false,
+            })
+            .unwrap();
+        assert_eq!(outcome.model(), Some("m"));
+        assert!(outcome.final_events().contains(&E::Model("m".into())));
+        let mut stream = StreamState::new("claude", decode);
+        stream.bind_identity("s", "other");
+        stream.observe(input.as_bytes()).unwrap();
+        assert!(matches!(
+            stream.finish(crate::ExitObservation {
+                code: Some(0),
+                timed_out: false
+            }),
+            Err(ProviderError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn unsuccessful_streams_never_emit_fallback() {
+        let assistant = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let success = "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\"}\n";
+        let refusal = "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"api_error_status\":429,\"result\":\"limited\"}\n";
+        let incomplete = "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"stop_reason\":\"max_tokens\",\"result\":\"\"}\n";
+        for (tail, code, timed_out) in [
+            (success, Some(1), false),
+            (success, Some(0), true),
+            ("{", Some(0), false),
+            (refusal, Some(0), false),
+            (incomplete, Some(0), false),
+            ("", Some(0), false),
+        ] {
+            let mut stream = StreamState::new("claude", decode);
+            let mut events = stream
+                .observe(format!("{assistant}{tail}").as_bytes())
+                .unwrap();
+            let outcome = stream
+                .finish(crate::ExitObservation { code, timed_out })
+                .unwrap();
+            events.extend_from_slice(outcome.final_events());
+            assert!(!events.contains(&E::ResultFallback), "tail: {tail}");
+            assert!(!events.contains(&E::Text("answer".into())), "tail: {tail}");
+        }
+    }
+
+    #[test]
     fn non_empty_result_is_not_replaced() {
         let input = concat!(
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
@@ -1137,10 +1193,7 @@ mod overload_tests {
         );
         let events = finish_text(input);
         assert!(!events.contains(&E::ResultFallback));
-        assert_eq!(
-            events.iter().filter(|e| matches!(e, E::Text(_))).count(),
-            1
-        );
+        assert_eq!(events.iter().filter(|e| matches!(e, E::Text(_))).count(), 1);
     }
 
     #[test]
