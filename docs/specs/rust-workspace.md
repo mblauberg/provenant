@@ -34,7 +34,8 @@ material transitive addition needs a recorded reason and an update to this rule.
 database. `toml_edit` enables `serde` for typed config. `serde-saphyr` parses
 bounded session summary YAML, preserving unsigned revision values without a
 bespoke parser. `unicode-normalization` (with `tinyvec`) gives NFC comparison
-of branch names, whose tables are not cheap to own. There is no async
+of branch names, whose tables are not cheap to own. `serde_path_to_error` (serde only) gives the field path of a graph or
+attempt decode error, so a refusal names what to fix; paths stop at user map keys. There is no async
 runtime and no daemon.
 - Why: a small, audited supply chain with bounded, synchronous code.
 - Test: `tests/workspace_policy.rs::every_member_obeys_the_direct_dependency_policy`;

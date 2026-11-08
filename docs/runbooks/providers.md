@@ -595,51 +595,39 @@ scripts, prompts or result artifacts.
 
 ## Cloud placement
 
-Configure a named target in Provenant's config. The provider environment and
-the local Git `origin` must refer to the intended repository. Install and log
-in to the selected provider CLI separately; do not put credentials in target
-settings, prompts, setup scripts, log URLs or result artifacts.
+Cloud jobs run read-only verification. Install and log in to the selected
+provider CLI, and ensure the local Git `origin` refers to the intended
+repository. Do not put credentials in prompts or placement settings.
 
-```toml
-[domains.lanes.cloud_targets.verify]
-provider = "codex" # or "claude"
-environment = "environment-id" # required for codex; optional for claude
-repository = "owner/repository"
-branch = "main"
-model = "requested-model"
-effort = "medium"
-deadline_seconds = 3600
-
-[domains.lanes.projects."PROJECT_ID"]
-cloud_target = "verify"
-```
-
-A Codex target requires its `environment`. For Claude the environment is
-optional and only names a self-hosted pool (`ccpool_...`, passed as
-`claude --cloud --environment`). Leave it out to use the hosted Claude cloud;
-Provenant then runs `claude --cloud` without `--environment`.
-
-The project setting is optional. Without it, choose the target explicitly:
+Provide the placement as a per-run `--set` value on the default task template.
+For hosted Claude, omit `environment`:
 
 ```sh
-provenant run --file cloud-verify.toml --explain
+provenant run --file brief.md --mode read-only --set "attempt.cloud={target='claude-hosted',provider='claude',repository='mblauberg/provenant',branch='main',model='claude-sonnet-5-5',deadline_seconds=1800}" --explain
+```
+
+For Codex, supply its environment ID:
+
+```sh
+provenant run --file brief.md --mode read-only --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=1800}" --explain
+```
+
+Replace the repository, branch, model and environment with your own values.
+Claude accepts an optional `environment` for a self-hosted pool (`ccpool_...`);
+omitting it selects hosted Claude. Remove `--explain` to submit. Explain shows
+the compiled node and placement without submitting a job. The graph runs at
+the current checkout's commit, so check out the intended commit before
+submitting. Cloud jobs cannot take a writer or delivery target.
+
+```sh
 provenant reconcile --id ATTEMPT_ID
 provenant status ATTEMPT_ID
-provenant output ATTEMPT_ID
 provenant output ATTEMPT_ID
 provenant stop ATTEMPT_ID
 ```
 
-`--placement local` overrides a project's cloud default. The target's branch
-defaults to `main` and its deadline to 3600 seconds. Use `--cloud-provider`,
-`--cloud-environment`, `--cloud-repository`, `--cloud-branch`, `--cloud-model`,
-`--cloud-effort` and `--cloud-deadline` for per-run overrides. `--head` selects
-the full commit; otherwise the current HEAD is used. `--wait` observes the job
-before returning. Cloud jobs are read-only verification work and cannot take a
-writer or delivery target.
-
 The owner saves the intent before submission and the remote ID before waiting.
-After a restart, `reconcile` observes saved jobs; `status`, `status` and `output`
+After a restart, `reconcile` observes saved jobs; `status` and `output`
 show the saved observation and its result. Cloud lane states are prefixed
 `cloud_`. In JSON status, `cloud_state` and `cloud_jobs` describe the remote
 job; the underlying local attempt has no process exit. A changed tracked file

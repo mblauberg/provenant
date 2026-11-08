@@ -117,6 +117,7 @@ allow = [
   "serde_core",
   "serde_derive",
   "serde_json",
+  "serde_path_to_error",
   "serde_spanned",
   "sha2",
   "shlex",

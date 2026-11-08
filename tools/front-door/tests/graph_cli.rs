@@ -607,6 +607,92 @@ fn explain_compiles_template_parameters_and_over_without_graph_state() -> Result
 }
 
 #[test]
+fn cloud_placement_explain_and_invalid_input_paths() -> Result {
+    let rig = GraphProject::new()?;
+    let brief = rig.project.join("brief.md");
+    std::fs::write(&brief, "Count the runbooks.")?;
+    let brief = brief.to_str().ok_or("brief path")?;
+    for (provider, environment) in [("claude", ""), ("codex", ",environment='provenant'")] {
+        let setting = format!(
+            "attempt.cloud={{target='verify',provider='{provider}'{environment},repository='mblauberg/provenant',branch='main',model='test-model',deadline_seconds=1800}}"
+        );
+        let (output, value) = rig.run(&[
+            "run",
+            "--file",
+            brief,
+            "--mode",
+            "read-only",
+            "--set",
+            &setting,
+            "--explain",
+        ])?;
+        assert!(output.status.success(), "{value}");
+        let placement = &value["data"]["document"]["nodes"][0]["attempt"]["placement"];
+        assert_eq!(placement["provider"], provider);
+        assert_eq!(
+            placement["environment"],
+            if provider == "claude" {
+                ""
+            } else {
+                "provenant"
+            }
+        );
+    }
+    let graph = rig.project.join("invalid.json");
+    std::fs::write(
+        &graph,
+        r#"{"schema_version":1,"graph_id":"bad","nodes":[{"id":"x","access":"read_only","prompt":"inspect","attempt":{"cloud":{"target":"verify","provider":"claude","repository":"owner/repo","branch":"main","model":"test","deadline_seconds":"secret-value"}},"route":{"adapter":"claude","model":"test"}}]}"#,
+    )?;
+    let (output, value) = rig.run(&[
+        "run",
+        "--file",
+        graph.to_str().ok_or("graph path")?,
+        "--explain",
+    ])?;
+    assert!(!output.status.success(), "{value}");
+    let error = value.to_string();
+    assert!(
+        error.contains("nodes[0].attempt.cloud.deadline_seconds"),
+        "{error}"
+    );
+    assert!(error.contains("invalid type or value"), "{error}");
+    assert!(!error.contains("secret-value"));
+    let valid_graph = std::fs::read_to_string(&graph)?.replace("\"secret-value\"", "1800");
+    std::fs::write(&graph, valid_graph)?;
+    let (output, value) = rig.run(&[
+        "run",
+        "--file",
+        graph.to_str().ok_or("graph path")?,
+        "--explain",
+    ])?;
+    assert!(output.status.success(), "{value}");
+    assert_eq!(
+        value["data"]["document"]["nodes"][0]["attempt"]["placement"]["provider"],
+        "claude"
+    );
+    let (output, value) = rig.run(&[
+        "run",
+        "Inspect",
+        "--set",
+        "attempt.cloud={target='verify'}",
+        "--explain",
+    ])?;
+    assert!(!output.status.success(), "{value}");
+    let error = value.to_string();
+    assert!(error.contains("attempt.cloud.provider"), "{error}");
+    assert!(error.contains("required field is missing"), "{error}");
+    let (output, value) = rig.run(&["run", "Inspect", "--set", "attempt.cloud={", "--explain"])?;
+    assert!(!output.status.success(), "{value}");
+    assert!(
+        value
+            .to_string()
+            .contains("--set `attempt.cloud`: value is not valid TOML"),
+        "{value}"
+    );
+    Ok(())
+}
+
+#[test]
 fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     let rig = GraphProject::new()?;
     let user = rig.temp.path().join("config/provenant/templates");

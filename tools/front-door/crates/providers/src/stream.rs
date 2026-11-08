@@ -58,6 +58,11 @@ pub enum ProviderEvent {
     Error,
     TransientError,
     Terminal,
+    /// Claude assistant text, held by the stream state as a fallback answer.
+    /// It never leaves the stream state.
+    AssistantText(String),
+    /// The final result was empty, so the last assistant text stands in for it.
+    ResultFallback,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExitObservation {
@@ -143,6 +148,9 @@ pub struct StreamState {
     auth_required: bool,
     malformed: bool,
     tail_truncated: bool,
+    last_assistant_text: Option<String>,
+    result_text_seen: bool,
+    early_stop: bool,
 }
 impl StreamState {
     pub(crate) fn new(adapter: &'static str, decoder: Decoder) -> Self {
@@ -164,6 +172,9 @@ impl StreamState {
             auth_required: false,
             malformed: false,
             tail_truncated: false,
+            last_assistant_text: None,
+            result_text_seen: false,
+            early_stop: false,
         }
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
@@ -274,30 +285,16 @@ impl StreamState {
                     }
                     self.answer_models.push((model.clone(), *digest));
                 }
+                ProviderEvent::AssistantText(text) => {
+                    self.last_assistant_text = Some(text.clone());
+                }
                 ProviderEvent::Text(text) if self.adapter == "claude" => {
-                    let digest =
-                        *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes();
-                    let mut models = self
-                        .answer_models
-                        .iter()
-                        .filter(|(_, answer)| *answer == digest)
-                        .map(|(model, _)| model);
-                    if let Some(model) = models.next() {
-                        if models.any(|other| other != model) {
-                            self.model_conflict = true;
-                        } else {
-                            if self
-                                .expected_model
-                                .as_ref()
-                                .is_some_and(|expected| expected != model)
-                            {
-                                return Err(ProviderError::IdentityMismatch);
-                            }
-                            self.model = Some(model.clone());
-                            answer_model = Some(model.clone());
-                        }
+                    self.result_text_seen |= !text.trim().is_empty();
+                    if let Some(model) = self.resolve_answer_model(text)? {
+                        answer_model = Some(model);
                     }
                 }
+                ProviderEvent::EarlyStop { .. } => self.early_stop = true,
                 ProviderEvent::Terminal => {
                     self.terminal = true;
                     self.transient_error = false;
@@ -313,10 +310,35 @@ impl StreamState {
                 _ => {}
             }
         }
+        events.retain(|event| !matches!(event, ProviderEvent::AssistantText(_)));
         if let Some(model) = answer_model {
             events.push(ProviderEvent::Model(model));
         }
         Ok(events)
+    }
+    fn resolve_answer_model(&mut self, text: &str) -> Result<Option<String>, ProviderError> {
+        let digest = *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes();
+        let mut models = self
+            .answer_models
+            .iter()
+            .filter(|(_, answer)| *answer == digest)
+            .map(|(model, _)| model);
+        if let Some(model) = models.next() {
+            if models.any(|other| other != model) {
+                self.model_conflict = true;
+            } else {
+                if self
+                    .expected_model
+                    .as_ref()
+                    .is_some_and(|expected| expected != model)
+                {
+                    return Err(ProviderError::IdentityMismatch);
+                }
+                self.model = Some(model.clone());
+                return Ok(Some(model.clone()));
+            }
+        }
+        Ok(None)
     }
     pub(crate) fn finish(
         mut self,
@@ -381,6 +403,20 @@ impl StreamState {
         } else {
             OutcomeStatus::Partial
         };
+        // Recover only a clean, complete terminal stream, using the same
+        // answer identity checks as an ordinary result event.
+        if self.adapter == "claude"
+            && status == OutcomeStatus::Success
+            && !self.early_stop
+            && !self.result_text_seen
+            && let Some(text) = self.last_assistant_text.take()
+        {
+            if let Some(model) = self.resolve_answer_model(&text)? {
+                final_events.push(ProviderEvent::Model(model));
+            }
+            final_events.push(ProviderEvent::Text(text));
+            final_events.push(ProviderEvent::ResultFallback);
+        }
         Ok(ProviderOutcome {
             adapter: self.adapter,
             session: self.session,

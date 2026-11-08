@@ -1,5 +1,6 @@
 //! Document-based graph service shared by the CLI and MCP transports.
 use super::*;
+use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
@@ -9,6 +10,52 @@ use std::collections::BTreeMap;
 
 fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
+}
+
+// Do not expose serde's message: it can contain supplied values. Preserve only
+// a schema path and a bounded reason, both filtered at the diagnostic boundary.
+fn decode_input<T: serde::de::DeserializeOwned>(
+    value: Value,
+    prefix: &str,
+) -> Result<T, FacadeError> {
+    use serde_path_to_error::Segment;
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let message = error.inner().to_string();
+        let missing = message
+            .strip_prefix("missing field `")
+            .and_then(|s| s.split_once('`'))
+            .map(|(field, _)| field);
+        let mut field = prefix.to_owned();
+        // Build from segments, stopping at a user map field so no key is kept.
+        let mut in_map = false;
+        for segment in error.path().iter() {
+            match segment {
+                Segment::Seq { index } => field.push_str(&format!("[{index}]")),
+                Segment::Map { key } => {
+                    if !field.is_empty() {
+                        field.push('.');
+                    }
+                    field.push_str(key);
+                    if is_map_key_parent(key) {
+                        in_map = true;
+                        break;
+                    }
+                }
+                Segment::Enum { .. } | Segment::Unknown => {}
+            }
+        }
+        let missing = missing.filter(|_| !in_map);
+        if let Some(missing) = missing {
+            if !field.is_empty() {
+                field.push('.');
+            }
+            field.push_str(missing);
+        }
+        FacadeError::invalid(InvalidInputDetail::FieldDecode {
+            field,
+            missing: missing.is_some(),
+        })
+    })
 }
 
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
@@ -118,10 +165,23 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         }
     }
     let typed: provenant_fabric_runtime::graph::AttemptSpec =
-        serde_json::from_value(attempt.clone()).map_err(|_| invalid())?;
-    if typed.provider_timeout == Some(0) || typed.host.as_ref().is_some_and(|host| host.is_empty())
-    {
-        return Err(invalid());
+        decode_input(attempt.clone(), "attempt")?;
+    for (field, invalid_value) in [
+        (
+            "attempt.provider_timeout",
+            typed.provider_timeout == Some(0),
+        ),
+        (
+            "attempt.host",
+            typed.host.as_ref().is_some_and(|host| host.is_empty()),
+        ),
+    ] {
+        if invalid_value {
+            return Err(FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                field: field.into(),
+                missing: false,
+            }));
+        }
     }
     input["attempt"] = attempt;
     if let Some(value) = input.get("operation_id").filter(|value| !value.is_null()) {
@@ -1119,15 +1179,13 @@ impl Factory {
             {
                 let patch = Patch {
                     schema_version: patch::PATCH_SCHEMA_VERSION,
-                    nodes: serde_json::from_value(raw["nodes"].clone())
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?,
+                    nodes: decode_input(raw["nodes"].clone(), "nodes")?,
                     ..Default::default()
                 };
                 patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
                     .map_err(graph_patch_error)?
             } else {
-                serde_json::from_value::<GraphDocument>(raw.clone())
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                decode_input::<GraphDocument>(raw.clone(), "document")?
             }
         } else {
             let mut node = match lane_document {
@@ -1924,6 +1982,68 @@ fn add(row: &mut Value, key: &str, value: u64) {
     reason = "the custom worktree driver omits libtest functions"
 )]
 mod tests {
+    #[test]
+    fn decode_errors_name_schema_paths_without_keys_or_values() -> Result<()> {
+        use provenant_fabric_runtime::graph::GraphDocument;
+        let node = |field: &str, value: Value| {
+            let mut node = json!({"id":"one","access":"read_only","prompt":"p","route":{"adapter":"mock","model":"m"}});
+            match field {
+                "role" => node["role"] = value,
+                other => node["attempt"] = json!({ other: value }),
+            }
+            json!({"schema_version":1,"graph_id":"g","nodes":[node]})
+        };
+        for (field, path) in [
+            ("directory", "nodes[0].attempt.directory"),
+            ("new_worktree", "nodes[0].attempt.new_worktree"),
+            ("role", "nodes[0].role"),
+        ] {
+            let error = super::decode_input::<GraphDocument>(node(field, json!(7)), "")
+                .expect_err("decode must fail");
+            let text = error.diagnostic().detail.unwrap_or_default();
+            assert!(text.contains(path), "{text}");
+            assert!(text.contains("invalid type or value"), "{text}");
+        }
+        let secret = "ghp_TOKEN_SENTINEL";
+        let mut doc = node("role", json!("fine"));
+        doc["nodes"][0]["access"] = json!(secret);
+        let error = super::decode_input::<GraphDocument>(doc, "").expect_err("decode must fail");
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains(secret), "{wire}");
+        assert!(wire.contains("nodes[0].access"), "{wire}");
+        // Map keys never appear, whatever characters they contain.
+        for key in ["foo.secret", "k[0]secret", "userkey"] {
+            #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
+            struct Doc {
+                nodes: Vec<Node>,
+            }
+            #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
+            struct Node {
+                attempt: Attempt,
+            }
+            #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
+            struct Attempt {
+                extra: BTreeMap<String, u8>,
+            }
+            let doc = json!({"nodes":[{"attempt":{"extra":{key: "not a number"}}}]});
+            let error = super::decode_input::<Doc>(doc, "").expect_err("decode must fail");
+            let wire = serde_json::to_string(&error).unwrap();
+            assert!(
+                !wire.contains("secret") && !wire.contains("userkey"),
+                "{wire}"
+            );
+            let back: FacadeError = serde_json::from_str(&wire).unwrap();
+            assert_eq!(back, error);
+            assert_eq!(serde_json::to_string(&back).unwrap(), wire);
+            let text = back.diagnostic().detail.unwrap_or_default();
+            assert!(text.contains("nodes[0].attempt.extra`"), "{text}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn relay_refusals_preserve_named_code_and_detail() -> Result<()> {
         for (code, detail) in [

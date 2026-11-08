@@ -283,6 +283,7 @@ pub struct TaskRequest {
 pub struct CloudPlacement {
     pub target: String,
     pub provider: String,
+    #[serde(default)]
     pub environment: String,
     pub repository: String,
     pub branch: String,
@@ -846,6 +847,8 @@ pub enum TerminalCause {
     IdentityUnobserved,
     /// A writer declared unfinished work and its pinned head equals its base.
     StoppedNoWork,
+    /// A writer finished without a final message.
+    EmptyWriterResult,
 }
 
 impl TerminalCause {
@@ -879,6 +882,7 @@ impl TerminalCause {
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
             Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
+            Self::EmptyWriterResult => "empty final message; review writer commit",
         }
     }
 
@@ -955,6 +959,9 @@ impl TerminalCause {
             }
             Self::StoppedNoWork => {
                 "the writer stopped with no work: its branch has no new commit; acceptance remains unmet"
+            }
+            Self::EmptyWriterResult => {
+                "the provider ended with an empty final message; its commit is kept for review"
             }
         }
     }

@@ -304,6 +304,7 @@ pub enum InvalidInputDetail {
     LandingLock,
     UnresolvableBase(String),
     Field(String),
+    FieldDecode { field: String, missing: bool },
     FieldTooLarge { field: String, limit: usize },
     FieldTitle(String),
     InputUnreadable,
@@ -315,6 +316,24 @@ pub enum InvalidInputDetail {
 impl InvalidInputDetail {
     pub fn graph_reason(reason: impl std::fmt::Display) -> Self {
         Self::GraphReason(reason.to_string())
+    }
+
+    /// The fact with any field path reduced to its disclosable form.
+    fn redacted(&self) -> Self {
+        let clean = |field: &String| safe_input_field(field).unwrap_or_default();
+        match self {
+            Self::Field(path) => Self::Field(clean(path)),
+            Self::FieldDecode { field, missing } => Self::FieldDecode {
+                field: safe_decoded_field(field).unwrap_or_default(),
+                missing: *missing,
+            },
+            Self::FieldTooLarge { field, limit } => Self::FieldTooLarge {
+                field: clean(field),
+                limit: *limit,
+            },
+            Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
+            other => other.clone(),
+        }
     }
 
     fn safe_text(&self) -> Option<String> {
@@ -343,6 +362,9 @@ impl InvalidInputDetail {
             Self::Field(path) => {
                 safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
             }
+            Self::FieldDecode { field, missing } => safe_decoded_field(field).map(|path| {
+                format!("invalid input field `{path}`: {}", if *missing { "required field is missing" } else { "invalid type or value" })
+            }),
             Self::FieldTooLarge { field, limit } => safe_input_field(field)
                 .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
@@ -909,7 +931,66 @@ fn safe_base_ref(name: &str) -> Option<&str> {
     .then_some(name)
 }
 
-pub(super) fn safe_input_field(field: &str) -> Option<&str> {
+/// Fields whose children are caller-chosen map keys rather than schema names.
+/// A decode path stops at one of these: nothing beneath it is disclosed.
+const MAP_KEY_PARENTS: [&str; 12] = [
+    "set",
+    "templates",
+    "parameters",
+    "capability_sources",
+    "extra",
+    "env",
+    "commands",
+    "host_native",
+    "home_hosts",
+    "peers",
+    "projects",
+    "ci_poll_overrides",
+];
+
+/// Whether `name` is a field whose children are user-chosen map keys.
+pub fn is_map_key_parent(name: &str) -> bool {
+    MAP_KEY_PARENTS.contains(&name)
+}
+
+/// A bounded decoder-derived path safe to disclose: snake_case schema field
+/// names and indexes only. It ends at a user map field, so no key can appear;
+/// a path that continues beneath one is refused. A supplied value is never
+/// part of a path.
+pub(super) fn safe_decoded_field(field: &str) -> Option<String> {
+    if field.is_empty() || field.len() > 128 {
+        return None;
+    }
+    let mut after_map = false;
+    let mut rest = field;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix('[') {
+            let (index, tail) = tail.split_once(']')?;
+            if after_map || index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            rest = tail;
+            continue;
+        }
+        let tail = rest.strip_prefix('.').unwrap_or(rest);
+        let end = tail.find(['.', '[']).unwrap_or(tail.len());
+        let (part, tail) = tail.split_at(end);
+        if after_map
+            || part.is_empty()
+            || !part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return None;
+        }
+        after_map = is_map_key_parent(part);
+        rest = tail;
+    }
+    Some(field.to_owned())
+}
+
+/// Allowlist for paths written by hand in code (not derived from a decoder).
+pub(super) fn safe_input_field(field: &str) -> Option<String> {
     let allowed = [
         "scope",
         "use",
@@ -982,6 +1063,19 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
         "name",
         "host",
         "attempt",
+        "nodes",
+        "graph_id",
+        "access",
+        "placement",
+        "cloud",
+        "environment",
+        "repository",
+        "deadline_seconds",
+        "provider_timeout",
+        "confidential",
+        "capabilities",
+        "build_heavy",
+        "write_roots",
         "digest",
         "encoding",
         "generation",
@@ -996,7 +1090,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
             .filter(|part| !part.is_empty())
             .all(|part| part.bytes().all(|b| b.is_ascii_digit()) || allowed.contains(&part))
     {
-        return Some(field);
+        return Some(field.to_owned());
     }
     None
 }
@@ -1020,7 +1114,7 @@ mod invalid_detail_wire {
                 InvalidInputDetail::GraphReason(_) => {
                     InvalidInputDetail::GraphReason(String::new())
                 }
-                fact => fact.clone(),
+                fact => fact.redacted(),
             };
             map.serialize_entry("detail_fact", &safe_fact)?;
         }

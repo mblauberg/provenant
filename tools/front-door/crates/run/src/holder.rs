@@ -1939,8 +1939,19 @@ impl RunStore {
         if decoded.result.is_empty()
             && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
         {
-            decoded.outcome = Outcome::Failed;
-            decoded.reason = Some("provider result is empty or incomplete".into());
+            if task.writer.is_some() {
+                // A writer's work is its commit. A provider that exited cleanly
+                // with no final message needs review; it has not failed.
+                decoded.result = EMPTY_WRITER_RESULT.into();
+                if decoded.outcome == Outcome::Succeeded {
+                    decoded.outcome = Outcome::ReviewRequired;
+                }
+                decoded.reason = Some(EMPTY_WRITER_REASON.into());
+                decoded.terminal_cause = Some(TerminalCause::EmptyWriterResult);
+            } else {
+                decoded.outcome = Outcome::Failed;
+                decoded.reason = Some("provider result is empty or incomplete".into());
+            }
         }
         // Decoding can reveal credential markers hidden by JSON escapes in
         // the already-filtered capture. Seal only a filtered rendering.
@@ -2233,6 +2244,10 @@ pub(crate) fn seal_manifest(
 }
 
 /// The cause shown for a lane that ended without a final handoff.
+/// Placeholder result for a writer whose provider sent no final message.
+pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";
+pub const EMPTY_WRITER_REASON: &str =
+    "the provider ended with an empty final message; its commit is kept for review";
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
 /// A final verdict reports a result even without a handoff.
@@ -3202,6 +3217,143 @@ mod writer_recovery_tests {
                     row.settlement.unwrap().reason.as_deref(),
                     Some(TerminalCause::StoppedNoWork.detail())
                 );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_committed_writer_requires_review_and_controls_fail()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
+        for (writer, outcome) in [
+            (true, Outcome::Succeeded),
+            (false, Outcome::Succeeded),
+            (true, Outcome::Failed),
+        ] {
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            if writer {
+                run.request.tasks[0].writer = Some(fixture.writer.clone());
+            }
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let pin = format!("refs/provenant/import/{}", launch.base);
+            fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            drop(provenant_supervisor::fixture::bind_writer_attempt(
+                lease, &attempt,
+            )?);
+            let committed_head = {
+                let objects = candidate.join("git-objects");
+                let shared_objects = launch.worktree.repo().common_git_dir().join("objects");
+                let private_git = |args: &[std::ffi::OsString]| {
+                    crate::objects::execute_bounded(
+                        &git,
+                        &candidate.join("git-common"),
+                        &fixture.writer.worktree,
+                        args,
+                        None,
+                        crate::objects::Execution {
+                            object_directory: Some(&objects),
+                            alternate_directory: Some(&shared_objects),
+                            ..Default::default()
+                        },
+                    )
+                };
+                let head = private_git(&[
+                    "-c".into(),
+                    "user.name=Fixture".into(),
+                    "-c".into(),
+                    "user.email=fixture@example.invalid".into(),
+                    "commit-tree".into(),
+                    format!("{}^{{tree}}", launch.base).into(),
+                    "-p".into(),
+                    launch.base.to_string().into(),
+                    "-m".into(),
+                    "Partial work".into(),
+                ])?;
+                let head = std::str::from_utf8(&head)?.trim();
+                private_git(&[
+                    "update-ref".into(),
+                    launch.branch.as_str().into(),
+                    head.into(),
+                ])?;
+                head.to_owned()
+            };
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            let mut fake = crate::dispatch_tests::Fake::with_observed(Some(route()), Some(outcome));
+            fake.answer = Some(String::new());
+            let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            let AttemptState::Terminal {
+                outcome: actual,
+                reason,
+                ..
+            } = &finished.state
+            else {
+                panic!("not terminal")
+            };
+            if writer && outcome == Outcome::Succeeded {
+                assert_eq!(*actual, Outcome::ReviewRequired, "{reason:?}");
+                assert!(reason.as_deref().unwrap().contains(EMPTY_WRITER_REASON));
+                let row = LaneRow::project(&finished, LaneProjectionFacts::default());
+                assert!(row.reason.as_deref().unwrap().contains(EMPTY_WRITER_REASON));
+                assert_eq!(
+                    read_sealed(&attempt, "result.md", RESULT_LIMIT)?.as_deref(),
+                    Some(EMPTY_WRITER_RESULT.as_bytes())
+                );
+                fixture.git(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &committed_head,
+                    launch.branch.as_str(),
+                ])?;
+                assert_ne!(committed_head, launch.base.to_string());
+            } else {
+                assert_eq!(*actual, Outcome::Failed);
             }
         }
         Ok(())
