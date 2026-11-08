@@ -291,31 +291,12 @@ impl WriterLaunch {
             ],
             None,
         )?;
-        let mut records = output.split(|byte| *byte == 0);
-        let mut paths = Vec::new();
-        while let Some(record) = records.next() {
-            if record.is_empty() {
-                break;
-            }
-            if record.len() < 4 || record[2] != b' ' {
-                return Err(RunError::Validation("invalid Git status record"));
-            }
-            paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
-            // Porcelain -z puts the destination first and follows it with the source.
-            if record[..2]
-                .iter()
-                .any(|status| matches!(status, b'R' | b'C'))
-                && records.next().is_none_or(|source| source.is_empty())
-            {
-                return Err(RunError::Validation("invalid Git status rename"));
-            }
-        }
-        Ok(paths)
+        status_paths(&output)
     }
 
     /// When a writer lane passes its token budget and stops, commit its
     /// uncommitted work in the lane's worktree so it ends up committed on its branch.
-    fn commit_budget_stop(&self, attempt: &Directory) -> Result<&'static str> {
+    fn commit_budget_stop(&self, attempt: &Directory) -> Result<BudgetCommit> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let source = crate::objects::bound_source(attempt)?.ok_or(RunError::Validation(
@@ -333,7 +314,7 @@ impl WriterLaunch {
             ("rebase-apply", "rebase"),
         ] {
             match source.refs.metadata_at(OsStr::new(name), false) {
-                Ok(_) => return Ok(in_progress_note(operation)),
+                Ok(_) => return Ok(BudgetCommit::note(in_progress_note(operation))),
                 Err(error) if error.is_not_found() => {}
                 Err(error) => return Err(error.into()),
             }
@@ -367,11 +348,14 @@ impl WriterLaunch {
             };
             run_git(&["update-ref", "HEAD", &tip.to_string()])?;
             if !run_git(&["ls-files", "--unmerged", "-z"])?.is_empty() {
-                return Ok(in_progress_note("merge"));
+                return Ok(BudgetCommit::note(in_progress_note("merge")));
             }
-            if run_git(&["status", "--porcelain", "-z"])?.is_empty() {
-                return Ok("budget stop: worktree already clean");
+            let status = run_git(&["status", "--porcelain", "-z", "-uall"])?;
+            if status.is_empty() {
+                return Ok(BudgetCommit::note("budget stop: worktree already clean"));
             }
+            let paths = status_paths(&status)?;
+            let message = budget_commit_message(&paths);
             run_git(&["add", "-A"])?;
             run_git(&[
                 "-c",
@@ -382,7 +366,7 @@ impl WriterLaunch {
                 "commit.gpgsign=false",
                 "commit",
                 "-m",
-                "stopped on budget",
+                &message,
             ])?;
             let bytes = run_git(&["rev-parse", "HEAD"])?;
             let head = GitOid::parse(
@@ -392,9 +376,94 @@ impl WriterLaunch {
             )
             .map_err(|_| RunError::Validation("budget commit head"))?;
             crate::objects::set_private_tip(&source, self.branch.as_str(), head)?;
-            Ok("work committed on its branch")
+            Ok(BudgetCommit {
+                note: "work committed on its branch",
+                committed: Some(BudgetWork {
+                    sha: head.to_string().chars().take(SHORT_SHA).collect(),
+                    files: paths.len(),
+                    paths: paths.into_iter().take(BUDGET_PATHS).collect(),
+                }),
+            })
         })
     }
+}
+
+/// The paths in `git status --porcelain -z` output.
+fn status_paths(output: &[u8]) -> Result<Vec<String>> {
+    let mut records = output.split(|byte| *byte == 0);
+    let mut paths = Vec::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            break;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            return Err(RunError::Validation("invalid Git status record"));
+        }
+        paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
+        // Porcelain -z puts the destination first and follows it with the source.
+        if record[..2]
+            .iter()
+            .any(|status| matches!(status, b'R' | b'C'))
+            && records.next().is_none_or(|source| source.is_empty())
+        {
+            return Err(RunError::Validation("invalid Git status rename"));
+        }
+    }
+    Ok(paths)
+}
+
+/// Hex digits in a short commit name.
+pub(crate) const SHORT_SHA: usize = 9;
+/// Changed paths named in a budget commit message and placeholder result.
+pub(crate) const BUDGET_PATHS: usize = 20;
+
+/// What a budget stop did to the lane's branch.
+struct BudgetCommit {
+    note: &'static str,
+    committed: Option<BudgetWork>,
+}
+
+impl BudgetCommit {
+    fn note(note: &'static str) -> Self {
+        Self {
+            note,
+            committed: None,
+        }
+    }
+}
+
+/// Work a budget stop committed.
+struct BudgetWork {
+    sha: String,
+    files: usize,
+    paths: Vec<String>,
+}
+
+/// Path names only, with control characters made visible so a name cannot
+/// reshape the message around it.
+fn listed_path(path: &str) -> String {
+    path.chars()
+        .map(|ch| if ch.is_control() { '?' } else { ch })
+        .collect()
+}
+
+/// The paths a budget stop names, capped, with a count of the rest.
+pub(crate) fn path_list(paths: &[String], total: usize) -> Vec<String> {
+    let mut lines: Vec<String> = paths.iter().map(|path| listed_path(path)).collect();
+    if total > paths.len() {
+        lines.push(format!("and {} more", total - paths.len()));
+    }
+    lines
+}
+
+fn budget_commit_message(paths: &[String]) -> String {
+    let shown = &paths[..paths.len().min(BUDGET_PATHS)];
+    let mut message = format!("wip: stopped on budget ({} files)\n", paths.len());
+    for line in path_list(shown, paths.len()) {
+        message.push('\n');
+        message.push_str(&line);
+    }
+    message
 }
 
 /// The settlement note for a budget stop that left an in-progress operation
@@ -2405,14 +2474,24 @@ impl WriterLaunch {
         {
             // Recovery holds writer exclusion and custody is absent. Commit
             // failure is diagnostic and must not replace the budget outcome.
-            let note = match self.commit_budget_stop(attempt) {
-                Ok(note) => note.to_owned(),
-                Err(error) => format!("budget commit failed: {error}"),
+            let (note, work) = match self.commit_budget_stop(attempt) {
+                Ok(commit) => (commit.note.to_owned(), commit.committed),
+                Err(error) => (format!("budget commit failed: {error}"), None),
+            };
+            let record = match work {
+                Some(work) => serde_json::json!({
+                    "schema_version": 1,
+                    "note": note,
+                    "commit": work.sha,
+                    "files": work.files,
+                    "paths": work.paths,
+                }),
+                None => serde_json::json!({"schema_version":1,"note":note}),
             };
             crate::artifacts::seal(
                 attempt,
                 "budget-commit.json",
-                &crate::db::bytes(&serde_json::json!({"schema_version":1,"note":note}))?,
+                &crate::db::bytes(&record)?,
                 crate::RECORD_LIMIT,
             )?;
         }

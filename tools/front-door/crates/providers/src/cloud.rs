@@ -230,6 +230,22 @@ pub struct RemoteJob {
     pub requested_model: String,
     pub requested_effort: Option<String>,
     pub state: RemoteState,
+    /// Why the last submission attempt failed, kept so status can show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_error: Option<String>,
+    /// Set only when submission was classified a definite refusal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub submit_refused: bool,
+    /// Codex transport chosen at submission; later config changes do not apply.
+    #[serde(default, skip_serializing_if = "is_default_transport")]
+    pub cloud_transport: provenant_config::CodexCloudTransport,
+    /// Codex command chosen at submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_command: Option<String>,
+}
+
+fn is_default_transport(transport: &provenant_config::CodexCloudTransport) -> bool {
+    *transport == provenant_config::CodexCloudTransport::default()
 }
 
 /// An actionable failure observed while the provider prepared the VM.
@@ -245,6 +261,10 @@ const ENVIRONMENT_REMEDY: &str =
     "Create or repair the named provider environment and select the repository, then retry.";
 
 impl RemoteJob {
+    /// An unresolved submission settled as unknown, with no remote identity.
+    pub fn is_unresolved_submission(&self) -> bool {
+        matches!(self.state, RemoteState::Unknown { .. }) && self.remote_id.trim().is_empty()
+    }
     pub fn environment_diagnostic(&self) -> Option<EnvironmentDiagnostic<'_>> {
         match &self.state {
             RemoteState::SetupFailed { detail } => Some(EnvironmentDiagnostic {
@@ -270,6 +290,10 @@ pub enum RemoteState {
     Finished {
         result: CloudResult,
     },
+    /// The provider ended the turn without a verification result.
+    Failed {
+        detail: String,
+    },
     /// The provider reported a terminal environment setup failure.
     SetupFailed {
         detail: String,
@@ -282,7 +306,10 @@ impl RemoteState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Finished { .. } | Self::SetupFailed { .. } | Self::Cancelled
+            Self::Finished { .. }
+                | Self::Failed { .. }
+                | Self::SetupFailed { .. }
+                | Self::Cancelled
         )
     }
 }
@@ -301,7 +328,17 @@ pub trait CloudProvider {
     /// Check the target before a model turn when the provider supports it.
     fn check_environment(&mut self, request: CloudSubmission<'_>) -> Result<(), Self::Error>;
     fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
+    /// Bounded text explaining a failed submission, saved with the job.
+    fn failure_detail(&self, _error: &Self::Error) -> Option<String> {
+        None
+    }
+    /// True only for a completed, definite refusal without a remote identity.
+    fn submission_refused(&self, _error: &Self::Error) -> bool {
+        false
+    }
     /// Recover a submission only when the provider can identify it unambiguously.
+    /// Record submission-time transport choices in the job before it is saved.
+    fn stamp(&self, _job: &mut RemoteJob) {}
     fn recover(&mut self, _job: &RemoteJob) -> Result<Option<String>, Self::Error> {
         Ok(None)
     }
@@ -363,10 +400,26 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
             remedy: ENVIRONMENT_REMEDY,
             error,
         })?;
+    provider.stamp(&mut job);
     store.begin(&job).map_err(CloudJobError::Store)?;
-    job.remote_id = provider
-        .submit(CloudSubmission { job: &job, task })
-        .map_err(CloudJobError::SubmitUnknown)?;
+    job.remote_id = match provider.submit(CloudSubmission { job: &job, task }) {
+        Ok(id) => id,
+        Err(error) => {
+            if provider.submission_refused(&error) {
+                let detail = provider
+                    .failure_detail(&error)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "submission unknown".into());
+                job.submit_error = Some(detail.clone());
+                job.submit_refused = true;
+                job.state = RemoteState::Failed { detail };
+                store.save(&job).map_err(CloudJobError::Store)?;
+                return Ok(job);
+            }
+            return Err(CloudJobError::SubmitUnknown(error));
+        }
+    };
+    job.submit_error = None;
     if job.remote_id.trim().is_empty() {
         return Err(CloudJobError::SubmissionUnknown);
     }
@@ -389,7 +442,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
     if job.state.is_terminal() {
         return Ok(());
     }
-    if job.state == RemoteState::Submitting {
+    if job.state == RemoteState::Submitting || job.is_unresolved_submission() {
         let id = provider
             .recover(job)
             .map_err(CloudJobError::Provider)?
@@ -431,7 +484,7 @@ pub fn cancel<P: CloudProvider, S: CloudJobStore>(
     if job.state.is_terminal() {
         return Ok(());
     }
-    if job.state == RemoteState::Submitting {
+    if job.state == RemoteState::Submitting || job.is_unresolved_submission() {
         return Err(CloudJobError::SubmissionUnknown);
     }
     // Persist the ambiguous outcome before contacting the provider. A crash or
@@ -523,6 +576,10 @@ mod lifecycle_tests {
             requested_model: "model".into(),
             requested_effort: Some("low".into()),
             state: RemoteState::Running,
+            submit_error: None,
+            submit_refused: false,
+            cloud_transport: Default::default(),
+            cloud_command: None,
         }
     }
     fn result(commit: &str) -> CloudResult {
@@ -537,6 +594,49 @@ mod lifecycle_tests {
             tracked_files_changed: false,
             observed_model: None,
         }
+    }
+
+    #[test]
+    fn cloud_definite_refusal_is_saved_as_failed() {
+        struct Refusal(bool);
+        impl CloudProvider for Refusal {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Err(())
+            }
+            fn failure_detail(&self, _: &()) -> Option<String> {
+                Some("no environment".into())
+            }
+            fn submission_refused(&self, _: &()) -> bool {
+                self.0
+            }
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
+                panic!("unexpected observation")
+            }
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
+                panic!("unexpected cancellation")
+            }
+        }
+        let mut store = FakeStore::default();
+        let failed = submit(&mut Refusal(true), &mut store, job(), "run tests").unwrap();
+        assert_eq!(
+            failed.state,
+            RemoteState::Failed {
+                detail: "no environment".into()
+            }
+        );
+        assert_eq!(store.saved, Some(failed));
+        let mut store = FakeStore::default();
+        assert!(matches!(
+            submit(&mut Refusal(false), &mut store, job(), "run tests"),
+            Err(CloudJobError::SubmitUnknown(()))
+        ));
+        let saved = store.saved.unwrap();
+        assert_eq!(saved.state, RemoteState::Submitting);
+        assert_eq!(saved.submit_error, None);
     }
 
     #[test]

@@ -606,7 +606,7 @@ For hosted Claude, omit `environment`:
 provenant run --file brief.md --mode read-only --set "attempt.cloud={target='claude-hosted',provider='claude',repository='mblauberg/provenant',branch='main',model='claude-sonnet-5-5',deadline_seconds=1800}" --explain
 ```
 
-For Codex, supply its environment ID:
+For Codex, supply its environment name or full ID:
 
 ```sh
 provenant run --file brief.md --mode read-only --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=1800}" --explain
@@ -637,9 +637,56 @@ unknown or different observed model. Unknown cost produces a warning.
 Claude has no status CLI: an unfinished job stays running until its deadline,
 then becomes unknown. It publishes a result-only commit on a `claude/*`
 branch, which the owner removes on a best-effort basis after saving the result.
-Codex returns the result in its cloud diff and cannot request model or effort.
-Cancellation is unconfirmed for both providers. CLI output formats have not
-yet been captured on real hosts; a parsing failure reports what was seen.
+`claude --cloud` refuses a non-terminal (`Error: --cloud requires an
+interactive terminal.`, exit 1), so the owner runs only the submit under a
+pseudo-terminal through `script(1)` with stdin closed. Captured on Claude Code
+2.1.319, after terminal control sequences and carriage returns, which the owner
+strips:
+
+```text
+Created cloud session: <title>
+View: https://claude.ai/code/session_<id>?from=cli&m=0
+Resume with: claude --teleport session_<id>
+```
+
+The owner records `session_<id>` from the `--teleport` line, or the View URL
+when that line is absent. A definite refusal without an identity fails the job with a bounded CLI error.
+An uncertain submission, including unparseable successful output, stays
+`submitting` for recovery.
+
+Codex defaults to the official `codex cloud exec/status/list` transport and
+returns the result in its cloud diff. It cannot request model or effort.
+On the real host checked on 8 November 2026, official codex-cli 0.167.0 could
+not list a ready environment served by the newer cloud thread API; submission
+reported `no cloud environments are available for this workspace`.
+For such environments, select the configurable thread transport in the host's
+state-root `config.toml`:
+
+```toml
+[providers.codex.cloud]
+transport = "thread"
+command = "codex-cloud-task"
+```
+
+The command is optional and defaults to `codex-cloud-task`; another installed
+client may implement the same interface. See
+[configuration](configuration.md#codex-cloud-transport).
+Thread submission runs `submit --env NAME_OR_ID --read-only` with the prompt
+on stdin. Observation uses `status THREAD_ID`: queued and in-progress turns
+remain running, completed turns supply the last agent message, and failed or
+cancelled turns report their detail. The thread client has no file-diff
+operation, so the job must include the contents of
+`.provenant-cloud-result.json` as JSON in its final agent message. The same
+job ID, nonce and commit checks apply; tracked-file changes are self-reported
+through `tracked_files_changed` rather than verified against a returned diff.
+The client's `list` returns environments, so it cannot recover a lost
+submission response by correlation marker. Such a submission remains unknown
+instead of being retried automatically.
+
+Cancellation is unconfirmed for both providers. Thread parsing uses offline
+fixtures from the supplied command shapes; successful thread-job output
+has not yet been captured on a real host. A parsing failure reports a bounded
+excerpt of what was seen.
 
 The job can use `scripts/cloud-verify` to run its named verification command.
 It requires the job ID, nonce and full commit from the request, a test name,

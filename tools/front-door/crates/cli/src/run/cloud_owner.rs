@@ -36,6 +36,10 @@ pub fn prepare_job(
         requested_model: target.model.clone(),
         requested_effort: target.effort.clone(),
         state: RemoteState::Submitting,
+        submit_error: None,
+        submit_refused: false,
+        cloud_transport: Default::default(),
+        cloud_command: None,
     })
 }
 
@@ -267,8 +271,70 @@ pub fn placement(
         .and_then(|task| task.cloud.clone()))
 }
 
+/// Resolve a provider's cloud transport settings from the current host configuration.
+pub fn cloud_settings(
+    roots: &provenant_core::Roots,
+    provider: &str,
+) -> Result<provenant_config::ProviderCloudSettings, String> {
+    Ok(
+        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?
+            .providers
+            .get(provider)
+            .map(|provider| provider.cloud.clone())
+            .unwrap_or_default(),
+    )
+}
+
+/// Settle a legacy submission only after the caller proves its owner terminal.
+pub(super) fn settle_saved_submission(
+    store: &provenant_run::RunStore,
+    id: AttemptId,
+    call: &provenant_run::Request<'_>,
+) -> Result<RemoteJob, String> {
+    use provenant_providers::cloud::CloudJobStore;
+    super::cloud_store::AttemptCloudStore::with_attempt(
+        store,
+        id,
+        false,
+        call,
+        |cloud_store| -> Result<RemoteJob, String> {
+            let mut current = cloud_store
+                .load()
+                .map_err(|e| e.to_string())?
+                .ok_or("missing cloud job")?;
+            validate_intent(store, id, &current, call)?;
+            if current.state == RemoteState::Submitting
+                && current.remote_id.trim().is_empty()
+                && current.submit_error.is_some()
+            {
+                let detail = current
+                    .submit_error
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("submission unknown")
+                    .to_owned();
+                // Only a recorded definite refusal is Failed; anything else may
+                // still exist remotely, so it stays unresolved and visible.
+                current.state = if current.submit_refused {
+                    RemoteState::Failed { detail }
+                } else {
+                    RemoteState::Unknown {
+                        detail: format!("submission outcome unknown: {detail}"),
+                    }
+                };
+                cloud_store.save(&current).map_err(|e| e.to_string())?;
+            }
+            note_state(store, id, &current, call)?;
+            Ok(current)
+        },
+    )
+    .map_err(|e| e.to_string())?
+}
+
 /// Reconcile or request cancellation with the installed cloud client.
 pub(super) fn observe_installed(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     id: AttemptId,
     job: &RemoteJob,
@@ -277,6 +343,44 @@ pub(super) fn observe_installed(
     cancel_job: bool,
 ) -> Result<RemoteJob, String> {
     use provenant_providers::cloud_cli::{ClaudeCloud, CodexCloud, InstalledCloudCli};
+    // Old submissions saved errors even when their outcome was uncertain. Only
+    // repair them after their owner has settled, never while it can still act.
+    if job.state == RemoteState::Submitting
+        && job.remote_id.trim().is_empty()
+        && job.submit_error.is_some()
+    {
+        let record = store.record(id, call).map_err(|e| e.to_string())?;
+        let closed = store
+            .run(record.run_id, call)
+            .map_err(|e| e.to_string())?
+            .closure
+            == provenant_records::run::Closure::Closed;
+        let graph_terminal = if !closed
+            && let Some(graph) = record.context.as_ref().and_then(|c| c.graph_id.as_deref())
+        {
+            provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                &roots.state,
+                record.project_id,
+                graph,
+            )
+            .map_err(|e| e.to_string())?
+            .is_some_and(|checkpoint| {
+                !checkpoint.nodes.is_empty()
+                    && checkpoint.nodes.iter().all(|node| {
+                        !matches!(
+                            node.state,
+                            provenant_fabric_runtime::graph::NodeState::Pending
+                                | provenant_fabric_runtime::graph::NodeState::Running
+                        )
+                    })
+            })
+        } else {
+            false
+        };
+        if closed || graph_terminal {
+            return settle_saved_submission(store, id, call);
+        }
+    }
     let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
     let cli = InstalledCloudCli {
         executor: &executor,
@@ -298,7 +402,9 @@ pub(super) fn observe_installed(
             cli,
             pending_cleanup: None
         }),
-        Some(provenant_records::CloudTransport::Codex) => observe!(CodexCloud { cli }),
+        Some(provenant_records::CloudTransport::Codex) => {
+            observe!(CodexCloud::new(cli, cloud_settings(roots, &job.provider)?))
+        }
         _ => Err(format!(
             "cloud target {} has unsupported provider {}",
             job.target, job.provider
@@ -326,6 +432,7 @@ impl provenant_providers::cloud_cli::CloudCli for ViewCli<'_> {
 // Read-only status observation: do not save the result or modify the run store.
 #[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
 fn observe_for_view(
+    roots: &provenant_core::Roots,
     job: &RemoteJob,
     cwd: &std::path::Path,
     budget_end: std::time::Instant,
@@ -337,7 +444,7 @@ fn observe_for_view(
         saved: &RemoteJob,
     ) -> Result<RemoteJob, String> {
         let mut job = saved.clone();
-        if matches!(job.state, RemoteState::Submitting) {
+        if matches!(job.state, RemoteState::Submitting) || job.is_unresolved_submission() {
             job.remote_id = provider
                 .recover(&job)?
                 .filter(|id| !id.trim().is_empty())
@@ -377,7 +484,10 @@ fn observe_for_view(
             },
             job,
         ),
-        Some(provenant_records::CloudTransport::Codex) => observe(&mut CodexCloud { cli }, job),
+        Some(provenant_records::CloudTransport::Codex) => observe(
+            &mut CodexCloud::new(cli, cloud_settings(roots, &job.provider)?),
+            job,
+        ),
         _ => Err(format!("unsupported cloud provider {}", job.provider)),
     }
 }
@@ -389,6 +499,9 @@ pub fn view(job: &RemoteJob) -> serde_json::Value {
         "remote_id": job.remote_id, "commit": job.commit,
         "requested_model": job.requested_model, "requested_effort": job.requested_effort, "state": job.state,
     });
+    if let Some(error) = &job.submit_error {
+        value["submit_error"] = serde_json::json!(error);
+    }
     if let Some(diagnostic) = job.environment_diagnostic() {
         value["remedy"] = serde_json::json!(diagnostic.remedy);
     }
@@ -421,15 +534,17 @@ pub(super) fn view_observation_budget() -> std::time::Instant {
 }
 
 pub(super) fn hydrate(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     lanes: &mut [provenant_run::AttemptRecord],
     call: &provenant_run::Request<'_>,
 ) -> Result<(), String> {
-    hydrate_within(store, lanes, call, view_observation_budget())
+    hydrate_within(roots, store, lanes, call, view_observation_budget())
 }
 
 /// Hydrate under a budget the caller shares across a view that hydrates in parts.
 pub(super) fn hydrate_within(
+    roots: &provenant_core::Roots,
     store: &provenant_run::RunStore,
     lanes: &mut [provenant_run::AttemptRecord],
     call: &provenant_run::Request<'_>,
@@ -443,12 +558,7 @@ pub(super) fn hydrate_within(
         let mut job = load(store, lane.attempt_id, call)?;
         let mut stale = false;
         if let Some(saved) = &job
-            && !matches!(
-                saved.state,
-                RemoteState::Finished { .. }
-                    | RemoteState::Cancelled
-                    | RemoteState::SetupFailed { .. }
-            )
+            && !saved.state.is_terminal()
         {
             // A spent budget starts no more providers. A timed-out call costs its
             // termination grace on top, so starting each remaining job would still
@@ -459,7 +569,7 @@ pub(super) fn hydrate_within(
             } else {
                 match std::env::current_dir()
                     .map_err(|error| error.to_string())
-                    .and_then(|cwd| observe_for_view(saved, &cwd, budget_end))
+                    .and_then(|cwd| observe_for_view(roots, saved, &cwd, budget_end))
                 {
                     Ok(observed) => job = Some(observed),
                     Err(_) => stale = true,
@@ -481,6 +591,7 @@ pub(super) fn hydrate_within(
                 RemoteState::Running => State::Running,
                 RemoteState::Unknown { .. } => State::Unknown,
                 RemoteState::SetupFailed { .. } => State::SetupFailed,
+                RemoteState::Failed { .. } => State::Failed,
                 RemoteState::Cancelled => State::Cancelled,
                 RemoteState::CancellationUnconfirmed => State::CancellationUnconfirmed,
                 RemoteState::Finished { result } => {

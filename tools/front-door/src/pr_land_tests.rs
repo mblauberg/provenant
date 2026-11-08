@@ -374,6 +374,11 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let stop_view = json(&stop_output)?;
     assert_eq!(stop_view["status"], "refused");
     assert_eq!(stop_view["error"]["code"], "GRAPH_REQUIRED");
+    assert!(
+        stop_view["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("reconcile --id"))
+    );
     for field in [
         "run_id",
         "task_id",

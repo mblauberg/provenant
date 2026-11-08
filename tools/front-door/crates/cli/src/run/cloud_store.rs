@@ -150,17 +150,24 @@ impl CloudJobStore for AttemptCloudStore<'_> {
                 &job.commit,
                 &job.requested_model,
                 &job.requested_effort,
-            ) {
+            ) || (old.cloud_transport, &old.cloud_command)
+                != (job.cloud_transport, &job.cloud_command)
+            {
                 return Err(Error::Identity);
             }
             if old.state == RemoteState::Submitting
                 && !(job.state == RemoteState::Submitting && job.remote_id.is_empty()
-                    || job.state == RemoteState::Running && !job.remote_id.trim().is_empty())
+                    || job.state == RemoteState::Running && !job.remote_id.trim().is_empty()
+                    || matches!(
+                        job.state,
+                        RemoteState::Failed { .. } | RemoteState::Unknown { .. }
+                    ) && job.remote_id.is_empty()
+                        && job.submit_error.is_some())
             {
                 return Err(Error::Identity);
             }
             if old.remote_id != job.remote_id
-                && !(old.state == RemoteState::Submitting
+                && !(unresolved_submission(old)
                     && old.remote_id.is_empty()
                     && !job.remote_id.is_empty()
                     && job.state == RemoteState::Running)
@@ -189,6 +196,14 @@ impl CloudJobStore for AttemptCloudStore<'_> {
     }
 }
 
+/// A submission whose remote identity was never recorded.
+fn unresolved_submission(job: &RemoteJob) -> bool {
+    matches!(
+        job.state,
+        RemoteState::Submitting | RemoteState::Unknown { .. }
+    ) && job.remote_id.trim().is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +224,10 @@ mod tests {
             requested_model: "model".into(),
             requested_effort: Some("low".into()),
             state: RemoteState::Running,
+            submit_error: None,
+            submit_refused: false,
+            cloud_transport: Default::default(),
+            cloud_command: None,
         }
     }
 

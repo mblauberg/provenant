@@ -544,6 +544,33 @@ report them. Activity records the old and new versions.
 Each lane's `availability.json`
 also includes its observed version and the latest update result.
 
+## Codex cloud transport
+
+Select the installed Codex cloud command in the host's state-root
+`config.toml`. The default is `transport = "official"`, using `codex cloud
+exec`, `status` and `list`. To use a client for the newer cloud thread API:
+
+```toml
+[providers.codex.cloud]
+transport = "thread"
+command = "codex-cloud-task"
+```
+
+`command` is optional: it defaults to `codex-cloud-task` for `thread` and
+`codex` for `official`. It names one executable, resolved through the host's
+PATH, or an explicit executable path; arguments and shell strings are refused.
+These settings apply only to Codex cloud placement. Keep the same transport
+and command configured while observing saved jobs after a restart.
+
+On the real host checked on 8 November 2026, official codex-cli 0.167.0 did
+not list the workspace's ready thread-API environment and `codex cloud exec`
+reported `no cloud environments are available for this workspace`. Select
+`thread` for those environments and install a compatible client separately.
+The client must support `submit --env NAME_OR_ID [--read-only]` with the prompt
+on stdin and `status THREAD_ID` returning thread/turn JSON. See
+[cloud placement](providers.md#cloud-placement) for the result channel and
+verification limits.
+
 ## Lane runtime deadline
 
 A lane's wall-clock allowance is its task provider timeout (3600

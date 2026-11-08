@@ -838,6 +838,12 @@ enum Event {
         #[serde(default)]
         api_error_status: Option<u16>,
     },
+    /// Tool results come back as user events.
+    #[serde(rename = "user")]
+    User {
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+    },
     #[serde(rename = "result")]
     Result {
         session_id: String,
@@ -872,6 +878,7 @@ enum Content {
     Text {
         text: String,
     },
+    ToolUse,
     #[serde(other)]
     Other,
 }
@@ -980,6 +987,15 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             api_error_status,
         } if message.role == "assistant" => {
             let mut events = vec![E::Session(session_id)];
+            // Ahead of this message's own text, so that text still counts as the
+            // last thing said; only later work invalidates the fallback.
+            if message
+                .content
+                .iter()
+                .any(|content| matches!(content, Content::ToolUse))
+            {
+                events.push(E::ToolActivity);
+            }
             if error.is_none() && !is_api_error_message && message.model != "<synthetic>" {
                 let text: String = message
                     .content
@@ -1035,6 +1051,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             events
         }
+        Event::User {
+            parent_tool_use_id: None,
+        } => vec![E::ToolActivity],
         Event::Result {
             session_id,
             subtype,
@@ -1127,6 +1146,25 @@ mod overload_tests {
         assert!(events.contains(&E::Text("committed the work".into())));
         assert!(events.contains(&E::ResultFallback));
         assert!(!events.iter().any(|e| matches!(e, E::AssistantText(_))));
+    }
+
+    #[test]
+    fn text_followed_by_later_tool_work_is_not_the_fallback() {
+        let text = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"I will stop early\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let tool_use = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Bash\",\"input\":{}}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let tool_result = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"ok\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let result = "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\"}\n";
+        // A later tool call, and a later tool result alone, both invalidate it.
+        for between in [tool_use, tool_result] {
+            let events = finish_text(&format!("{text}{between}{result}"));
+            assert!(!events.contains(&E::Text("I will stop early".into())));
+            assert!(!events.contains(&E::ResultFallback));
+            assert!(!events.iter().any(|e| matches!(e, E::ToolActivity)));
+        }
+        // Text as the last event before the terminal one still qualifies.
+        let events = finish_text(&format!("{tool_use}{tool_result}{text}{result}"));
+        assert!(events.contains(&E::Text("I will stop early".into())));
+        assert!(events.contains(&E::ResultFallback));
     }
 
     #[test]

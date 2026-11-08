@@ -1578,6 +1578,9 @@ impl RunStore {
                     Some(reason) => format!("{reason}; {note}"),
                     None => note.to_owned(),
                 });
+                if decoded.result.trim().is_empty() {
+                    decoded.result = budget_stop_result(&result, note);
+                }
             }
             if let Err(error) = &check
                 && let Some(driver) = &mut settlement
@@ -2245,6 +2248,43 @@ pub(crate) fn seal_manifest(
 
 /// The cause shown for a lane that ended without a final handoff.
 /// Placeholder result for a writer whose provider sent no final message.
+/// The result of a writer stopped on its token budget that sent no final
+/// message: what the host committed, and that the remainder is unknown.
+fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
+    let mut text = String::from("Stopped on budget.\n");
+    if let Some(commit) = record["commit"].as_str() {
+        let paths: Vec<String> = record["paths"]
+            .as_array()
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|path| path.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let files = record["files"].as_u64().unwrap_or(paths.len() as u64) as usize;
+        text.push_str(&format!(
+            "Leftover work was committed as {commit} ({files} files).\nChanged paths:\n"
+        ));
+        for line in crate::writer::path_list(&paths, files) {
+            text.push_str(&format!("- {line}\n"));
+        }
+    } else {
+        text.push_str(&format!("{note}.\n"));
+    }
+    text.push_str("What remains is unknown; inspect the branch.\n\n");
+    let handoff = serde_json::json!({
+        "schema_version": 2,
+        "status": "stopped_early",
+        "note": "Stopped on budget with no final message from the writer; the host recorded the branch state only.",
+        "remaining": ["unknown: inspect branch"],
+        "decisions": [],
+        "verify": [],
+    });
+    text.push_str(&format!("```handoff\n{handoff}\n```"));
+    text
+}
+
 pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";
 pub const EMPTY_WRITER_REASON: &str =
     "the provider ended with an empty final message; its commit is kept for review";
@@ -2343,6 +2383,31 @@ fn bounded_reason(mut reason: String) -> String {
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
     provenant_confinement::redact::bounded_line(note, 240)
+}
+
+#[cfg(test)]
+mod budget_result_tests {
+    use super::*;
+
+    #[test]
+    fn a_budget_stop_placeholder_names_the_commit_and_caps_the_paths() {
+        let paths: Vec<String> = (0..20).map(|n| format!("src/f{n}.rs")).collect();
+        let record = serde_json::json!({"commit": "abcdef123", "files": 25, "paths": paths});
+        let text = budget_stop_result(&record, "work committed on its branch");
+        assert!(text.contains("Stopped on budget"), "{text}");
+        assert!(text.contains("abcdef123 (25 files)"), "{text}");
+        assert!(text.contains("- src/f19.rs") && !text.contains("src/f20.rs"));
+        assert!(text.contains("- and 5 more"), "{text}");
+        assert!(text.contains("inspect the branch"), "{text}");
+        let handoff = provenant_records::handoff::Handoff::from_result(&text)
+            .unwrap()
+            .expect("a handoff");
+        assert_eq!(
+            handoff.status,
+            provenant_records::handoff::HandoffStatus::StoppedEarly
+        );
+        assert_eq!(handoff.remaining, ["unknown: inspect branch"]);
+    }
 }
 
 #[cfg(test)]
@@ -3176,7 +3241,14 @@ mod writer_recovery_tests {
             crate::dispatch_tests::seal_exit(&store, &observed)?;
             let mut fake =
                 crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Succeeded));
-            fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Acceptance remains unfinished\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```".into());
+            let note = if changed {
+                "No commit was made; acceptance remains unfinished"
+            } else {
+                "Acceptance remains unfinished"
+            };
+            fake.answer = Some(format!(
+                "```handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
+            ));
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             assert_eq!(
                 finished.settlement_reason,
@@ -3202,6 +3274,13 @@ mod writer_recovery_tests {
             assert_eq!(
                 row.terminal_cause,
                 (!changed).then_some(TerminalCause::StoppedNoWork)
+            );
+            assert!(
+                !reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("handoff disagrees with the branch"),
+                "{reason:?}"
             );
             if !changed {
                 assert!(reason.as_deref().unwrap().contains("no new commit"));
@@ -3766,7 +3845,26 @@ mod writer_recovery_tests {
             ],
             None,
         )?;
-        assert_eq!(String::from_utf8_lossy(&log).trim(), "stopped on budget");
+        let log = String::from_utf8_lossy(&log);
+        assert!(
+            log.starts_with("wip: stopped on budget (") && log.contains(" files)\n"),
+            "{log}"
+        );
+        assert!(log.contains("\nbudget-work.txt"), "{log}");
+        let disposition: serde_json::Value = serde_json::from_slice(
+            &read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?.ok_or("budget commit")?,
+        )?;
+        assert_eq!(
+            disposition["commit"].as_str(),
+            Some(&published_tip.to_string()[..crate::writer::SHORT_SHA])
+        );
+        assert!(
+            disposition["paths"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "budget-work.txt"))
+        );
+        let placeholder = budget_stop_result(&disposition, "work committed on its branch");
+        assert!(placeholder.contains("budget-work.txt"), "{placeholder}");
         Ok(())
     }
 
