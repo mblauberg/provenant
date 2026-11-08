@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Exercise scripts/download-with-retry against a local HTTP server."""
+import http.server
+import os
+import socket
+import subprocess
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+SCRIPT = Path(__file__).with_name("download-with-retry")
+hits: dict[str, int] = {}
+# Responses for /flaky: the first N requests get 503, then 200.
+flaky_failures = {"/flaky": 2, "/always-503": 10**6}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits[self.path] = hits.get(self.path, 0) + 1
+        if self.path in flaky_failures and hits[self.path] <= flaky_failures[self.path]:
+            status, body = 503, b"unavailable"
+        elif self.path == "/missing":
+            status, body = 404, b"not found"
+        elif self.path == "/teapot":
+            status, body = 418, b"short and stout"
+        else:
+            status, body = 200, b"payload"
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def run(url, output, budget="20", base_delay="0"):
+    env = dict(os.environ, DOWNLOAD_RETRY_BUDGET=budget, DOWNLOAD_RETRY_BASE_DELAY=base_delay)
+    started = time.monotonic()
+    result = subprocess.run(
+        [str(SCRIPT), url, str(output)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result, time.monotonic() - started
+
+
+def main():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    with tempfile.TemporaryDirectory(prefix="download-retry-test-") as tmp:
+        out = Path(tmp) / "out"
+
+        result, _ = run(f"{base}/ok", out)
+        assert result.returncode == 0, result.stderr
+        assert out.read_bytes() == b"payload"
+
+        # Two 503s are retried, then the download succeeds.
+        result, _ = run(f"{base}/flaky", out)
+        assert result.returncode == 0, result.stderr
+        assert hits["/flaky"] == 3, hits
+        assert out.read_bytes() == b"payload"
+
+        # 404 is not transient: one request, no retry, no partial file.
+        missing = Path(tmp) / "missing"
+        result, _ = run(f"{base}/missing", missing)
+        assert result.returncode == 1, result
+        assert hits["/missing"] == 1, hits
+        assert "HTTP 404" in result.stderr and not missing.exists()
+
+        # 418 is another client error and is not retried either.
+        result, _ = run(f"{base}/teapot", Path(tmp) / "teapot")
+        assert result.returncode == 1 and hits["/teapot"] == 1, result
+
+        # A persistent 503 stops at the five-attempt cap.
+        always = Path(tmp) / "always"
+        result, _ = run(f"{base}/always-503", always)
+        assert result.returncode == 1, result
+        assert hits["/always-503"] == 5, hits
+        assert "after 5 attempts" in result.stderr and not always.exists()
+
+        # A refused connection is transient; a zero budget gives up at once.
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+        probe.close()
+        result, elapsed = run(f"http://127.0.0.1:{closed_port}/x", Path(tmp) / "refused", budget="3", base_delay="1")
+        assert result.returncode == 1, result
+        assert "giving up" in result.stderr
+        assert elapsed < 10, elapsed
+
+        result, _ = run(f"{base}/ok", Path(tmp) / "spent", budget="0")
+        assert result.returncode == 1 and "budget" in result.stderr, result
+
+    server.shutdown()
+    print("download-with-retry: all cases passed")
+
+
+if __name__ == "__main__":
+    main()

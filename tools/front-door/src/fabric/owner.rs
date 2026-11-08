@@ -3324,14 +3324,8 @@ impl BoundGraphOwner<'_> {
                 ),
                 false,
             )
-            .map_err(|error| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: format!(
-                    "cloud submission or observation failed: {}",
-                    provenant_confinement::redact::bounded_line(&error, 600)
-                ),
-            })? {
+            .map_err(|error| cloud_refusal(&error))?
+            {
                 return Ok(observation);
             }
         }
@@ -3666,6 +3660,40 @@ pub(crate) fn restore_scratch_source(
             }
         }
         Err(_) => Err(FacadeError::io("access graph scratch")),
+    }
+}
+
+/// Map a cloud submission or observation error to the facade refusal.
+fn cloud_refusal(error: &str) -> FacadeError {
+    FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
+        reason: format!(
+            "cloud submission or observation failed: {}",
+            provenant_confinement::redact::bounded_line(error, 600)
+        ),
+    }
+}
+
+#[cfg(test)]
+mod cloud_refusal_tests {
+    #[allow(
+        unused_imports,
+        reason = "the custom worktree driver includes this module without libtest"
+    )]
+    use super::*;
+
+    #[test]
+    fn cloud_error_maps_to_a_redacted_bounded_dispatch_refusal() {
+        let secret = format!("sk-{}", "a1b2c3d4".repeat(6));
+        let error = format!("submit failed with {secret} {}", "x".repeat(2000));
+        let FacadeError::DispatchRefused { fact, disk, reason } = cloud_refusal(&error) else {
+            panic!("expected a dispatch refusal");
+        };
+        assert!(fact.is_none() && disk.is_none());
+        assert!(reason.starts_with("cloud submission or observation failed: submit failed"));
+        assert!(!reason.contains(&secret));
+        assert!(reason.len() < 700);
     }
 }
 

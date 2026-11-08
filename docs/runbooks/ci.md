@@ -126,3 +126,17 @@ blocking partitions, then runs them in an advisory step that reports their
 result. Remove the entry in the PR that fixes the test.
 
 To measure a cold run, dispatch the CI workflow on the desired branch with `cold_cache` set to `true` (for example, `gh workflow run ci.yml --ref BRANCH -f cold_cache=true`). The run uses fresh Rust cache keys without deleting existing caches.
+
+## Tool downloads
+
+Workflow tools that are not installed by `taiki-e/install-action` come from
+`scripts/download-with-retry`. It retries connection failures, HTTP 408, 429
+and 5xx responses with doubling backoff, gives up after 180 seconds or five
+attempts, and fails at once on any other HTTP error. `scripts/test-download-with-retry`
+covers that policy against a local server.
+
+Each `taiki-e/install-action` step has a `timeout-minutes` of 3 per tool, so a
+stalled install fails rather than retrying until the job is cancelled. The
+actionlint and lychee archives are cached under a key that names their versions
+and checksums. Every run still verifies the pinned checksum before extracting
+them. Changing a pin changes its key, so update both together.

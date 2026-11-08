@@ -59,6 +59,57 @@ fn cloud_abandon_warning(remote_id: &str) -> String {
     }
 }
 
+fn cloud_abandon_output(
+    run: impl serde::Serialize,
+    id: impl serde::Serialize + std::fmt::Display,
+    job: &provenant_providers::cloud::RemoteJob,
+) -> (Value, String) {
+    let warning = cloud_abandon_warning(&job.remote_id);
+    (
+        json!({"run_id": run, "attempt_id": id, "found": cloud_owner::view(job), "warning": warning}),
+        format!("{id} abandoned; {warning}\n"),
+    )
+}
+
+#[test]
+fn abandon_output_carries_json_and_text_with_the_remote_warning() {
+    use provenant_providers::cloud::{RemoteJob, RemoteState};
+    let mut job = RemoteJob {
+        job_id: "j".into(),
+        nonce: "n".into(),
+        deadline_unix_seconds: 1,
+        provider: "p".into(),
+        target: "t".into(),
+        environment: "e".into(),
+        repository: "r".into(),
+        branch: "b".into(),
+        remote_id: String::new(),
+        commit: String::new(),
+        requested_model: "m".into(),
+        requested_effort: None,
+        state: RemoteState::Abandoned {
+            reason: "gave up".into(),
+        },
+        submit_error: None,
+        submit_refused: false,
+        cloud_transport: Default::default(),
+        cloud_command: None,
+    };
+    let (data, human) = cloud_abandon_output("run-1", "att-1", &job);
+    assert_eq!(human, "att-1 abandoned; a remote session may exist\n");
+    assert_eq!(data["run_id"], "run-1");
+    assert_eq!(data["attempt_id"], "att-1");
+    assert_eq!(data["warning"], "a remote session may exist");
+    assert_eq!(data["found"], cloud_owner::view(&job));
+    job.remote_id = "remote-1".into();
+    let (data, human) = cloud_abandon_output("run-1", "att-1", &job);
+    assert_eq!(
+        human,
+        "att-1 abandoned; a remote session may exist: remote-1\n"
+    );
+    assert_eq!(data["warning"], "a remote session may exist: remote-1");
+}
+
 #[test]
 fn abandonment_warning_includes_known_remote_identity() {
     assert_eq!(cloud_abandon_warning(""), "a remote session may exist");
@@ -118,11 +169,7 @@ pub(super) fn reconcile_inner(
         {
             let job = cloud_owner::abandon(&session.store, id, &reason, &call)
                 .map_err(|error| Fail::new(Status::Refused, ErrorKind::Io, error))?;
-            let warning = cloud_abandon_warning(&job.remote_id);
-            return Ok((
-                json!({"run_id": selected.run, "attempt_id": id, "found": cloud_owner::view(&job), "warning": warning}),
-                format!("{id} abandoned; {warning}\n"),
-            ));
+            return Ok(cloud_abandon_output(selected.run, id, &job));
         }
         let state =
             session

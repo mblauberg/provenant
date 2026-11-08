@@ -36,11 +36,13 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Install nextest
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: cargo-nextest@0.9.149
       - name: Install mutation testing
         if: inputs.tier == '3'
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        timeout-minutes: 3
         with:
           tool: cargo-mutants
       - name: Run selected tier

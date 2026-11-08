@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Download URL to OUTPUT, retrying transient failures within a fixed time budget.
+#
+# Transient failures are connection, reset and timeout errors (curl reports
+# HTTP 000), HTTP 408, 429 and 5xx. Any other HTTP status fails at once.
+# Backoff starts at DOWNLOAD_RETRY_BASE_DELAY seconds (default 2), doubles and
+# stops at 16 seconds. The download gives up after DOWNLOAD_RETRY_BUDGET
+# seconds (default 180) or five attempts, whichever comes first, and removes
+# any partial OUTPUT.
+set -uo pipefail
+
+if (( $# != 2 )); then
+  echo "usage: $0 URL OUTPUT" >&2
+  exit 2
+fi
+url=$1
+output=$2
+budget=${DOWNLOAD_RETRY_BUDGET:-180}
+delay=${DOWNLOAD_RETRY_BASE_DELAY:-2}
+max_attempts=5
+max_attempt_seconds=60
+start=$SECONDS
+attempt=0
+
+fail() {
+  rm -f -- "$output"
+  echo "download-with-retry: $1" >&2
+  exit 1
+}
+
+while :; do
+  attempt=$((attempt + 1))
+  remaining=$((budget - (SECONDS - start)))
+  if (( remaining <= 0 )); then
+    fail "giving up on $url after the ${budget}s budget"
+  fi
+  per_attempt=$(( remaining < max_attempt_seconds ? remaining : max_attempt_seconds ))
+
+  curl_status=0
+  code=$(curl --silent --show-error --location --connect-timeout 15 \
+    --max-time "$per_attempt" --output "$output" --write-out '%{http_code}' \
+    "$url") || curl_status=$?
+
+  if (( curl_status == 0 )) && [[ $code == 2* ]]; then
+    exit 0
+  fi
+  if (( curl_status == 0 )) && [[ ! $code =~ ^(408|429|5[0-9][0-9])$ ]]; then
+    fail "$url returned HTTP $code, which is not retried"
+  fi
+
+  if (( attempt >= max_attempts )); then
+    fail "giving up on $url after $attempt attempts"
+  fi
+  echo "download-with-retry: attempt $attempt for $url failed (curl status $curl_status, HTTP $code); retrying" >&2
+  remaining=$((budget - (SECONDS - start)))
+  if (( remaining > 0 )); then
+    wait_seconds=$(( delay < remaining ? delay : remaining ))
+    sleep "$wait_seconds"
+  fi
+  delay=$(( delay * 2 < 16 ? delay * 2 : 16 ))
+done
