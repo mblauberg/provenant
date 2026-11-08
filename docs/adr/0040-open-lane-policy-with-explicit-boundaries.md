@@ -135,7 +135,11 @@ Git directory, supplied with `MandatoryRoots::add_git`. The source checkout's
 verified handles, selected branch and the Git-grant digest; optional settings
 cannot replace it. Extra write roots overlapping the chosen source/worktree,
 host Git, state or credentials in either direction remain refused, for children
-and direct launches alike. Component-prefix siblings such as `source-other`
+and direct launches alike. Other protected checkouts refuse them too, except a
+host-configured `[domains.run] writer_writes` root strictly inside one, which
+encloses no protected root and touches no Git metadata. The renderer exempts
+that root from the checkout's write denial
+(`MandatoryRoots::add_host_write`); dispatch write roots receive no exemption. Component-prefix siblings such as `source-other`
 are not overlaps. `MandatoryRoots::validate_extra_write` owns the shared
 contract; submission and compile edges must still canonicalise and revalidate.
 

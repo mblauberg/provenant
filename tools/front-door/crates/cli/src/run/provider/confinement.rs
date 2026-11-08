@@ -267,6 +267,18 @@ pub(super) fn confinement_request(
         writer.is_some(),
         &project_id.to_string(),
     );
+    // The host owner's writer roots may sit inside another checkout, such as
+    // the primary checkout's ignored lock directory; dispatch roots may not.
+    if writer.is_some() {
+        for path in host_writes.writer_write_roots_for(&project_id.to_string()) {
+            let write = grant(path);
+            mandatory.add_host_write(&write)?;
+            mandatory.add_host_write(&PathGrant {
+                path: resolve_policy_path(path)?,
+                scope: write.scope,
+            })?;
+        }
+    }
     for write in &writes {
         mandatory.validate_extra_write(write)?;
         mandatory.validate_extra_write(&PathGrant {

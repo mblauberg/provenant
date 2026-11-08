@@ -1234,11 +1234,20 @@ fn push_boundaries(
             push_ancestor_guards(source, root, &mut ancestors)?;
         }
     }
-    // A lane's own checkout can be a protected worktree: its writer grant and a
-    // read-only lane's configured project writes stay usable.
+    // A lane's own checkout can be a protected worktree: its writer grant, the
+    // host owner's writer roots inside other checkouts and a read-only lane's
+    // configured project writes stay usable. The rest of each checkout stays
+    // immutable.
     let writer_exception: Vec<_> = worktree
         .map(|grants| grants.worktree.clone())
         .into_iter()
+        .chain(
+            worktree
+                .is_some()
+                .then(|| mandatory.host_writes().iter().cloned())
+                .into_iter()
+                .flatten(),
+        )
         .chain(
             plan.read_only
                 .iter()

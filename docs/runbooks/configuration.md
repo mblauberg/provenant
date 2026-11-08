@@ -873,6 +873,11 @@ lanes only, so build scripts under it run. Graph nodes can also declare write ro
 Read-only lanes are unchanged. The config is refused if an entry is too broad
 or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
+Other checkouts of the project, the primary one included, are read-only to a
+writer. An entry strictly inside one, such as the lock directory above, is
+exempt from that denial, and the rest of that checkout stays read-only. A launch
+is refused if an entry is a checkout itself or encloses one. Graph write roots
+get no such exemption.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
 
 ## Writer review-exempt paths

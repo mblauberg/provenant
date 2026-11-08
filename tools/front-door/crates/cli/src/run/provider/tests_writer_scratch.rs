@@ -996,10 +996,15 @@ printf 'agy 1.0.0\n'
             assert_eq!(receipt["source"]["key"], key);
         }
     }
+    // The primary checkout is another protected worktree for this writer; the
+    // host owner's lock directory inside it must not refuse the launch.
+    let locks = project.join(".agent-run/locks");
+    std::fs::create_dir_all(&locks)?;
     std::fs::write(
         state.join("config.toml"),
         format!(
-            "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 60000\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+            "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 60000\nwriter_writes = ['{}']\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+            locks.display(),
             home.join(".claude-other").display()
         ),
     )?;
@@ -1015,6 +1020,26 @@ printf 'agy 1.0.0\n'
         },
         None,
     )?;
+    {
+        let confinement = launch.confinement.as_ref().ok_or("writer confinement")?;
+        let permissions = confinement.plan.permissions();
+        let lock_grant = PathGrant {
+            path: locks.clone(),
+            scope: PathScope::Subtree,
+        };
+        assert!(permissions.write_roots.contains(&lock_grant));
+        let mandatory = permissions.policy.as_ref().ok_or("policy")?.mandatory();
+        assert!(mandatory.protected().iter().any(|root| root.path == project));
+        assert!(mandatory.host_writes().contains(&lock_grant));
+        host_writer_roots_inside_other_checkouts(
+            binding.project_id(),
+            &project,
+            &home,
+            &assets,
+            &paths,
+            confinement.writer.as_ref().ok_or("writer")?,
+        )?;
+    }
     assert_eq!(launch.route.extra["argv_prompt_limit"]["value"], 60_000);
     assert_eq!(
         launch.route.extra["argv_prompt_limit"]["key"],
@@ -1955,5 +1980,107 @@ printf 'agy 1.0.0\n'
         matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::Permission(provenant_confinement::permissions::PermissionError::ProtectedOverlap)))),
         "{error}"
     );
+    Ok(())
+}
+
+/// The primary checkout is another protected worktree for a writer. The host
+/// owner's `writer_writes` may still name its ignored lock directory; dispatch
+/// roots there, and host roots that open the checkout or its Git, stay refused.
+fn host_writer_roots_inside_other_checkouts(
+    project_id: ProjectId,
+    primary: &Path,
+    home: &Path,
+    assets: &Path,
+    paths: &run::LaunchPaths,
+    writer: &run::WriterLaunch,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::PermissionError;
+    let worktree = writer.worktree.path().to_owned();
+    assert!(worktree.starts_with(primary), "fixture worktree is nested");
+    let locks = primary.join(".agent-run/locks");
+    std::fs::create_dir_all(&locks)?;
+    let protected = [PathGrant {
+        path: primary.to_owned(),
+        scope: PathScope::Subtree,
+    }];
+    let config = |writes: Vec<PathBuf>| provenant_confinement::run_config::RunConfig {
+        writer_writes: writes,
+        ..Default::default()
+    };
+    let request = |writer: Option<&run::WriterLaunch>,
+                   access: &run::LaneAccess,
+                   config: &provenant_confinement::run_config::RunConfig| {
+        confinement_request(
+            project_id,
+            ConfinementRoots {
+                host_roots: None,
+                cwd: if writer.is_some() { &worktree } else { primary },
+                home,
+                state: Path::new("/fixture-host-state"),
+                credential_roots: &[],
+                github_roots: &[],
+                protected_worktrees: &protected,
+                scratch: &paths.scratch,
+                private_state: &paths.provider_state,
+                assets,
+                prompt_file: None,
+            },
+            writer,
+            access,
+            config,
+            "cursor",
+            false,
+        )
+    };
+    let hosted = config(vec![locks.clone()]);
+    let launched = request(Some(writer), &run::LaneAccess::default(), &hosted)?;
+    let lock_grant = PathGrant {
+        path: locks.clone(),
+        scope: PathScope::Subtree,
+    };
+    assert_eq!(launched.permissions.write_roots, vec![lock_grant.clone()]);
+    let mandatory = launched
+        .permissions
+        .policy
+        .as_ref()
+        .ok_or("policy")?
+        .mandatory();
+    assert!(mandatory.protected().iter().any(|root| root.path == primary));
+    assert!(mandatory.host_writes().contains(&lock_grant));
+    provenant_confinement::ConfinedPlan::new(launched)?;
+    // A read-only lane receives no writer roots and no exception.
+    let read_only = request(None, &run::LaneAccess::default(), &hosted)?;
+    assert!(read_only.permissions.write_roots.is_empty());
+    let mandatory = read_only
+        .permissions
+        .policy
+        .as_ref()
+        .ok_or("policy")?
+        .mandatory();
+    assert!(mandatory.host_writes().is_empty());
+    // A dispatch root inside the checkout is not host policy.
+    let dispatch = run::LaneAccess {
+        write_roots: vec![primary.join("scripts")],
+        ..Default::default()
+    };
+    assert!(matches!(
+        request(Some(writer), &dispatch, &config(Vec::new())),
+        Err(PermissionError::ProtectedOverlap)
+    ));
+    // Host roots equal to or enclosing the checkout, or inside Git, stay refused.
+    for path in [
+        primary.to_owned(),
+        primary.join(".worktrees"),
+        primary.join(".git/hooks"),
+    ] {
+        assert!(
+            matches!(
+                request(Some(writer), &run::LaneAccess::default(), &config(vec![path.clone()])),
+                Err(PermissionError::ProtectedOverlap)
+            ),
+            "{}",
+            path.display()
+        );
+    }
     Ok(())
 }
