@@ -1301,6 +1301,17 @@ impl WriterAdvisoryOverride {
     }
 }
 
+/// Why a model named without its adapter did not resolve to exactly one row.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BareModelError {
+    /// Several adapters offer the name; `candidates` are their `ADAPTER/ID` forms.
+    #[error("several providers offer this model")]
+    Ambiguous { candidates: Vec<String> },
+    /// No catalogued model carries the name.
+    #[error("no catalogued provider offers this model")]
+    Unknown,
+}
+
 /// Production catalogues come from the bundled asset. A caller cannot deserialize
 /// or change family/effort rows while retaining an existing revision.
 #[derive(Debug, Clone, Serialize)]
@@ -1526,6 +1537,24 @@ impl Catalogue {
     }
     pub fn model(&self, id: &ModelId) -> Option<&ModelEntry> {
         self.models.iter().find(|row| row.model == *id)
+    }
+    /// Resolve a model named without its adapter, such as `claude-sonnet-5-5`.
+    /// Exactly one catalogued model must carry that ID. Several offers name
+    /// their `ADAPTER/ID` forms, and none is an unknown name.
+    pub fn resolve_bare_model(&self, name: &str) -> Result<ModelId, BareModelError> {
+        let offered: Vec<&ModelId> = self
+            .models
+            .iter()
+            .map(|row| &row.model)
+            .filter(|id| !name.contains('/') && id.model() == name)
+            .collect();
+        match offered.as_slice() {
+            [only] => Ok((*only).clone()),
+            [] => Err(BareModelError::Unknown),
+            several => Err(BareModelError::Ambiguous {
+                candidates: several.iter().map(|id| id.as_str().to_owned()).collect(),
+            }),
+        }
     }
     /// The single owner of a model's quota pool group. An uncatalogued model
     /// draws on the catalogued pool its family prefix names, so

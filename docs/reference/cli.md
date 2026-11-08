@@ -52,7 +52,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--model` | `{"conflicts": ["tier"], "description": "Use this exact adapter/model instead of a route tier", "name": "model"}` |
+| `--model` | `{"conflicts": ["tier"], "description": "Use this exact adapter/model instead of a route tier; a bare model name works when one provider offers it", "name": "model"}` |
 | `--effort` | `{"description": "Override model reasoning effort", "name": "effort"}` |
 | `brief` | `{"description": "Brief for the selected template", "name": "brief", "positional": true}` |
 | `--use` | `{"description": "Select a layered template [default: task]", "name": "template"}` |

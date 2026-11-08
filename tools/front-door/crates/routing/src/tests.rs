@@ -599,6 +599,7 @@ fn go_alias_quota_case(
 
 mod alternatives;
 mod availability;
+mod bare_model;
 mod exclusions;
 mod policies;
 mod preferences;
