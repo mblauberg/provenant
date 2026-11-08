@@ -619,7 +619,7 @@ esac
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"cloud-owner", "node_id":"verify", "route_index":0
         }))?;
-        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let route = serde_json::from_value(serde_json::json!({"alias":"senior"}))?;
         let spec: graph::AttemptSpec = serde_json::from_value(serde_json::json!({"placement":{
             "target":"cloud-test", "provider":"codex", "environment":"env", "repository":"repo",
             "branch":"main", "model":"requested", "deadline_seconds":3600
@@ -628,7 +628,7 @@ esac
             attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
             require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
             context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
-            source_commit: Some(&head), review_base: None, title: "verify", prompt: "Run targeted tests",
+            source_commit: None, review_base: None, title: "verify", prompt: "Run targeted tests",
             required_verdict: None, deadline_seconds: None, inputs_dir: None,
         };
         let refused = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::WorktreeWrite,
@@ -647,7 +647,7 @@ esac
             attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
             require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
             context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
-            source_commit: Some(&head), review_base: None, title: "verify", prompt: "Run targeted tests",
+            source_commit: None, review_base: None, title: "verify", prompt: "Run targeted tests",
             required_verdict: None, deadline_seconds: None, inputs_dir: None,
         };
         let first = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly,
@@ -662,6 +662,7 @@ esac
         let id = reference.split_once('/').ok_or("attempt reference")?.1.parse()?;
         let job = provenant_cli::run::cloud_owner::load(&store, id, &call)?.ok_or("missing cloud identity")?;
         assert_eq!(job.remote_id, "graph-remote");
+        assert_eq!(job.commit, head);
         let result = serde_json::json!({"job_id":job.job_id, "nonce":job.nonce, "commit":head,
             "exit_status":0, "tests_run":["targeted"], "tests_failed":[], "log_location":"log",
             "tracked_files_changed":false, "observed_model":null});
