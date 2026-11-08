@@ -3895,7 +3895,12 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let rig = policy_codex_fixture()?;
+    let mut rig = policy_codex_fixture()?;
+    let assets = rig.root.join("product-assets");
+    fs::create_dir(&assets)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
     let cleanup = rig.process_cleanup();
     fs::write(
         rig.project.join("review-subject.txt"),

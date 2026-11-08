@@ -11,6 +11,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
     struct Refused {
         typed: bool,
         disk: bool,
+        source_overlap: bool,
     }
     impl Providers for Refused {
         fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
@@ -36,6 +37,11 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
             let mut refusal = PrepareRefusal::from("PROVIDER_SECRET_SENTINEL");
             refusal.terminal_cause = None;
+            if self.source_overlap {
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.terminal_note =
+                    Some("product assets overlap the live graph source checkout".into());
+            }
             if self.typed {
                 refusal.terminal_cause = Some(TerminalCause::RouteResolutionRefused);
                 refusal.terminal_note =
@@ -53,10 +59,11 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             unreachable!()
         }
     }
-    for (model, typed, disk) in [
-        ("codex/gpt-6.1-sol", true, false),
-        ("agy/gemini-3.8-flash", false, false),
-        ("codex/gpt-6.1-sol", false, true),
+    for (model, typed, disk, source_overlap) in [
+        ("codex/gpt-6.1-sol", true, false, false),
+        ("agy/gemini-3.8-flash", false, false, false),
+        ("codex/gpt-6.1-sol", false, false, true),
+        ("codex/gpt-6.1-sol", false, true, false),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -84,7 +91,11 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let id = run.attempts[0].attempt_id;
         let started = store.start(
             run.run_id,
-            &Refused { typed, disk },
+            &Refused {
+                typed,
+                disk,
+                source_overlap,
+            },
             &|_, _| unreachable!(),
             &call,
         )?;
@@ -126,6 +137,11 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             assert!(reason.contains("provenant gc --apply"), "{reason}");
             assert!(!reason.contains("access grants"), "{reason}");
             assert!(!reason.contains("HOST_DISK_ERROR_SENTINEL"), "{reason}");
+        } else if source_overlap {
+            assert!(
+                reason.contains("product assets overlap the live graph source checkout"),
+                "{reason}"
+            );
         } else if typed {
             assert!(reason.contains("unsupported_effort"), "{reason}");
             assert!(reason.contains("provenant route resolve"), "{reason}");

@@ -537,6 +537,8 @@ pub(super) enum PrepareError {
     GraphInputsAuthority(String),
     #[error("{0}")]
     SourceAuthority(String),
+    #[error(transparent)]
+    SourceRoots(#[from] super::source_tree::SourceRootsError),
     #[error("{0}")]
     WriterContinuation(String),
     #[error(transparent)]
@@ -627,6 +629,12 @@ impl PrepareError {
                     skipped_routes,
                     fallback_outcome,
                 }
+            }
+            Self::SourceRoots(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.terminal_note = Some(error.to_string());
+                refusal
             }
             Self::SourceCwd(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
@@ -747,6 +755,14 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
             .into_refusal();
     assert_eq!(source.boundary_class, BoundaryClass::Authority);
+    let source_roots =
+        PrepareError::SourceRoots(super::source_tree::SourceRootsError::AssetsOverlap)
+            .into_refusal();
+    assert_eq!(source_roots.boundary_class, BoundaryClass::Authority);
+    assert_eq!(
+        source_roots.terminal_note.as_deref(),
+        Some("product assets overlap the live graph source checkout")
+    );
     let unavailable =
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
@@ -1636,8 +1652,7 @@ pub(super) fn prepare_candidates(
     let isolated =
         writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
-        super::source_tree::ensure_source_roots(&source, &task.access, assets)
-            .map_err(PrepareError::SourceAuthority)?;
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()

@@ -1220,17 +1220,20 @@ impl RunStore {
                             } else {
                                 TerminalCause::PreparationRefused
                             }));
-                    let terminal_note =
-                        kind.terminal_note().or(refusal.terminal_note).or_else(|| {
-                            refusal.skipped_routes.first().map(|route| {
-                                let diagnostic = route.diagnostic();
-                                format!(
-                                    "first candidate: {}; {}",
-                                    diagnostic.detail.unwrap_or_default(),
-                                    diagnostic.next.unwrap_or_default()
-                                )
-                            })
-                        });
+                    let terminal_note = match (kind.terminal_note(), refusal.terminal_note) {
+                        (Some(guidance), Some(note)) if guidance != note => {
+                            Some(format!("{note}; {guidance}"))
+                        }
+                        (Some(note), _) | (_, Some(note)) => Some(note),
+                        (None, None) => refusal.skipped_routes.first().map(|route| {
+                            let diagnostic = route.diagnostic();
+                            format!(
+                                "first candidate: {}; {}",
+                                diagnostic.detail.unwrap_or_default(),
+                                diagnostic.next.unwrap_or_default()
+                            )
+                        }),
+                    };
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
                         id,
