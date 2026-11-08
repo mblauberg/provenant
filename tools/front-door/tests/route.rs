@@ -862,6 +862,9 @@ fn route_list_human_output_omits_dispatch_only_fields() -> Result {
     let rig = rig()?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
     assert_eq!(code(&out), 0);
+    let stdout = String::from_utf8(out.stdout.bytes)?;
+    assert!(!stdout.contains("factor="), "{stdout}");
+    assert!(!stdout.contains("readiness="), "{stdout}");
     assert!(!rig.home.join("provider-started").exists());
     rig.assert_legacy_unchanged()?;
     Ok(())

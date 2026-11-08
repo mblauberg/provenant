@@ -415,9 +415,15 @@ fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result 
     save(&checkpoint, &copied)?;
     run_hook(&rig, "pre-compact", &input)?;
     assert_eq!(checkpoint_text(&checkpoint)?, copied);
-    // The report remains bounded.
+    // The report carries the chair's notes before the saved state, bounded.
     let output = run_hook(&rig, "compact", &start(&rig, "keep-session", "compact"))?;
     assert!(output.stdout.bytes.len() <= 8192);
+    let text = context(&output)?;
+    let notes = text
+        .find("Authority: user approved #1829 only")
+        .ok_or("notes")?;
+    let state = text.rfind(&lane).ok_or("state")?;
+    assert!(notes < state, "{text}");
     // A chair save replaces only the chair's file; the autosave file stays.
     save(&checkpoint, "fresh notes")?;
     assert_eq!(checkpoint_text(&checkpoint)?, "fresh notes");
