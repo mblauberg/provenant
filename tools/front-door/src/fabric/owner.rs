@@ -2326,9 +2326,38 @@ impl BoundGraphOwner<'_> {
                 .is_some()
                 && access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
             {
-                return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                    "node".into(),
+                return Err(FacadeError::invalid(InvalidInputDetail::CloudPlacement(
+                    provenant_fabric_runtime::coordination::facade::CloudPlacementIssue::Access,
                 )));
+            }
+            if let Some(cloud) = node.attempt.and_then(|spec| spec.placement.as_ref()) {
+                use provenant_fabric_runtime::coordination::facade::CloudPlacementIssue as Issue;
+                let invalid =
+                    |issue| FacadeError::invalid(InvalidInputDetail::CloudPlacement(issue));
+                for (issue, value) in [
+                    (Issue::Target, &cloud.target),
+                    (Issue::Provider, &cloud.provider),
+                    (Issue::Repository, &cloud.repository),
+                    (Issue::Branch, &cloud.branch),
+                    (Issue::Model, &cloud.model),
+                ] {
+                    if value.trim().is_empty() {
+                        return Err(invalid(issue));
+                    }
+                }
+                let Some(transport) = provenant_records::AdapterSpec::get(&cloud.provider)
+                    .and_then(|spec| spec.cloud_transport)
+                else {
+                    return Err(invalid(Issue::Provider));
+                };
+                if transport == provenant_records::CloudTransport::Codex
+                    && cloud.environment.trim().is_empty()
+                {
+                    return Err(invalid(Issue::Environment));
+                }
+                if cloud.deadline_seconds == 0 {
+                    return Err(invalid(Issue::Deadline));
+                }
             }
             // Replaying an accepted operation must observe its existing writer,
             // even after that writer has advanced beyond the pinned start.
@@ -2564,7 +2593,28 @@ impl BoundGraphOwner<'_> {
             if !accepted && let Some(context) = &mut context {
                 context.writer_predecessor = writer_predecessor;
             }
-            let source_commit = successor_head.as_deref().or(node.source_commit);
+            // Cloud jobs require an immutable commit even for the default
+            // read-only task, which otherwise reads the live checkout. On
+            // replay successor_head comes from the sealed request.
+            let cloud = node.attempt.and_then(|spec| spec.placement.as_ref());
+            let cloud_head = if !accepted && cloud.is_some() && node.source_commit.is_none() {
+                Some(
+                    self.factory
+                        .resolve_base(&self.factory.cwd, "HEAD", &self.repo_facts, self.cancel)
+                        .map_err(|_| FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason: "attempt.cloud requires a resolvable checkout HEAD".into(),
+                        })?
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            let source_commit = successor_head
+                .as_deref()
+                .or(node.source_commit)
+                .or(cloud_head.as_deref());
             let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             // An exact route cannot be substituted, so required separation is
             // decided here, before any worktree advance or submission. An
@@ -2903,21 +2953,27 @@ impl BoundGraphOwner<'_> {
                         None if route.name.is_some() => {
                             provenant_records::run::RequestedRoute::Adapter {
                                 extra: Default::default(),
-                                provider: route
-                                    .adapter
-                                    .clone()
-                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
-                                name: route
-                                    .name
-                                    .clone()
-                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
+                                provider: route.adapter.clone().ok_or_else(|| {
+                                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                                        field: "route.adapter".into(),
+                                        missing: true,
+                                    })
+                                })?,
+                                name: route.name.clone().ok_or_else(|| {
+                                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                                        field: "route.name".into(),
+                                        missing: true,
+                                    })
+                                })?,
                             }
                         }
                         Some(model) => {
-                            let adapter = route
-                                .adapter
-                                .as_ref()
-                                .ok_or(FacadeError::InvalidInput { detail: None })?;
+                            let adapter = route.adapter.as_ref().ok_or_else(|| {
+                                FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                                    field: "route.adapter".into(),
+                                    missing: true,
+                                })
+                            })?;
                             provenant_records::run::RequestedRoute::Model {
                                 extra: Default::default(),
                                 provider: adapter.clone(),
@@ -2928,10 +2984,12 @@ impl BoundGraphOwner<'_> {
                         None if !avoided_families.is_empty() => {
                             provenant_records::run::RequestedRoute::Review {
                                 extra: Default::default(),
-                                name: route
-                                    .alias
-                                    .clone()
-                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
+                                name: route.alias.clone().ok_or_else(|| {
+                                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                                        field: "route.alias".into(),
+                                        missing: true,
+                                    })
+                                })?,
                                 effort: route.effort.clone(),
                                 excluded_families: avoided_families,
                                 distinct_families: true,
@@ -2941,10 +2999,12 @@ impl BoundGraphOwner<'_> {
                         }
                         None => provenant_records::run::RequestedRoute::Named {
                             extra: Default::default(),
-                            name: route
-                                .alias
-                                .clone()
-                                .ok_or(FacadeError::InvalidInput { detail: None })?,
+                            name: route.alias.clone().ok_or_else(|| {
+                                FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                                    field: "route.alias".into(),
+                                    missing: true,
+                                })
+                            })?,
                             effort: route.effort.clone(),
                         },
                     }),
@@ -3261,8 +3321,12 @@ impl BoundGraphOwner<'_> {
                 ),
                 false,
             )
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?
-            {
+            .map_err(|_| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: "cloud submission or observation failed; inspect the cloud job state"
+                    .into(),
+            })? {
                 return Ok(observation);
             }
         }

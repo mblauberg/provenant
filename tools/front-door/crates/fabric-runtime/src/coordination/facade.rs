@@ -295,6 +295,7 @@ impl GraphRelayCause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
+    CloudPlacement(CloudPlacementIssue),
     GraphReason(String),
     GraphRelayCause(GraphRelayCause),
     TemplateInvalid,
@@ -311,6 +312,20 @@ pub enum InvalidInputDetail {
     InputTooLarge,
     InputInvalidUtf8,
     GraphDocumentTooLarge,
+}
+
+/// Fixed diagnostics: neither field values nor provider output cross the facade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudPlacementIssue {
+    Access,
+    Target,
+    Provider,
+    Environment,
+    Repository,
+    Branch,
+    Model,
+    Deadline,
 }
 
 impl InvalidInputDetail {
@@ -338,6 +353,16 @@ impl InvalidInputDetail {
 
     fn safe_text(&self) -> Option<String> {
         match self {
+            Self::CloudPlacement(issue) => Some(match issue {
+                CloudPlacementIssue::Access => "invalid input field `attempt.cloud`: cloud placement requires read-only access",
+                CloudPlacementIssue::Target => "invalid input field `attempt.cloud.target`: must not be empty",
+                CloudPlacementIssue::Provider => "invalid input field `attempt.cloud.provider`: must name a supported cloud provider",
+                CloudPlacementIssue::Environment => "invalid input field `attempt.cloud.environment`: Codex requires an environment",
+                CloudPlacementIssue::Repository => "invalid input field `attempt.cloud.repository`: must not be empty",
+                CloudPlacementIssue::Branch => "invalid input field `attempt.cloud.branch`: must not be empty",
+                CloudPlacementIssue::Model => "invalid input field `attempt.cloud.model`: must not be empty",
+                CloudPlacementIssue::Deadline => "invalid input field `attempt.cloud.deadline_seconds`: must be greater than zero",
+            }.into()),
             // Parser and transport errors may contain input, prompts or source
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
@@ -1803,6 +1828,34 @@ mod diagnostic_tests {
             FacadeError::from(&super::super::CoordinationError::LandingLockRequired).to_string(),
             "invalid input: landing lock required"
         );
+    }
+
+    #[test]
+    fn cloud_placement_diagnostics_survive_transport_without_values() {
+        use super::{CloudPlacementIssue as Issue, InvalidInputDetail};
+        for (issue, field, reason) in [
+            (Issue::Access, "attempt.cloud", "read-only"),
+            (Issue::Target, "attempt.cloud.target", "empty"),
+            (Issue::Provider, "attempt.cloud.provider", "supported"),
+            (Issue::Environment, "attempt.cloud.environment", "requires"),
+            (Issue::Repository, "attempt.cloud.repository", "empty"),
+            (Issue::Branch, "attempt.cloud.branch", "empty"),
+            (Issue::Model, "attempt.cloud.model", "empty"),
+            (
+                Issue::Deadline,
+                "attempt.cloud.deadline_seconds",
+                "greater than zero",
+            ),
+        ] {
+            let error = FacadeError::invalid(InvalidInputDetail::CloudPlacement(issue));
+            let received: FacadeError =
+                serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+            let message = received.to_string();
+            assert!(
+                message.contains(field) && message.contains(reason),
+                "{message}"
+            );
+        }
     }
 
     #[test]

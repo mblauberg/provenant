@@ -693,6 +693,62 @@ fn cloud_placement_explain_and_invalid_input_paths() -> Result {
 }
 
 #[test]
+fn cloud_set_form_reaches_submission_for_both_providers() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    for (provider, target, environment, model) in [
+        (
+            "codex",
+            "codex-cloud",
+            ",environment='provenant'",
+            "gpt-6.1-sol",
+        ),
+        ("claude", "claude-hosted", "", "claude-sonnet-5-5"),
+    ] {
+        let rig = GraphProject::new()?;
+        let bin = rig.temp.path().join("bin");
+        std::fs::create_dir(&bin)?;
+        let stub = bin.join(provider);
+        let expected = if provider == "codex" {
+            "cloud exec"
+        } else {
+            "--cloud"
+        };
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in '{expected}'*) ;; *) exit 8;; esac\nprintf submitted > \"$CLOUD_TEST_MARKER\"\nprintf '{{\"id\":\"fake-job\"}}'\n"
+            ),
+        )?;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700))?;
+        let marker = rig.temp.path().join("submitted");
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let brief = rig.project.join("brief.md");
+        std::fs::write(&brief, "Count the runbooks.")?;
+        let setting = format!(
+            "attempt.cloud={{target='{target}',provider='{provider}'{environment},repository='mblauberg/provenant',branch='main',model='{model}',deadline_seconds=1800}}"
+        );
+        let output = rig
+            .command()
+            .env("PATH", std::env::join_paths(paths)?)
+            .env("CLOUD_TEST_MARKER", &marker)
+            .args(["run", "--file"])
+            .arg(&brief)
+            .args(["--mode", "read-only", "--set", &setting])
+            .output()?;
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            marker.exists(),
+            "provider {provider}: {value}; {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn template_show_resolves_user_repository_and_inline_layers() -> Result {
     let rig = GraphProject::new()?;
     let user = rig.temp.path().join("config/provenant/templates");
