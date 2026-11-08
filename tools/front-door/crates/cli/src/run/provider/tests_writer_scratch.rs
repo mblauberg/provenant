@@ -1,4 +1,3 @@
-
 #[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -233,7 +232,11 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             skipped_routes[0].cause,
             Some(provenant_records::RouteExclusionReason::ProviderUpdating)
         );
-        assert!(skipped_routes[0].detail.contains("provider update in progress for codex"));
+        assert!(
+            skipped_routes[0]
+                .detail
+                .contains("provider update in progress for codex")
+        );
         assert_eq!(
             *fallback_outcome,
             Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
@@ -289,7 +292,11 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             prepared.route.model.as_deref(),
             Some("cursor/gpt-5.3-codex-low")
         );
-        let selection = prepared.route.pool_selection.as_ref().ok_or("pool receipt")?;
+        let selection = prepared
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("pool receipt")?;
         let updating = selection
             .candidates
             .iter()
@@ -313,6 +320,187 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             Some(config) => std::fs::write(state.join("config.toml"), config)?,
             None => std::fs::remove_file(state.join("config.toml"))?,
         }
+
+        // A protected-paths project: confidential directories denied to every
+        // lane, and a confidential task. Excluding a pool's first candidate at
+        // preparation, for any cause, tries the next permitted member, even
+        // with no settlement retry budget, and records every exclusion.
+        let confidential = project.join("confidential");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&confidential)?;
+        let protected_policy = format!(
+            "[domains.run.host_policy]\ndeny_read = ['{0}']\ndeny_write = ['{0}']\n",
+            confidential.display()
+        );
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version=1\n[domains.routing]\nsettlement_retries=0\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='codex/gpt-6.1-terra'\nweight=1\nefforts=['low']\n{protected_policy}"
+            ),
+        )?;
+        let mut protected = task.clone();
+        protected
+            .profile
+            .extra
+            .insert("confidential".into(), serde_json::json!(true));
+        protected.route = run::RequestedRoute::Named {
+            extra: Default::default(),
+            name: "protected-fixture".into(),
+            effort: None,
+        };
+        let fresh_paths = |name: &str| -> Result<run::LaunchPaths, std::io::Error> {
+            let paths = run::LaunchPaths {
+                scratch: attempt.join(format!("{name}-scratch")),
+                provider_state: attempt.join(format!("{name}-provider-state")),
+                temporary: attempt.join(format!("{name}-tmp")),
+                temporary_alias: None,
+                attempt_id: paths.attempt_id,
+                operation_id: paths.operation_id.clone(),
+                task_index: paths.task_index,
+                lane_depth: paths.lane_depth,
+                run_id: paths.run_id,
+                deadline_unix_ms: paths.deadline_unix_ms,
+            };
+            for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+                std::fs::DirBuilder::new().mode(0o700).create(path)?;
+            }
+            Ok(paths)
+        };
+        // Only Cursor is installed; Codex's default account cannot be observed.
+        let cursor_only = |adapter: &str| {
+            if adapter == "cursor" {
+                Ok(executable.clone())
+            } else {
+                Err(format!("{adapter} is not installed"))
+            }
+        };
+        let walk_paths = fresh_paths("protected-walk")?;
+        // The first candidate's staging directory cannot be created.
+        std::fs::write(walk_paths.temporary.join("candidate-0"), b"occupied")?;
+        let walked = prepare_with_wait(
+            &registry,
+            &protected,
+            "protected pool fixture",
+            &walk_paths,
+            None,
+            cursor_only,
+            None,
+            Some(0),
+        )?;
+        assert_eq!(
+            walked.skipped_routes.len(),
+            1,
+            "{:?}",
+            walked.skipped_routes
+        );
+        let first = &walked.skipped_routes[0];
+        assert_eq!(first.kind, SkipKind::Setup);
+        assert!(first.route.starts_with("cursor/"));
+        let chosen = walked.route.model.as_deref().ok_or("walked route model")?;
+        assert!(chosen.starts_with("cursor/"));
+        assert_ne!(chosen, first.route, "the excluded candidate was retried");
+        assert_eq!(
+            walked.route.provider.as_deref(),
+            Some("cursor"),
+            "the pool must not stop after one excluded member"
+        );
+        let selection = walked.route.pool_selection.as_ref().ok_or("pool receipt")?;
+        let terra = selection
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "codex/gpt-6.1-terra")
+            .ok_or("terra left the pool receipt")?;
+        // Codex has an access context; its missing account is not a
+        // disclosure-policy refusal.
+        assert!(
+            !matches!(
+                terra.readiness,
+                Some(provenant_records::RouteReadiness::Unavailable {
+                    reason: provenant_records::RouteExclusionReason::DisclosureDenied,
+                    ..
+                })
+            ),
+            "{terra:?}"
+        );
+        drop(walked);
+
+        // When every member is excluded, each is listed once with a typed cause.
+        let exhausted_paths = fresh_paths("protected-exhausted")?;
+        for index in 0..2 {
+            std::fs::write(
+                exhausted_paths.temporary.join(format!("candidate-{index}")),
+                b"occupied",
+            )?;
+        }
+        let refusal = prepare_with_wait(
+            &registry,
+            &protected,
+            "protected pool fixture",
+            &exhausted_paths,
+            None,
+            cursor_only,
+            None,
+            Some(0),
+        )
+        .err()
+        .ok_or("a pool with no preparable member launched")?;
+        let PrepareError::Candidates { skipped_routes, .. } = &refusal else {
+            return Err(format!("pool exclusions lost their diagnosis: {refusal}").into());
+        };
+        let mut routes: Vec<_> = skipped_routes
+            .iter()
+            .map(|skipped| skipped.route.as_str())
+            .collect();
+        routes.sort_unstable();
+        assert_eq!(
+            routes,
+            [
+                "codex/gpt-6.1-terra",
+                "cursor/gpt-5.3-codex-low",
+                "cursor/grok-4.7"
+            ],
+            "{skipped_routes:?}"
+        );
+        for skipped in skipped_routes {
+            if skipped.route.starts_with("cursor/") {
+                assert_eq!(skipped.kind, SkipKind::Setup, "{skipped:?}");
+            } else {
+                assert!(skipped.cause.is_some(), "{skipped:?}");
+            }
+            assert_ne!(
+                skipped.cause,
+                Some(provenant_records::RouteExclusionReason::DisclosureDenied),
+                "{skipped:?}"
+            );
+        }
+
+        // A writer on the shipped senior route resolves to a permitted member.
+        std::fs::write(
+            state.join("config.toml"),
+            format!("schema_version=1\n{protected_policy}"),
+        )?;
+        let mut senior = protected.clone();
+        senior.route = run::RequestedRoute::Named {
+            extra: Default::default(),
+            name: "senior".into(),
+            effort: None,
+        };
+        let senior_paths = fresh_paths("protected-senior")?;
+        let resolved = prepare_with_wait(
+            &registry,
+            &senior,
+            "protected senior fixture",
+            &senior_paths,
+            None,
+            cursor_only,
+            None,
+            Some(0),
+        )?;
+        assert_eq!(resolved.route.model.as_deref(), Some("cursor/grok-4.7"));
+        assert!(resolved.confinement.is_some());
+        drop(resolved);
+        std::fs::remove_file(state.join("config.toml"))?;
 
         // A separate access omission retains the confinement guard that
         // refused the plan, rather than being labelled a disclosure denial.
@@ -341,7 +529,9 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             ..
         } = &error
         else {
-            return Err(format!("confinement failure lost its candidate diagnosis: {error}").into());
+            return Err(
+                format!("confinement failure lost its candidate diagnosis: {error}").into(),
+            );
         };
         assert!(plans.iter().any(|plan| matches!(
             plan,
@@ -355,7 +545,10 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             Some(provenant_records::RouteExclusionReason::ConfinementUnavailable)
         );
         assert_eq!(skipped_routes[0].extra["guard_boundary"], "authority");
-        assert_eq!(skipped_routes[0].extra["confinement_guard"], "protected_path_overlap");
+        assert_eq!(
+            skipped_routes[0].extra["confinement_guard"],
+            "protected_path_overlap"
+        );
         assert_eq!(skipped_routes[0].extra["plan_error"], "protected_overlap");
         assert_eq!(
             skipped_routes[0].diagnostic().detail.as_deref(),
@@ -667,7 +860,11 @@ printf 'agy 1.0.0\n'
             } else {
                 environment.push(("IDENTITY_PROBE".into(), "reader".into()));
             }
-            let argv = compiled.command(&prepared.argv, &attempt_id, &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?)?;
+            let argv = compiled.command(
+                &prepared.argv,
+                &attempt_id,
+                &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+            )?;
             let mut options = argv.options(&prepared.cwd, Duration::from_secs(10))?;
             options.env = Some(&environment);
             let result = executor.execute(options)?;
@@ -1212,7 +1409,11 @@ printf 'agy 1.0.0\n'
             &confinement.profile,
             &anchors,
         )?;
-        let confined_command = compiled.command(&publishing.argv, &attempt_id, &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?)?;
+        let confined_command = compiled.command(
+            &publishing.argv,
+            &attempt_id,
+            &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+        )?;
         assert!(!confined_command.is_empty());
     }
     for name in ["ignore", "attributes"] {
@@ -1453,8 +1654,10 @@ printf 'agy 1.0.0\n'
     ] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
+    // Settlement retries bound launched attempts. A member that preparation
+    // excluded never launched, so a zero budget still tries the next member.
     let calls = std::cell::Cell::new(0);
-    let Err(refusal) = prepare_with(
+    let no_retry = prepare_with(
         &registry,
         &redraw_task,
         redraw_prompt,
@@ -1470,25 +1673,20 @@ printf 'agy 1.0.0\n'
             }
         },
         None,
-    ) else {
-        panic!("zero retry budget must not redraw")
-    };
+    )?;
+    assert_eq!(calls.get(), 4);
+    assert_eq!(no_retry.skipped_routes.len(), 1);
+    assert_eq!(no_retry.skipped_routes[0].kind, SkipKind::Unavailable);
     assert!(
-        !refusal
-            .to_string()
+        !no_retry.skipped_routes[0]
+            .detail
             .contains("fixture executable disappeared")
     );
-    assert!(
-        refusal
-            .to_string()
-            .contains("selected route is unavailable")
+    assert_ne!(
+        no_retry.route.model.as_deref(),
+        Some(no_retry.skipped_routes[0].route.as_str())
     );
-    assert_eq!(calls.get(), 3);
-    let PrepareError::Candidates { skipped_routes, .. } = &refusal else {
-        panic!("budget refusal must retain the skipped candidate")
-    };
-    assert_eq!(skipped_routes.len(), 1);
-    assert_eq!(skipped_routes[0].kind, SkipKind::Unavailable);
+    drop(no_retry);
     std::fs::write(state.join("config.toml"), saved_config)?;
 
     let mut review_task = task.clone();
@@ -1587,9 +1785,14 @@ printf 'agy 1.0.0\n'
     prior.applied_route = Some(launch.route.clone());
     prior.session = Some("fixture-session".into());
     // Cursor continuation is retained in the settled attempt, never the host home.
-    let retained_session = paths.provider_state.join("candidate-0/chats/fixture-session");
+    let retained_session = paths
+        .provider_state
+        .join("candidate-0/chats/fixture-session");
     std::fs::create_dir_all(&retained_session)?;
-    std::fs::write(retained_session.join("transcript"), b"retained fixture session")?;
+    std::fs::write(
+        retained_session.join("transcript"),
+        b"retained fixture session",
+    )?;
     let mut continued_task = task.clone();
     continued_task.route = prior.requested_route.clone();
     continued_task.account = Some("retired-account-alias".into());
@@ -1630,7 +1833,11 @@ printf 'agy 1.0.0\n'
     assert!(continued.route.pool_selection.is_none());
     assert!(continued.argv.iter().any(|arg| arg == "--resume"));
     assert_eq!(
-        std::fs::read(continued_paths.provider_state.join("candidate-0/chats/fixture-session/transcript"))?,
+        std::fs::read(
+            continued_paths
+                .provider_state
+                .join("candidate-0/chats/fixture-session/transcript")
+        )?,
         b"retained fixture session"
     );
     let confinement = launch.confinement.ok_or("writer confinement missing")?;
