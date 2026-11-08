@@ -359,9 +359,14 @@ fn unknown_profile_and_access_fields_survive_parent_skip_rules() -> TestResult {
 #[test]
 fn route_exclusion_reason_codes_round_trip() -> TestResult {
     // Existing wire names stay readable; the account-evidence codes are additive.
+    // Every variant of RouteExclusionReason, so a new wire name must be listed here.
     for code in [
+        "setup_failed",
+        "account_pinned",
+        "admission_refused",
         "disabled",
         "missing_executable",
+        "provider_updating",
         "unknown_availability",
         "stale_availability",
         "unknown_account",
@@ -370,7 +375,9 @@ fn route_exclusion_reason_codes_round_trip() -> TestResult {
         "unsupported_effort",
         "exhausted",
         "pacing_reserve",
+        "unknown_partial_headroom",
         "auth_required",
+        "login_expired",
         "unverified_model",
         "account_mismatch",
         "free_tier_refused",
