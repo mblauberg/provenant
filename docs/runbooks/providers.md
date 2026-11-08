@@ -603,7 +603,7 @@ settings, prompts, setup scripts, log URLs or result artifacts.
 ```toml
 [domains.lanes.cloud_targets.verify]
 provider = "codex" # or "claude"
-environment = "environment-id"
+environment = "environment-id" # required for codex; optional for claude
 repository = "owner/repository"
 branch = "main"
 model = "requested-model"
@@ -613,6 +613,11 @@ deadline_seconds = 3600
 [domains.lanes.projects."PROJECT_ID"]
 cloud_target = "verify"
 ```
+
+A Codex target requires its `environment`. For Claude the environment is
+optional and only names a self-hosted pool (`ccpool_...`, passed as
+`claude --cloud --environment`). Leave it out to use the hosted Claude cloud;
+Provenant then runs `claude --cloud` without `--environment`.
 
 The project setting is optional. Without it, choose the target explicitly:
 
