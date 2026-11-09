@@ -227,6 +227,9 @@ pub(super) fn apply_attempt_observation(
                     commit,
                     &upstream_findings,
                 );
+                if !repair::may_report_items(node, plan) {
+                    outputs.extra.remove("repair_items");
+                }
                 if !plan.nodes.iter().any(|consumer| {
                     consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
                         && consumer.depends_on.contains(&node.id)

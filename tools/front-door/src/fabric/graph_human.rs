@@ -129,11 +129,23 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                 .pointer("/outputs/spec_concerns")
                 .and_then(serde_json::Value::as_array)
             {
+                let full_count = node
+                    .pointer("/outputs/spec_concern_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(concerns.len() as u64);
                 rows.push(format!(
-                    "{}: {} spec concerns for chair judgement",
+                    "{}: {} spec concerns for chair judgement ({} retained)",
                     bounded_reason(node_id),
+                    full_count,
                     concerns.len()
                 ));
+                if (concerns.len() as u64) < full_count {
+                    let source = node
+                        .pointer("/outputs/result/path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("the attempt result artifact and handoff.json");
+                    rows.push(format!("full spec concerns: {}", bounded_reason(source)));
+                }
                 for concern in concerns {
                     let detail = |key| {
                         concern
@@ -468,5 +480,16 @@ mod spec_chair_tests {
         assert!(text.contains("remove reader") && text.contains("diverged"));
         assert!(text.contains("1 spec defects"));
         assert!(text.contains("criterion conflicts with scope"));
+        let clipped = super::graph_summary(&serde_json::json!({
+            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                {"id":"writer","state":"succeeded","outputs":{
+                    "spec_concerns":[],"spec_concern_count":2,"result":{"path":"/attempt/result.md"}
+                }}
+            ]}
+        }))
+        .lines
+        .join("\n");
+        assert!(clipped.contains("2 spec concerns") && clipped.contains("0 retained"));
+        assert!(clipped.contains("/attempt/result.md"));
     }
 }

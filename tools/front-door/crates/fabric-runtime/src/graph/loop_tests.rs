@@ -2217,11 +2217,15 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
         let initial = repair_finding(false);
         let growth = initial.replace("\"design_defect\":false", "\"design_defect\":false,\"risk_grew\":true");
         let new_finding = initial.replace("F1", "F2").replace("correctness", "security");
+        let checked_new_finding = new_finding.replace(
+            "\"status\":\"open\"",
+            "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
+        );
         let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
         let mut owner = if limit == 1 {
-            repair_reviews(&[&initial, "fix one", &growth, pass, &new_finding, &new_finding, "principal options"])
+            repair_reviews(&[&initial, "fix one", &growth, pass, &new_finding, &checked_new_finding, "principal options"])
         } else {
-            repair_reviews(&[&initial, "fix one", &growth, pass, &new_finding, &new_finding, "fix two", pass, pass, pass, pass])
+            repair_reviews(&[&initial, "fix one", &growth, pass, &new_finding, &checked_new_finding, "fix two", pass, pass, pass, pass])
         };
         owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
         for (index, oid) in [(1, 'a'), (6, 'b')] {
@@ -2568,10 +2572,14 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
     document.context = Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
     let initial = repair_finding(false);
     let security = initial.replace("F1", "F2").replace("correctness", "security");
+    let checked_security = security.replace(
+        "\"status\":\"open\"",
+        "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
+    );
     let growth = "```findings\n{\"schema_version\":1,\"risk_tier\":\"crucial\",\"findings\":[]}\n```\nVERDICT: PASS";
     let pass = "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = repair_reviews(&[
-        &initial, "fix one", growth, growth, pass, &security, &security,
+        &initial, "fix one", growth, growth, pass, &security, &checked_security,
         "fix two", pass, pass, pass, pass, pass,
     ]);
     owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);

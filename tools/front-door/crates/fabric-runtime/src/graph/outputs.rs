@@ -126,29 +126,54 @@ pub(super) fn make_outputs_with_upstream(
         }
         valid
     });
-    // Leading items first: a handoff lists the most pressing work first.
-    let handoff_remaining = result
-        .and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref))
-        .map(|handoff| {
-            let mut kept: Vec<String> = Vec::new();
-            for item in &handoff.remaining {
-                kept.push(item.clone());
-                if canonical_len(&kept) > REMAINING_BYTES {
-                    kept.pop();
-                    warnings.push(bounded(
-                        &format!(
-                            "handoff remaining items cut to {} of {}",
-                            kept.len(),
-                            handoff.remaining.len()
-                        ),
-                        WARNING_BYTES,
-                    ));
-                    break;
-                }
+    // Remaining work and spec concerns share one bounded checkpoint projection.
+    // Full entries stay in the immutable result and handoff artifacts.
+    let handoff = result.and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref));
+    let spec_concern_count = handoff.map_or(0, |handoff| handoff.spec_concerns.len());
+    let mut kept_concerns = Vec::<provenant_records::handoff::SpecConcern>::new();
+    let mut kept_remaining = Vec::<String>::new();
+    let projection_bytes =
+        |remaining: &[String], concerns: &[provenant_records::handoff::SpecConcern]| {
+            // Without concerns, preserve the original remaining-array budget.
+            if spec_concern_count == 0 {
+                return canonical_len(&remaining);
             }
-            kept
-        })
-        .filter(|items| !items.is_empty());
+            canonical_len(&serde_json::json!({
+                "remaining":remaining,
+                "spec_concerns":concerns,
+                "spec_concern_count":spec_concern_count,
+            }))
+        };
+    if let Some(handoff) = handoff {
+        for concern in &handoff.spec_concerns {
+            kept_concerns.push(concern.clone());
+            if projection_bytes(&kept_remaining, &kept_concerns) > REMAINING_BYTES {
+                kept_concerns.pop();
+                break;
+            }
+        }
+        for item in &handoff.remaining {
+            kept_remaining.push(item.clone());
+            if projection_bytes(&kept_remaining, &kept_concerns) > REMAINING_BYTES {
+                kept_remaining.pop();
+                break;
+            }
+        }
+        if kept_concerns.len() < handoff.spec_concerns.len() {
+            warnings.push(bounded(&format!(
+                "handoff spec concerns retained {} of {}; full entries: {} and the attempt handoff.json",
+                kept_concerns.len(), handoff.spec_concerns.len(), path.as_deref().unwrap_or("the attempt result artifact")
+            ), WARNING_BYTES));
+        }
+        if kept_remaining.len() < handoff.remaining.len() {
+            warnings.push(bounded(&format!(
+                "handoff remaining items cut to {} of {}; full entries in the attempt result and handoff.json",
+                kept_remaining.len(), handoff.remaining.len()
+            ), WARNING_BYTES));
+        }
+    }
+    let handoff_remaining = (!kept_remaining.is_empty()).then_some(kept_remaining);
+    let spec_concerns = (spec_concern_count > 0).then(|| serde_json::json!(kept_concerns));
     let verdict_error = result.and_then(|capture| {
         if capture.source_truncated {
             Some("result truncated before the verdict could be verified".to_owned())
@@ -182,14 +207,6 @@ pub(super) fn make_outputs_with_upstream(
         .filter(|design| design.get("within_scope").is_some_and(serde_json::Value::is_boolean)
             && design.get("one_way_door").is_some_and(serde_json::Value::is_boolean))
         .map(|design| serde_json::json!({"within_scope":design["within_scope"],"one_way_door":design["one_way_door"]}));
-    let spec_concerns = result
-        .and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref))
-        .filter(|handoff| !handoff.spec_concerns.is_empty())
-        .map(|handoff| serde_json::json!(handoff.spec_concerns));
-    let spec_concern_count = spec_concerns
-        .as_ref()
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
     let spec_defect_count = findings
         .iter()
         .filter(|finding| finding.spec_defect())
@@ -532,8 +549,17 @@ fn parse_findings(
                     .as_object()
                     .ok_or_else(|| fail("id", "invalid upstream finding"))?
                 {
-                    if matches!(field.as_str(), "trigger" | "triage" | "verification") {
+                    if matches!(field.as_str(), "trigger" | "triage") {
                         entry.entry(field.clone()).or_insert_with(|| value.clone());
+                    } else if field == "verification"
+                        && entry
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| {
+                                matches!(value, "upheld" | "falsified" | "unverifiable" | "new")
+                            })
+                    {
+                        // A verifier's typed decision supersedes the prior decision.
                     } else if !matches!(field.as_str(), "disposition" | "reason" | "propagates") {
                         entry.insert(field.clone(), value.clone());
                     }
@@ -1826,6 +1852,82 @@ mod alias_tests {
         assert_eq!(
             view[0].spec_concerns[0].status,
             provenant_records::handoff::SpecConcernStatus::AsWritten
+        );
+
+        // An individual concern may fill the handoff's field limit. Its full
+        // content remains in the source while the checkpoint stays bounded.
+        let concern = serde_json::json!({
+            "criterion":"retired reader", "claim":"scope conflict", "evidence":"x".repeat(4096),
+            "proposed_change":"remove reader", "status":"as_written"
+        });
+        let full_handoff = serde_json::json!({
+            "schema_version":2, "status":"done", "note":"done", "remaining":["continue delivery"],
+            "decisions":[], "verify":[], "spec_concerns":[concern.clone(), concern]
+        });
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(format!("```handoff\n{full_handoff}\n```\n").as_bytes());
+        let captured = capture.finish();
+        assert_eq!(
+            captured
+                .handoff
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .spec_concerns
+                .len(),
+            2
+        );
+        let outputs = make_outputs(
+            Some(&captured),
+            None,
+            Some("/attempt/result.md".into()),
+            None,
+            None,
+        );
+        assert_eq!(outputs.extra["spec_concern_count"], 2);
+        assert!(
+            outputs.extra["spec_concerns"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            outputs.remaining.as_deref(),
+            Some(["continue delivery".to_owned()].as_slice())
+        );
+        assert!(
+            canonical_len(&serde_json::json!({
+                "remaining":outputs.remaining,
+                "spec_concerns":outputs.extra["spec_concerns"],
+                "spec_concern_count":outputs.extra["spec_concern_count"],
+            })) <= REMAINING_BYTES
+        );
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("retained 0 of 2")
+                    && warning.contains("/attempt/result.md"))
+        );
+
+        let remaining = "r".repeat(4090);
+        let no_concerns = serde_json::json!({
+            "schema_version":2, "status":"done", "note":"done", "remaining":[remaining],
+            "decisions":[], "verify":[]
+        });
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(format!("```handoff\n{no_concerns}\n```\n").as_bytes());
+        let captured = capture.finish();
+        let outputs = make_outputs(Some(&captured), None, None, None, None);
+        assert_eq!(outputs.remaining.as_ref().unwrap(), &vec!["r".repeat(4090)]);
+        assert!(!outputs.extra.contains_key("spec_concerns"));
+        assert!(!outputs.extra.contains_key("spec_concern_count"));
+        assert!(
+            !outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("remaining items cut"))
         );
     }
 

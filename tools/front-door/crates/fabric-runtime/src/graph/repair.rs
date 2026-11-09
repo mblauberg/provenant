@@ -10,6 +10,17 @@ pub(super) fn is_repair(node: &PlannedNode) -> bool {
     node.loop_body.as_ref().is_some_and(spec_is_repair)
 }
 
+pub(super) fn may_report_items(node: &PlannedNode, plan: &PlannedGraph) -> bool {
+    repair_writer(node)
+        || node.round.as_ref().is_some_and(|round| {
+            round.node_id == "fix"
+                && plan
+                    .nodes
+                    .iter()
+                    .any(|owner| owner.id == round.loop_id && is_repair(owner))
+        })
+}
+
 fn initial_outputs<'a>(
     node: &PlannedNode,
     checkpoint: &'a GraphCheckpoint,

@@ -175,6 +175,11 @@ with criterion, claim, evidence, proposed_change and status (`as_written`,
 `diverged` or `stopped`); graph status exposes these and spec-defect findings to
 the chair.
 
+Checkpoint concern previews share the bounded handoff projection with remaining
+work. When previews are clipped, status keeps the full count, reports how many
+entries are shown and points to the complete result; the typed handoff retains
+every concern.
+
 Set `max_repair_cycles` to one, two or three (default three). This counts repairs
 after the first review and is separate from CI's `max_iterations`. Each repair
 starts a fresh writer attempt. Prefer a route outside the reviewers' families;

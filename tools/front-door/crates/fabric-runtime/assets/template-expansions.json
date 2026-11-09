@@ -290,7 +290,8 @@
                       "id": "synthesis",
                       "prompt": "Check every delta finding and writer repair_item against the code and invariant under repair. Preserve every qualified finding, including rejected findings. For each emit triage with decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean. Group worthwhile confirmed findings by cause. A disputed item is a claim to judge, not automatically unresolved. Reject a falsified premise with evidence. Flag a shared design flaw design_defect=true. End with VERDICT: PASS if no repair-eligible finding remains and evidence is complete, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE.",
                       "depends_on": [
-                        "check"
+                        "check",
+                        "fix"
                       ],
                       "inputs": [
                         {
@@ -349,11 +350,11 @@
               {
                 "template": "design",
                 "acceptance_checks": [
-                  "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
+                  "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
                 ],
                 "access": "read_only",
                 "id": "design",
-                "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
+                "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
                 "depends_on": [
                   "cycles"
                 ],
@@ -809,7 +810,8 @@
                       "id": "synthesis",
                       "prompt": "Check every delta finding and writer repair_item against the code and invariant under repair. Preserve every qualified finding, including rejected findings. For each emit triage with decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean. Group worthwhile confirmed findings by cause. A disputed item is a claim to judge, not automatically unresolved. Reject a falsified premise with evidence. Flag a shared design flaw design_defect=true. End with VERDICT: PASS if no repair-eligible finding remains and evidence is complete, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE.",
                       "depends_on": [
-                        "check"
+                        "check",
+                        "fix"
                       ],
                       "inputs": [
                         {
@@ -868,11 +870,11 @@
               {
                 "template": "design",
                 "acceptance_checks": [
-                  "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
+                  "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
                 ],
                 "access": "read_only",
                 "id": "design",
-                "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
+                "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
                 "depends_on": [
                   "cycles"
                 ],
@@ -1968,7 +1970,8 @@
                             "id": "synthesis",
                             "prompt": "Check every delta finding and writer repair_item against the code and invariant under repair. Preserve every qualified finding, including rejected findings. For each emit triage with decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean. Group worthwhile confirmed findings by cause. A disputed item is a claim to judge, not automatically unresolved. Reject a falsified premise with evidence. Flag a shared design flaw design_defect=true. End with VERDICT: PASS if no repair-eligible finding remains and evidence is complete, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE.",
                             "depends_on": [
-                              "check"
+                              "check",
+                              "fix"
                             ],
                             "inputs": [
                               {
@@ -2027,11 +2030,11 @@
                     {
                       "template": "design",
                       "acceptance_checks": [
-                        "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
+                        "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
                       ],
                       "access": "read_only",
                       "id": "design",
-                      "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
+                      "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
                       "depends_on": [
                         "cycles"
                       ],
@@ -2644,7 +2647,8 @@
           "id": "synthesis",
           "prompt": "Check every delta finding and writer repair_item against the code and invariant under repair. Preserve every qualified finding, including rejected findings. For each emit triage with decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean. Group worthwhile confirmed findings by cause. A disputed item is a claim to judge, not automatically unresolved. Reject a falsified premise with evidence. Flag a shared design flaw design_defect=true. End with VERDICT: PASS if no repair-eligible finding remains and evidence is complete, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE.",
           "depends_on": [
-            "check"
+            "check",
+            "fix"
           ],
           "inputs": [
             {
@@ -3178,7 +3182,8 @@
                 "id": "synthesis",
                 "prompt": "Check every delta finding and writer repair_item against the code and invariant under repair. Preserve every qualified finding, including rejected findings. For each emit triage with decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean. Group worthwhile confirmed findings by cause. A disputed item is a claim to judge, not automatically unresolved. Reject a falsified premise with evidence. Flag a shared design flaw design_defect=true. End with VERDICT: PASS if no repair-eligible finding remains and evidence is complete, otherwise VERDICT: FAIL or VERDICT: INCONCLUSIVE.",
                 "depends_on": [
-                  "check"
+                  "check",
+                  "fix"
                 ],
                 "inputs": [
                   {
@@ -3237,11 +3242,11 @@
         {
           "template": "design",
           "acceptance_checks": [
-            "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
+            "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority."
           ],
           "access": "read_only",
           "id": "design",
-          "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. Before the final handoff, include a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
+          "prompt": "Read only. Diagnose the checked shared flaw, writer design-cannot-hold report, concrete design defect or recurring finding. Say whether the findings share one flaw and what the right design is; reaching the third review round prompts this judgement and does not end the work, so further repair may be the recommendation. Return the root constraint, two or three options with trade-offs and migration implications, a comparison of the structural fix with the small one, one recommended slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the recommended slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority.",
           "depends_on": [
             "cycles"
           ],

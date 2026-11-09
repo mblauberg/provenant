@@ -1174,8 +1174,9 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
     assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded);
     assert!(!owner.prompts[1].contains("REJECTED_DO_NOT_REPAIR"));
-    assert!(owner.file_requests[1].iter().all(|request| request.attempt_ref.is_none()));
-    let staged = owner.file_requests[1].iter().flat_map(|request| request.inline_findings.as_ref().unwrap()).collect::<Vec<_>>();
+    let writer_files = owner.file_requests.iter().find(|requests| requests.iter().any(|request| request.label == "review")).unwrap();
+    assert!(writer_files.iter().all(|request| request.attempt_ref.is_none()));
+    let staged = writer_files.iter().flat_map(|request| request.inline_findings.as_ref().unwrap()).collect::<Vec<_>>();
     assert_eq!(staged.len(), 2);
     assert!(staged.iter().all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR"));
     let (_, input) = owner.prompts[1].split_once("review findings: ").unwrap();

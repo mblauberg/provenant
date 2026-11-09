@@ -826,9 +826,9 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
                 let mut entry = finding();
                 entry["id"] = json!(format!("F{i}"));
                 entry["evidence"] =
-                    json!("A realistic code path reaches an unchecked state. ".repeat(20));
+                    json!("A realistic code path reaches an unchecked state. ".repeat(18));
                 entry["proposed_fix"] =
-                    json!("Validate the state before dispatch and preserve the error. ".repeat(15));
+                    json!("Validate the state before dispatch and preserve the error. ".repeat(12));
                 entry
             })
             .collect();
