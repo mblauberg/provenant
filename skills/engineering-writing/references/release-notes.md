@@ -12,7 +12,7 @@ Use when writing or editing release notes, a changelog or release fragments (tow
 6. **Leave out what no user notices:** refactors, tests, CI, contributor tooling, fixes to unreleased code, slice or phase numbers, process words.
 7. **Say each thing once.** Merge entries on one topic, including repeats between the intro and an entry, and cite every issue on the merged entry.
 8. **Reference, do not explain.** End with `(#123)` or `(#123, #124)`. Link a guide for anything longer.
-9. **Tag, then group when large.** Each fragment carries an area tag line from a fixed project list. The collator renders area sub-headings only in a section with more than about a dozen entries, and lists smaller sections flat in area order. The area list belongs in the project's fragment guide.
+9. **Follow the project's fragment guide** for area tags and grouping; the guide owns them.
 10. **Deprecations and removals** name the replacement and the condition or version for removal.
 
 ## Template

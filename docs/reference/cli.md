@@ -383,7 +383,7 @@ Accepted by every command, before or after the subcommand.
 
 Commands the run owner serves put one of these stable codes in the JSON
 envelope's `error.code`; `status` and the exit code give its category. Other
-owners' codes are not listed yet. Match on the code, never on `error.message`,
+owners' codes are in [Schemas](schemas.md#edge-error-codes). Match on the code, never on `error.message`,
 which may be reworded.
 
 | Code | Meaning |

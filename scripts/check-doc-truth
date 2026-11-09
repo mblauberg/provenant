@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Warn on unresolved inline provenant commands, long flags, repo paths and ADRs.
 
-Reference warnings are advisory; deleted commands in current command guides fail.
+Reference warnings are advisory. Deleted commands, research index omissions and
+projection mismatches fail; strict options enforce inventory, Anchor paths,
+diagram metadata and explicit test citations.
 Fenced examples, runtime absolute paths and templates are
 excluded. Commands scope flags to
 their own help; flags are checked only after a provenant command. Lines that
@@ -176,6 +178,106 @@ def check_references(root, document, commands, adrs, gone):
                 warn(display, line, "path", path)
 
 
+
+def check_test_citations(root, document):
+    """Resolve explicit, grouped and same-file shorthand Rust Test citations."""
+    count = 0
+    text = document.read_text()
+    blocks = re.finditer(
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?Tests?:(?:\*\*)?([^\n]*(?:\n(?!\s*$|\s*(?:[-*]\s*)?(?:\*\*)?(?:Why|Owner):)[^\n]*)*)",
+        text, re.M,
+    )
+    for block in blocks:
+        current_path = None
+        for citation in re.finditer(r"`([^`]+)`", block[1]):
+            reference = " ".join(citation[1].split())
+            match = re.fullmatch(r"([^ ]+\.rs)(?:::|#)(.+)", reference)
+            if match:
+                current_path, symbols = match.groups()
+            elif reference.startswith("::"):
+                symbols = reference[2:]
+            elif reference.endswith(".rs"):
+                if not any((base / reference).is_file() for base in
+                           (root, document.parent, root / "tools/front-door")):
+                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
+                    warn(document.relative_to(root), line, "test citation", reference)
+                    count += 1
+                current_path = reference
+                continue
+            else:
+                continue
+            # tests::{one, two} is a same-file list, never a wildcard family.
+            names = symbols.split("{", 1)[-1].rstrip("}").split(",")
+            source = next((base / current_path for base in
+                           (root, document.parent, root / "tools/front-door")
+                           if current_path and (base / current_path).is_file()), None)
+            for symbol in names:
+                name = symbol.strip().split("::")[-1]
+                if (source is None or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name)
+                        or not re.search(r"\b(?:fn|mod)\s+" + re.escape(name) + r"\b", source.read_text())):
+                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
+                    warn(document.relative_to(root), line, "test citation",
+                         f"{current_path or '(no preceding path)'}::{symbol.strip()}")
+                    count += 1
+    return count
+
+
+def check_anchors(root, document):
+    """Resolve paths in the opening Anchor, including Markdown link targets."""
+    lines = document.read_text().splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("Anchor:")), None)
+    if start is None:
+        return 0  # Missing headers are reported by inventory().
+    block = [lines[start]]
+    for line in lines[start + 1:]:
+        if not line.strip() or not (line.startswith(("`", "[", " ", "\t"))
+                                    or block[-1].rstrip().endswith((",", ";"))):
+            break
+        block.append(line)
+    text = " ".join(block)
+    targets = re.findall(r"\]\(([^)]+)\)", text)
+    # Remove links first: their labels may name symbols rather than paths.
+    text = re.sub(r"\[[^\]]*\]\([^)]+\)", "", text)
+    targets += [word.strip("`;, ") for word in text.removeprefix("Anchor:").split()]
+    missing = 0
+    for target in dict.fromkeys(targets):
+        path = path_reference(target)
+        if path and not resolves_path(root, document, path, {path}):
+            warn(document.relative_to(root), start + 1, "Anchor path", target)
+            missing += 1
+    return missing
+
+
+def check_spec_index(root):
+    """Every living area spec must be reachable from its directory index."""
+    index = root / "docs/specs/README.md"
+    if not index.exists():
+        return 0
+    targets = {target.split("#", 1)[0] for target in
+               re.findall(r"\]\(([^)]+)\)", index.read_text())}
+    missing = 0
+    for spec in sorted(index.parent.glob("*.md")):
+        if spec != index and spec.name not in targets:
+            warn(index.relative_to(root), 1, "spec index entry", spec.name)
+            missing += 1
+    return missing
+
+
+def check_diagrams(root, document):
+    """Mermaid accessibility metadata is structural; visual review is separate."""
+    missing = 0
+    text = document.read_text()
+    for match in re.finditer(r"^```mermaid\n(.*?)^```", text, re.M | re.S):
+        for field in ("accTitle", "accDescr"):
+            description = re.search(r"^\s*accDescr\s*\{([^}]+)\}", match[1], re.M | re.S)
+            multiline = field == "accDescr" and description and description[1].strip()
+            if not multiline and not re.search(r"^\s*" + field + r"\s*:[ \t]*\S", match[1], re.M):
+                warn(document.relative_to(root), text.count("\n", 0, match.start()) + 1,
+                     "diagram metadata", field)
+                missing += 1
+    return missing
+
+
 def inventory(root, document):
     """Owner: and Anchor: open the first paragraph below the title; values may wrap."""
     lines = document.read_text().splitlines()
@@ -196,12 +298,114 @@ def inventory(root, document):
     return missing
 
 
+def check_research_index(root):
+    """Every note under docs/research is linked from its README index."""
+    base = root / "docs/research"
+    index = base / "README.md"
+    if not index.exists():
+        return 0
+    text = index.read_text()
+    errors = 0
+    for path in sorted(base.rglob("*.md")):
+        relative = path.relative_to(base).as_posix()
+        if path != index and relative not in text and path.parent.relative_to(base).as_posix() + "/README.md" not in text:
+            print(f"{index.relative_to(root)}: error: {relative} is not linked from the research index")
+            errors += 1
+    return errors
+
+
+ANCHOR_PATH = re.compile(r"`([^`\s]+)`|(?<![\w./-])([\w-]+\.(?:md|rs|py|toml|json|ya?ml|sh))(?![\w/-])|(?<![\w./-])((?:\.\./|\.github/|docs/|scripts/|skills/|tools/|config/|crates/|src/|tests/)[\w./-]+)")
+
+
+def anchors(root, document):
+    """Each Anchor: path resolves, and at least one names a file, not a directory."""
+    lines = document.read_text().splitlines()
+    index = next((number for number, line in enumerate(lines) if line.startswith("Anchor:")), None)
+    if index is None:
+        return 0  # inventory() reports the missing header.
+    block = [lines[index][len("Anchor:"):]]
+    # A wrapped value continues after a trailing separator or on a line that opens with a reference.
+    while index + len(block) < len(lines) and (
+            re.match(r"[`\[]", lines[index + len(block)]) or block[-1].rstrip().endswith((",", ";"))):
+        block.append(lines[index + len(block)])
+    display = document.relative_to(root)
+    found = []
+    text = " ".join(block)
+    # A link's target is the evidence; its label is only a name for it.
+    references = re.findall(r"\]\(([^)\s#]+)[^)]*\)", text)
+    text = re.sub(r"\[[^\]]*\]\([^)]*\)", " ", text)
+    references += [match[1] or match[2] or match[3] for match in ANCHOR_PATH.finditer(text)]
+    for reference in references:
+        reference = reference.split("#", 1)[0].split("::", 1)[0].rstrip(".,;:")
+        if not reference or "://" in reference or ("/" not in reference and "." not in reference):
+            continue
+        bases = (document.parent, root, root / "tools/front-door")
+        target = next((base / reference for base in bases if (base / reference).exists()), None)
+        if target is None:
+            print(f"{display}:{index + 1}: error: Anchor path `{reference}` does not resolve")
+            return 1
+        found.append(target)
+    if not any(path.is_file() for path in found):
+        print(f"{display}:{index + 1}: error: Anchor names no source file or test")
+        return 1
+    return 0
+
+
+def table_rows(text, heading):
+    """First-column cells and rows of the first table after a Markdown heading."""
+    section = text.split(heading, 1)[1] if heading in text else ""
+    rows = []
+    for line in section.splitlines():
+        if line.startswith("|---"):
+            continue
+        if line.startswith("|"):
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+        elif rows:
+            break
+    return rows[1:]
+
+
+def check_projections(root):
+    """Compare hand-kept runbook tables with the source they project."""
+    errors = []
+    intake = root / "docs/runbooks/event-intake-configuration.md"
+    source = root / "tools/front-door/src/bin/event-intake.rs"
+    if intake.exists() and source.exists():
+        code = source.read_text()
+        documented = {row[0].strip("`"): row for row in table_rows(intake.read_text(), "## Configure")}
+        read = set(re.findall(r'"(PROVENANT_INTAKE_[A-Z_]+)"', code))
+        for name in sorted(read ^ set(documented)):
+            where = "is read by event-intake but not documented" if name in read else "is documented but not read"
+            errors.append(f"{intake.relative_to(root)}: error: {name} {where}")
+        default = re.search(r'"PROVENANT_INTAKE_SWEEP_SECONDS"\)\s*\.unwrap_or_else\(\|_\| "(\d+)"', code)
+        row = documented.get("PROVENANT_INTAKE_SWEEP_SECONDS")
+        if default and row and f"`{default[1]}`" not in row[1]:
+            errors.append(f"{intake.relative_to(root)}: error: sweep default is {default[1]}")
+    inbox = root / "docs/runbooks/human-inbox.md"
+    specs = root / "tools/front-door/crates/records/src/adapters.rs"
+    hooks = root / "tools/front-door/crates/cli/src/hooks.rs"
+    if inbox.exists() and specs.exists() and hooks.exists():
+        rows = table_rows(inbox.read_text(), "## Delivery service")
+        readers = set(re.findall(r'name: "([\w-]+)",(?:(?!name: ").)*?local_offer_reader: true', specs.read_text(), re.S))
+        injected = {name.lower() for name in re.findall(
+            r"DeliveryCapability \{\s*provider: Harness::(\w+),(?:(?!\}\);).)*?live_injection: true", hooks.read_text(), re.S)}
+        documented_readers = {row[0].strip("`") for row in rows if len(row) == 4 and row[2] == "Library API"}
+        documented_injected = {row[0].strip("`") for row in rows if len(row) == 4 and row[3] not in ("Unavailable", "")}
+        if not rows or rows[-1][0] != "Every other adapter":
+            errors.append(f"{inbox.relative_to(root)}: error: delivery table must end with an 'Every other adapter' row")
+        if documented_readers != readers:
+            errors.append(f"{inbox.relative_to(root)}: error: library offer readers are {sorted(readers)}, documented {sorted(documented_readers)}")
+        if documented_injected != injected:
+            errors.append(f"{inbox.relative_to(root)}: error: live injection providers are {sorted(injected)}, documented {sorted(documented_injected)}")
+    for error in errors:
+        print(error)
+    return len(errors)
+
+
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
-    "README.md", "docs/worktrees.md", "docs/specs/cli.md", "docs/specs/fabric.md",
-    "docs/specs/run.md", "docs/specs/workflow.md", "docs/specs/routing.md",
-    "docs/specs/supervisor.md", "docs/reference/schemas.md",
+    "README.md", "docs/worktrees.md", "docs/reference/schemas.md",
     "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
 )
 DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"
@@ -243,7 +447,8 @@ def deleted_command(reference):
 def check_deleted_commands(root):
     """Fail on command uses, keeping template names, wire fields and prose valid."""
     count = 0
-    for relative in COMMAND_GUIDES:
+    for relative in sorted(set(COMMAND_GUIDES) |
+                           {str(path.relative_to(root)) for path in (root / "docs/specs").glob("*.md")}):
         document = root / relative
         if not document.exists():
             continue
@@ -281,17 +486,24 @@ def check_deleted_commands(root):
     return count
 
 
+# Reserved parallel batches; remove entries when their spec repairs land.
+RESERVED_SPECS = ("docs/specs/supervisor.md", "docs/specs/disk.md")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
-    parser.add_argument("--inventory-only", action="store_true", help="check Owner/Anchor headers and deleted commands only")
-    parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers; reference warnings remain advisory")
+    parser.add_argument("--exclude-reserved", action="store_true",
+                        help="exclude the reserved parallel-batch specs from evidence checks")
+    parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved Rust Test citations")
+    parser.add_argument("--inventory-only", action="store_true", help="check documentation evidence without loading the CLI catalogue")
+    parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers, Anchor paths, spec index entries or diagram metadata")
     args = parser.parse_args()
     root = args.root.resolve()
-    command_errors = check_deleted_commands(root)
+    command_errors = check_deleted_commands(root) + check_research_index(root)
     commands = None if args.inventory_only else catalogue(args, root)
     adrs = {int(match[1]) for path in (root / "docs/adr").glob("*.md")
             if (match := re.match(r"(\d+)-", path.name))}
@@ -310,12 +522,26 @@ def main():
     except (OSError, subprocess.CalledProcessError):
         pass
     documents = sorted((root / "docs/runbooks").glob("*.md")) + sorted((root / "docs/specs").glob("*.md"))
-    missing = sum(inventory(root, document) for document in documents)
+    maintained = [root / "docs/worktrees.md", root / "docs/ARCHITECTURE.md", root / "docs/glossary.md"]
+    maintained = [path for path in maintained if path.exists()]
+    evidence = [document for document in documents + maintained
+                if str(document.relative_to(root)) not in (RESERVED_SPECS if args.exclude_reserved else ())]
+    missing = sum(inventory(root, document) for document in evidence
+                  if document in documents or document.name == "worktrees.md")
+    missing += sum(check_anchors(root, document) for document in evidence)
+    missing += check_spec_index(root)
+    adr_documents = sorted((root / "docs/adr").glob("*.md"))
+    missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
+    citations = sum(check_test_citations(root, document) for document in evidence
+                    if document.parent == root / "docs/specs")
+    missing += sum(anchors(root, document) for document in evidence
+                   if document in documents)
+    projection_errors = check_projections(root)
     if not args.inventory_only:
         agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
-        for document in [path for path in agents if path.exists()] + documents:
+        for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
             check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or (args.strict_inventory and bool(missing)))
+    return int(bool(command_errors) or bool(projection_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 
 
 if __name__ == "__main__":

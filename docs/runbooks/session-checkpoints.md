@@ -158,8 +158,8 @@ to 50 entries and accept `--limit` from 1 to 100. Continue with `--after` and
 the returned `next_cursor`; a byte limit may shorten a page. Entries are
 limited to 16 KiB. Log contents are not copied into demand telemetry.
 
-Each append applies the per-session age, count and size limits documented in
-[configuration](configuration.md#lane-cache-collection). Listing applies all
+Each append applies the per-session age, count and size limits set under
+[`[retention]`](../reference/config-keys-all.md#host-retention-settings). Listing applies all
 three limits without changing storage, and full `gc` removes excess payloads
 even for idle sessions. Operation receipts are kept for the configured replay horizon,
 then pruned; aggregate appended/pruned counts survive. There is no lifetime

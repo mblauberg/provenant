@@ -8,9 +8,6 @@ uses no LLM, no network, no new counters and no synthetic runs.
 
 Implementation: `provenant_telemetry::study::reduce` (library) and
 `cargo run -p provenant-telemetry --example study -- INPUT.json [--json]`.
-No `provenant telemetry study` subcommand exists yet: wiring it needs edits to
-the CLI's module list and dispatcher, which were outside the slice that added
-the reducer. The example binary is the stopgap.
 
 Input (`StudyInput`, JSON, all times unix seconds):
 
@@ -56,6 +53,8 @@ Rules:
   buckets by changed lines (small ≤ 50, medium ≤ 300, large, unknown), token
   share by route, attribution coverage and chair coverage.
 
+Verdict thresholds are owned by `crates/telemetry/src/study.rs`.
+
 Verdict:
 
 | Verdict | Condition |
@@ -67,35 +66,3 @@ Verdict:
 A `comparable` result is a descriptive comparison, not a causal claim: the
 cohorts differ in time, PR mix and model pricing. Read the size buckets and
 route mix before drawing a conclusion.
-
-## Controlled replay (deferred)
-
-A controlled comparison would replay the same recorded tasks under both
-configurations. Without live runs it can only be specified, not measured: a
-deterministic offline comparison over recorded fixtures would reduce paired
-`StudyInput` fixtures with identical PR sets and report per-task deltas. That
-needs a recorded fixture corpus that does not exist yet, and synthetic runs are
-excluded from this study, so it is deferred until such a corpus is captured.
-
-## Results template
-
-Copy into the issue when real data is available.
-
-```text
-Cut-over: <commit> on <date>
-Baseline cohort: merged <from> to <until>, N = <n>
-Enabled cohort:  merged <from> to <until>, N = <n>
-Verdict: pending | inconclusive | comparable   Reasons: <...>
-
-                      baseline   enabled   change
-Aggregate tokens/PR
-Mean tokens/PR
-Median tokens/PR
-Size: small / medium / large / unknown (median, n)
-Category: chair / worker / review / repair / failed
-Route mix (token share)
-Attribution coverage (linked attempts)
-Chair coverage (PRs with a read chair counter; unread sessions)
-Beside totals: abandoned / unlinked attempts, unlinked chair sessions
-Data sources and extraction dates:
-```

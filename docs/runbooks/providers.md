@@ -1,6 +1,6 @@
 # Providers
 Owner: provenant-providers
-Anchor: tools/front-door/crates/providers/src
+Anchor: [`providers tests`](../../tools/front-door/crates/providers/src/tests.rs); [`cloud.rs`](../../tools/front-door/crates/providers/src/cloud.rs)
 
 Per-adapter launch notes. The model adapters (Claude, Codex, Cursor, Agy and
 OpenCode) are enabled by default in every access and session mode with a launch

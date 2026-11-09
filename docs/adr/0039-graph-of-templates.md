@@ -6,38 +6,26 @@ Changed: 2026-11-06, #2867.
 
 ## Context
 
-The owner wants a graph to be a customisable collection of nodes that any agent
-can use or create, with great presets, planners that can reshape it, and enough
-trace to recover from failure, fix causes and measure efficiency. A plain lane
-is a single node. Backwards compatibility is not a constraint; silently losing
-state an install holds is.
-
-Two independent architecture reviews read the code and agreed on the direction.
-Today `src/lib.rs#run` splits a run into two lifecycle paths over shared
-execution, with nine next-attempt mechanisms (#2869). Agents cannot add nodes:
-`src/fabric/preset_graph.rs#run_preset_graph` refuses inside a lane, children are
-read-only and `crates/run/src/launch.rs#RunStore::validate_child` rejects writers.
-Planner fragments cannot emit composites or loops
-(`crates/fabric-runtime/src/graph/plans.rs#validate_spec`). Roles, presets and
-patterns are three templating forms. An eight-lane `big-batch` with file specs
-exceeded the 16 MiB checkpoint limit because prompts are embedded per node.
+Multi-step work needs one recovery and mutation owner. Templates make workflow
+shapes composable without adding a separate runtime for each shape; a plain
+worker is the same execution mechanism as a node in a larger graph.
 
 ## Decision
 
 Keep the graph kernel, its checkpoint-before-launch discipline and the compiled
-`GraphNode` as an internal form. Replace what sits above them with four concepts.
+`GraphNode` as an internal form. Expose four concepts above it.
 
 - **Attempt:** one provider process under custody. Retries and continuations are
   new attempts with lineage.
 - **Template:** TOML with parameters and either a leaf (brief, tier, access,
-  outputs) or `nodes`. It replaces role, preset and pattern. A composite is a
+  outputs) or `nodes`. A composite is a
   template with nodes; a dotted name is a flavour (`review.security`). Layers are
   bundled, user, repository and inline, and the same schema serves all of them.
 - **Node:** `use` plus overrides (`brief`, `tier`, `after`, `inputs`, `over`,
   `min_ok`, `repeat`, work binding). Its executor is an agent, a deterministic
   action (gate, decide, land) or a composite. Plan and synthesise are briefs, not
-  runtime kinds. `over` copies a node per named item with `${item}`, replacing
-  `count`, `for_each` and `parallel`, so a swarm is one node over named areas.
+  runtime kinds. `over` copies a node per named item with `${item}`, so a swarm
+  is one node over named areas.
 - **Graph:** a revisioned collection of nodes, changed only by patches.
 
 ```toml
@@ -57,7 +45,7 @@ an agent's final `patch` block and a live call from a lane. A patch holds nodes,
 inline templates and optional `skip` or `replace` of unstarted nodes. It commits
 atomically against an expected revision and an idempotency key, and rejects cycles
 and conflicting edits, scans for secrets and journals the change. Started attempts
-are immutable. Limits are overridable, including child depth (default 8).
+are immutable. Admission applies the configured graph limits.
 "Planner" is only `use = "plan"`: any agent may emit any template, loop, worktree
 or further planner, so replanning after a wave is ordinary.
 
@@ -91,13 +79,15 @@ No reverse connection or replicated journal is required. Budgets and
 recovery are owned by each host's graph; this boundary does not provide a shared
 cross-host spending ledger.
 
-A child's roots and capabilities need not be a subset of its parent's. A lane
-may request what its agent could request by calling the CLI directly; spawning
-does not introduce a narrower authority envelope. The host applies the ordinary
-launch policy to every child: credential roots, state roots and write roots
-that overlap the worktree remain refused at launch.
+A child's sandbox roots and capabilities need not be a subset of its parent's:
+the host admits the child through ordinary launch policy, rather than inheriting
+the parent process's sandbox. This does not widen the user-approved authority
+envelope. The chair must keep delegated work within that envelope, as
+[ADR 0021](0021-configured-workspace-dispatch-boundaries.md) requires. Credential,
+state and protected-root checks apply independently at every launch. The admission
+owner is [`relay.rs#admit_child_bound`](../../tools/front-door/crates/fabric-runtime/src/graph/relay.rs).
 
-**A plain lane** is a one-node patch using `task`, with `AttemptSpec` (#2869)
+**A plain lane** is a one-node patch using `task`, with `AttemptSpec`
 carrying placement, account and write roots.
 
 **Prompts are content-addressed.** A checkpoint stores digests into a store beside
@@ -106,84 +96,38 @@ times node count. Prompts are scanned for secrets before they persist.
 
 ## Node library
 
-| Template | Default brief's job | Tier | Composes as |
-|---|---|---|---|
-| `task` | Do the brief | senior | Leaf |
-| `plan` | Return a patch and its reasoning | principal | Leaf; may add explorers |
-| `explore` | Map an area and cite evidence | junior | Over areas, senior synthesis |
-| `research` | Answer from dated primary sources | `web`, else junior | Over questions, senior synthesis |
-| `design` | Options, root constraint, smallest slice | principal | Optional critique |
-| `implement` (`.plan`, `.issue`, `.fix`) | Meet acceptance, commit, hand off | senior | Over slices, into one branch |
-| `review` (`.<lens>`) | Find defects at a pinned head | by shape | Over lenses, senior synthesis; a panel of one is one attempt |
-| `verify`, `synthesise`, `repair` | Falsify claims; reconcile inputs; fix qualified findings | senior | Repair loops with delta review |
-| `ci`, `decide`, `land` | Deterministic control | none | Action |
-| `deliver`, `batch` | Implement through landing | mixed | Composite |
-
-The general `plan` brief carries the working rules: slices of about three
-acceptance items with disjoint scopes into one integration branch; shared contracts
-first, waves only for real dependencies; a long writer only for coupled work, near
-500k tokens, perhaps a senior calling juniors; junior for mechanical work, senior
-for contained design, at most one principal a wave; explore when evidence is thin;
-end a wave with another `plan` when results could change the shape; light review per
-slice and full review of the integrated head, with lens breadth before family;
-consult recorded cost per template. Compulsory scouting and refactoring stages go.
+Bundled templates are owned by
+[`assets/templates/`](../../tools/front-door/crates/fabric-runtime/assets/templates/).
+The [template runbook](../runbooks/presets.md) owns composition and use; template
+names, tiers and briefs are not a separate architectural catalogue.
 
 ## Trace and recovery
 
-Add append-only `graphs/<id>.events.jsonl`, written before each checkpoint and
-retained after terminal collection. It records patches (digest, author attempt,
-reason, revision), node state changes with cause codes, attempt start and settle
-(requested tier, resolved route), waits (slot, quota, CI, ask), gates, joins,
-cancellation, budget use and effects (branch, commit, PR). It holds identifiers,
-digests and codes only, so secrets stay out.
+The graph journal retains bounded, redacted identifiers, digests and cause codes
+for mutations, attempts and control decisions. The checkpoint is the authority
+for recovery; the event trace explains it rather than replacing it. Checkpoint
+before launching, and bind replay to stable operation and node identities so a
+restart cannot launch a completed effect twice. Recovery reconciles uncertain
+launches, reuses finished outputs and resumes only unfinished work.
 
-The checkpoint stays the authority for recovery, and operation replay prevents
-duplicate launches. Recovery reconciles uncertain launches, reuses finished outputs
-and resumes only unfinished work. `AttemptFact` gains `tier`, `template`,
-`parent_node` and slot wait, and keeps its token, cache and timing fields, and reports group by
-tier and template without counting composite descendants twice.
+Landing accepts independent review evidence bound to the exact subject it merges. Run settlement
+advances pending graphs without a second scheduler in the CLI or MCP façade
+([ADR 0022](0022-thin-fabric-mcp-execution-facade.md)).
 
 ## Interface
 
-`run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`, `templates`, `land`,
-`quota`. Everything else sits behind `--all`. `trace GRAPH` shows the retained graph
-timeline with recorded attempt measurements; `output --trace` also shows the timeline;
-`edit` applies a patch. `status` has one row schema for graph, node and attempt.
-`run [BRIEF] [--use T] [--tier T | --model ADAPTER/MODEL] [--effort LEVEL]
-[--account NAME] [--host NAME] [--over] [--set] [--file] [--explain] [--wait]` starts
-work, and inside a lane adds a child. `retry` resumes, continues or redoes a target,
-optionally with a new brief or a raised budget. `status --stats --by tier|template`
-reports efficiency. MCP calls the same service with the same JSON and takes
-documents, not file paths.
-
-`--operation-id ID` is available in `help --all` for replay. Attempt controls use
-`--set attempt.host='"workshop"'`, `--set attempt.build_heavy=true`,
-`--set attempt.confidential=true` and `--set attempt.provider_timeout=300`.
-`--host` overrides the attempt host setting. Delivery uses `--use deliver`.
-
-Deleted: `dispatch`, `review`, `lanes`, `resume`, `cancel`, `preset`, `fabric graph`,
-`fabric_graph`, `PRESET_INCOMPATIBLE`, the policy successors and tail chase (#2869),
-child stores, `pattern_plan.rs`, per-preset `[plan]`, `shape_stages`,
-`review_lenses`, automatic preset rules and pipeline experiments; review uses a
-panel resolved at launch.
+The [generated command reference](../reference/cli.md) owns commands and flags.
+CLI and MCP call the same graph service. Inside a lane, submission adds child
+work through the host relay; it does not create a private child store.
 
 ## Consequences
 
-Delivery is one integration branch and one release, after a drain. Pending graphs
-finish or are cancelled first and live lanes drain. Terminal checkpoints stay
-decodable or take the existing `retire_unreadable` path, and the release note reports
-any that do. Records that cannot be read are preserved and reported, never dropped.
-User presets are ported by hand. Old child stores stop being written. Their
-records drop out of statistics: this cutover does not ingest child-store history
-into telemetry. The stores remain on disk for inspection; the cutover never
-deletes them. All hosts upgrade together, then real launches run on each.
+Checkpoint recovery around external effects is the critical boundary. Waiting
+parents yield capacity so child completion does not depend on a slot the parent
+holds. Each host owns its budget and recovery; peer placement does not imply a
+cross-host spending ledger.
 
-Rejected: event sourcing with the checkpoint as a projection, because rewriting
-recovery adds risk for no present need; a state converter, because a drain leaves
-little to convert.
-
-Risks: every lane rests on journal recovery around external effects, so a parity
-corpus gates the cutover; waiting parents can starve under lane caps, so they yield
-slots; spend can run away, so budgets warn and pause; agents without a live relay
-can only add nodes in their final block. IR additivity and relay-add locking are
-inferred, not prototyped.
+Checkpoint formats must remain readable across an upgrade or be drained first.
+Unreadable records are preserved and reported. Event sourcing with a projected
+checkpoint is rejected: it would replace a working recovery authority without
+solving a present need.

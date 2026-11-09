@@ -1,6 +1,6 @@
 # Model routing
 Owner: provenant-routing
-Anchor: tools/front-door/crates/routing/src
+Anchor: [`resolve.rs`](../../tools/front-door/crates/routing/src/resolve.rs); [`routing tests`](../../tools/front-door/crates/routing/src/tests.rs)
 
 Run `provenant route list` to inspect the catalogue, configured pool weights
 and pacing policy; pacing and readiness apply at dispatch. Use

@@ -10,7 +10,8 @@ ruleset edit, and a renamed job silently stops being enforced. Instead, add a
 single `ci-status` job (template:
 [`../templates/ci-status-aggregate.yml`](../templates/ci-status-aggregate.yml))
 that `needs:` every real job, runs `if: always()`, and fails unless each
-needed job's result is `success` or `skipped`. That one job name is what the
+needed job's result is `success`, or `skipped` for a job the change filter
+explicitly left unselected. Any other skip fails the check. That one job name is what the
 ruleset pins.
 
 ## Creating the ruleset

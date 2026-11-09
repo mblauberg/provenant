@@ -1,6 +1,6 @@
 # Landing lease
 Owner: provenant-fabric-store
-Anchor: tools/front-door/crates/fabric-store/src
+Anchor: [`landing.rs`](../../tools/front-door/crates/fabric-store/src/landing.rs)
 
 Call `fabric_context` (`op: inspect`) to verify the selected project and inbox.
 Lease actions use the `fabric_lease` tool. `landing_acquire` takes `reference`

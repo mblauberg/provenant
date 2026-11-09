@@ -1,7 +1,6 @@
 # Lens: simplicity
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Ownership and structure" (simplicity, YAGNI, the 1,000-line cap).
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Where does over-engineering add complexity beyond the current need?
 - What can be deleted while keeping behaviour? Name the lines.

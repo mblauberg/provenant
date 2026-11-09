@@ -24,7 +24,7 @@ and evidence. Layers are bundled, user, repository and inline; project templates
 `.provenant/templates/`. See the [template runbook](../../docs/runbooks/presets.md).
 
 Register writer worktrees first with `provenant worktree create NAME --base BASE`.
-Use separate worktree and write_scope bindings per slice; review the integrated head. The [planner brief](references/planner.md)
+The bundled `batch` composite gives every slice the same `worktree` and `write_scope` bindings, so its writers sharing that worktree run in sequence. For parallel writers, define a graph with a separate registered worktree and write scope for each node; review the integrated head. The [planner brief](references/planner.md)
 owns slicing and tier choices; [brief and collect](references/dispatch.md)
 owns the hand-off. Keep coupled writes with one owner.
 

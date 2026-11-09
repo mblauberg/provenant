@@ -59,5 +59,5 @@ does not fix them without the grant.
 
 ## Evidence
 
-Prefer 2026 sources and mark older ones as possibly stale. The dated research
+Prefer current sources and mark any older than a year as possibly stale. The dated research
 basis is in [references/audit.md](references/audit.md#research-basis).

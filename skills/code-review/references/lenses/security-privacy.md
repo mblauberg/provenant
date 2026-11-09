@@ -1,7 +1,6 @@
 # Lens: security and privacy
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Security and privacy overlay".
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Trace untrusted input through parsing, validation, authorisation, effects,
   persistence, logging and output.

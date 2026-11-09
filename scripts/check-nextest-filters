@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import re
 import subprocess
@@ -13,6 +15,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FILTER_FILES = (ROOT / "tools/front-door/.config/nextest.toml", ROOT / ".github/workflows/ci.yml")
 TEST_SELECTOR = re.compile(r"test\(=([^)]*)\)")
+
+
+def native_inventory():
+    """Read the native inventory through its owning checker's parser."""
+    loader = importlib.machinery.SourceFileLoader("native_inventory", str(ROOT / "scripts/check-native-inventory"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.inventory(module.INVENTORY)
 
 
 def main() -> int:
@@ -50,10 +61,7 @@ def main() -> int:
         path.read_text(errors="replace") for path in (ROOT / "tools/front-door").rglob("*.rs") if "target" not in path.parts
     )
     missing = []
-    inventory = {
-        match.group(1)
-        for match in re.finditer(r"^\| `([^`]+)` \| macOS \|", (ROOT / "docs/runbooks/ci.md").read_text(), re.MULTILINE)
-    }
+    inventory = {row[0] for row in native_inventory()}
     for name in unlisted:
         if name in inventory:
             if sys.platform == "darwin":
