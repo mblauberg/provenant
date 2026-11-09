@@ -9,10 +9,7 @@ or verified pool. It records a schema version, state (ready, unavailable or
 unknown), typed reason, observation and expiry times, optional reset time and a
 bounded non-secret evidence reference. Providers supply facts; quota publishes
 verdicts. Selection gates for access, confinement, effort and pacing remain
-contextual. Reasons include not probed, stale, probe timeout, command failure,
-missing executable, signed out, expired login, account mismatch, exhausted, provider refusal,
-uncalibrated partial coverage, invalid evidence, unreachable peer and
-unsupported peer version. Existing exclusion reason wire names stay stable.
+contextual. Reason types are owned by `crates/quota/src/readiness.rs`.
 
 Missing records, future observations, scope mismatches and records at or beyond
 their expiry read as unknown. A reset does not by itself establish readiness.
@@ -23,14 +20,8 @@ it without clearing other refusals. Account refusals cover all routes for
 that account; pool refusals cover only the verified pool. Refusals publish as
 soon as observed and retain the existing clearing and isolation rules.
 
-Persist readiness in its own tree, `<state>/readiness/<account-key>/<adapter>.json`,
-outside `quota/` (older readers treat every JSON file there as an account
-snapshot). The file holds every observation for that account and adapter, at
-most 64, and is written under the quota lock with the same private atomic
-replacement as the account JSON. Readers take no lock. No existing reader
-rejects an unknown top-level state directory: the disk report counts it as
-other state and the other state walkers visit only the directories they name.
-An absent file reads as unknown; quota tick schedules a probe immediately for
+Persist readiness separately from quota snapshots so older readers remain
+unaffected. [State](state.md) owns the layout. An absent file reads as unknown; quota tick schedules a probe immediately for
 an unprobed account, or after its configured panel interval from the last probe,
 subject to power policy, backoff and an existing claim. A normally due probe
 can run sooner.
@@ -66,12 +57,7 @@ sync rebuilds held refusals from the account record. A failed readiness write
 leaves it unknown, never ready. The CLI warns if readiness publication fails;
 the account commit remains authoritative.
 
-Reading. `provenant_quota::ReadinessFile::get(scope, now)` returns a
-`ReadinessRead` (state, reason, source scope, observation and expiry times,
-reset, evidence reference) and `ReadinessRead::project()` the receipt form. In the CLI edge,
-`quota::read_readiness(state, scope, now)` opens the file without creating
-anything and returns unknown when it is absent, stale, for another scope or
-damaged. Route lists and resolution show recorded model or verified-pool evidence
+Reading. Route lists and resolution show recorded model or verified-pool evidence
 separately from executable availability; quota and doctor label account-wide
 evidence as such. A route list caches each account file for the display and warns
 when its 256-row readiness display limit is reached. Routing, route commands and

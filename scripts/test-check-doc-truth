@@ -37,6 +37,21 @@ class DocTruthTests(unittest.TestCase):
         path.write_text(text)
         return path
 
+    def test_test_citations_resolve_and_fail_strictly(self):
+        source = self.root / "tools/front-door/crates/example/src/lib.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text("mod tests { fn present() {} }\n")
+        spec = self.root / "docs/specs/example.md"
+        spec.write_text("# Example\n\nOwner: example\nAnchor: example\n\n"
+                        "- Test: `crates/example/src/lib.rs::present`;\n"
+                        "  `crates/example/src/lib.rs::missing`\n")
+        result = self.check("--inventory-only", "--strict-citations", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("lib.rs::missing", result.stdout)
+        self.assertNotIn("lib.rs::present", result.stdout)
+        source.write_text("mod tests { fn present() {} fn missing() {} }\n")
+        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
+
     def test_deleted_commands_fail_even_in_fenced_examples(self):
         (self.root / "README.md").write_text(
             "```sh\nprovenant dispatch --route junior\n```\n"

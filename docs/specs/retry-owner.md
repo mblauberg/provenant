@@ -1,14 +1,13 @@
 # Retry owner
 
 Owner: run, routing, confinement and fabric-runtime
-Anchor: `crates/run/src/policy.rs`
+Anchor: `crates/run/src/dispatch_temporary_tests.rs`
 
 A retry lineage preserves each terminal receipt and its `retry_of` links. The
 version 2 sealed policy decision requires a typed cause and action. Drain
 active runs before upgrading; prior decision records are not read. Terminal
 publication and successor insertion are atomic. A stop decision is recorded even without a successor.
-`Service::live_tail` resolves the live attempt with a bounded status and tail
-recheck. Any unavoidable migration must be forward-only, idempotent and
+Any unavoidable migration must be forward-only, idempotent and
 preceded by a timestamped, WAL-aware store backup.
 
 One cumulative infrastructure-successor allowance per lineage uses
@@ -48,9 +47,7 @@ automatic quota-reset wait. Partial fan-in minimums are separate work.
 **Why:** A single owner and allowance make recovery traceable without expanding
 writer authority or multiplying retries.
 
-**Test:** `crates/run/src/policy.rs::tests` covers the implemented decision
-and lineage contract; later budget, admission and recovery requirements are
-review gates until their slices land.
+**Test:** `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state` covers continuation lineage; other requirements are review gates where no test pins them.
 
 The run continuation driver and graph worktree driver cover real successor
 custody, launch and guardian settlement. Native confinement is required for

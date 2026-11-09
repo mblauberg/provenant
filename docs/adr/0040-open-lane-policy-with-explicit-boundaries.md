@@ -12,11 +12,8 @@ from the CLI, including children launched through the host. Restrictions outside
 should warn or be host-configurable. [ADR 0039](0039-graph-of-templates.md)
 requires the same launch policy for children and direct launches.
 
-The current macOS renderer starts with `(deny default)`. The launch edge builds
-empty secret and protected lists in
-`tools/front-door/crates/cli/src/run/provider/confinement.rs#confinement_request`.
-Changing the default without first specifying explicit denials would expose
-credentials and host state and make read-only sources writable.
+Explicit denials protect credentials and host state while allowing ordinary
+access. Read-only sources remain protected from writes.
 
 ## Decision
 

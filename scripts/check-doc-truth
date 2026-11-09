@@ -176,6 +176,28 @@ def check_references(root, document, commands, adrs, gone):
                 warn(display, line, "path", path)
 
 
+
+def check_test_citations(root, document):
+    """Check explicit Rust path::symbol citations on Test lines and continuations."""
+    count = 0
+    in_test = False
+    for number, line in enumerate(document.read_text().splitlines(), 1):
+        if re.match(r"^\s*(?:[-*]\s*)?(?:\*\*)?Test:(?:\*\*)?", line):
+            in_test = True
+        elif not line.strip() or re.match(r"^\s*(?:[-*]\s*)?(?:\*\*)?(?:Why|Owner):", line):
+            in_test = False
+        if not in_test:
+            continue
+        for path, symbol in re.findall(r"`([^`\s]+\.rs)::([A-Za-z_][A-Za-z_0-9:]*)`", line):
+            candidates = [base / path for base in (root, document.parent, root / "tools/front-door")]
+            source = next((candidate for candidate in candidates if candidate.is_file()), None)
+            name = symbol.split("::")[-1]
+            if source is None or not re.search(r"\b(?:fn|mod)\s+" + re.escape(name) + r"\b", source.read_text()):
+                warn(document.relative_to(root), number, "test citation", f"{path}::{symbol}")
+                count += 1
+    return count
+
+
 def inventory(root, document):
     """Owner: and Anchor: open the first paragraph below the title; values may wrap."""
     lines = document.read_text().splitlines()
@@ -287,6 +309,7 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
+    parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved explicit test citations")
     parser.add_argument("--inventory-only", action="store_true", help="check Owner/Anchor headers and deleted commands only")
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers; reference warnings remain advisory")
     args = parser.parse_args()
@@ -311,11 +334,12 @@ def main():
         pass
     documents = sorted((root / "docs/runbooks").glob("*.md")) + sorted((root / "docs/specs").glob("*.md"))
     missing = sum(inventory(root, document) for document in documents)
+    citations = sum(check_test_citations(root, document) for document in sorted((root / "docs/specs").glob("*.md")))
     if not args.inventory_only:
         agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
         for document in [path for path in agents if path.exists()] + documents:
             check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or (args.strict_inventory and bool(missing)))
+    return int(bool(command_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 
 
 if __name__ == "__main__":

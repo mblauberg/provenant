@@ -16,10 +16,8 @@ harness without rediscovering it from individual skills.
 
 ## System map
 
-The `provenant` binary is the CLI and composition edge. Fifteen crates under
-`tools/front-door/crates/` each own one decision, and a crate may depend only on
-the crates beneath it (the allowed maximum in the
-[workspace table](specs/rust-workspace.md#crate-layering); a crate may declare fewer).
+The `provenant` binary is the CLI and composition edge. Crates under `tools/front-door/crates/` have the boundaries below. The
+[workspace table](specs/rust-workspace.md#crate-layering) owns allowed dependencies.
 
 | Crate | Owns |
 |---|---|
@@ -39,9 +37,15 @@ the crates beneath it (the allowed maximum in the
 | `fabric-store` | Project-scoped mail, tasks and events in SQLite |
 | `fabric-runtime` | Fabric identity, home-host coordination and peer hosts |
 | `fabric-mcp` | The Fabric MCP stdio server |
+| `sqlite` | Shared SQLite support |
+| `test-support` | Test-only utilities |
+
+The diagram shows conceptual execution flow; arrows are not crate dependency declarations.
 
 ```mermaid
 flowchart TB
+    accTitle: System execution flow
+    accDescr: The CLI and Fabric connect run, routing, providers, storage and shared records.
     App["Quota menu bar app"] -->|"quota show, accounts set, quota display"| CLI["provenant CLI"]
     CLI --> Run["run"]
     CLI --> Workflow["workflow"]
@@ -136,7 +140,7 @@ flowchart TB
     G1 -. "send back" .-> SC
     G1 == "authority" ==> DEL
 
-    subgraph DEL["deliver kernel: one delivery-run receipt binds every gate below"]
+    subgraph DEL["Delivery lifecycle and its gates"]
       direction TB
       EX["execute<br/>implement, test-design, refactor, diagnose"] --> VF["verify<br/>deterministic checks"]
       VF -. "failed" .-> EX
@@ -345,8 +349,7 @@ It rejects majority voting and repetitive reviewers.
 The review lead chooses lenses proportional to the work: correctness, security,
 performance, reliability/concurrency, state and type boundaries, test coverage,
 spec alignment, readability/maintainability and larger structural
-simplification. Findings become blocking only when evidence and primary-family
-corroboration justify it.
+simplification. Findings are adjudicated against evidence.
 
 ## Authority and concurrency
 
