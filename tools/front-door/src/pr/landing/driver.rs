@@ -25,7 +25,6 @@ pub struct Report {
     pub warnings: Vec<String>,
     pub exclusion_reasons: BTreeMap<u64, String>,
     pub local_steps: BTreeMap<u64, serde_json::Value>,
-    pub head_moves: BTreeMap<u64, super::head_move::HeadMove>,
 }
 
 fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<String, LandingError> {
@@ -62,20 +61,6 @@ fn add_recovered(report: &mut Report, recovered: Vec<LandingReceipt>) {
         }
         report.receipts.push(record);
     }
-}
-
-fn attach_head_moves(record: &mut LandingReceipt, report: &Report) {
-    record.head_moves = record
-        .candidate_steps
-        .iter()
-        .filter_map(|step| {
-            report
-                .head_moves
-                .get(&step.pr.number)
-                .cloned()
-                .map(|class| (step.pr.number, class))
-        })
-        .collect();
 }
 
 #[allow(
@@ -215,37 +200,6 @@ fn run_inner(
     let mut open = Vec::new();
     for number in unique {
         let info = forge.pull_request(number)?;
-        match forge.latest_review(number, &info.author) {
-            Ok(Some(review)) if review.head != info.head => {
-                match fetch_target(repo, request.target, request.shadow) {
-                    Ok(target) => {
-                        if let Some(class) =
-                            super::head_move::classify(repo, &review, &info.head, &target)
-                        {
-                            report.warnings.push(format!(
-                                "pull request #{number}: shadow head-move classification {class:?}"
-                            ));
-                            report.head_moves.insert(number, class);
-                        }
-                    }
-                    Err(error) => {
-                        let class = super::head_move::HeadMove::C {
-                            reviewed_head: review.head,
-                            reviewed_base: review.base,
-                            reason: format!("target unavailable: {error}"),
-                        };
-                        report.warnings.push(format!(
-                            "pull request #{number}: shadow head-move classification {class:?}"
-                        ));
-                        report.head_moves.insert(number, class);
-                    }
-                }
-            }
-            Err(error) => report.warnings.push(format!(
-                "pull request #{number}: shadow review history unavailable: {error}"
-            )),
-            _ => {}
-        }
         if info.state == super::ports::PullRequestState::Merged && !request.shadow {
             let pr = EligiblePr {
                 number,
@@ -410,7 +364,6 @@ fn run_inner(
                     cost.clone(),
                     request.shadow,
                 );
-                attach_head_moves(&mut record, report);
                 record.outcomes = outcomes;
                 record.split = parts
                     .iter()
@@ -488,17 +441,6 @@ fn run_inner(
                     gate_evidence: evidence.clone(),
                     publish: decision.clone(),
                     cost: cost.clone(),
-                    head_moves: candidate
-                        .steps
-                        .iter()
-                        .filter_map(|step| {
-                            report
-                                .head_moves
-                                .get(&step.pr.number)
-                                .cloned()
-                                .map(|class| (step.pr.number, class))
-                        })
-                        .collect(),
                     settled: None,
                     dispatched: Some(Vec::new()),
                     started_at: super::reconcile::now_seconds(),
@@ -550,7 +492,6 @@ fn run_inner(
                             cost.clone(),
                             false,
                         );
-                        attach_head_moves(&mut record, report);
                         record.candidate_steps.truncate(progress.len());
                         record.pull_requests.truncate(progress.len());
                         for (index, step) in candidate.steps.iter().enumerate() {
@@ -644,7 +585,6 @@ fn run_inner(
                 cost,
                 request.shadow,
             );
-            attach_head_moves(&mut record, report);
             record.outcomes = outcomes;
             record.approved_to_landed = mapping;
             record.alarms = publication.alarms;
@@ -662,7 +602,6 @@ fn run_inner(
                     gate_evidence: record.gate_evidence.clone(),
                     publish: record.publish.clone(),
                     cost: record.cost.clone(),
-                    head_moves: record.head_moves.clone(),
                     settled: None,
                     dispatched: None,
                     started_at: None,
@@ -968,138 +907,6 @@ mod tests {
         assert_eq!(report.outcomes[&2], Outcome::Landed);
         assert_eq!(forge.stack_merge_attempts, vec![1, 2]);
         assert_eq!(report.receipts.len(), 2);
-        Ok(())
-    }
-
-    #[test]
-    fn shadow_head_move_reporting_does_not_change_landing_decision()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::super::{
-            head_move::{HeadMove, ReviewedHead},
-            ports::{DeltaFile, DeltaStats},
-        };
-        for refuse in [false, true] {
-            let mut outcomes = Vec::new();
-            for class in [None, Some("exact"), Some("A"), Some("B"), Some("C")] {
-                let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
-                let head = forge.pull_requests[&1].head.clone();
-                if let Some(class) = class {
-                    forge.latest_reviews.insert(
-                        1,
-                        ReviewedHead {
-                            head: if class == "exact" {
-                                head.clone()
-                            } else {
-                                "reviewed".into()
-                            },
-                            base: Some("old-base".into()),
-                            valid: class != "C",
-                        },
-                    );
-                    if class == "A" {
-                        repo.parents
-                            .insert(head.clone(), vec!["reviewed".into(), "base-side".into()]);
-                        repo.parents
-                            .insert("base-side".into(), vec!["old-base".into()]);
-                        repo.parents
-                            .insert(repo.target.clone(), vec!["base-side".into()]);
-                        repo.trees
-                            .insert(head.clone(), "tree-reviewed-base-side".into());
-                    } else {
-                        repo.parents.insert(head.clone(), vec!["reviewed".into()]);
-                    }
-                    repo.review_deltas.insert(
-                        ("reviewed".into(), head),
-                        DeltaStats {
-                            complete: true,
-                            files: vec![DeltaFile {
-                                path: "src/lib.rs".into(),
-                                added: 2,
-                                deleted: 1,
-                                eligible: true,
-                            }],
-                        },
-                    );
-                }
-                if refuse {
-                    forge.approvals_at_head.clear();
-                }
-                let state = tempfile::tempdir()?;
-                let report = exercise(
-                    &mut forge,
-                    &mut repo,
-                    &mut gate,
-                    &settings,
-                    &definition,
-                    &[1],
-                    false,
-                    state.path(),
-                )?;
-                outcomes.push(report.outcomes.clone());
-                let observed = report.head_moves.get(&1);
-                assert!(match class {
-                    None | Some("exact") => observed.is_none(),
-                    Some("A") => matches!(observed, Some(HeadMove::A { .. })),
-                    Some("B") => matches!(observed, Some(HeadMove::B { .. })),
-                    Some("C") => matches!(observed, Some(HeadMove::C { .. })),
-                    _ => false,
-                });
-                if !refuse {
-                    assert_eq!(report.receipts[0].head_moves.get(&1), observed);
-                }
-            }
-            assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
-            assert_eq!(
-                outcomes[0][&1],
-                if refuse {
-                    Outcome::Excluded
-                } else {
-                    Outcome::Landed
-                }
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn unavailable_shadow_target_reports_class_c_without_changing_refusal()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::super::head_move::{HeadMove, ReviewedHead};
-        for classified in [false, true] {
-            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
-            forge.approvals_at_head.clear();
-            repo.fail_fetch = Some(std::rc::Rc::new(std::cell::Cell::new(true)));
-            if classified {
-                forge.latest_reviews.insert(
-                    1,
-                    ReviewedHead {
-                        head: "reviewed".into(),
-                        base: None,
-                        valid: true,
-                    },
-                );
-            }
-            let state = tempfile::tempdir()?;
-            let report = exercise(
-                &mut forge,
-                &mut repo,
-                &mut gate,
-                &settings,
-                &definition,
-                &[1],
-                false,
-                state.path(),
-            )?;
-            assert_eq!(report.outcomes[&1], Outcome::Excluded);
-            if classified {
-                assert!(matches!(
-                    report.head_moves.get(&1),
-                    Some(HeadMove::C { .. })
-                ));
-            } else {
-                assert!(report.head_moves.is_empty());
-            }
-        }
         Ok(())
     }
 
@@ -1826,7 +1633,6 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "test".into(),
                     },
-                    head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
                     started_at: None,
@@ -1900,7 +1706,6 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "test".into(),
                     },
-                    head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
                     started_at: None,
@@ -1994,7 +1799,6 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
-                head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
                 started_at: None,
@@ -2115,7 +1919,6 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "fixture".into(),
                     },
-                    head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
                     started_at: None,
@@ -2197,7 +2000,6 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
-                head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
                 started_at: None,
@@ -2489,7 +2291,6 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
-                head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
                 started_at: None,
@@ -2578,7 +2379,6 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
-                head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
                 started_at: None,
@@ -2671,7 +2471,6 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "fixture".into(),
                     },
-                    head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
                     started_at: None,
