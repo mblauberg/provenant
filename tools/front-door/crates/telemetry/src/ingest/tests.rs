@@ -762,3 +762,111 @@ fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
     assert!(attempts.iter().any(|a| a.id == "tool-1"));
     Ok(())
 }
+
+#[test]
+fn ambiguous_native_trigger_and_unreported_reasoning_stay_distinct() -> Result {
+    let fixture = Fixture::new()?;
+    let transcript = concat!(
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"invented direction\"},{\"type\":\"tool_result\",\"tool_use_id\":\"fixture-tool\",\"is_error\":true,\"content\":\"invented failure\"}]}}\n",
+        "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"compactMetadata\":{\"trigger\":\"auto\",\"preTokens\":123}}\n"
+    ).to_owned() + &message("fixture-reply", "2026-10-01T00:00:00Z", 10, 100, 40, 3);
+    fixture.write("native", "projects/p/fixture-session.jsonl", &transcript)?;
+    fixture.run(&[("fixture-account", "native")], &[], None)?;
+    let rows = read_rows(&fixture.roots, &RowFilter::default())?;
+    assert_eq!(rows.len(), 1);
+    let reply = rows[0].reply.as_ref().unwrap();
+    assert_eq!(reply.inferred, crate::signals::Trigger::Mixed);
+    assert!(reply.recorded.contains(&crate::signals::Event::UserMessage));
+    assert!(reply.recorded.contains(&crate::signals::Event::ToolError));
+    assert_eq!(reply.compactions, 1);
+    assert_eq!(rows[0].reasoning_tokens, None);
+    let thinking = crate::signals::thinking(&rows);
+    assert_eq!(
+        thinking[&crate::signals::Trigger::Mixed].reasoning_unknown,
+        1
+    );
+    assert_eq!(thinking[&crate::signals::Trigger::Mixed].reasoning_known, 0);
+    let mut notification = crate::signals::ReplyContext::default();
+    notification.observe_native(&serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":"<task-notification><task-id>fixture-task</task-id><status>completed</status></task-notification>"}]}}));
+    assert_eq!(
+        notification.inferred,
+        crate::signals::Trigger::LaneNotification
+    );
+    assert_eq!(
+        notification.recorded,
+        vec![crate::signals::Event::UserMessage]
+    );
+    let mut cli_error = crate::signals::ReplyContext::default();
+    cli_error.observe_native(&serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fixture-tool","is_error":true,"content":"{\"schema_version\":1,\"command\":\"run\",\"status\":\"invalid\",\"data\":null,\"error\":{\"code\":\"INVALID\",\"message\":\"invented error\"}}"}]}}));
+    assert_eq!(
+        cli_error.inferred,
+        crate::signals::Trigger::ProvenantCliError
+    );
+    assert_eq!(cli_error.recorded, vec![crate::signals::Event::ToolError]);
+    let unknown = serde_json::json!({"type":"user","message":{"content":"<unsupported-notification>invented</unsupported-notification>"}});
+    let direction = serde_json::json!({"type":"user","message":{"content":"invented direction"}});
+    for events in [[&unknown, &direction], [&direction, &unknown]] {
+        let mut context = crate::signals::ReplyContext::default();
+        for event in events {
+            context.observe_native(event);
+        }
+        assert_eq!(context.inferred, crate::signals::Trigger::Mixed);
+        assert!(context.unknown_evidence);
+    }
+    // Excluded replies consume their preceding events; a streamed repeat of
+    // that reply must not consume events destined for the next distinct reply.
+    let since_fixture = Fixture::new()?;
+    let filtered = transcript
+        + "{\"type\":\"user\",\"message\":{\"content\":\"status?\"}}\n"
+        + &message("fixture-reply", "2026-10-01T00:00:00Z", 10, 100, 40, 3)
+        + &message("fixture-next", "2026-10-01T00:00:02Z", 2, 0, 0, 1);
+    since_fixture.write("native", "projects/p/fixture-session.jsonl", &filtered)?;
+    since_fixture.run(
+        &[("fixture-account", "native")],
+        &[],
+        Some("2026-10-01T00:00:01Z"),
+    )?;
+    let included = read_rows(&since_fixture.roots, &RowFilter::default())?;
+    assert_eq!(included.len(), 1);
+    let isolated = included[0].reply.as_ref().unwrap();
+    assert_eq!(
+        isolated.inferred,
+        crate::signals::Trigger::UserStatusRequest
+    );
+    assert_eq!(isolated.compactions, 0);
+    assert_eq!(isolated.recorded, vec![crate::signals::Event::UserMessage]);
+    Ok(())
+}
+
+#[test]
+fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
+    let fixture = Fixture::new()?;
+    fixture.write(
+        "native",
+        "projects/p/fixture-session.jsonl",
+        &message("fixture-reply", "2026-10-01T00:00:00Z", 10, 100, 40, 3),
+    )?;
+    fixture.run(&[("fixture-account", "native")], &[], None)?;
+    let before = read_rows(&fixture.roots, &RowFilter::default())?;
+    assert_eq!(before[0].buckets(), [10, 7, 60, 40, 3]);
+    // Simulate the stored version-1 row written by the preceding release.
+    let mut legacy = serde_json::to_value(&before[0])?;
+    legacy.as_object_mut().unwrap().remove("reply");
+    legacy.as_object_mut().unwrap().remove("reasoning_tokens");
+    std::fs::write(
+        fixture.roots.state.as_path().join(STORE),
+        format!("{legacy}\n"),
+    )?;
+    fixture.run(&[("fixture-account", "native")], &[], None)?;
+    let after = read_rows(&fixture.roots, &RowFilter::default())?;
+    assert_eq!(before[0].buckets(), after[0].buckets());
+    assert!(after[0].reply.is_some());
+    let stored = std::fs::read_to_string(fixture.roots.state.as_path().join(STORE))?;
+    assert!(!stored.contains("private words"));
+    let row = serde_json::to_value(&after[0])?;
+    assert!(row.get("content").is_none());
+    assert!(row.get("prompt").is_none());
+    assert!(row.get("response").is_none());
+    assert_eq!(row["reply"]["inferred"], "unknown");
+    Ok(())
+}
