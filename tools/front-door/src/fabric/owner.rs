@@ -3489,38 +3489,38 @@ impl BoundGraphOwner<'_> {
                     }
                     _ => None,
                 };
-                let (result, result_warning) =
-                    if attempt.result.is_some() || outcome == Outcome::Succeeded {
-                        let captured = if remote {
-                            remote_graph_result(
-                                &mut owner,
-                                &target,
-                                node.required_verdict,
-                                self.budget,
-                                self.cancel,
-                            )
-                            .map_err(|_| provenant_run::RunError::NotFound)
-                        } else {
-                            store.stream_result(attempt.attempt_id, &call, node.required_verdict)
-                        };
-                        match captured {
-                            Ok(mut result) => {
-                                if remote && let Some(artifact) = &attempt.result {
-                                    // Output pages prove the redacted stream. Graph evidence
-                                    // still identifies the peer's sealed original artifact.
-                                    result.digest = artifact.digest.to_string();
-                                    // The peer's sealed settlement handoff, carried in its
-                                    // status; the output pages hold only text.
-                                    result.handoff =
-                                        peer_handoff(attempt.extra.get("graph_handoff"));
-                                }
-                                (Some(Box::new(result)), None)
-                            }
-                            Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
-                        }
+                let (result, result_warning) = if attempt.result.is_some()
+                    || outcome == Outcome::Succeeded
+                {
+                    let captured = if remote {
+                        remote_graph_result(
+                            &mut owner,
+                            &target,
+                            node.required_verdict,
+                            self.budget,
+                            self.cancel,
+                        )
+                        .map_err(|_| provenant_run::RunError::NotFound)
                     } else {
-                        (None, None)
+                        store.stream_result(attempt.attempt_id, &call, node.required_verdict)
                     };
+                    match captured {
+                        Ok(mut result) => {
+                            if remote && let Some(artifact) = &attempt.result {
+                                // Output pages prove the redacted stream. Graph evidence
+                                // still identifies the peer's sealed original artifact.
+                                result.digest = artifact.digest.to_string();
+                                // The peer's sealed settlement handoff, carried in its
+                                // status; the output pages hold only text.
+                                result.handoff = peer_handoff(attempt.extra.get("graph_handoff"));
+                            }
+                            (Some(Box::new(result)), None)
+                        }
+                        Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
+                    }
+                } else {
+                    (None, None)
+                };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
                 // route fallback for authentication or quota failures.
@@ -4610,7 +4610,11 @@ mod peer_handoff_tests {
         assert!(peer_handoff(Some(&bad)).is_err());
         assert!(peer_handoff(Some(&sealed(" "))).is_err());
         assert!(peer_handoff(Some(&sealed(&"n".repeat(5000)))).is_err());
-        assert!(peer_handoff(Some(&serde_json::Value::Null)).unwrap().is_none());
+        assert!(
+            peer_handoff(Some(&serde_json::Value::Null))
+                .unwrap()
+                .is_none()
+        );
         assert!(peer_handoff(None).unwrap().is_none());
     }
 }
