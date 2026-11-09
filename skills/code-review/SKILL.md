@@ -27,7 +27,8 @@ Lens breadth comes before family spread. `deliver` includes review before landin
 Inspect the explanation, then submit without `--explain`. Collect findings with
 `provenant output TARGET`; use `provenant output TARGET --trace` for lineage.
 A changed subject needs review of its delta against the prior findings and the
-invariant under repair.
+invariant under repair. After a shared flaw or a third round, ask whether the
+design is wrong before another repair, as `implement` describes.
 
 ## Independence
 
@@ -47,9 +48,8 @@ invariant under repair.
 
 [reviewer-context.md](references/reviewer-context.md) defines blocking,
 should-fix and note, what a finding states and what not to report. Every lens
-receives it, and a manual review applies it too. A structural alternative
-blocks only when tied to a defect. A file over 1,000 lines is a prompt to look
-for a cohesion defect, not a finding.
+receives it, and a manual review applies it too. A file over 1,000 lines is a
+prompt to look for a cohesion defect, not a finding.
 
 The `review` template supplies the findings and verdict protocol. Use its
 evidence to judge whether the review supports acceptance; `clean` is valid when

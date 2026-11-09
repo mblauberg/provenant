@@ -101,9 +101,10 @@ time through an injected `provenant_core::Clock`, with
 
 Build the simplest design that is correct for the main path and the failures
 that matter: data loss, credential exposure, killing a healthy provider,
-writing outside the selected roots and silent wrong answers. Reviews block only on those
-failures or a broken main path; other edge cases get a typed refusal or a PR
-note. Never mute the `ci-status` check.
+writing outside the selected roots and silent wrong answers. Other edge cases
+get a typed refusal or a PR note. Reviews block by the
+[code-review rubric](../../skills/code-review/SKILL.md#rubric). Never mute the
+`ci-status` check.
 - Why: guardrails for unobserved risks cost more than they save.
 - Test: none (review gate)
 - Owner: code review
