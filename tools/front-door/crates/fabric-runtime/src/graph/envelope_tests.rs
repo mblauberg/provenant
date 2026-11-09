@@ -76,7 +76,11 @@ fn findings(cap: usize) -> Vec<Finding> {
     };
     let mut findings = vec![finding(String::new()); MAX_FINDINGS];
     let spare = cap - canonical_len(&findings);
-    findings[0].summary = "x".repeat(spare);
+    // Long individual strings are externalised; spread the allowance so the
+    // findings remain inline in the checkpoint representation being measured.
+    for (index, finding) in findings.iter_mut().enumerate() {
+        finding.summary = "x".repeat(spare / MAX_FINDINGS + usize::from(index < spare % MAX_FINDINGS));
+    }
     assert_eq!(canonical_len(&findings), cap);
     findings
 }
