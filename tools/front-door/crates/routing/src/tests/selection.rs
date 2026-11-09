@@ -753,3 +753,142 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
     ));
     Ok(())
 }
+
+#[test]
+fn required_provider_family_filters_pool_and_records_exclusions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"family-trial": [
+            {"model":"codex/gpt-6-luna", "weight":1},
+            {"model":"claude/claude-haiku-5-5", "weight":99}
+        ]}
+    }))?;
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "claude".into(),
+            ..availability()
+        },
+    ];
+    let access = ["codex", "claude"].map(|adapter| AccessContext {
+        adapter,
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    });
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("family-trial")?);
+    for seed in 0..20 {
+        let constrained = resolve_for_account_with_seed_excluding_family(
+            &query,
+            &ctx,
+            None,
+            "family",
+            seed,
+            &[],
+            &[],
+            Some("openai"),
+        )?;
+        assert_eq!(constrained.adapter, "codex");
+        assert!(
+            constrained
+                .pool_selection
+                .unwrap()
+                .candidates
+                .iter()
+                .any(|candidate| candidate.model.starts_with("claude/")
+                    && candidate
+                        .exclusion
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("required family openai count 1")))
+        );
+        let old =
+            resolve_for_account_with_seed_excluding(&query, &ctx, None, "family", seed, &[], &[])?;
+        let unchanged = resolve_for_account_with_seed_excluding_family(
+            &query,
+            &ctx,
+            None,
+            "family",
+            seed,
+            &[],
+            &[],
+            None,
+        )?;
+        assert_eq!(serde_json::to_value(old)?, serde_json::to_value(unchanged)?);
+    }
+    let missing = RoutingContext {
+        availability: &records[1..],
+        ..ctx
+    };
+    // Preview has no availability/confinement snapshot; family selection keeps
+    // ordinary unknown-readiness semantics until the dispatch probes the host.
+    let preview = resolve_for_account_with_seed_excluding_family(
+        &query,
+        &missing,
+        None,
+        "family",
+        0,
+        &[],
+        &[],
+        Some("openai"),
+    )?;
+    assert_eq!(preview.adapter, "codex");
+    assert!(matches!(
+        preview.readiness,
+        RouteReadiness::Unavailable { .. }
+    ));
+    let rejected = [ModelId::parse("codex/gpt-6-luna")?];
+    let error = resolve_for_account_with_seed_excluding_family(
+        &query,
+        &ctx,
+        None,
+        "family",
+        0,
+        &rejected,
+        &[],
+        Some("openai"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("openai"), "{error}");
+    assert!(error.contains("count 1"), "{error}");
+    assert!(error.contains("admission rejected"), "{error}");
+    assert!(error.contains("candidate family anthropic"), "{error}");
+    // Exact routes are constrained too, and cannot escape through a fallback.
+    query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
+    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse(
+        "claude/claude-haiku-5-5",
+    )?])?);
+    let pinned = resolve_for_account_with_seed_excluding_family(
+        &query,
+        &ctx,
+        None,
+        "family",
+        0,
+        &[],
+        &[],
+        Some("openai"),
+    )?;
+    assert!(pinned.alternatives.as_slice().is_empty());
+    query.fallback = Fallback::None;
+    query.choice = RouteChoice::Model(ModelId::parse("claude/claude-haiku-5-5")?);
+    assert!(
+        resolve_for_account_with_seed_excluding_family(
+            &query,
+            &ctx,
+            None,
+            "family",
+            0,
+            &[],
+            &[],
+            Some("openai"),
+        )
+        .is_err()
+    );
+    Ok(())
+}

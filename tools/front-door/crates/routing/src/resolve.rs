@@ -1680,6 +1680,7 @@ pub fn resolve_with_seed(
         Excluded {
             rejected: &[],
             rules: &[],
+            required_family: None,
         },
     )
 }
@@ -1715,6 +1716,34 @@ pub fn resolve_for_account_with_seed_excluding(
     excluded_members: &[ModelId],
     rules: &[ExclusionRule],
 ) -> Result<ResolvedRoute, RoutingError> {
+    resolve_for_account_with_seed_excluding_family(
+        request,
+        context,
+        account,
+        operation_id,
+        task_index,
+        excluded_members,
+        rules,
+        None,
+    )
+}
+
+/// Resolve with a hard provider-family requirement. Candidate filtering and
+/// readiness are shared with ordinary selection; absence leaves its draw intact.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_for_account_with_seed_excluding_family(
+    request: &RouteRequest,
+    context: &RoutingContext<'_>,
+    account: Option<&str>,
+    operation_id: &str,
+    task_index: u64,
+    excluded_members: &[ModelId],
+    rules: &[ExclusionRule],
+    required_family: Option<&str>,
+) -> Result<ResolvedRoute, RoutingError> {
+    if required_family.is_some_and(|family| !crate::request::identifier(family)) {
+        return Err(RoutingError::InvalidValue);
+    }
     let account = AccountSelection::parse(account)?;
     let context = ValidatedContext::new(context)?;
     // Exclusions shape named-route pools only: a pinned model keeps its own
@@ -1743,6 +1772,7 @@ pub fn resolve_for_account_with_seed_excluding(
     let excluded_members = Excluded {
         rejected: if named { excluded_members } else { &[] },
         rules,
+        required_family,
     };
     if let AccountSelection::Known(account) = account {
         let mut adapters: BTreeSet<&str> = match &request.choice {
@@ -1812,6 +1842,7 @@ pub fn resolve(
         Excluded {
             rejected: &[],
             rules: &[],
+            required_family: None,
         },
     )
 }
@@ -1822,12 +1853,29 @@ pub fn resolve(
 struct Excluded<'a> {
     rejected: &'a [ModelId],
     rules: &'a [ExclusionRule],
+    required_family: Option<&'a str>,
 }
 impl Excluded<'_> {
-    /// The reason a named-route member is excluded, if any. Rules come first,
-    /// then persistent model exclusions, then admission rejections. An account
-    /// rule removes a model once no remaining account serves it.
+    /// Provider-family constraints apply to exact models as well as pools.
+    fn family_reason(&self, model: &ModelId) -> Option<String> {
+        self.required_family.and_then(|required| {
+            let actual =
+                provenant_records::AdapterSpec::get(model.adapter()).map(|spec| spec.family);
+            (actual != Some(required)).then(|| {
+                format!(
+                    "required family {required} count 1; candidate family {}",
+                    actual.unwrap_or("unknown")
+                )
+            })
+        })
+    }
+    /// The reason a named-route member is excluded, if any. The declared
+    /// family precedes rules, persistent exclusions and admission rejections.
+    /// An account rule removes a model once no remaining account serves it.
     fn reason(&self, model: &ModelId, context: &ValidatedContext<'_>) -> Option<String> {
+        if let Some(reason) = self.family_reason(model) {
+            return Some(reason);
+        }
         let serving_accounts_remain = context.availability.iter().any(|record| {
             record.adapter == model.adapter()
                 && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
@@ -1871,6 +1919,11 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
+            if let Some(detail) = excluded_members.family_reason(model) {
+                return Err(RoutingError::NoEligiblePoolMember {
+                    exclusions: vec![format!("{}: {detail}", model.as_str())],
+                });
+            }
             if !privacy_allowed(model, request.confidential, context.catalogue) {
                 return Err(RoutingError::ConfidentialModel);
             }
@@ -1953,6 +2006,7 @@ fn resolve_inner(
                 let single = Excluded {
                     rejected: &[],
                     rules: excluded_members.rules,
+                    required_family: excluded_members.required_family,
                 };
                 if let Some(detail) = single.reason(&named.model, context) {
                     return Err(RoutingError::NoEligiblePoolMember {
@@ -1972,6 +2026,16 @@ fn resolve_inner(
             }
         }
     };
+    if let Some(family) = excluded_members.required_family
+        && matches!(&primary.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+    {
+        return Err(RoutingError::NoEligiblePoolMember {
+            exclusions: vec![format!(
+                "required family {family} count 1; {}/{}: {:?}",
+                primary.adapter, primary.model, primary.readiness
+            )],
+        });
+    }
     let models = match &request.fallback {
         Fallback::None => &[][..],
         Fallback::Models(models) => models.as_slice(),
@@ -1998,6 +2062,7 @@ fn resolve_inner(
     let named_route = matches!(request.choice, RouteChoice::NamedRoute(_));
     let alternatives = models
         .iter()
+        .filter(|model| excluded_members.family_reason(model).is_none())
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         // A named route's fallback keeps to the same exclusions as its pool; a
         // pinned model's own fallback is never filtered.
@@ -2226,6 +2291,29 @@ fn classify_pool(
                 request.intent,
             ) {
                 Ok(resolved) => {
+                    if let Some(family) = excluded_members.required_family
+                        && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
+                    {
+                        let detail = format!(
+                            "required family {family} count 1; unavailable: {:?}",
+                            resolved.readiness
+                        );
+                        classified
+                            .exclusions
+                            .push(format!("{}: {detail}", member.model.as_str()));
+                        classified.candidates.push(RouteSelectionCandidate {
+                            extra: Default::default(),
+                            model: member.model.as_str().into(),
+                            weight: member.weight,
+                            factor_basis_points,
+                            pacing_detail: None,
+                            effort,
+                            readiness: Some(resolved.readiness.clone()),
+                            exclusion: Some(detail),
+                        });
+                        classified.routes.push(None);
+                        continue;
+                    }
                     let model_policy = context
                         .config
                         .model_policy
