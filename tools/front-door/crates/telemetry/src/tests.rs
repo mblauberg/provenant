@@ -1346,6 +1346,134 @@ fn effective_dates_must_be_ordered_real_dates() {
 }
 
 #[test]
+fn route_outcomes_report_success_cost_time_access_effort_and_assignment() {
+    use crate::route_outcomes::{Evidence, report};
+    let mut first = fact(1, Some(1_000_000));
+    first.provider_ms = Some(100);
+    let mut stopped = fact(2, Some(2_000_000));
+    stopped.provider_ms = Some(300);
+    let mut exact = fact(3, Some(1_000_000));
+    exact.provider_ms = None;
+    exact.resolved_route.as_mut().unwrap().effort = Some("low".into());
+    let mut failed = fact(4, Some(1_000_000));
+    failed.terminal_state = AttemptOutcome::Failed;
+    failed.provider_ms = Some(100);
+    let rows = report(
+        vec![
+            Evidence {
+                fact: failed,
+                access: Some("worktree-write".into()),
+                pool: Some("senior".into()),
+                partial: false,
+            },
+            Evidence {
+                fact: first,
+                access: Some("worktree-write".into()),
+                pool: Some("senior".into()),
+                partial: false,
+            },
+            Evidence {
+                fact: stopped,
+                access: Some("worktree-write".into()),
+                pool: Some("senior".into()),
+                partial: true,
+            },
+            Evidence {
+                fact: exact,
+                access: Some("read-only".into()),
+                pool: None,
+                partial: false,
+            },
+        ],
+        &prices(Some(1_000_000)),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    let writer = rows
+        .iter()
+        .find(|row| row.access == "worktree-write")
+        .unwrap();
+    assert_eq!(writer.effort, "high");
+    assert_eq!(writer.samples, 3);
+    assert_eq!(writer.successes, 1);
+    assert_eq!(writer.success_rate, Some(1.0 / 3.0));
+    assert_eq!(writer.cost_per_success_microdollars, Some(4_000_000.0));
+    assert_eq!(writer.time_per_success_ms, Some(500.0));
+    assert_eq!(writer.comparison, "hash_assigned_pool");
+    let reader = rows.iter().find(|row| row.access == "read-only").unwrap();
+    assert_eq!(reader.comparison, "observational_not_hash_assigned");
+    assert_eq!(reader.time_per_success_ms, None);
+    assert_eq!(reader.missing_time, 1);
+}
+
+#[test]
+fn route_outcomes_zero_success_and_unknown_cost_remain_unknown() {
+    use crate::route_outcomes::{Evidence, report};
+    let rows = report(
+        vec![Evidence {
+            fact: fact(1, None),
+            access: None,
+            pool: None,
+            partial: true,
+        }],
+        &prices(None),
+    )
+    .unwrap();
+    assert_eq!(rows[0].success_rate, Some(0.0));
+    assert_eq!(rows[0].cost_per_success_microdollars, None);
+    assert_eq!(rows[0].time_per_success_ms, None);
+    assert_eq!(rows[0].access, "unknown");
+}
+
+#[test]
+fn pool_preferences_and_fallbacks_are_not_hash_comparisons() {
+    let mut receipt: provenant_records::RouteSelectionReceipt = serde_json::from_value(json!({
+        "pool": "senior", "candidates": [], "roll": 1, "total_weight": 100,
+        "pick": "p/m", "selection_rule": "weighted_draw"
+    }))
+    .unwrap();
+    assert!(crate::route_outcomes::hash_assigned(&receipt));
+    for rule in [
+        "model_choice_override",
+        "first_zero_weight_ready",
+        "first_standby_ready",
+        "first_unavailable",
+    ] {
+        receipt.extra.insert("selection_rule".into(), json!(rule));
+        assert!(!crate::route_outcomes::hash_assigned(&receipt));
+    }
+    receipt
+        .extra
+        .insert("selection_rule".into(), json!("weighted_draw"));
+    receipt.total_weight = 0;
+    assert!(!crate::route_outcomes::hash_assigned(&receipt));
+    receipt.total_weight = 100;
+    // A standing configuration exclusion shapes every draw alike; a graph
+    // restart's exclusion of its predecessor's model makes the draw conditional.
+    receipt.extra.insert(
+        "considered_exclusions".into(),
+        json!(["source=config selector=model p/old"]),
+    );
+    assert!(crate::route_outcomes::hash_assigned(&receipt));
+    receipt.extra.insert(
+        "considered_exclusions".into(),
+        json!([
+            "source=config selector=model p/old",
+            "source=graph selector=model p/n"
+        ]),
+    );
+    assert!(!crate::route_outcomes::hash_assigned(&receipt));
+    receipt.extra.remove("considered_exclusions");
+    receipt.redraws.push(
+        serde_json::from_value(
+            json!({"rejected_pick":"p/n", "roll":0, "total_weight":100, "reason":"refused"}),
+        )
+        .unwrap(),
+    );
+    assert!(!crate::route_outcomes::hash_assigned(&receipt));
+}
+
+#[test]
 fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::telemetry_context::TelemetryContext;
     let mut lane = fact(1, Some(42));

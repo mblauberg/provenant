@@ -706,6 +706,27 @@ scan. The host snapshot survives provider-state and temporary cleanup.
 Recovery and fresh manual continuation carry this bounded snapshot with the
 original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
+For graph writers, the graph owns fresh restarts. One rule covers every
+declared stop, whether the writer committed, left nothing or left uncommitted
+edits: the node restarts in place on its retained worktree with its edits
+intact, under the shared continuation budget. The successor's brief includes
+the handoff, and a pool draw excludes previously used models. A dirty
+settlement without a declared stop still fails to the chair.
+An exact selector requires another declared route; without one the graph pauses
+for the chair. A `blocked` handoff means an owner decision, a missing capability
+or an external change and never launches a successor. The `decisions[]` array
+records decisions already made; its presence alone does not block a restart.
+Run policy may retain session continuation only when the applied model explicitly
+selects `resume_continuations = true`. Standalone runs retain their model policy
+continuation allowance. Sealed continuation decisions replay unchanged after
+upgrade, and graph lineage is read from its existing expansion journal.
+- Test: `crates/fabric-runtime/src/graph/retry_tests.rs::stopped_writer_restarts_fresh_on_another_route_with_its_handoff`;
+  `tests/graph_provider.rs::graph_writer_automatically_continues_retained_or_fresh`;
+  `crates/fabric-runtime/src/graph/retry_tests.rs::stopped_writer_without_another_route_returns_to_the_chair`;
+  `crates/fabric-runtime/src/graph/retry_tests.rs::writer_owner_decision_or_missing_capability_returns_to_chair_without_launch`;
+  `crates/fabric-runtime/src/graph/plan_tests.rs::declared_writer_stop_restarts_with_handoff_and_excludes_the_used_pool_model`;
+  `crates/fabric-runtime/src/graph/plan_tests.rs::pending_writer_continuation_reopens_and_excludes_its_predecessor_model`;
+  `crates/run/src/automatic.rs::tests::stopped_early_queues_one_visible_successor_in_the_terminal_transaction`
 The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
 an unfinished result; the initial attempt is separate.
 - Why (default): a lane that did part of its brief must not read as one that did all of it.

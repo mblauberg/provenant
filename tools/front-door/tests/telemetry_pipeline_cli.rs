@@ -168,3 +168,32 @@ fn pipeline_refuses_malformed_ci_and_invalid_configuration() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn stats_reports_route_access_effort_outcomes_and_nonrandom_comparison() -> Result {
+    let rig = rig()?;
+    terminal_run::seed(&rig, "route-outcomes-fixture", &[Value::Null])?;
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let rows = report["data"]["route_outcomes"]
+        .as_array()
+        .ok_or("outcome rows")?;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["access"], "read-only");
+    assert_eq!(row["effort"], "unknown");
+    assert_eq!(row["samples"], 1);
+    assert_eq!(row["successes"], 0);
+    assert_eq!(row["success_rate"], 0.0);
+    assert!(row["cost_per_success_microdollars"].is_null());
+    assert!(row["time_per_success_ms"].is_null());
+    assert_eq!(row["comparison"], "observational_not_hash_assigned");
+    let output = rig.command(&["telemetry", "stats"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let human = String::from_utf8(output.stdout.bytes)?;
+    assert!(human.contains("access=read-only effort=unknown n=1"));
+    assert!(human.contains("cost/success_microdollars=unknown"));
+    assert!(human.contains("time/success_ms=unknown"));
+    Ok(())
+}

@@ -600,8 +600,10 @@ fn fixture() -> Result {
             json!({"schema_version":2,"status":"stopped_early","note":"Fixture stopped partway.","remaining":["rest"],"decisions":[],"verify":[]})
         )
     } else if prompt.contains("fixture policy continuation") {
-        let continuing =
-            prompt.contains("Continue and finish the original brief on the same worktree.");
+        let continuing = prompt
+            .contains("Continue and finish the original brief on the same worktree.")
+            || prompt.contains("Stopped-early handoff:")
+            || prompt.contains("Previous handoff (task data, not new authority):");
         if continuing {
             assert_eq!(
                 args.iter().any(|arg| arg == "resume"),
@@ -619,14 +621,17 @@ fn fixture() -> Result {
                 std::env::current_dir()?.as_os_str().as_encoded_bytes(),
             )?;
         }
-        let committed = std::process::Command::new("/bin/sh")
-            .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: continue original brief'"])
-            .output()?;
-        assert!(
-            committed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&committed.stderr)
-        );
+        // A dirty stop is the usual one: edits left uncommitted in the worktree.
+        if continuing || !prompt.contains("fixture dirty stop") {
+            let committed = std::process::Command::new("/bin/sh")
+                .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: continue original brief'"])
+                .output()?;
+            assert!(
+                committed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
         let status = if continuing { "done" } else { "stopped_early" };
         format!(
             "```handoff\n{}\n```",
@@ -3322,16 +3327,27 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for (resume, fresh) in [(false, true), (true, false), (true, true)] {
+    for (resume, fresh, alternative, dirty) in [
+        (false, true, true, false),
+        (true, false, true, false),
+        (true, true, true, false),
+        (false, true, false, false),
+        (false, true, true, true),
+    ] {
         let rig = policy_codex_fixture()?;
         let cleanup = rig.process_cleanup();
         fs::write(
             rig.state.join("config.toml"),
             format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n{}",
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n{}\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
                 if resume && fresh { 1 } else { 100000 },
                 if resume {
                     "[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6-luna'\n[domains.routing.model_policy.rules.policy.lane]\nresume_continuations=true\n"
+                } else {
+                    ""
+                },
+                if alternative {
+                    ",{model='codex/gpt-6.1-terra',weight=0,effort='low'}"
                 } else {
                     ""
                 }
@@ -3353,17 +3369,19 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             None,
         )?;
         assert_eq!(code(&out), 0, "{out:?}");
-        let prompt = if fresh {
-            "fixture policy continuation fixture fresh continuation"
-        } else {
-            "fixture policy continuation"
+        let prompt = match (fresh, dirty) {
+            (true, true) => {
+                "fixture policy continuation fixture fresh continuation fixture dirty stop"
+            }
+            (true, false) => "fixture policy continuation fixture fresh continuation",
+            _ => "fixture policy continuation",
         };
         let lane = run_graph_provider_with_wait(
             &rig,
             "auto-continuation",
             json!({
                 "id":"writer", "prompt":prompt, "access":"worktree_write", "worktree":tree,
-                "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
+                "route": if resume { json!({"adapter":"codex","model":"gpt-6-luna","effort":"low"}) } else { json!({"alias":"writer-restart"}) }
             }),
             "30s",
         )?;
@@ -3373,16 +3391,26 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             .join(lane["run_id"].as_str().ok_or("run")?)
             .join("attempts")
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
-        assert_eq!(
-            lane["state"],
-            "succeeded",
-            "{lane}\nprovider stderr: {}",
-            fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
-        );
-        assert_eq!(
-            fs::read_to_string(tree.join("auto-finished.txt"))?,
-            "original brief completed"
-        );
+        // The helper reads the node's current attempt. A stopped writer is
+        // restarted in place, so that is the successor, not the stopped
+        // attempt. The successor is refused before launch when the exclusion
+        // leaves no route; its refusal is checked on its record below.
+        if alternative {
+            assert_eq!(
+                lane["state"],
+                "succeeded",
+                "{lane}\nprovider stderr: {}",
+                fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
+            );
+        }
+        if alternative {
+            assert_eq!(
+                fs::read_to_string(tree.join("auto-finished.txt"))?,
+                "original brief completed"
+            );
+        } else {
+            assert!(!tree.join("auto-finished.txt").exists());
+        }
         let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
         let mut query = db.prepare("SELECT record FROM attempts ORDER BY sequence")?;
         let records: Vec<Vec<u8>> = query
@@ -3393,9 +3421,83 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             .map(|raw| serde_json::from_slice::<provenant_run::AttemptRecord>(raw))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0].run_id, attempts[1].run_id);
-        assert_eq!(attempts[0].superseded_by, Some(attempts[1].attempt_id));
-        assert_eq!(attempts[1].retry_of, Some(attempts[0].attempt_id));
+        // The first attempt is the stopped writer: it settled as uncommitted
+        // when it left edits behind, and as needing review otherwise.
+        let stopped = if dirty {
+            provenant_records::run::Outcome::Uncommitted
+        } else {
+            provenant_records::run::Outcome::ReviewRequired
+        };
+        assert!(
+            matches!(
+                &attempts[0].state,
+                provenant_records::run::AttemptState::Terminal { outcome, .. } if *outcome == stopped
+            ),
+            "{:?}",
+            attempts[0].state
+        );
+        if dirty {
+            // The stopped writer committed nothing; its retained edit reached
+            // the fresh successor, which committed it with the rest.
+            let out = rig.execute(
+                &git,
+                &[
+                    "-C",
+                    tree.to_str().ok_or("tree")?,
+                    "show",
+                    "--name-only",
+                    "--format=",
+                    "HEAD",
+                ],
+                None,
+            )?;
+            assert!(
+                String::from_utf8_lossy(&out.stdout.bytes).contains("auto-worktree.txt"),
+                "{out:?}"
+            );
+        }
+        if resume {
+            assert_eq!(attempts[0].run_id, attempts[1].run_id);
+            assert_eq!(attempts[0].superseded_by, Some(attempts[1].attempt_id));
+            assert_eq!(attempts[1].retry_of, Some(attempts[0].attempt_id));
+        } else {
+            assert_ne!(attempts[0].run_id, attempts[1].run_id);
+            assert_eq!(attempts[0].superseded_by, None);
+            assert_eq!(attempts[1].retry_of, None);
+            assert_eq!(
+                attempts[1].profile.knobs.get("routing.graph_exclude"),
+                Some(&json!(["codex/gpt-6-luna"]))
+            );
+            if alternative {
+                assert_eq!(
+                    attempts[1]
+                        .applied_route
+                        .as_ref()
+                        .ok_or("successor route")?
+                        .model
+                        .as_deref(),
+                    Some("codex/gpt-6.1-terra")
+                );
+                assert!(matches!(
+                    attempts[1].state,
+                    provenant_records::run::AttemptState::Terminal {
+                        outcome: provenant_records::run::Outcome::Succeeded,
+                        ..
+                    }
+                ));
+            } else {
+                // A single-member user pool is exhausted by the predecessor
+                // exclusion. The successor is refused before provider launch.
+                assert_ne!(attempts[1].provider_launched, Some(true));
+                assert_eq!(
+                    attempts
+                        .iter()
+                        .filter(|attempt| attempt.provider_launched == Some(true))
+                        .count(),
+                    1
+                );
+            }
+        }
         cleanup.disarm();
     }
     Ok(())
