@@ -240,7 +240,9 @@ pub const LIGHT_PRESET: &str = "light";
 impl AttemptSpec {
     /// Whether the preset name is one this build bundles.
     pub fn preset_known(&self) -> bool {
-        self.preset.as_deref().is_none_or(|name| name == LIGHT_PRESET)
+        self.preset
+            .as_deref()
+            .is_none_or(|name| name == LIGHT_PRESET)
     }
 
     fn preset_default(&self, light: &'static str) -> Option<&str> {

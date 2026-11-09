@@ -518,7 +518,7 @@
       "default": "delivery",
       "status": "wired",
       "reader": "tools/front-door/src/fabric/owner.rs",
-      "effect": "none withholds the delivery destination, so the node produces no delivery receipt. Set per graph node with `attempt.receipts` or the `light` preset.",
+      "effect": "Delivery requested by a writer always runs and records its outcome. Set per graph node with `attempt.receipts` or the `light` preset.",
       "trade_off": "none suits read-only or scratch work; nothing is published or recorded as delivered."
     },
     "lanes.prepare_deps": {

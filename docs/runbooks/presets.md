@@ -67,7 +67,7 @@ settings:
 |---|---|---|---|
 | `attempt.isolation` | `shared` | `private` | A pinned read-only lane reads the live checkout; the immutable source view is not built. |
 | `attempt.supervision` | `minimal` | `standard` | A silent provider is marked after one hour, not `lanes.silence_seconds`. |
-| `attempt.receipts` | `none` | `delivery` | No delivery destination, so no delivery receipt. |
+| `attempt.receipts` | `none` | `delivery` | Requested writer delivery still runs and records its outcome. |
 
 Apply it, or set any one setting alone, in a run document or a template's
 `[node]` table, or per run with `--set`:

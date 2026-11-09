@@ -556,7 +556,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `"delivery"` |
-| `effect` | `"none withholds the delivery destination, so the node produces no delivery receipt. Set per graph node with &#96;attempt.receipts&#96; or the &#96;light&#96; preset."` |
+| `effect` | `"Delivery requested by a writer always runs and records its outcome. Set per graph node with &#96;attempt.receipts&#96; or the &#96;light&#96; preset."` |
 | `reader` | `"tools/front-door/src/fabric/owner.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"none suits read-only or scratch work; nothing is published or recorded as delivered."` |

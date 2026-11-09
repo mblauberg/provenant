@@ -2758,14 +2758,8 @@ impl BoundGraphOwner<'_> {
                         }
                     })?;
             }
-            // A node that sets receipts to none (the `light` preset) gets no
-            // delivery destination, so no delivery receipt is produced.
-            let delivery = if node
-                .attempt
-                .is_some_and(|spec| spec.effective_receipts() == "none")
-            {
-                None
-            } else if let Some(mode) = replay.delivery {
+            // Delivery is a writer obligation independent of the receipt preset.
+            let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
                     let writer = provenant_run::resolve_writer(
                         self.factory.context.roots.state.as_path(),
