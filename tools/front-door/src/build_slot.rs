@@ -478,6 +478,7 @@ fn warn(error: &dyn std::fmt::Display) {
 #[cfg(test)]
 #[allow(
     unused_imports,
+    dead_code,
     reason = "the custom worktree test driver includes this library without the test harness"
 )]
 mod tests {

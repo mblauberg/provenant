@@ -353,15 +353,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
         &mut issues,
         crate::RetentionSettings::validate,
     );
-    let mut cleanup_item = user.remove("cleanup");
-    let cleanup = recover_settings::<crate::CleanupSettings>(
-        &mut cleanup_item,
-        "cleanup",
-        &user_sites,
-        &user_origin,
-        &mut issues,
-        crate::CleanupSettings::validate,
-    );
     let mut providers_item = user.remove("providers");
     let mut providers = crate::providers::defaults();
     if let Some(item) = &mut providers_item {
@@ -594,12 +585,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
             origins.insert(key.into(), user_origin.clone());
         });
     }
-    origins.insert("cleanup.unlanded_days".into(), compiled.clone());
-    if let Some(item) = &cleanup_item {
-        walk_item(item, "cleanup", None, &mut |key, _, _| {
-            origins.insert(key.into(), user_origin.clone());
-        });
-    }
     if let Some(item) = &install_item {
         walk_item(item, "install", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());
@@ -760,7 +745,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
         ("install", serde_json::to_value(&install)),
         ("gc", serde_json::to_value(&gc)),
         ("retention", serde_json::to_value(&retention)),
-        ("cleanup", serde_json::to_value(&cleanup)),
         ("providers", serde_json::to_value(&providers)),
         ("domains", serde_json::to_value(&domains)),
     ] {
@@ -779,7 +763,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
             install,
             gc,
             retention,
-            cleanup,
             providers,
             knobs,
             origins,

@@ -806,10 +806,9 @@ GC reports `provider_state.attempt_logs`; disk reports measure `attempt_logs`.
 `gc.schedule = false` disables scheduled retention sweeps and admission
 collection; manual GC and landing cleanup remain available.
 
-`[cleanup] unlanded_days = 14` (1 to 3650) is how long a ref Provenant
-created stays when it has not landed, counted from when the ref ledger
-recorded it. Landed refs go on settlement or the next `gc` pass; see
-[removing finished lanes' refs](gc.md#remove-finished-lanes-refs).
+Automatic ref cleanup retains unlanded work regardless of age. Landed refs
+are removed on settlement or the next `gc` pass only while their tips match
+the ownership ledger; see [removing finished lanes' refs](gc.md#remove-finished-lanes-refs).
 
 The optional `[gc]` section controls daily collection by the host tick:
 

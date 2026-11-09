@@ -1280,15 +1280,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     cancel,
                 )?;
                 report.upstream_error = upstream_error;
-                // Refs the ledger records as created go once landed on the
-                // fetched default branch, or once expired. Pressure passes
-                // stay local and skip it.
-                if !command.pressure
-                    && let Some(sweep) = crate::lane_cleanup::Sweep::new(
-                        &config.cleanup,
-                        command.dry_run || !command.apply,
-                    )
-                {
+                // Only proven landed refs with unchanged ledger tips may go.
+                if !command.pressure {
+                    let sweep = crate::lane_cleanup::Sweep::new(command.dry_run || !command.apply);
                     report.refs = crate::lane_cleanup::collect(
                         context,
                         upstream

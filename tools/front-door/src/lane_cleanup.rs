@@ -2,8 +2,8 @@
 //!
 //! The candidates are the refs the shared ledger records as created by
 //! Provenant: local branches, and remote branches at the endpoint a delivery
-//! bound. A ref is removed once the shared landed check proves it landed, or
-//! once it has stayed unlanded for `cleanup.unlanded_days`. Everything else is
+//! bound. A ref is removed only once the shared landed check proves it landed.
+//! Unlanded refs are reported and retained regardless of age. Everything else is
 //! retained: adopted or unobserved refs, a branch any worktree has checked
 //! out, the integration ref itself and a ref that moved since it was checked.
 //! Every deletion is leased on the tip just checked. Each artefact reports one
@@ -14,7 +14,7 @@ use provenant_confinement::worktrees::{
     self, Artefact, ArtefactOutcome, ArtefactState, IntegrationEdge, LandingTarget, RefDeletion,
     RefEndpoint, RefLedger, RefOrigin, RefRecord, WorktreeContext,
 };
-use provenant_core::{CancelToken, GitOid, WallTime};
+use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::Termination;
 use std::time::Duration;
 
@@ -23,28 +23,12 @@ const REMOTE_WRITE: Duration = Duration::from_secs(60);
 
 /// The policy one pass applies.
 pub(crate) struct Sweep {
-    pub(crate) unlanded_seconds: i64,
-    pub(crate) now: WallTime,
     pub(crate) dry_run: bool,
 }
 
 impl Sweep {
-    pub(crate) fn new(settings: &provenant_config::CleanupSettings, dry_run: bool) -> Option<Self> {
-        use provenant_core::Clock;
-        Some(Self {
-            unlanded_seconds: settings.unlanded_seconds(),
-            now: provenant_os::clock::SystemClock.wall_now().ok()?,
-            dry_run,
-        })
-    }
-
-    fn expired(&self, record: &RefRecord) -> bool {
-        let age = self
-            .now
-            .as_micros()
-            .saturating_sub(record.recorded_at.as_micros())
-            / 1_000_000;
-        age >= self.unlanded_seconds
+    pub(crate) fn new(dry_run: bool) -> Self {
+        Self { dry_run }
     }
 }
 
@@ -52,23 +36,20 @@ impl Sweep {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
     Landed,
-    Expired,
     Keep(&'static str),
 }
 
-fn verdict(landed: Option<bool>, expired: bool) -> Verdict {
-    match (landed, expired) {
-        (Some(true), _) => Verdict::Landed,
-        (_, true) => Verdict::Expired,
-        (Some(false), false) => Verdict::Keep("not_landed"),
-        (None, false) => Verdict::Keep("target_unavailable"),
+fn verdict(landed: Option<bool>) -> Verdict {
+    match landed {
+        Some(true) => Verdict::Landed,
+        Some(false) => Verdict::Keep("not_landed"),
+        None => Verdict::Keep("target_unavailable"),
     }
 }
 
 fn reason(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Landed => "landed",
-        Verdict::Expired => "unlanded_expired",
         Verdict::Keep(reason) => reason,
     }
 }
@@ -107,7 +88,7 @@ fn landed_on_any(
 }
 
 /// Remove one local branch Provenant created, when it has landed on one of
-/// `targets` or has expired.
+/// `targets`, while its tip still matches the ledger.
 pub(crate) fn sweep_local(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -153,15 +134,17 @@ fn local_outcome(
         }
         Err(error) => return out(ArtefactState::Failed).with_reason(error.to_string()),
     };
+    if tip != record.tip {
+        return out(ArtefactState::Retained)
+            .with_reason("changed")
+            .with_head(tip);
+    }
     match worktrees::branch_checked_out(context, &reference, cancel) {
         Ok(false) => {}
         Ok(true) => return out(ArtefactState::Retained).with_reason("checked_out"),
         Err(error) => return out(ArtefactState::Failed).with_reason(error.to_string()),
     }
-    let verdict = verdict(
-        landed_on_any(context, tip, targets, &[], cancel),
-        sweep.expired(record),
-    );
+    let verdict = verdict(landed_on_any(context, tip, targets, &[], cancel));
     if let Verdict::Keep(why) = verdict {
         return out(ArtefactState::Retained).with_reason(why).with_head(tip);
     }
@@ -188,7 +171,7 @@ fn local_outcome(
 }
 
 /// Remove one remote branch Provenant created, and its tracking ref, when it
-/// has landed on `target` (through ancestry or `chain`) or has expired.
+/// has landed on `target` (through ancestry or `chain`).
 pub(crate) fn sweep_remote(
     context: &WorktreeContext<'_>,
     ledger: &RefLedger,
@@ -245,23 +228,21 @@ fn remote_outcomes(
         }
         return outcomes;
     };
-    let landed = target.map(|target| {
-        worktrees::landing_in_repo(context, tip, target, chain, cancel)
-            .is_ok_and(|landing| landing.is_landed())
-    });
-    let verdict = verdict(landed, sweep.expired(record));
-    if let Verdict::Keep(why) = verdict {
-        return vec![out(ArtefactState::Retained).with_reason(why).with_head(tip)];
-    }
-    // An expired, unlanded ref is removed only while its commit stays here,
-    // so the outcome's head can restore it.
-    if verdict == Verdict::Expired && !worktrees::has_commit(context, tip, cancel).unwrap_or(false)
-    {
+    if tip != record.tip {
         return vec![
             out(ArtefactState::Retained)
-                .with_reason("head_not_local")
+                .with_reason("changed")
                 .with_head(tip),
         ];
+    }
+    let landed = target.and_then(|target| {
+        worktrees::landing_in_repo(context, tip, target, chain, cancel)
+            .ok()
+            .map(|landing| landing.is_landed())
+    });
+    let verdict = verdict(landed);
+    if let Verdict::Keep(why) = verdict {
+        return vec![out(ArtefactState::Retained).with_reason(why).with_head(tip)];
     }
     let mut outcomes = Vec::new();
     if sweep.dry_run {
@@ -483,7 +464,7 @@ pub(crate) fn fetched_target(fetched: &(String, GitOid)) -> Option<LandingTarget
     })
 }
 
-/// One GC pass over the ledger: every created ref, landed or expired, goes.
+/// One GC pass over the ledger: only proven landed, unchanged created refs go.
 /// `upstream` is the default branch GC already fetched, when it did.
 pub(crate) fn collect(
     context: &WorktreeContext<'_>,
@@ -614,43 +595,372 @@ pub(crate) fn settle_integrated(
 }
 
 #[cfg(test)]
+// Custom harness=false drivers include this module without running its unit tests.
+#[allow(dead_code, unused_imports)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn landed_refs_go_unlanded_refs_stay_until_they_expire() {
-        assert_eq!(verdict(Some(true), false), Verdict::Landed);
-        assert_eq!(verdict(Some(true), true), Verdict::Landed);
-        assert_eq!(verdict(Some(false), false), Verdict::Keep("not_landed"));
-        assert_eq!(verdict(Some(false), true), Verdict::Expired);
-        // A target that could not be read never proves landing, and an
-        // unexpired ref is kept.
-        assert_eq!(verdict(None, false), Verdict::Keep("target_unavailable"));
-        assert_eq!(verdict(None, true), Verdict::Expired);
+    struct FreeWorkers;
+
+    impl worktrees::WorkerObserver for FreeWorkers {
+        fn observe_roots(
+            &self,
+            roots: &[std::path::PathBuf],
+        ) -> std::collections::BTreeMap<std::path::PathBuf, worktrees::Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, worktrees::Occupancy::Available))
+                .collect()
+        }
+    }
+
+    struct CleanupFixture {
+        _temp: tempfile::TempDir,
+        home: std::path::PathBuf,
+        project: std::path::PathBuf,
+        remote: std::path::PathBuf,
+        roots: provenant_core::Roots,
+        base: GitOid,
+        unlanded: GitOid,
+        landed: GitOid,
+    }
+
+    impl CleanupFixture {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            use provenant_os::fixture::run_git;
+            let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
+            let home = temp.path().join("home");
+            let project = temp.path().join("project");
+            let remote = temp.path().join("remote.git");
+            let state = temp.path().join("state");
+            for path in [&home, &project, &remote] {
+                std::fs::create_dir(path)?;
+            }
+            provenant_os::fixture::private_state_dir(&state)?;
+            run_git(&remote, &["init", "--bare", "-q"])?;
+            run_git(&project, &["init", "-q", "-b", "main"])?;
+            run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+            let head = || -> Result<GitOid, Box<dyn std::error::Error>> {
+                Ok(GitOid::parse(
+                    String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?.trim(),
+                )?)
+            };
+            let base = head()?;
+            run_git(&project, &["checkout", "-qb", "lane/old"])?;
+            run_git(
+                &project,
+                &["commit", "--allow-empty", "-qm", "unlanded work"],
+            )?;
+            let unlanded = head()?;
+            run_git(&project, &["checkout", "-q", "main"])?;
+            run_git(
+                &project,
+                &["commit", "--allow-empty", "-qm", "human work landed"],
+            )?;
+            let landed = head()?;
+            run_git(&project, &["branch", "lane/changed"])?;
+            run_git(
+                &project,
+                &[
+                    "remote",
+                    "add",
+                    "bound",
+                    remote.to_str().ok_or("remote path")?,
+                ],
+            )?;
+            run_git(
+                &project,
+                &["push", "bound", "main", "lane/old", "lane/changed"],
+            )?;
+            let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+            inputs.state_dir = Some(state);
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            Ok(Self {
+                _temp: temp,
+                home,
+                project,
+                remote,
+                roots,
+                base,
+                unlanded,
+                landed,
+            })
+        }
+
+        fn with_context<T>(
+            &self,
+            action: impl FnOnce(
+                &WorktreeContext<'_>,
+                &CancelToken,
+            ) -> Result<T, crate::worktrees::Error>,
+        ) -> Result<T, crate::worktrees::Error> {
+            crate::worktrees::with_context(
+                &self.roots,
+                &self.home,
+                &self.project,
+                Duration::from_secs(30),
+                &FreeWorkers,
+                action,
+            )
+        }
+
+        fn endpoint(&self) -> RefEndpoint {
+            RefEndpoint::Remote {
+                remote: "bound".into(),
+                push_url: self.remote.to_string_lossy().into_owned(),
+            }
+        }
+    }
+
+    fn record_old_ref(
+        context: &WorktreeContext<'_>,
+        ledger: &RefLedger,
+        endpoint: RefEndpoint,
+        branch: &str,
+        tip: GitOid,
+        cancel: &CancelToken,
+    ) -> Result<RefRecord, worktrees::WorktreeError> {
+        ledger.record(
+            worktrees::RefObservation {
+                endpoint,
+                reference: GitRefName::branch(branch)
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                origin: RefOrigin::Created,
+                tip,
+                // Far beyond the former 14-day expiry threshold.
+                recorded_at: provenant_core::WallTime::from_unix_seconds(1).unwrap(),
+                attempt_id: None,
+                operation_id: None,
+            },
+            context.clock,
+            cancel,
+        )
     }
 
     #[test]
-    fn age_counts_from_the_ledger_record() {
-        let record = |recorded: i64| RefRecord {
-            schema_version: 1,
-            repository: provenant_core::ProjectId::from_bytes([1; 16]),
-            endpoint: RefEndpoint::Local,
-            reference: "refs/heads/lane/x".into(),
-            generation: 1,
-            origin: RefOrigin::Created,
-            tip: GitOid::parse(&"ab".repeat(20)).unwrap(),
-            recorded_at: WallTime::from_unix_seconds(recorded).unwrap(),
-            attempt_id: None,
-            operation_id: None,
-        };
-        let sweep = Sweep {
-            unlanded_seconds: 14 * 86_400,
-            now: WallTime::from_unix_seconds(100 * 86_400).unwrap(),
-            dry_run: true,
-        };
-        assert!(!sweep.expired(&record(100 * 86_400 - 13 * 86_400)));
-        assert!(sweep.expired(&record(100 * 86_400 - 14 * 86_400)));
+    fn ancient_unlanded_local_and_remote_refs_survive_automatic_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let target = LandingTarget {
+                reference: Some(GitRefName::branch("main").unwrap()),
+                tip: fixture.landed,
+            };
+            for endpoint in [RefEndpoint::Local, fixture.endpoint()] {
+                let record = record_old_ref(
+                    context,
+                    &ledger,
+                    endpoint.clone(),
+                    "lane/old",
+                    fixture.unlanded,
+                    cancel,
+                )?;
+                let outcomes = if endpoint == RefEndpoint::Local {
+                    vec![sweep_local(
+                        context,
+                        &ledger,
+                        &record,
+                        std::slice::from_ref(&target),
+                        &Sweep::new(false),
+                        cancel,
+                    )]
+                } else {
+                    sweep_remote(
+                        context,
+                        &ledger,
+                        &record,
+                        Some(&target),
+                        &[],
+                        &Sweep::new(false),
+                        cancel,
+                    )
+                };
+                assert_eq!(outcomes.len(), 1);
+                assert_eq!(outcomes[0].outcome, ArtefactState::Retained);
+                assert_eq!(outcomes[0].reason.as_deref(), Some("not_landed"));
+                assert_eq!(outcomes[0].head, Some(fixture.unlanded));
+                assert_eq!(
+                    ledger.load(&endpoint, &GitRefName::branch("lane/old").unwrap())?,
+                    Some(record)
+                );
+            }
+            assert_eq!(
+                worktrees::ref_tip(context, &GitRefName::branch("lane/old").unwrap(), cancel)?,
+                Some(fixture.unlanded)
+            );
+            assert_eq!(
+                remote_tip(
+                    context,
+                    fixture.remote.to_str().unwrap(),
+                    &GitRefName::branch("lane/old").unwrap()
+                )
+                .unwrap(),
+                Some(fixture.unlanded)
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn human_changed_local_and_remote_tips_survive_even_when_landed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let target = LandingTarget {
+                reference: Some(GitRefName::branch("main").unwrap()),
+                tip: fixture.landed,
+            };
+            for endpoint in [RefEndpoint::Local, fixture.endpoint()] {
+                let record = record_old_ref(
+                    context,
+                    &ledger,
+                    endpoint.clone(),
+                    "lane/changed",
+                    fixture.base,
+                    cancel,
+                )?;
+                let outcomes = if endpoint == RefEndpoint::Local {
+                    vec![sweep_local(
+                        context,
+                        &ledger,
+                        &record,
+                        std::slice::from_ref(&target),
+                        &Sweep::new(false),
+                        cancel,
+                    )]
+                } else {
+                    sweep_remote(
+                        context,
+                        &ledger,
+                        &record,
+                        Some(&target),
+                        &[],
+                        &Sweep::new(false),
+                        cancel,
+                    )
+                };
+                assert_eq!(outcomes.len(), 1);
+                assert_eq!(outcomes[0].outcome, ArtefactState::Retained);
+                assert_eq!(outcomes[0].reason.as_deref(), Some("changed"));
+                assert_eq!(outcomes[0].head, Some(fixture.landed));
+                assert_eq!(
+                    ledger.load(&endpoint, &GitRefName::branch("lane/changed").unwrap())?,
+                    Some(record)
+                );
+            }
+            assert_eq!(
+                worktrees::ref_tip(
+                    context,
+                    &GitRefName::branch("lane/changed").unwrap(),
+                    cancel
+                )?,
+                Some(fixture.landed)
+            );
+            assert_eq!(
+                remote_tip(
+                    context,
+                    fixture.remote.to_str().unwrap(),
+                    &GitRefName::branch("lane/changed").unwrap()
+                )
+                .unwrap(),
+                Some(fixture.landed)
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_landing_target_and_unreachable_remote_preserve_ancient_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                fixture.endpoint(),
+                "lane/old",
+                fixture.unlanded,
+                cancel,
+            )?;
+            let outcomes = sweep_remote(
+                context,
+                &ledger,
+                &record,
+                None,
+                &[],
+                &Sweep::new(false),
+                cancel,
+            );
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].outcome, ArtefactState::Retained);
+            assert_eq!(outcomes[0].reason.as_deref(), Some("target_unavailable"));
+            assert_eq!(
+                remote_tip(
+                    context,
+                    fixture.remote.to_str().unwrap(),
+                    &GitRefName::branch("lane/old").unwrap()
+                )
+                .unwrap(),
+                Some(fixture.unlanded)
+            );
+            Ok(())
+        })?;
+        let offline = fixture.remote.with_extension("offline");
+        std::fs::rename(&fixture.remote, &offline)?;
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            let record = ledger
+                .load(
+                    &fixture.endpoint(),
+                    &GitRefName::branch("lane/old").unwrap(),
+                )?
+                .unwrap();
+            let outcomes = sweep_remote(
+                context,
+                &ledger,
+                &record,
+                None,
+                &[],
+                &Sweep::new(false),
+                cancel,
+            );
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].outcome, ArtefactState::Failed);
+            assert_eq!(
+                ledger.load(
+                    &fixture.endpoint(),
+                    &GitRefName::branch("lane/old").unwrap()
+                )?,
+                Some(record)
+            );
+            assert_eq!(
+                worktrees::ref_tip(context, &GitRefName::branch("lane/old").unwrap(), cancel)?,
+                Some(fixture.unlanded)
+            );
+            Ok(())
+        })?;
+        std::fs::rename(&offline, &fixture.remote)?;
+        let head =
+            provenant_os::fixture::run_git(&fixture.remote, &["rev-parse", "refs/heads/lane/old"])?;
+        assert_eq!(
+            String::from_utf8(head)?.trim(),
+            fixture.unlanded.to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unlanded_and_unknown_refs_are_never_expired() {
+        assert_eq!(verdict(Some(true)), Verdict::Landed);
+        assert_eq!(verdict(Some(false)), Verdict::Keep("not_landed"));
+        assert_eq!(verdict(None), Verdict::Keep("target_unavailable"));
     }
 
     #[test]

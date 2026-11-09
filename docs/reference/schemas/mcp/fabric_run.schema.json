@@ -415,6 +415,12 @@
               ]
             },
             "partial_signals": {},
+            "payload": {
+              "enum": [
+                "evicted"
+              ],
+              "type": "string"
+            },
             "priority": {
               "anyOf": [
                 {
@@ -1392,6 +1398,12 @@
                 ]
               },
               "partial_signals": {},
+              "payload": {
+                "enum": [
+                  "evicted"
+                ],
+                "type": "string"
+              },
               "priority": {
                 "anyOf": [
                   {
@@ -2380,6 +2392,12 @@
               ]
             },
             "partial_signals": {},
+            "payload": {
+              "enum": [
+                "evicted"
+              ],
+              "type": "string"
+            },
             "priority": {
               "anyOf": [
                 {
@@ -3356,6 +3374,12 @@
               ]
             },
             "partial_signals": {},
+            "payload": {
+              "enum": [
+                "evicted"
+              ],
+              "type": "string"
+            },
             "priority": {
               "anyOf": [
                 {

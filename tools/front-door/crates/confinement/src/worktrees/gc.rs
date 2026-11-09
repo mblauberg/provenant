@@ -89,7 +89,7 @@ pub struct WorktreeGcReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_error: Option<String>,
     /// One outcome per ref the ledger records as created: removed once
-    /// landed or expired, otherwise retained with its reason.
+    /// landed with an unchanged recorded tip, otherwise retained with its reason.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<super::ArtefactOutcome>,
 }
@@ -1336,6 +1336,10 @@ fn collect_foreign(
 
 /// Preview against the command's inventory snapshot without creating state.
 /// Applied removal refreshes Git and custody facts before mutation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "preview binds the inventory, lane identity, custody policy and shared walk budget"
+)]
 fn preview_foreign(
     context: &WorktreeContext<'_>,
     entries: &[GitWorktree],

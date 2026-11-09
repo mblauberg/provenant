@@ -1100,6 +1100,7 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
             WorktreeOwner {
                 attempt_id: None,
                 operation_id: Some(format!("parallel-writer-{index}").parse()?),
+                reference: None,
                 branch,
                 base: info.head.to_string(),
                 host: provenant_core::HostId::from_bytes([3; 16]),
@@ -1203,6 +1204,7 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
     let owner = WorktreeOwner {
         attempt_id: None,
         operation_id: Some("writer-git-lock".parse()?),
+        reference: None,
         branch: "writer-git-lock".into(),
         base: info.head.to_string(),
         host: provenant_core::HostId::from_bytes([3; 16]),

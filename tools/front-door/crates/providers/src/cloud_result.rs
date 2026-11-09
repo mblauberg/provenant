@@ -111,6 +111,7 @@ mod tests {
         let result = result_from_diff(diff).unwrap();
         assert!(
             result
+                .clone()
                 .check("job", "nonce", &"a".repeat(40), "model")
                 .unwrap()
                 .passed

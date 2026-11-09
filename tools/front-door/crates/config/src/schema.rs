@@ -66,7 +66,6 @@ const RETENTION_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("chair_log_bytes", 65_536, 1_073_741_824),
     FieldMetadata::int("payload_cap_bytes", 1_048_576, 1_125_899_906_842_624),
 ];
-const CLEANUP_FIELDS: &[FieldMetadata] = &[FieldMetadata::int("unlanded_days", 1, 3650)];
 const INSTALL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("bin_dir", "string"),
     FieldMetadata::new("targets.{harness}.home", "string"),
@@ -271,12 +270,6 @@ pub fn schema<T: Serialize>(
             serde_json::to_value(crate::RetentionSettings::default()).unwrap_or(Value::Null),
             serde_json::to_value(&config.retention).unwrap_or(Value::Null),
             RETENTION_FIELDS,
-        ),
-        (
-            "cleanup",
-            serde_json::to_value(crate::CleanupSettings::default()).unwrap_or(Value::Null),
-            serde_json::to_value(&config.cleanup).unwrap_or(Value::Null),
-            CLEANUP_FIELDS,
         ),
         (
             "install",

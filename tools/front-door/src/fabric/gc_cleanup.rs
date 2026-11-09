@@ -19,6 +19,33 @@ fn spawn(request: &str, home: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// Dispatch records are written before spawning, so a slow or crashed worker
+// cannot be respawned on every host tick. Five attempts, ten minutes apart
+// initially, bound both process churn and the lifetime of transient failures.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Retry {
+    attempts: u32,
+    next_at: u64,
+}
+
+fn now_seconds() -> Result<u64, Box<dyn std::error::Error>> {
+    use provenant_core::Clock;
+    Ok(u64::try_from(SystemClock.wall_now()?.as_micros() / 1_000_000).unwrap_or(0))
+}
+
+fn final_receipt(receipt: &serde_json::Value) -> bool {
+    if receipt["retryable"] == true || receipt["reason"] == crate::worktrees::COLLECTION_BUSY {
+        return false;
+    }
+    if receipt["state"] == "retained" {
+        return receipt["reason"].as_str().is_some_and(|reason| {
+            !reason.is_empty() && reason != crate::worktrees::COLLECTION_BUSY
+        });
+    }
+    (receipt["state"] == "pruned" || receipt["cleanup_complete"] == true)
+        && receipt["cleanup_warning"].is_null()
+}
+
 pub(crate) fn queue(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
@@ -37,51 +64,119 @@ pub(crate) fn queue(
         request.as_bytes(),
         provenant_os::fs::PublishMode::Replace,
     )?;
-    spawn(&request, &settled.roots.home)
+    // Settlement touches only this request. Queue enumeration belongs to the
+    // host tick, never to the synchronous settlement path.
+    let retries = provenant_config::private_directory(
+        &roots.state.as_path().join("gc/completion-retries"),
+        true,
+    )?;
+    let _dispatch = match retries.try_lock(
+        "dispatch.lock".as_ref(),
+        provenant_os::fs::LockMode::Exclusive,
+    ) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let name = request_name(&request);
+    let mut retry = match retries.read_bounded(name.as_ref(), 1024) {
+        Ok(bytes) => serde_json::from_slice::<Retry>(&bytes)?,
+        Err(error) if error.is_not_found() => Retry::default(),
+        Err(error) => return Err(error.into()),
+    };
+    let now = now_seconds()?;
+    if now < retry.next_at || retry.attempts >= 5 {
+        return Ok(());
+    }
+    dispatch(
+        &retries,
+        name.as_ref(),
+        &mut retry,
+        &request,
+        &settled.roots.home,
+        now,
+    )
 }
 
-/// Every host tick retries completion work, independently of the daily GC schedule.
+fn dispatch(
+    retries: &provenant_os::fs::Directory,
+    name: &std::ffi::OsStr,
+    retry: &mut Retry,
+    request: &str,
+    home: &Path,
+    now: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    retry.attempts += 1;
+    retry.next_at = now.saturating_add(600 * (1_u64 << (retry.attempts - 1)));
+    retries.atomic_write(
+        name,
+        "retry",
+        &serde_json::to_vec(retry)?,
+        provenant_os::fs::PublishMode::Replace,
+    )?;
+    spawn(request, home)
+}
+
+/// Retry only due transient work, with a bounded batch and durable backoff.
 pub(crate) fn retry_pending(state: &Path, home: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let directory = match provenant_os::fs::Directory::open_anchor(&state.join("gc/completions")) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let metadata = provenant_config::private_directory(&state.join("gc"), true)?;
-    let cursor = match metadata.read_bounded("completion-cursor.json".as_ref(), 64) {
-        Ok(bytes) => serde_json::from_slice::<usize>(&bytes).unwrap_or(0),
-        Err(error) if error.is_not_found() => 0,
+    let metadata = provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
+    let _dispatch = match metadata.try_lock(
+        "dispatch.lock".as_ref(),
+        provenant_os::fs::LockMode::Exclusive,
+    ) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let batch: Vec<_> = directory.entries()?.skip(cursor).take(32).collect();
-    let next = if batch.len() < 32 {
-        0
-    } else {
-        cursor.saturating_add(batch.len())
-    };
-    metadata.atomic_write(
-        "completion-cursor.json".as_ref(),
-        "completion-cursor",
-        &serde_json::to_vec(&next)?,
-        provenant_os::fs::PublishMode::Replace,
-    )?;
-    let mut first_error = None;
-    for entry in batch {
-        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let name = entry?;
-            let bytes = match directory.read_bounded(&name, 64 * 1024) {
-                Ok(bytes) => bytes,
-                Err(error) if error.is_not_found() => return Ok(()),
-                Err(error) => return Err(error.into()),
-            };
-            spawn(std::str::from_utf8(&bytes)?, home)
-        })();
-        if let Err(error) = result {
-            first_error.get_or_insert(error);
+    let now = now_seconds()?;
+    let mut dispatched = 0;
+    for entry in directory.entries()? {
+        let name = entry?;
+        let bytes = match directory.read_bounded(&name, 64 * 1024) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let mut retry = match metadata.read_bounded(&name, 1024) {
+            Ok(bytes) => serde_json::from_slice::<Retry>(&bytes)?,
+            Err(error) if error.is_not_found() => Retry::default(),
+            Err(error) => return Err(error.into()),
+        };
+        if now < retry.next_at {
+            continue;
         }
-    }
-    if let Some(error) = first_error {
-        return Err(error);
+        if retry.attempts >= 5 {
+            // Preserve the exhausted request as diagnostic evidence outside
+            // the active queue; it is never automatically spawned again.
+            let exhausted =
+                provenant_config::private_directory(&state.join("gc/completion-exhausted"), true)?;
+            exhausted.atomic_write(
+                &name,
+                "exhausted",
+                &bytes,
+                provenant_os::fs::PublishMode::Replace,
+            )?;
+            directory.unlink(&name)?;
+            metadata.unlink(&name)?;
+            continue;
+        }
+        dispatch(
+            &metadata,
+            &name,
+            &mut retry,
+            std::str::from_utf8(&bytes)?,
+            home,
+            now,
+        )?;
+        dispatched += 1;
+        if dispatched == 4 {
+            break;
+        }
     }
     Ok(())
 }
@@ -115,7 +210,6 @@ pub(crate) fn run(
         Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())?;
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -129,14 +223,23 @@ pub(crate) fn run(
         read_prompts: true,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
+    // A later explicit delivery may supersede an earlier final retention.
+    // Finality belongs to this request, not every request for the attempt.
+    collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())?;
     if store
         .worktree_settlement(settled.attempt_id, &call)?
-        .is_some_and(|receipt| {
-            (receipt["state"] == "pruned" || receipt["cleanup_complete"] == true)
-                && receipt["cleanup_warning"].is_null()
-        })
+        .is_some_and(|receipt| final_receipt(&receipt))
     {
         match directory.unlink(request_name(request).as_ref()) {
+            Ok(()) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let retries = provenant_config::private_directory(
+            &roots.state.as_path().join("gc/completion-retries"),
+            true,
+        )?;
+        match retries.unlink(request_name(request).as_ref()) {
             Ok(()) => {}
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
@@ -168,6 +271,13 @@ pub(crate) fn collect_owned_worktree(
         provenant_run::RunStore::open(&context, &call)?.with_writer_registry(roots.state.as_path());
     let record = store.record(settled.attempt_id, &call)?;
     if !matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
+        record_worktree_settlement(
+            &store,
+            record.attempt_id,
+            &serde_json::json!({
+                "schema_version":1, "state":"retained", "reason":"attempt is not terminal", "retryable":true
+            }),
+        )?;
         return Ok(());
     }
     let task = store
@@ -177,8 +287,34 @@ pub(crate) fn collect_owned_worktree(
         .find(|task| task.task_id == record.task_id)
         .ok_or("settled task missing")?;
     let Some(writer) = task.writer else {
+        record_worktree_settlement(
+            &store,
+            record.attempt_id,
+            &serde_json::json!({
+                "schema_version":1, "state":"retained", "reason":"task has no writer"
+            }),
+        )?;
         return Ok(());
     };
+    // Recover an interrupted prune before classifying an absent worktree.
+    let prior = store.worktree_settlement(record.attempt_id, &call)?;
+    if replay_worktree_settlement(prior.as_ref(), &writer.worktree)?.is_none() {
+        match std::fs::symlink_metadata(&writer.worktree) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                record_worktree_settlement(
+                    &store,
+                    record.attempt_id,
+                    &serde_json::json!({
+                        "schema_version":1, "state":"retained", "worktree":writer.worktree,
+                        "reason":"worktree already removed"
+                    }),
+                )?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+    }
     if task.deliver.is_none()
         && delivery_override.is_none()
         && record.delivery.is_none()
@@ -285,6 +421,7 @@ pub(crate) fn collect_owned_worktree(
         settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
     let mut pruning_intent = replayed.clone();
     let collection_error = std::cell::RefCell::new(None::<String>);
+    let final_reason = std::cell::Cell::new(retention_reason);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         if replayed.is_some() {
             return Ok(None);
@@ -441,6 +578,23 @@ pub(crate) fn collect_owned_worktree(
                 }) else {
                     return Err(worktrees::WorktreeError::InvalidOutput.into());
                 };
+                if delivery.is_none()
+                    && delivery_request.is_none()
+                    && !worktrees::landing_in_repo(
+                        context,
+                        head,
+                        &worktrees::LandingTarget {
+                            reference: None,
+                            tip: pinned,
+                        },
+                        &[],
+                        cancel,
+                    )?
+                    .is_landed()
+                {
+                    final_reason.set(Some("not landed on base and no delivery requested"));
+                    return Ok(None);
+                }
                 let policy = WorktreeGcPolicy {
                     // A push or open PR has not landed the branch. Only an
                     // integration receipt grants local branch cleanup.
@@ -481,7 +635,7 @@ pub(crate) fn collect_owned_worktree(
     } else {
         match result {
             Ok(None) => {
-                let reason = match retention_reason {
+                let reason = match final_reason.get() {
                     Some(reason) => reason,
                     None => {
                         record_worktree_settlement(
@@ -496,7 +650,7 @@ pub(crate) fn collect_owned_worktree(
                     }
                 };
                 let warning = collection_error.take();
-                serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason, "cleanup_complete":warning.is_none(), "cleanup_warning":warning})
+                serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason, "cleanup_complete":true, "cleanup_warning":warning})
             }
             Ok(Some(result)) => {
                 let artefacts = worktrees::ArtefactOutcome::from_remove(&result);
@@ -509,7 +663,20 @@ pub(crate) fn collect_owned_worktree(
                     pruned["cleanup_warning"] = serde_json::json!(error.to_string());
                     pruned
                 } else {
-                    serde_json::json!({"schema_version":1, "state":"retained", "worktree": writer.worktree, "reason":retention_reason.map(str::to_owned).unwrap_or_else(|| error.to_string()), "cleanup_warning":error.to_string()})
+                    let final_error = error.downcast_ref::<crate::worktrees::Error>().and_then(
+                        |error| match error {
+                            crate::worktrees::Error::Worktree(
+                                worktrees::WorktreeError::Dirty(_)
+                                | worktrees::WorktreeError::IgnoredPaths(_),
+                            ) => Some("dirty worktree retained"),
+                            crate::worktrees::Error::Worktree(
+                                worktrees::WorktreeError::NotFound,
+                            ) => Some("worktree already removed"),
+                            _ => None,
+                        },
+                    );
+                    let reason = final_reason.get().or(final_error);
+                    serde_json::json!({"schema_version":1, "state":"retained", "worktree": writer.worktree, "reason":reason.map(str::to_owned).unwrap_or_else(|| error.to_string()), "retryable":reason.is_none(), "cleanup_warning":error.to_string()})
                 }
             }
         }
@@ -553,11 +720,8 @@ pub(crate) fn collect_owned_worktree(
             .and_then(|intent| intent["branch"].as_str())
             .and_then(|branch| provenant_confinement::repo::GitRefName::new(branch).ok())
     {
-        let settings =
-            provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-                .map(|config| config.cleanup)
-                .unwrap_or_default();
-        if let Some(sweep) = crate::lane_cleanup::Sweep::new(&settings, false) {
+        {
+            let sweep = crate::lane_cleanup::Sweep::new(false);
             let outcomes = crate::worktrees::with_context_using_facts(
                 roots,
                 &settled.roots.home,
@@ -603,4 +767,118 @@ pub(crate) fn collect_owned_worktree(
     // budget after it so a completed prune can always publish its receipt.
     record_worktree_settlement(&store, record.attempt_id, &receipt)?;
     Ok(())
+}
+
+#[cfg(test)]
+// Custom harness=false drivers include this module without running its unit tests.
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn final_retention_reason_wins_over_cleanup_warning() {
+        for reason in [
+            "not landed on base and no delivery requested",
+            "dirty worktree retained",
+            "worktree already removed",
+            "task has no writer",
+            "graph writer worktree retained for continuation, later rounds and explicit delivery",
+        ] {
+            assert!(
+                final_receipt(&json!({
+                    "state": "retained",
+                    "reason": reason,
+                    "cleanup_complete": false,
+                    "cleanup_warning": "output cleanup could not finish"
+                })),
+                "final retention must drain its request: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_receipts_remain_pending() {
+        for receipt in [
+            json!({"state": "retained", "reason": crate::worktrees::COLLECTION_BUSY}),
+            json!({"state": "retained", "reason": "attempt is not terminal", "retryable": true}),
+            json!({"state": "retained", "reason": "", "cleanup_warning": "unknown failure"}),
+            json!({"state": "pruned", "cleanup_warning": "remote cleanup failed; retry queued"}),
+            json!({"state": "retained", "reason": "fetch failed", "retryable": true, "cleanup_complete": true}),
+            json!({"state": "retained", "reason": crate::worktrees::COLLECTION_BUSY, "cleanup_complete": true}),
+        ] {
+            assert!(
+                !final_receipt(&receipt),
+                "transient receipt must stay queued: {receipt}"
+            );
+        }
+        assert!(final_receipt(&json!({"state": "pruned"})));
+        assert!(final_receipt(&json!({"cleanup_complete": true})));
+    }
+
+    #[test]
+    fn retry_tick_honours_backoff_and_drains_exhausted_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let state = temporary.path();
+        let requests = provenant_config::private_directory(&state.join("gc/completions"), true)?;
+        let retries =
+            provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
+        // A missing child working directory makes accidental dispatch fail;
+        // these requests must only be deferred or moved into diagnostics.
+        let missing_home = state.join("must-not-spawn");
+        let waiting_name = request_name("waiting fixture");
+        let exhausted_name = request_name("exhausted fixture");
+        for name in [&waiting_name, &exhausted_name] {
+            requests.atomic_write(
+                name.as_ref(),
+                "fixture",
+                b"not a cleanup request",
+                provenant_os::fs::PublishMode::Replace,
+            )?;
+        }
+        let deferred = serde_json::to_vec(&Retry {
+            attempts: 2,
+            next_at: u64::MAX,
+        })?;
+        retries.atomic_write(
+            waiting_name.as_ref(),
+            "fixture",
+            &deferred,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        retries.atomic_write(
+            exhausted_name.as_ref(),
+            "fixture",
+            &serde_json::to_vec(&Retry {
+                attempts: 5,
+                next_at: 0,
+            })?,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        for _ in 0..2 {
+            retry_pending(state, &missing_home)?;
+            assert_eq!(
+                requests.read_bounded(waiting_name.as_ref(), 1024)?,
+                b"not a cleanup request"
+            );
+            assert_eq!(retries.read_bounded(waiting_name.as_ref(), 1024)?, deferred);
+            assert!(!state.join("gc/completions").join(&exhausted_name).exists());
+            assert!(
+                !state
+                    .join("gc/completion-retries")
+                    .join(&exhausted_name)
+                    .exists()
+            );
+            assert_eq!(
+                std::fs::read(state.join("gc/completion-exhausted").join(&exhausted_name))?,
+                b"not a cleanup request"
+            );
+        }
+        requests.unlink(waiting_name.as_ref())?;
+        retries.unlink(waiting_name.as_ref())?;
+        retry_pending(state, &missing_home)?;
+        assert_eq!(requests.entries()?.count(), 0);
+        Ok(())
+    }
 }

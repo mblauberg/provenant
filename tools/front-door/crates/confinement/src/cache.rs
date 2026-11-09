@@ -547,6 +547,10 @@ impl std::fmt::Display for CacheSweepFailures {
 
 impl std::error::Error for CacheSweepFailures {}
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "cache identity, custody and shared measurement budget stay explicit at the mutation boundary"
+)]
 fn prune_worktree_cache(
     root: &provenant_os::fs::Directory,
     cache_root: &Path,

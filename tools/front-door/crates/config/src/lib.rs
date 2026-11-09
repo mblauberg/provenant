@@ -31,12 +31,10 @@ pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_dom
 mod presets;
 mod providers;
 pub use providers::{CodexCloudTransport, ProviderCloudSettings, ProviderSettings, ProviderUpdate};
-mod cleanup;
 mod project_binding;
 mod release;
 mod retention;
 pub mod shared_settings;
-pub use cleanup::CleanupSettings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
 #[cfg(test)]
 mod edit_tests;
@@ -218,7 +216,6 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub install: InstallSettings,
     pub gc: GcSettings,
     pub retention: RetentionSettings,
-    pub cleanup: CleanupSettings,
     pub providers: BTreeMap<String, ProviderSettings>,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,

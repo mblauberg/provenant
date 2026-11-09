@@ -171,10 +171,9 @@ remote-tracking ref. It needs no action from you.
   ancestor of the freshly fetched target, or an integration receipt chain
   carries it there. Tree or patch-id equality is never proof, so a squash
   merge without a receipt is not landed.
-- A created ref that has not landed stays for `cleanup.unlanded_days`
-  (default 14) from when the ledger recorded it, then goes too. A remote
-  branch is removed then only while its commit is in the local object store,
-  so the reported `head` can restore it.
+- Unlanded refs are reported and retained regardless of age. An unknown
+  landing state also retains the ref. A tip that differs from the ledger's
+  recorded tip is retained, including commits added by a human.
 - Every deletion is leased on the tip just checked: a local ref is deleted
   with `update-ref -d NAME TIP` and a remote branch with
   `git push --force-with-lease=REF:TIP URL :REF`. A ref that moved is kept.
@@ -189,8 +188,8 @@ integrated lane, its created local branch; an integrated lane's own created
 remote branch goes when the integration receipt proves it landed. A pushed
 lane is not landed at settlement; its refs go on the first full `gc` pass
 after the target contains them. `gc` lists every created ref in the ledger,
-fetches each bound remote's default branch once, and removes what landed or
-expired. `gc --pressure` skips this network step.
+fetches each bound remote's default branch once, and removes only proven
+landed refs whose tips still match the ledger. `gc --pressure` skips this network step.
 
 Each artefact reports one outcome under `artefacts` in the settlement receipt
 and `worktree_cleanup[].refs` in `gc --json`:
@@ -202,8 +201,7 @@ and `worktree_cleanup[].refs` in `gc --json`:
 
 `artefact` is `worktree`, `local_branch`, `remote_branch` or `tracking_ref`.
 `outcome` is `removed`, `would_remove` (preview), `absent`, `retained` or
-`failed`; `reason` says why, for example `landed`, `unlanded_expired`,
-`not_landed`, `not_created`, `checked_out`, `changed` or
+`failed`; `reason` says why, for example `landed`, `not_landed`, `not_created`, `checked_out`, `changed` or
 `target_unavailable`. A failed removal prints a warning and never fails the
 settlement or the pass; the ref is retained and the next pass retries. To
 restore a removed ref, recreate it at `head`, for example

@@ -194,14 +194,6 @@ Set these in `[gc]` in the host configuration. Omit a key for its default.
 |---|---|---|
 | `graph_checkpoint_days` | 90 | Retain terminal graph checkpoints for at least this many days after their last save (1 to 3650 days). |
 
-## Host cleanup settings
-
-Set these in `[cleanup]` in the host configuration. Omit a key for its default.
-
-| Key | Default | Effect |
-|---|---|---|
-| `unlanded_days` | 14 | Keep a ref Provenant created this many days after the ref ledger recorded it when it has not landed; landed refs go on settlement or the next gc pass (1 to 3650 days). |
-
 ## Host store settings
 
 Set these in `[domains.fabric.limits]` in the host configuration. Omit a key for its default.

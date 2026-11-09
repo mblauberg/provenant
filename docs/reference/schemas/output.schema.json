@@ -262,6 +262,12 @@
                   ]
                 },
                 "partial_signals": {},
+                "payload": {
+                  "enum": [
+                    "evicted"
+                  ],
+                  "type": "string"
+                },
                 "planner_fallback": {},
                 "priority": {
                   "anyOf": [
@@ -1421,6 +1427,12 @@
                     }
                   ]
                 },
+                "payload": {
+                  "enum": [
+                    "evicted"
+                  ],
+                  "type": "string"
+                },
                 "planner_fallback": {},
                 "priority": {
                   "anyOf": [
@@ -2490,6 +2502,12 @@
                   ]
                 },
                 "partial_signals": {},
+                "payload": {
+                  "enum": [
+                    "evicted"
+                  ],
+                  "type": "string"
+                },
                 "planner_fallback": {},
                 "priority": {
                   "anyOf": [
@@ -3558,6 +3576,12 @@
                   ]
                 },
                 "partial_signals": {},
+                "payload": {
+                  "enum": [
+                    "evicted"
+                  ],
+                  "type": "string"
+                },
                 "planner_fallback": {},
                 "priority": {
                   "anyOf": [
@@ -4837,6 +4861,12 @@
                   "type": "string"
                 },
                 "partial_signals": {},
+                "payload": {
+                  "enum": [
+                    "evicted"
+                  ],
+                  "type": "string"
+                },
                 "planner_fallback": {},
                 "priority": {
                   "anyOf": [
