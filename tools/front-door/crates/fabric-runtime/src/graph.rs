@@ -2310,6 +2310,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             break;
                         }
                     }
+                    if node.access == AccessMode::ReadOnly && template::review_node(node) {
+                        let progress = &checkpoint.nodes[node_index];
+                        let base = progress
+                            .review_base
+                            .as_ref()
+                            .or(checkpoint.bound_review_base.as_ref());
+                        if base
+                            .zip(progress.source_commit.as_ref())
+                            .is_some_and(|(base, head)| base == head)
+                        {
+                            transitions::fail_with(
+                                &mut checkpoint.nodes[node_index],
+                                "review_empty_range",
+                                "review range is empty; select a subject with changes".into(),
+                            );
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
+                    }
                     let mut integration_valid = true;
                     for expected in
                         transitions::integration_expectations(node_index, &plan, &checkpoint)
