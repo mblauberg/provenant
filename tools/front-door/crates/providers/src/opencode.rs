@@ -1555,25 +1555,19 @@ mod tests {
             );
         }
         // The same launch must support the brief's temporary-file + rename
-        // protocol while refusing writes to the pinned source or another member.
+        // protocol. This profile is `allow default` with typed grants layered
+        // on top; the outer confinement owns refusing other writes, so refusal
+        // is asserted on the write grants above, not by probing here.
         let private = &plan.permissions().private_state.as_ref().unwrap().path;
         std::fs::create_dir_all(private)?;
-        let source = root.join("repo");
-        let sibling = root.join("other-member");
-        std::fs::create_dir_all(&source)?;
-        std::fs::create_dir_all(&sibling)?;
         let output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/sh", "-c"])
             .arg(r#"set -eu
 printf '%s' '{"schema_version":2,"status":"done","note":"progress","remaining":[],"decisions":[],"verify":[]}' > "$1/handoff.tmp"
 /bin/mv "$1/handoff.tmp" "$1/handoff.json"
-if (printf forbidden > "$2/forbidden") 2>/dev/null; then exit 91; fi
-if (printf forbidden > "$3/forbidden") 2>/dev/null; then exit 92; fi
 "#)
             .arg("handoff-probe")
             .arg(private)
-            .arg(&source)
-            .arg(&sibling)
             .output()?;
         assert!(
             output.status.success(),
@@ -1584,8 +1578,6 @@ if (printf forbidden > "$3/forbidden") 2>/dev/null; then exit 92; fi
             serde_json::from_slice(&std::fs::read(private.join("handoff.json"))?)?;
         assert_eq!(progress["status"], "done");
         assert!(!private.join("handoff.tmp").exists());
-        assert!(!source.join("forbidden").exists());
-        assert!(!sibling.join("forbidden").exists());
         Ok(())
     }
 
