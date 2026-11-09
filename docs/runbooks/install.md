@@ -1,6 +1,6 @@
 # Build, package and install
 Owner: provenant-config
-Anchor: tools/front-door/crates/config/src
+Anchor: [`managed.rs`](../../tools/front-door/crates/config/src/managed.rs); [`shared_settings.rs`](../../tools/front-door/crates/config/src/shared_settings.rs)
 
 The `provenant-config` crate owns release stamping, packaging and managed-file
 installation. See the [state design](../specs/state.md) for
@@ -62,35 +62,10 @@ report unreadable records; never drop them. Check `provenant status`, collect
 `provenant output TARGET` and inspect `provenant output TARGET --trace` before
 using `retry` for unfinished work.
 
-For the graph cutover, finish or cancel every pending graph and drain all live
-lanes before upgrading: there is no state converter. Port user presets by hand
-to templates before using them with the new release. Old child-store directories
-are no longer written; retain them for telemetry ingestion before garbage
-collection decides what can be removed. Upgrade every host together, then test
-a real launch on each host. Report terminal checkpoints that cannot be read;
-keep their records for inspection and use the unreadable-record retirement path
-when appropriate.
-
 The staged release checks each host for pending graphs, live lanes and user
 presets before installation. Resolve the reported findings and rerun the upgrade,
 or pass `--yes` to `provenant upgrade` or `install.sh --upgrade` to proceed
 despite them. A failure to inspect the state stops the upgrade.
-Older installed CLI versions may invoke the installer with `--yes` themselves;
-for the first graph-cutover upgrade, run the new `install.sh --upgrade` without
-`--yes` on each host to see and act on its preflight before proceeding:
-
-```sh
-# Use the new release's installer directly for the first graph cutover.
-sh /absolute/path/to/new-release/install.sh --upgrade
-```
-
-Do not use the already-installed `provenant upgrade` for this first cutover;
-its older wrapper can forward `--yes` and bypass the drain refusal.
-
-The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
-`edit`, `templates`, `land` and `quota`. Use `run --use task` for a
-bounded assignment or `run --use deliver` for implementation through landing;
-see [templates](presets.md). `provenant help --all` lists advanced commands.
 
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.
@@ -175,39 +150,8 @@ installed pnpm whatever version a project pins (`manage-package-manager-versions
 and `package-manager-strict` are off), because a downloaded `@pnpm/exe` launcher
 needs a hard link that lanes cannot create. Never use
 a lane cache for a host build. `provenant worktree remove` deletes only the
-removed worktree's own cache while holding its writer lock. Other orphaned
-caches remain until `provenant gc [--dry-run | --apply] [--idle-days N]
-[--free-floor SIZE]`, which also
-removes caches idle for N days (default 7) for the selected project's
-worktrees, sparing live or unobservable writers. Idle removal takes the existing
-writer lock without waiting and releases it immediately after the tombstone
-rename. A held lock keeps the cache as live; a missing or unsafe lock, a
-reservation, or unverifiable registration keeps it as unobservable.
-Bare `gc` deletes eligible caches and expired provider state; `--dry-run`
-previews all cleanup. `--apply` also deletes eligible merged worktrees and
-declared output. Scheduled GC also
-removes clean merged worktrees using fetched upstream ancestry and prunes
-explicitly configured regenerable output for known terminal lanes. The
-[configuration runbook](configuration.md#lane-cache-collection) describes
-per-project keep paths, the 24-hour write protection and low-space alerts.
-If `--free-floor 20G` (or plain GiB) is set and space on the cache volume
-remains below that floor after the usual pass, GC removes further eligible
-caches oldest-first by their newest recursive write. It rechecks writer
-exclusion and reservations before detachment, and stops at the floor or when
-candidates run out. JSON adds `free_floor` removal reasons,
-`free_bytes_before` and `free_bytes_after`. Dry-run predictions include
-estimated reclaimable bytes and set `free_bytes_estimated` to true.
-V1 owner markers support orphan cleanup and foreign-owner reporting, but never
-idle cleanup because they lack device and inode identity. Existing owners
-outside that project are reported as kept (foreign). Before deletion, GC
-atomically renames each cache to a tombstone so a launching lane can create a
-fresh cache. Later sweeps retry interrupted tombstones. Entries that fail
-identity verification are quarantined under `.gc-refused-*` and kept for
-inspection. The owner marker is deleted last, and a failed sweep reports
-completed removals and bytes already freed alongside the error.
-
-GC also collects terminal provider state, preserving transcripts and evidence.
-See the [GC runbook](gc.md) for resume windows, credential expiry and dry runs.
+removed worktree's own cache while holding its writer lock; [GC](gc.md)
+collects other idle and orphaned lane caches.
 
 The packager defaults to `$CARGO_TARGET_DIR/release/provenant`, or the
 workspace's `target/release/provenant` without that variable. Pass
@@ -303,12 +247,9 @@ are local logins of one client directory, so their registrations add no target.
 
 Never synced: credentials and sign-in state (`.credentials*`, `auth.json`),
 identity fields in `.claude.json` such as `oauthAccount`, any `settings.json`
-key outside the allow-list, user-owned hooks and MCP entries, and the key
-names refused by the deny rule in
-[configuration](configuration.md#chair-account-switching) (`apiKeyHelper`, any
-name containing `token`, `secret`, `session` and the like), which are refused
-outright. Other
-bytes in `settings.json` and `.claude.json` are preserved.
+key outside the allow-list, user-owned hooks and MCP entries, and the keys the
+deny rule below refuses. Other bytes in `settings.json` and `.claude.json` are
+preserved.
 
 ### Hooks
 
@@ -320,12 +261,30 @@ new account, takes the hooks its siblings own.
 
 ### Shared settings
 
-`[domains.accounts.shared_settings]` names a `source` settings file (default
-`~/.claude/settings.json` when it exists) and the allow-list `keys`
-(default `permissions`, `env`, `statusLine`, `enabledPlugins`, `outputStyle`,
-`includeCoAuthoredBy`, `cleanupPeriodDays`). `[domains.accounts.entries.<id>.settings]`
-holds per-account values that win over the source. See
-[configuration](configuration.md#chair-account-switching).
+```toml
+[domains.accounts.shared_settings]
+source = "/Users/me/.claude/settings.json"   # default: ~/.claude/settings.json when it exists
+keys = ["permissions", "env", "statusLine", "enabledPlugins",
+        "outputStyle", "includeCoAuthoredBy", "cleanupPeriodDays"]   # the default allow-list
+
+[domains.accounts.entries.claude-work.settings]   # wins over the source for this account
+outputStyle = "verbose"
+```
+
+With no source file and no per-account `settings`, nothing is synced. Only keys
+in `keys` are synced, and a per-account key must be in `keys`. The deny rule
+refuses, even when listed, identity and credential keys (`apiKeyHelper`,
+`awsAuthRefresh`, `awsCredentialExport`, `forceLoginMethod`,
+`forceLoginOrgUUID`, `otelHeadersHelper`), `hooks`, and any key or `env`
+variable name containing an `auth`, `credential`, `token`, `oauth`, `secret` or
+`password` word, an `api key`, `access key` or `private key` pair, or, after
+lower-casing and dropping separators and digits, any of `token`, `secret`,
+`password`, `passwd`, `credential`, `oauth`, `apikey`, `authtoken`,
+`privatekey`, `session`, `cookie` or `bearer`. The rule catches glued names such
+as `ANTHROPICAUTHTOKEN` and accepts some false positives; the one exemption is
+the default key `includeCoAuthoredBy`. The message names the key and the rule
+that matched. A refused configuration stops install, upgrade and sync, never
+uninstall.
 
 Each synced key is recorded in the receipt (`setting:<key>`) with the value
 last written. On the next sync:
@@ -403,9 +362,7 @@ Symlinked plist paths or parents are refused. The agent's PATH contains the
 fixed system directories, the install bin directory and existing absolute
 directories holding resolved Claude, Codex and Git executables, when known.
 It does not inherit the shell's other PATH entries.
-An exact plist from the earlier installer is recognised for upgrade or
-uninstall using its recorded binary path and state root. Modified or unknown
-plists are preserved and block install. To recover, move the named plist
+Modified or unknown plists are preserved and block install. To recover, move the named plist
 aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
 
 The same macOS default-state install also manages
@@ -428,27 +385,10 @@ The user manager needs a login session (`XDG_RUNTIME_DIR` set). To keep the
 timer running while logged out, run `loginctl enable-linger $USER`. The peer
 agent stays macOS-only.
 
-Daily collection runs in a detached one-shot worker, so a slow collection does
-not delay graph deadlines. Its completion or failure is recorded in
-`<state>/tick/gc-result.json`; `provenant tick --json` reports a failed sweep.
-
-Install and upgrade unload the former `dev.provenant.gc` label. Receipt-owned,
-unchanged GC plists are removed during migration; modified plists are preserved
-and reported. `[gc] schedule = false` disables scheduled deletion without
-stopping graph deadlines. The collector reads the live idle threshold and floor
-from configuration each run. When `free_floor` is unset, the floor is 10% of the
-state volume, at least 50 GiB. See
-[configuration](configuration.md#lane-cache-collection).
-
-Install quietly boots out and deletes an existing
-`~/Library/LaunchAgents/dev.provenant.disk-guard.plist` on upgrade. Disk checks
-now run inside active lane supervisors. There is no periodic disk-guard agent.
-After bootout, install waits up to three seconds for the checker's recovery
-lock, resumes saved builds after checking their process identities, then removes
-the recovery state and plist. Stopping the checker first prevents another pause
-during recovery. Uninstall also performs this one-time retirement when an
-installation was last managed by an older release.
-See [configuration](configuration.md#disk-pressure) for the shared floor.
+The tick also runs daily [GC](gc.md) in a detached worker, recording its result
+in `<state>/tick/gc-result.json`; `provenant tick --json` reports a failed
+sweep. `[gc] schedule = false` stops scheduled collection without stopping
+graph deadlines.
 
 To remove an installation, run
 `provenant --state-dir "$STATE" uninstall --harness claude`. It removes only
@@ -484,17 +424,15 @@ surface without resolving roots or creating state.
 
 ## Receipt recovery
 
-A receipt that fails to decode reports a reinstall error. A `legacy` member of
-any value is ignored and dropped on the next install write, so it needs no
-recovery. For any other invalid receipt, move `<state>/install/receipt.json`
+A receipt that fails to decode reports a reinstall error. For an invalid receipt, move `<state>/install/receipt.json`
 aside, then preview and reapply `install` with the desired release and
 harnesses. Existing exact desired files and links
 remain no-ops. Links into an older release conflict; remove those binary, skill
 and instruction links manually before reapplying install. Use `--adopt-existing`
 for occupied managed MCP selectors or a stable regular executable that must be
-replaced, and inspect the preview before applying it. Remove obsolete entries
-manually; install, uninstall and `check install` no longer clean up or audit
-pre-1.0 entries or Git launchers.
+replaced, and inspect the preview before applying it. Install, uninstall and
+`check install` do not clean up or audit pre-1.0 entries or Git launchers;
+remove those manually.
 
 ## Fabric MCP registration
 

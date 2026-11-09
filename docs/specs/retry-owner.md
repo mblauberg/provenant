@@ -1,7 +1,7 @@
 # Retry owner
 
 Owner: run, routing, confinement and fabric-runtime
-Anchor: `crates/run/src/policy.rs`
+Anchor: `crates/core/src/retry.rs`, `crates/run/src/controls.rs`
 
 A retry lineage preserves each terminal receipt and its `retry_of` links. The
 version 2 sealed policy decision requires a typed cause and action. Drain

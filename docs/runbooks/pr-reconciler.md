@@ -1,7 +1,7 @@
 # Pull request work records
 
 Owner: Workflow maintainers
-Anchor: tools/front-door/crates/workflow/src/reconciler.rs
+Anchor: [`reconciler.rs`](../../tools/front-door/crates/workflow/src/reconciler.rs)
 
 `pr-reconciler` runs signed event intake and authoritative sweeps in one
 observe-only worker. It writes proposed decisions, local escalations and daily
@@ -118,7 +118,7 @@ adapter; observe mode never invokes it. Settings and plists contain no webhook
 secret. The generated supervisor supports polling only. For a foreground signed
 receiver, set `bind` in the settings to a loopback socket, supply
 `PROVENANT_INTAKE_SECRET` through the process environment and configure the tunnel
-and webhook described in [event intake](github-workflow.md#event-intake).
+and webhook described in [event intake](event-intake-configuration.md).
 Do not point standalone `event-intake` at this worker's state directory.
 
 `report.json` is the atomic checkpoint. It binds repository and policy, counts
