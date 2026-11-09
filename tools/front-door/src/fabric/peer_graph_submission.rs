@@ -74,7 +74,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
         }))?;
-        bound.observe_or_start(&key, graph::NodeInput {
+        bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
             distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
@@ -554,7 +554,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
     };
     let actor = bound.actor();
-    bound.observe_or_start(&key, graph::NodeInput {
+    bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&key), read_roots: &[],
         distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
@@ -578,7 +578,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
     }))?;
     let actor = bound.actor();
-    bound.observe_or_start(&second, graph::NodeInput {
+    bound.observe_or_start(&second, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&second), read_roots: &[],
         distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),

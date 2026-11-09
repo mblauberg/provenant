@@ -1556,6 +1556,8 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    /// Review identity of the expanded node being launched.
+    pub review_launch: bool,
     pub require_skill_location: bool,
     /// Remaining portion of the graph's single infrastructure allowance.
     pub settlement_retries: Option<u8>,

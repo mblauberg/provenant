@@ -38,7 +38,7 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
         ("default-no-origin-head", None, &head),
     ] {
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
-        let observation = graph_owner.observe_or_start(&key, graph::NodeInput {
+        let observation = graph_owner.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
             context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
             source_commit: Some(&head), review_base, title: name, prompt: "review",
@@ -104,7 +104,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
             }))?;
             let roots = vec![root.to_string_lossy().into_owned()];
             let attempt = graph::AttemptSpec { write_roots: if write { roots.clone() } else { Vec::new() }, ..Default::default() };
-            let result = owner.observe_or_start(&key, graph::NodeInput {
+            let result = owner.observe_or_start(&key, graph::NodeInput { review_launch: false,
                 attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&attempt),
                 require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
                 context: graph_test_context(&key), read_roots: if write { &[] } else { &roots },
@@ -163,7 +163,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), B
     let write_root = rig.root.join("extra-write");
     std::fs::create_dir(&write_root)?;
     let attempt_spec = graph::AttemptSpec { build_heavy: true, write_roots: vec![write_root.to_string_lossy().into_owned()], ..Default::default() };
-    let node = || graph::NodeInput {
+    let node = || graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&attempt_spec), require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: graph_test_context(&key),
         read_roots: &source_roots, distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
         review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
@@ -267,7 +267,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result
     let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"batch", "node_id":"lane-outside", "route_index":0}))?;
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
     let delivery = provenant_records::run::DeliveryMode::Integrate("batch".into());
-    let error = owner.observe_or_start(&key, graph::NodeInput {
+    let error = owner.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[],
         capabilities: None,
         capability_sources: None, attempt: None,
@@ -432,7 +432,7 @@ fn graph_replay_preserves_accepted_context_without_a_checkpoint_reference()
     {
         let observation = graph_owner.observe_or_start(
             &key,
-            graph::NodeInput { capabilities: None, capability_sources: None, attempt: None, require_skill_location: false,
+            graph::NodeInput { review_launch: false, capabilities: None, capability_sources: None, attempt: None, require_skill_location: false,
                 settlement_retries: None,
                 prior_attempts: &[],
                 family_peers: &[],

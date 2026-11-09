@@ -928,13 +928,10 @@ pub(crate) fn graph_review_node(
     document: &provenant_fabric_runtime::graph::GraphDocument,
     id: &str,
 ) -> bool {
-    document.nodes.iter().any(|node| {
-        node.id == id
-            && node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-            && node.role.as_deref().is_some_and(|role| {
-                role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
-            })
-    })
+    document
+        .nodes
+        .iter()
+        .any(|node| node.id == id && provenant_fabric_runtime::graph::is_review_node(node))
 }
 
 pub(crate) fn writer_source_identity_matches(
@@ -2878,18 +2875,7 @@ impl BoundGraphOwner<'_> {
                     .and_then(|v| v.as_bool())
                     == Some(true)
             });
-            let review_launch = execution.as_ref().is_some_and(|execution| {
-                graph_review_node(&execution.document, &key.node_id)
-                    || execution.document.nodes.iter().any(|spec| {
-                        spec.id == key.node_id
-                            && matches!(
-                                spec.extra
-                                    .get("review_behaviour")
-                                    .and_then(serde_json::Value::as_str),
-                                Some("lens" | "verify" | "synthesis")
-                            )
-                    })
-            });
+            let review_launch = node.review_launch;
             let review_base = execution
                 .as_ref()
                 .and_then(|execution| execution.review_base);
@@ -3842,6 +3828,20 @@ mod journal_error_tests {
         review_launch_fixture("repair")
     }
 
+    #[test]
+    fn repair_loop_composite_review_uses_merge_base_and_refuses_empty_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::repair_loop_composite_review_uses_merge_base_and_refuses_empty_range",
+        )? {
+            return Ok(());
+        }
+        for scenario in ["expanded", "expanded-empty"] {
+            review_launch_fixture(scenario)?;
+        }
+        Ok(())
+    }
+
     #[allow(dead_code)] // The custom worktree driver includes this module without libtest.
     fn review_launch_fixture(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
@@ -3868,7 +3868,7 @@ mod journal_error_tests {
             crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "repair subject"])?;
         }
         let subject = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-        let target_start = if scenario == "ancestor" {
+        let target_start = if matches!(scenario, "ancestor" | "expanded-empty") {
             &subject
         } else {
             &fork
@@ -3915,12 +3915,28 @@ mod journal_error_tests {
                 .remove("role");
             document["nodes"][0]["review_behaviour"] = serde_json::json!("lens");
         }
+        if scenario.starts_with("expanded") {
+            let review = document["nodes"][0].clone();
+            document["nodes"] = serde_json::json!([{
+                "id":"repair", "kind":"loop", "access":"read_only",
+                "loop":{"review_repair":true,"max_rounds":1,"until":"accepted","body":[
+                    {"id":"panel","kind":"composite","access":"read_only",
+                        "composite":{"nodes":[review],
+                            "exports":[{"node":"review","outputs":["verdict"]}]}},
+                    {"id":"accepted","kind":"gate","access":"read_only",
+                        "depends_on":["panel"],"inputs":[{"node":"panel","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}
+            }]);
+        }
         let document: graph::GraphDocument = serde_json::from_value(document)?;
         let integration = (scenario == "repair").then(|| fork.parse()).transpose()?;
         let bound = BoundGraphBases {
             integration,
             review: graph_base.then(|| tip.parse()).transpose()?,
         };
+        // Real admission performs the upgrade preflight before binding a pending graph.
+        crate::install::cutover_pending_guard(&factory.context.roots.state)?;
         let mut journal = graph::FileJournal::open(
             &factory.context.roots.state,
             factory.context.identity.project,
@@ -3962,13 +3978,29 @@ mod journal_error_tests {
             )
         });
         let checkpoint = journal.load(&document.graph_id)?.ok_or("checkpoint")?;
-        if matches!(scenario, "same-head" | "ancestor" | "no-base") {
-            assert!(
-                format!("{result:?} {checkpoint:?}").contains("review_empty_range"),
-                "{scenario}: {result:?}"
+        let review = checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "review" || node.id == "repair--r1--panel--review")
+            .ok_or("review checkpoint")?;
+        if matches!(
+            scenario,
+            "same-head" | "ancestor" | "no-base" | "expanded-empty"
+        ) {
+            // Equal bound inputs fail in the scheduler; derived empty ranges are
+            // invalid-input refusals from the launch owner.
+            let expected = if scenario == "same-head" {
+                "review_empty_range"
+            } else {
+                "invalid_input"
+            };
+            assert_eq!(
+                review.advance_error_code.as_deref(),
+                Some(expected),
+                "{scenario}: {result:?} {checkpoint:?}"
             );
             assert!(
-                checkpoint.nodes[0]
+                review
                     .attempts
                     .iter()
                     .all(|attempt| attempt.attempt_ref.is_none()),
@@ -3977,7 +4009,7 @@ mod journal_error_tests {
             return Ok(());
         }
         let run = result?;
-        let reference = run.checkpoint.nodes[0]
+        let reference = review
             .attempts
             .iter()
             .find_map(|attempt| attempt.attempt_ref.as_deref())
@@ -3998,10 +4030,7 @@ mod journal_error_tests {
         assert_eq!(task.head.as_deref(), Some(subject.as_str()), "{scenario}");
         // The checkpoint keeps the bound ref tip, never the derived comparison base.
         if !graph_base && scenario != "repair" {
-            assert_eq!(
-                checkpoint.nodes[0].review_base.as_deref(),
-                Some(tip.as_str())
-            );
+            assert_eq!(review.review_base.as_deref(), Some(tip.as_str()));
         }
         Ok(())
     }
@@ -4182,6 +4211,7 @@ mod journal_error_tests {
             route_index: 0,
         };
         let node = |prompt| graph::NodeInput {
+            review_launch: false,
             require_skill_location: false,
             settlement_retries: Some(1),
             prior_attempts: &[],
