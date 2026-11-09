@@ -88,7 +88,7 @@ dated disposition only.
 | One chair, topology waves, native modes, discovery surfaces and OSS orchestration patterns | [Native orchestration and discovery surfaces](../native-orchestration-and-discovery-surfaces.md) and the current Agent Fabric specifications |
 | Adapter capability/effective configuration, OpenCode boundary, telemetry and runtime stack | Specs 01/03/04 (the standalone note was deleted; see Git history) |
 | Terminal framework/language comparison, interaction references and resize contract | Not retained; the console was never built |
-| General delivery lifecycle and skill portfolio evidence | Existing `agentic-sdlc-harness-2026.md` and `skill-portfolio-practices-2026.md`; not merged here |
+| General delivery lifecycle and skill portfolio evidence | See repository history for the earlier research baselines |
 | Skill-trigger lifecycle routing baseline | [Lifecycle routing dataset](../../evals/lifecycle-routing-2026-07/README.md); not provider routing |
 
 Exact source-section coverage:

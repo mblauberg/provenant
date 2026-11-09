@@ -43,8 +43,8 @@ runs per branch.
    needs a passing regression gate and enough comparable later runs;
    underpowered or confounded evidence is `inconclusive`.
 
-Once a quarter, refresh the research behind the skills against 2026 primary
-sources and mark older ones as possibly stale.
+Once a quarter, refresh the research behind the skills against current primary
+sources and mark any older than a year as possibly stale.
 
 ## Output
 

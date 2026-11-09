@@ -3,12 +3,10 @@
 Owner: `crates/core` (IDs, roots, time), `crates/records` (codecs, digests),
 `crates/config` (config, release, managed install)
 Anchor: `crates/core/src/roots.rs`, `crates/records/tests/contracts.rs`,
-`crates/config/src/tests.rs`, `crates/config/src/managed_tests.rs`
+`crates/config/src/managed_tests.rs`
 
 State owns root selection, identities, record codecs, typed configuration and
-the managed installation. The [cross-cutting
-decisions](README.md#cross-cutting-decisions) fix the root, layout and
-environment. Config keys are listed in the generated [config
+the managed installation. Config keys are listed in the generated [config
 reference](../reference/config-keys.md); the attempt layout is `AttemptFile`
 in `crates/records/src/attempt_file.rs`. Operator steps are in the [install
 runbook](../runbooks/install.md) and [GC runbook](../runbooks/gc.md). Paths
@@ -43,48 +41,26 @@ provider signal.
   `crates/core/src/paths.rs::relative_paths_reject_normalisation_and_parent_traversal`
 - Owner: `crates/core/src/`
 
+## Readiness persistence
+
+Readiness evidence has a separate tree from quota snapshots, so a failed
+publication cannot corrupt an account commit. `crates/cli/src/quota.rs` owns
+its paths; [route readiness](route-readiness.md) owns scope and freshness.
+
 ## Records
 
 ### Owner change generations
 
-Owners publish local invalidations in `changes.json` in the state root after
-committing inbox, board, chair summary or log, quota, and configuration changes.
-`provenant console changes --json` reads this small signal without opening the
-owner databases. Pass its `generations` object as JSON to `--since` to compare:
-`changed` contains true or false for comparable generations and null for an
-unknown value or reset. Unknown requires a full bounded re-read. File events
-are hints; watch the state directory as well as the file and reattach watches
-after replacement or directory recreation, watching an existing ancestor when
-the state directory is absent. Remote freshness remains the CLI's peer reads,
-explicit refresh and slow bounded fallback.
-The signal is a hint and never part of the commit. An owner commits first, then
-bumps. A failed or skipped bump does not fail the write, which still reports
-success. The first failure per process is printed once to stderr, and a later
-committed write publishes a fresh generation.
-- Watch window: watchers coalesce file events over 250 ms. A commit in any scope
-  is visible to a watcher on the state directory within that window.
-- Null-on-busy read: a read never waits. If a writer holds the signal lock, or
-  the entry is stray, the read returns null generations (unknown) and the client
-  does a full bounded re-read.
-- Lock: a bump takes the signal lock with five attempts 10 ms apart (about 50 ms)
-  and skips the bump on timeout. One bump covers several scopes with one lock
-  and one write.
-- Stray entries: a symlink, hard link, foreign owner, group- or world-writable
-  mode, or non-regular entry at the signal name is unlinked and recreated by the
-  next bump. Links are never written through. The new file starts a new epoch,
-  so readers see a reset.
-- No fsync: the signal is written without fsync. After a power loss it can roll
-  back to an earlier generation, so a client that compares for equality could
-  miss a change until its next full re-read. The owner's commit is already
-  durable.
-- Scopes: Inbox and Board bump on each Fabric commit, Quota on each committed
-  quota write, and Configuration on each config edit. Chair bumps on log appends
-  and prunes, and on saves by a chair-bound session store only. Other session
-  saves do not bump Chair.
-- Cost: `cargo test -p provenant-os --lib signal_bump_cost -- --ignored --nocapture`
-  measured 100 single-scope bumps in about 8 ms and 100 two-scope bumps in about
-  16 ms on macOS. The fsynced single-scope bumps measured 508 ms per 100 before
-  this change, so about 5 ms each.
+Owners commit durable state before publishing the lossy change-generation
+signal. A failed signal must not fail the committed write. Readers treat absent,
+busy or reset generations as unknown and perform a bounded re-read; file events
+are hints, and clients reattach after replacement or directory recreation.
+
+Signal publication never writes through stray links or foreign entries. It
+starts a new epoch after replacement. It does not fsync, so power loss may roll
+back a generation; clients need a periodic full re-read even when generations
+compare equal. The signal's scope and timing constants belong to
+`crates/os/src/changes.rs`, not to the owner's transaction.
 - Owner: `crates/os/src/changes.rs`, with bumps at each committing owner
 - Test: `crates/cli/src/console.rs::changes_reports_unknown_and_comparison`;
   `crates/fabric-store/src/tests.rs::signal_failure_reports_a_committed_fabric_write`;
@@ -93,9 +69,9 @@ committed write publishes a fresh generation.
 
 ### Strict, bounded records
 
-Stored records are typed serde models with `schema_version`, closed enums and
-`deny_unknown_fields`; unknown major versions fail before mutation. The
-reader rejects duplicate members, invalid UTF-8, trailing input, non-finite
+Stored records are typed, versioned serde models. Extra record fields survive
+round trips and canonical digests; authority-bearing input validation is a
+separate boundary. Unsupported versions fail before mutation. The reader rejects duplicate members, invalid UTF-8, trailing input, non-finite
 numbers and out-of-range integers, caps the bytes it reads (1 MiB for config,
 8 MiB for records) and the nesting depth (64), and never repeats the rejected
 value in its error. Edge-built
@@ -103,7 +79,8 @@ facts are `Serialize` only, so deserialisation cannot manufacture evidence.
 - Why: ambiguous JSON parses differently in different readers, and a forged
   file must not become evidence.
 - Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
-  `::typed_decode_errors_do_not_disclose_rejected_values`
+  `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`;
+  `crates/records/tests/forward_compatibility.rs::request_digest_matches_the_newer_writers_canonical_record`
 - Owner: `crates/records/src/`
 
 ### Digest preimage
@@ -139,8 +116,8 @@ the [worktree guide](../worktrees.md).
   store when unavailable, and a host may turn it off; it is never a
   prerequisite for running a lane.
 - Test: `crates/fabric-runtime/src/config.rs::tests::lane_priority_defaults_and_bounds`;
-  `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`;
-  `::enabled_is_a_no_op_on_other_platforms`
+  `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`
+- Test: none (gap) for the non-macOS no-op.
 - Owner: `crates/fabric-runtime/src/config.rs`, `crates/run/src/cargo_seed.rs`
 
 ### Cargo target seed generations
@@ -161,22 +138,25 @@ builds inline. A busy build is a no-op; a failure is recorded in
 the tick.
 - Test: `src/target_seed_build.rs::tests`; `crates/run/src/target_seed_gc.rs::tests`;
   `src/tick.rs::tests::seed_refresh_is_queued_without_running_inline_and_a_spawn_failure_is_recorded`;
-  `::seed_pass_treats_busy_as_a_noop_and_isolates_project_failures`;
-  `::seed_pass_is_single_flight_and_respects_a_disabled_seed`
+  `src/tick.rs::seed_pass_treats_busy_as_a_noop_and_isolates_project_failures`;
+  `src/tick.rs::seed_pass_is_single_flight_and_respects_a_disabled_seed`
 - Owner: `src/target_seed_build.rs`, `src/tick.rs`, `crates/run/src/target_seed_gc.rs`
 
 ### Strict typed config
 
-`config.toml` declares `schema_version = 1`; unknown keys, duplicates, bad
-types or ranges and unsupported versions fail, a missing `config.toml` means defaults, and a
-symlinked or unreadable file is an error. There is no include,
-interpolation, migration, profile layering or per-knob environment
-variable, and a preset never grants authority. `config set` writes
-atomically and refuses to rewrite an invalid file; `config show` redacts
-secret values and never writes to the file.
-- Why: implicit or executable configuration cannot be audited.
-- Test: `crates/config/src/tests.rs::closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_without_echoing_input`;
-  `::knob_edit_refuses_to_rewrite_an_invalid_config`
+`config.toml` declares its supported schema version. Missing configuration
+uses defaults; syntax, version and filesystem-boundary failures refuse loading.
+Invalid optional values warn and use defaults. A malformed restriction must not
+become permission. Unknown optional keys survive an unrelated edit; `config set`
+validates the requested value and publishes atomically. `config show` redacts
+secrets and never rewrites the file. The [config reference](../reference/config-keys.md)
+owns keys and defaults.
+- Why: configuration errors need visible remedies without silently expanding
+  authority or discarding unrelated user settings.
+- Test: `crates/config/src/tests.rs::config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoing_input`;
+  `crates/config/src/tests.rs::config_filesystem_boundary_refuses_links_non_files_and_unreadable_roots`;
+  `crates/config/src/tests.rs::set_rejects_out_of_range_values_and_unknown_knobs`;
+  `crates/config/src/tests.rs::knob_edit_preserves_unknown_keys_while_applying_the_edit`
 - Owner: `crates/config/src/`
 
 ### Provider-state retention
@@ -188,11 +168,11 @@ leaves result, captures, exit evidence and digests untouched; resume then
 fails `PROVIDER_STATE_EXPIRED` before spending. GC does not wait for locks,
 spares reservations and pending continuations, deletes only through
 identity-checked tombstones, never follows links and writes nothing on a dry
-run (ADR 0031).
+run ([ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md)).
 - Why: freeing credentials and space must not destroy evidence or a session
   in use.
 - Test: `crates/run/src/retention.rs::gc_spares_nonterminal_attempts_and_contention_and_reservations`;
-  `::gc_retries_only_authorised_tombstones_and_never_follows_links`
+  `crates/run/src/retention.rs::gc_retries_only_authorised_tombstones_and_never_follows_links`
 - Owner: `crates/run/src/retention.rs`
 
 ## Release identity
@@ -219,7 +199,7 @@ manifests fail `ReleaseConflict`. A digest proves identity, not publisher
 trust.
 - Why: a partial or swapped release must never run.
 - Test: `crates/config/src/managed_tests.rs::bytes_and_modes_are_verified_and_existing_release_is_immutable`;
-  `::interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_staging_file`
+  `crates/config/src/managed_tests.rs::interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_staging_file`
 - Owner: `crates/config/src/release.rs`
 
 ## Managed install
@@ -233,7 +213,7 @@ stops the install. Locks hold back only other installers, not running
 harness clients, so quit those clients first.
 - Why: the user's harness config changes only in view.
 - Test: `crates/config/src/managed_tests.rs::dry_run_and_broken_preview_create_nothing`;
-  `::drift_between_preview_and_apply_refuses_before_file_writes`
+  `crates/config/src/managed_tests.rs::drift_between_preview_and_apply_refuses_before_file_writes`
 - Owner: `crates/config/src/managed.rs`
 
 ### Only unchanged owned entries are removed
@@ -246,7 +226,7 @@ environment variables. Protected destinations and paths under a mount point are 
 any read.
 - Why: install must never delete what it cannot prove it wrote.
 - Test: `crates/config/src/managed_tests.rs::uninstall_keeps_edited_links_and_unmanaged_siblings_and_binary`;
-  `::mcp_conflict_does_not_adopt_foreign_env_or_create_state`
+  `crates/config/src/managed_tests.rs::mcp_conflict_does_not_adopt_foreign_env_or_create_state`
 - Owner: `crates/config/src/managed.rs`
 
 ### Editors preserve foreign bytes
@@ -259,7 +239,7 @@ absolute stable binary with `--state-dir ABS fabric mcp --client NAME` and
 no secret environment, matching the recorded contract for each client.
 - Why: a harness config holds the user's other tools and secrets.
 - Test: `crates/config/src/managed_tests.rs::five_client_install_preserves_foreign_hooks_comments_and_reapplies`;
-  `::mcp_registry_matches_recorded_client_config_contracts`
+  `crates/config/src/managed_tests.rs::mcp_registry_matches_recorded_client_config_contracts`
 - Owner: `crates/config/src/splice.rs`, `crates/config/src/harness.rs`
 
 ### Hook ownership
@@ -280,7 +260,7 @@ their paths being inspected or changed; uninstall forgets selected stale
 ownership and reinstall leaves dangling links for manual cleanup.
 - Why: an old path may now belong to something else.
 - Test: `crates/config/src/managed_tests.rs::uninstall_after_home_rename_never_acts_on_old_paths`;
-  `::check_after_home_rename_never_inspects_old_config_paths`
+  `crates/config/src/managed_tests.rs::check_after_home_rename_never_inspects_old_config_paths`
 - Owner: `crates/config/src/managed.rs`
 
 ### LaunchAgents
@@ -305,7 +285,7 @@ displaced user files, and a full disk (ENOSPC) or an uncertain publication retur
 failure.
 - Why: one idempotent path is easier to trust than a rollback engine.
 - Test: `crates/config/src/managed_tests.rs::crash_after_any_publication_reapplies_without_a_receipt`;
-  `::receipt_publish_failure_reports_partial_actions_and_reapplies`
+  `crates/config/src/managed_tests.rs::receipt_publish_failure_reports_partial_actions_and_reapplies`
 - Owner: `crates/config/src/managed.rs`
 
 ## Not provided

@@ -136,12 +136,17 @@ removal, capped at five seconds. Applied full and pressure sweeps share
 Manual `gc --pressure` prints a notice when the project is transient or no
 eligible data is in scope; JSON exposes the reason as `notice`.
 
-Fabric settlement records `cleanup_deferred = true` and immediately queues a
-detached completion GC worker to collect its worktree, declared output and Cargo
-caches. Settlement fetches no refs and walks no payload trees. The worker retains
+Fabric settlement records `cleanup_deferred = true` and atomically publishes a
+completion request without waiting on any dispatch or collection lock. The host
+tick dispatches a detached worker to collect its worktree, declared output and
+Cargo caches. Settlement fetches no refs and walks no payload trees. The worker retains
 all ownership, continuation, terminal-state, live-writer, landing-proof and
 expected-tip lease checks. Durable requests under `<state>/gc/completions/`
-survive interruption; each host tick retries them independently of the daily
+contain both intent and retry state. A worker claims the whole record by rename
+to a `.claim` filename and holds an OS lock while processing it. A dead worker's
+claim remains retryable; a requeue publishes fresh pending intent even when the
+earlier claim has exhausted its budget. Exhaustion moves the whole record to
+`gc/completion-exhausted` in one rename. Each host tick retries independently of the daily
 GC deadline and `gc.schedule`. A busy worker waits up to 120 seconds for collection
 custody before leaving its request for retry. `land` retains its explicit cleanup.
 Kept files, live writers and reservations still prevent removal.

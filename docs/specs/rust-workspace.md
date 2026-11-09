@@ -21,13 +21,14 @@ on the run crate. The binary `provenant` is the only executable.
   events break cycles, never an import of `run` into `providers` or
   `routing`.
 - Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
-  `::libraries_cannot_depend_on_cli`
+  `tests/workspace_policy.rs::libraries_cannot_depend_on_cli`
 - Owner: `tests/workspace_policy.rs` (`LAYERS`), each member's `Cargo.toml`
 
 ## Dependencies
 
 Direct dependencies come only from the `DIRECT` list in
-`tests/workspace_policy.rs` (ADR 0028 decision 3), declared once in
+`tests/workspace_policy.rs` ([ADR 0028](../adr/0028-rust-port-dependencies.md)
+decision 3), declared once in
 `[workspace.dependencies]`; `tempfile` is dev-only. A new crate, feature or
 material transitive addition needs a recorded reason and an update to this rule.
 `rusqlite` also serves run's store, keeping admission atomic in one
@@ -39,7 +40,7 @@ attempt decode error, so a refusal names what to fix; paths stop at user map key
 runtime and no daemon.
 - Why: a small, audited supply chain with bounded, synchronous code.
 - Test: `tests/workspace_policy.rs::every_member_obeys_the_direct_dependency_policy`;
-  `::transitive_crates_and_renamed_dependencies_are_rejected`
+  `tests/workspace_policy.rs::transitive_crates_and_renamed_dependencies_are_rejected`
 - Owner: `Cargo.toml` (`[workspace.dependencies]`), `deny.toml`
 
 ## Errors
@@ -67,7 +68,7 @@ reviewer.
 - Why: process custody is the safety core; one audited boundary is
   reviewable.
 - Test: `tests/workspace_policy.rs::os_internals_are_reserved_for_supervisor`;
-  `::native_boundaries_mirror_workspace_lints_except_for_unsafe_code`. The
+  `tests/workspace_policy.rs::native_boundaries_mirror_workspace_lints_except_for_unsafe_code`. The
   second review is a review gate.
 - Owner: `Cargo.toml` (`unsafe_code = "forbid"`), `clippy.toml`
 

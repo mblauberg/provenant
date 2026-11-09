@@ -14,9 +14,6 @@ entries and say which ones you reasoned from.
 Read it before choosing a model. Prefer what it says. Depart from it when the
 work calls for something else, and say why in the receipt.
 
-All five adapters are enabled by default. `provenant route list` does not
-probe; readiness is decided at dispatch.
-
 ## Advisory only
 
 This file cannot change what is permitted. Nothing here is enforced by a schema
@@ -30,12 +27,6 @@ dispatch a leg.
   authority, never reaches an unavailable route, and never blocks a dispatch.
 - If a preference here disagrees with a resolved route, the resolved route wins
   and the disagreement is a signal to fix the dossier, not the router.
-
-```mermaid
-flowchart LR
-  D[model dossier] -->|ADVISORY: which mind fits| R
-  G[route eligibility] -->|VETO| R
-```
 
 ## What this file does not own
 
@@ -81,8 +72,7 @@ not read an absent `Watch out for` as an endorsement.
   exploration. The default for critical review, synthesis and adjudication at
   every risk tier, ahead of Fable 5.1. Reserve it for that work; Sonnet 5.5 is
   the cheaper default elsewhere.
-- **Watch out for:** the owner on Opus 5's long-form prose: "opus's writing is
-  quite horrible". Hand human-facing prose to a voice pass (see
+- **Watch out for:** long-form prose reads poorly. Hand human-facing prose to a voice pass (see
   [Human-facing final polish](#human-facing-final-polish)) rather than shipping
   Opus drafts as written.
 - **Cost:** principal-tier; not separately characterised.
@@ -94,11 +84,9 @@ not read an absent `Watch out for` as an endorsement.
 - **Good at:** correctness, edge cases and precise work on a tight scope.
   Medium is the senior default; high is the principal default, with xhigh
   available there for harder work.
-- **Watch out for:** the benchmark priors below vary by task. Revisit the
+- **Watch out for:** benchmark priors vary by task. Revisit the
   Sol/Terra split using Provenant lane telemetry.
-- **Cost:** on the Artificial Analysis Intelligence Index, max adds one point
-  over xhigh at nearly twice the cost per task. Keep max available for exact
-  model requests, outside all pools.
+- **Cost:** consult the benchmark registry and the catalogue for current priors and pool settings.
 - **Reach:** `codex` adapter, `openai` family. The Codex models cache fetched
   2026-10-26T22:24Z records low, medium, high, xhigh and max. Consult the
   catalogue for each pool's narrower effort range.
@@ -106,8 +94,7 @@ not read an absent `Watch out for` as an endorsement.
 ### GPT-6.1 Terra (OpenAI senior and junior trial)
 
 - **Good at:** a trial for ordinary implementation, research legwork, review
-  and drafting in senior, and cheaper bounded work in junior. The benchmark
-  priors support trying it, rather than assuming it replaces Sol.
+  and drafting in senior, and cheaper bounded work in junior.
 - **Watch out for:** high and xhigh are unmeasured. Do not interpolate a
   performance claim for either. Revisit the senior and junior trials using
   Provenant lane telemetry.
@@ -117,37 +104,6 @@ not read an absent `Watch out for` as an endorsement.
   2026-10-26T22:24Z records low, medium, high, xhigh and max. The senior trial
   defaults to high and allows low through high; the junior trial defaults to
   low and allows low and medium.
-
-#### Sol/Terra benchmark priors
-
-These published results are priors, not Provenant lane measurements. Scores
-from different benchmarks are not interchangeable; task costs are USD per task,
-not token prices. Sources read 2026-10-27:
-
-| Benchmark | Model and effort | Score | Cost per task |
-|---|---|---|---|
-| AA Intelligence Index | Sol low / medium / high / xhigh / max | 42 / 48 / 50 / 51 / 52 | $0.13 / $0.21 / $0.32 / $0.39 / $0.72 |
-| AA Intelligence Index | Terra medium | 41 | $0.10 |
-| AA Intelligence Index | Terra max | 48 | $0.40 |
-| Terminal-Bench 4 | Terra low / medium / max | 24.8 / 35.8 / 50.3 | Not reported here |
-| Terminal-Bench 4 | Sol medium / max | 52.7 / 55.9 | Not reported here |
-| Agents' Last Exam | Terra low / medium / max | 55.9 / 57.6 / 60.0 | $0.16 / $0.29 / $1.01 |
-| Agents' Last Exam | Sol medium / max | 53.8 / 58.6 | $1.31 / $2.00 |
-
-The Sol Intelligence Index figures come from Artificial Analysis's
-[low](https://artificialanalysis.ai/models/gpt-6-1-sol-low),
-[medium](https://artificialanalysis.ai/models/gpt-6-1-sol-medium),
-[high](https://artificialanalysis.ai/models/gpt-6-1-sol-high),
-[xhigh](https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh) and
-[max](https://artificialanalysis.ai/models/gpt-6-1-sol) entries. Terra max
-comes from [Artificial Analysis](https://artificialanalysis.ai/models/gpt-6-1-terra),
-read 2026-10-27. Terra medium is secondary evidence from
-[kingy.ai](https://kingy.ai/blog/gpt-6-1-terra/), published 2026-10-26,
-citing Artificial Analysis. Terminal-Bench 4 is OpenAI-run, reported via that
-kingy.ai article; Agents' Last Exam is OpenAI-run, reported via
-[cellcog.ai](https://cellcog.ai/blog/gpt-6-1-terra/), read 2026-10-27.
-Neither vendor-run benchmark is an independent reproduction. Terra high and
-xhigh remain unmeasured in this evidence.
 
 ### GPT-6 Luna (OpenAI junior)
 
@@ -256,41 +212,12 @@ to whoever chairs the run, so the right second family depends on the first. Do
 not write a standing preference here; pick the family that is *not* the author's
 and record it.
 
-## Execution status
-
-All five adapters are enabled for dispatch. A catalogue entry shows that a
-model is configured, not that it is reachable; readiness depends on the local
-sign-in and quota, which dispatch decides; `provenant route list` does not probe.
-
-| Adapter | Models in the bundled pools |
-|---|---|
-| Claude | Haiku 5.5, Sonnet 5.5, Opus 5.5 |
-| Codex | GPT-6 Luna, GPT-6.1 Terra, GPT-6.1 Sol |
-| Agy | Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking |
-| Cursor | Grok 4.7 |
-| OpenCode | DeepSeek V4.1 Flash and GLM 5.3 Flash (free models) |
-
-No other adapters exist.
-
 ## Recording the preference
 
-Cite the entry heading when one of these entries actually decided a route. The
-`orchestrate` skill's routing reference owns that convention and where the
-citation goes; it is not repeated here.
+When one of these entries decided a route, cite its heading in the receipt.
 
 ## Maintenance
 
-Edit this file directly. It needs no migration, no baseline and no regenerated
-fixture, which is the entire point. If a preference here starts being treated as
-binding, that is a bug in the caller, not a reason to formalise the file.
-
-These notes are version-specific and they decay. That is expected and is the
-reason the file is prose rather than a schema: a claim like "loves to
-over-engineer but is very good at being correct" is worth writing down precisely
-because it will stop being true, and rewriting one paragraph must cost nothing.
-
-- A new model release is one new entry, not an audit of every use case.
-- Delete a claim the moment it stops matching what you observe. A stale entry is
-  worse than an absent one.
-- Keep entries in the owner's own terms. Do not balance or soften an assessment,
-  and do not invent one for a model nobody has used.
+Edit this file directly; it needs no migration or regenerated fixture. Notes are
+version-specific and decay: add one entry per new model, delete a claim when it
+stops matching what you observe, and keep entries in the owner's own terms.

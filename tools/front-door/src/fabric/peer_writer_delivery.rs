@@ -13,37 +13,64 @@ fn completion_gc_retries_busy_collection_and_requeued_exhausted_request()
     let request_path = std::fs::read_dir(&requests)?.next().ok_or("queued request")??.path();
     let request = std::fs::read_to_string(&request_path)?;
     let name = request_path.file_name().ok_or("request name")?;
-    let retry_path = fixture.roots.state.as_path().join("gc/completion-retries").join(name);
-    let retry = std::fs::read(&retry_path)?;
     let lock = crate::worktrees::collection_lock(&fixture.roots)?;
     let old_wait = gc_cleanup::COLLECTION_WAIT_SECONDS.replace(1);
     let result = gc_cleanup::run(&request, &FreeWorkers);
     gc_cleanup::COLLECTION_WAIT_SECONDS.set(old_wait);
     result?;
-    assert!(request_path.exists(), "busy collection must retain its request");
+    let claimed_path = requests.join(format!("{}.claim", name.to_string_lossy()));
+    assert!(claimed_path.exists(), "busy collection must retain its request");
     assert!(fixture.worktree.exists());
-    assert_eq!(std::fs::read(&retry_path)?, retry, "worker must preserve durable backoff");
+    let retry = std::fs::read(&claimed_path)?;
+    let record: serde_json::Value = serde_json::from_slice(&retry)?;
+    assert_eq!(record["retry"]["attempts"], 1);
+    assert_eq!(record["retry"]["last_cause"], crate::worktrees::COLLECTION_BUSY);
     gc_cleanup::retry_pending(fixture.roots.state.as_path(), &fixture.rig.home)?;
-    assert_eq!(std::fs::read(&retry_path)?, retry, "host tick must honour backoff");
+    assert_eq!(std::fs::read(&claimed_path)?, retry, "host tick must honour backoff");
     drop(lock);
     gc_cleanup::run(&request, &FreeWorkers)?;
     assert!(!fixture.worktree.exists(), "later pass must clean the lane");
     assert!(!request_path.exists());
-    assert!(!retry_path.exists());
+    assert!(!claimed_path.exists());
 
-    // Recreate the crash window after exhaustion deleted the request but
-    // before deleting its capped retry. Requeue before a host sweep occurs.
+    // The diagnostic record contains both payload and exhausted budget.
     let exhausted = fixture.roots.state.as_path().join("gc/completion-exhausted");
     std::fs::create_dir_all(&exhausted)?;
-    std::fs::write(exhausted.join(name), &request)?;
-    std::fs::write(&retry_path, br#"{"attempts":5,"next_at":0}"#)?;
-    // The test harness may refuse detached spawning, after recording dispatch.
-    let _ = gc_cleanup::queue(&fixture.settled, &fixture.roots, None);
-    assert_eq!(std::fs::read_to_string(&request_path)?, request);
-    let retry: serde_json::Value = serde_json::from_slice(&std::fs::read(&retry_path)?)?;
-    assert_eq!(retry["attempts"], 1, "identical requeue must get a fresh budget");
-    assert!(retry["next_at"].as_u64().ok_or("backoff")? > 0);
-    assert_eq!(std::fs::read_to_string(exhausted.join(name))?, request);
+    let mut record: serde_json::Value = serde_json::from_str(&request)?;
+    record["retry"] = serde_json::json!({"attempts":5,"next_at":0,"last_cause":"busy"});
+    std::fs::write(exhausted.join(name), serde_json::to_vec(&record)?)?;
+    gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
+    let fresh: serde_json::Value = serde_json::from_slice(&std::fs::read(&request_path)?)?;
+    assert_eq!(fresh["request"], record["request"]);
+    assert_eq!(fresh["retry"]["attempts"], 0, "identical requeue must get a fresh budget");
+    assert_eq!(fresh["retry"]["next_at"], 0);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(exhausted.join(name))?)?, record);
+    Ok(())
+}
+
+#[test]
+fn completion_queue_publishes_promptly_while_dispatch_is_contended()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::peer_writer_delivery::completion_queue_publishes_promptly_while_dispatch_is_contended")? {
+        return Ok(());
+    }
+    let fixture = SettlementFixture::resumed()?;
+    // Hold the old dispatch lock too: queue must never wait for either lock.
+    let locks = provenant_config::private_directory(
+        &fixture.roots.state.as_path().join("gc/completion-retries"), true)?;
+    let _dispatch = locks.try_lock("dispatch.lock".as_ref(), provenant_os::fs::LockMode::Exclusive)?;
+    let started = std::time::Instant::now();
+    gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let requests = fixture.roots.state.as_path().join("gc/completions");
+    let paths = std::fs::read_dir(&requests)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(paths.len(), 1);
+    let bytes = std::fs::read(paths[0].path())?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(record["retry"]["attempts"], 0);
+    assert!(record["request"].as_str().is_some());
+    gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
+    assert_eq!(std::fs::read(paths[0].path())?, bytes);
     Ok(())
 }
 
@@ -94,18 +121,14 @@ fn settlement_defers_adopted_writer_cleanup()
     )?;
     let queued = pending.entries()?.collect::<Result<Vec<_>, _>>()?;
     assert_eq!(queued.len(), 1);
-    let retries = provenant_config::private_directory(
-        &fixture.roots.state.as_path().join("gc/completion-retries"), false,
-    )?;
-    let first_retry = retries.read_bounded(&queued[0], 1024)?;
-    let dispatch: serde_json::Value = serde_json::from_slice(&first_retry)?;
-    assert_eq!(dispatch["attempts"], 1);
-    // A test harness refuses detached dispatch. Repeating settlement during
-    // backoff preserves its intent without dispatching again or that warning.
+    let first_request = pending.read_bounded(&queued[0], 128 * 1024)?;
+    let dispatch: serde_json::Value = serde_json::from_slice(&first_request)?;
+    assert_eq!(dispatch["retry"]["attempts"], 0);
+    // Repeating settlement preserves the pending request and its budget.
     receipt.as_object_mut().ok_or("receipt object")?.remove("cleanup_warning");
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
     assert_eq!(fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?, Some(receipt));
-    assert_eq!(retries.read_bounded(&queued[0], 1024)?, first_retry);
+    assert_eq!(pending.read_bounded(&queued[0], 128 * 1024)?, first_request);
     assert_eq!(pending.entries()?.collect::<Result<Vec<_>, _>>()?, queued);
     gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
     assert!(fixture.worktree.exists());

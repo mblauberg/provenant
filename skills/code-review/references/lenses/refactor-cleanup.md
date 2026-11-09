@@ -1,7 +1,6 @@
 # Lens: refactor-cleanup
 
-Canonical questions: [review-lenses.md](../review-lenses.md), sections
-"Dependency cone" and "Ownership and structure".
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Does the change address the root cause within its dependency cone?
 - Identify duplicated logic the change should consolidate.

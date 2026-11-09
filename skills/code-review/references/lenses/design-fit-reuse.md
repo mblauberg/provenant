@@ -1,7 +1,6 @@
 # Lens: design fit and reuse
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Ownership and structure" and its design-principle probes.
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Does the change belong where it was put? Find the canonical owner of the
   behaviour or data and compare.

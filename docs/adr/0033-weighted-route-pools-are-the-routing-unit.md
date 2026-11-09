@@ -12,10 +12,10 @@ each hit quota limits. Fixed task classes coupled callers to model names.
 
 ## Decision
 
-A task selects either one exact model or one named pool. The bundled catalogue
-defines `utility`, `junior`, `senior`, `principal`, `writing` and `design`
-pools. Junior, senior and principal form the capability pyramid that presets,
-roles and review tiers refer to. A pool makes a deterministic weighted draw
+A task selects either one exact model or one named pool. The
+[bundled catalogue](../../tools/front-door/crates/routing/assets/catalogue.toml)
+owns pool names and contents. Capability tiers used by templates and reviews
+resolve through those pools. A pool makes a deterministic weighted draw
 among ready positive-weight members, scaled by provider pacing; zero-weight
 members are ordered fallbacks. Pool membership and weights are data, editable
 under `[domains.routing]`, not code.

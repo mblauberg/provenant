@@ -1,6 +1,6 @@
 # Telemetry and quota
 Owner: provenant-telemetry
-Anchor: tools/front-door/crates/telemetry/src
+Anchor: [`telemetry tests`](../../tools/front-door/crates/telemetry/src/tests.rs); [`native.rs`](../../tools/front-door/crates/telemetry/src/native.rs)
 
 `provenant telemetry stats` reduces retained terminal attempt facts with prices
 from `config/telemetry-prices.toml`. Optional `--since`, `--until DATE`,

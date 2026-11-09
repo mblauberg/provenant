@@ -6,14 +6,9 @@ Changed: 2026-10-26, #1754.
 
 ## Context
 
-A workshop-host inventory found 12 GB under `runs/`, including 11.4 GB of
-attempt-private provider state. Codex caches and plugins accounted for about
-10.2 GB; transcripts and history databases accounted for about 0.6 GB.
-Only continuation reads the private provider state. Telemetry reads the
-attempt records and `usage.jsonl`.
-
-The inventory establishes a concrete retention requirement for private
-provider state, separate from durable run results.
+Attempt-private caches can dominate storage, while transcripts and durable
+results must survive cache collection. Only continuation reads resumable
+provider state; telemetry uses attempt records independently.
 
 ## Decision
 
@@ -22,15 +17,14 @@ Apply automatic retention to attempt-private provider state.
 custody; it grants no general state-deletion authority.
 
 At terminal settlement, prune only provider cache paths known to be
-regenerable. Codex's initial entry is `cache/`, `plugins/`, `skills/` and
-`models_cache.json`. Provider startup fetches or generates them again.
-Keep the paths in one small provider table; add another provider only with
+regenerable. The provider-owned cache inventory identifies
+paths that startup can fetch or generate again; add another provider only with
 evidence that its entries are regenerable.
 
 GC removes known credential copies and links once a terminal attempt is
 24 hours old. It expires resumable provider state after
 `retention.provider_state_days`, default 7. Both ages start at terminal
-`finished_at`. Existing runs use the same rule on the first sweep.
+`finished_at`.
 
 Before expiry, archive transcripts and history databases under the attempt's
 `provider-history/`. Codex sessions, history and their database companions,

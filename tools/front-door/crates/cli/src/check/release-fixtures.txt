@@ -16,7 +16,7 @@ apps/quota-menubar/Tests/QuotaMenuBarTests/ConsoleAppTests.swift release.home-pa
 bench/tasks/routing-effort.patch release.home-path ba642492100016a8
 bench/tasks/run-follow-dispatch.patch release.github-token 99c270f8f6f93d02
 docs/runbooks/configuration.md release.home-path 7740e31cae060f24
-docs/runbooks/configuration.md release.home-path ca4f050fa11812ca
+docs/runbooks/configuration.md release.home-path db06b785162bef40
 docs/runbooks/fabric-hosts.md release.home-path e2af7abfbdb20bbc
 tools/front-door/crates/confinement/src/permissions/tests/render.rs release.home-path 0c50c3dedaf28dfa
 tools/front-door/crates/confinement/src/permissions/tests/render.rs release.home-path 13dba8fd3a7b99e3

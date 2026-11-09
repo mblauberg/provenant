@@ -1,7 +1,6 @@
 # Lens: correctness against the spec
 
-Canonical questions: [review-lenses.md](../review-lenses.md), sections
-"Correctness and failure" and "Verification".
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 Check the change against the spec (the issue or file you were given), not
 against the author's account of it.

@@ -161,7 +161,7 @@ producers close and its join condition holds.
 
 ## Writer tiers
 
-Use the [planner brief](../../skills/orchestrate/references/planner.md): about
+Follow the [orchestrate skill](../../skills/orchestrate/SKILL.md) planner brief: about
 three acceptance items per slice, disjoint scopes, one integration branch,
 shared contracts first and waves only for dependencies. Default slices to
 junior; raise tiers for contained or difficult design. Add light review per

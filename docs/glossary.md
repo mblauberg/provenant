@@ -3,12 +3,15 @@
 Terms used by `HARNESS.md`. Risk-tier criteria are listed there and compiled
 into `provenant-records`.
 
-- **Acceptance:** objective checks plus the review required by the risk tier establish that delivered work meets its approved criteria. The chair reports the outcome and the user may still reject it. Explicit user acceptance is required only for `terminal` work or when the approved scope asks for it. A project may name its landing gate as acceptance. Acceptance grants no release, deploy, publish or send authority.
-- **User gate:** approval of specs and scope, one-way doors, risk-tier downgrades, unresolved acceptance criteria, destructive or irreversible actions, external communications or production promotion; also final acceptance for `terminal` work or when the approved scope asks for it.
+- **Acceptance:** the delivery criterion owned by the [constitution](../HARNESS.md#lifecycle-and-user-gates); it grants no external-action authority.
+- **User gate:** a decision reserved to the user by the [constitution](../HARNESS.md#lifecycle-and-user-gates).
 - **Chair:** the harness the user started. It owns authority, user communication, run state, gates and final synthesis.
-- **Lane:** one dispatched worker run (native subagent or Fabric dispatch) with its own prompt, route and output file.
+- **Lane:** a worker assignment with its own authority and output.
+- **Graph node:** a scheduled unit of graph work, which may be an agent, action or composite.
+- **Run:** a durable execution identity represented by [`run.rs#RunRecord`](../tools/front-door/crates/records/src/run.rs).
+- **Attempt:** one execution under custody, represented by [`run.rs#AttemptRecord`](../tools/front-door/crates/records/src/run.rs). Retries and continuations create new attempts with lineage.
 - **Front door:** the skill that names the kind of work before acting: `scope`, `diagnose`, `session`, `deliver` or `implement`.
 - **One-way door:** a decision or action that is hard or impossible to reverse, such as a published release or a destructive change. It needs user approval.
-- **Receipt:** the recorded `adapter/model@effort` and outcome of an attempt. Provenance comes from the receipt, never from a model's self-report.
+- **Receipt:** a typed record of an outcome. Attempt receipts record route and outcome; delivery receipts record the delivery decision. Provenance comes from records, never from a model's self-report.
 - **Envelope:** the user-approved authority bounds for a piece of work: paths, actions, disclosure, secrets, expiry and approver. Delegation only narrows it.
 - **Stage owner:** the one agent accountable for a lifecycle stage at a time, even when other agents contribute.

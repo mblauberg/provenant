@@ -15,6 +15,10 @@ jobs:
   # ... real build/test/lint jobs here, each optionally path-filtered via a
   # detect-changes job (see provenant's ci.yml) so ci-status still reports
   # promptly on docs-only or partial-surface changes ...
+  #
+  # A job may only be skipped when detect-changes says it was not selected.
+  # Name each filter-skippable job in SELECTED_JSON below with its
+  # selection output; any other skip fails the check.
 
   ci-status:
     runs-on: ubuntu-latest
@@ -23,20 +27,25 @@ jobs:
     needs:
       - job-one   # replace with this project's real job ids
       - job-two
+      - detect-changes
     if: always()
     steps:
-      - name: Fail unless every needed job succeeded or was skipped by filter
+      - name: Fail unless every needed job succeeded or was legitimately unselected
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          # JSON map of job id -> "true" when detect-changes selected it, for
+          # filter-skippable jobs only. Replace with this project's outputs.
+          SELECTED_JSON: '{"job-two": "${{ needs.detect-changes.outputs.job-two }}"}'
         run: |
           echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value.result)"'
-          blocking="$(echo "$NEEDS_JSON" | jq -r \
-            'to_entries[]
-             | select(.value.result != "success" and .value.result != "skipped")
+          blocking="$(jq -rn --argjson n "$NEEDS_JSON" --argjson s "$SELECTED_JSON" \
+            '$n | to_entries[]
+             | select(.value.result != "success"
+                      and (.value.result != "skipped" or ($s[.key] // "true") == "true"))
              | "\(.key)=\(.value.result)"')"
           if [ -n "$blocking" ]; then
             echo "Blocking job results:"
             echo "$blocking"
             exit 1
           fi
-          echo "All needed jobs succeeded or were skipped by the path filter."
+          echo "All needed jobs succeeded or were unselected by the path filter."

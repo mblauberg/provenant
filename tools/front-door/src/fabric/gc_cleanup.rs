@@ -19,13 +19,53 @@ fn spawn(request: &str, home: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Dispatch records are written before spawning, so a slow or crashed worker
-// cannot be respawned on every host tick. Five attempts, ten minutes apart
-// initially, bound both process churn and the lifetime of transient failures.
+// The identity payload and retry budget travel together, including on exhaustion.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Retry {
     attempts: u32,
     next_at: u64,
+    #[serde(default)]
+    last_cause: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Completion {
+    request: String,
+    #[serde(default)]
+    retry: Retry,
+}
+
+impl Completion {
+    fn decode(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        // Requests persisted before the single-record queue were identity tuples.
+        if let Ok(record) = serde_json::from_slice::<Self>(bytes) {
+            return Ok(record);
+        }
+        let _: (
+            provenant_run::HolderContext,
+            Option<provenant_run::WriterDeliveryReceipt>,
+        ) = serde_json::from_slice(bytes)?;
+        Ok(Self {
+            request: std::str::from_utf8(bytes)?.to_owned(),
+            retry: Retry::default(),
+        })
+    }
+
+    fn save(
+        &self,
+        directory: &provenant_os::fs::Directory,
+        name: &std::ffi::OsStr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        directory
+            .atomic_write(
+                name,
+                "completion",
+                &serde_json::to_vec(self)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        Ok(())
+    }
 }
 
 fn now_seconds() -> Result<u64, Box<dyn std::error::Error>> {
@@ -61,150 +101,178 @@ pub(crate) fn queue(
     let request = serde_json::to_string(&(request, delivery))?;
     let directory =
         provenant_config::private_directory(&roots.state.as_path().join("gc/completions"), true)?;
-    let retries = provenant_config::private_directory(
-        &roots.state.as_path().join("gc/completion-retries"),
-        true,
-    )?;
-    // Publish and reconcile under the same lock as exhaustion and final removal.
-    // Otherwise a new identical request could inherit a crashed worker's budget.
-    let _dispatch = dispatch_lock(&retries)?;
-    let name = request_name(&request);
-    reconcile_orphan(&directory, &retries, name.as_ref())?;
-    directory.atomic_write(
-        name.as_ref(),
-        "completion",
-        request.as_bytes(),
-        provenant_os::fs::PublishMode::Replace,
-    )?;
-    let mut retry = match retries.read_bounded(name.as_ref(), 1024) {
-        Ok(bytes) => serde_json::from_slice::<Retry>(&bytes)?,
-        Err(error) if error.is_not_found() => Retry::default(),
-        Err(error) => return Err(error.into()),
-    };
-    let now = now_seconds()?;
-    if now < retry.next_at || retry.attempts >= 5 {
-        return Ok(());
-    }
-    dispatch(
-        &retries,
-        name.as_ref(),
-        &mut retry,
-        &request,
-        &settled.roots.home,
-        now,
-    )
+    publish(&directory, &request)
 }
 
-fn dispatch(
-    retries: &provenant_os::fs::Directory,
-    name: &std::ffi::OsStr,
-    retry: &mut Retry,
+fn publish(
+    directory: &provenant_os::fs::Directory,
     request: &str,
-    home: &Path,
-    now: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    retry.attempts += 1;
-    retry.next_at = now.saturating_add(600 * (1_u64 << (retry.attempts - 1)));
-    retries.atomic_write(
-        name,
-        "retry",
-        &serde_json::to_vec(retry)?,
-        provenant_os::fs::PublishMode::Replace,
-    )?;
-    spawn(request, home)
+    let record = Completion {
+        request: request.to_owned(),
+        retry: Retry::default(),
+    };
+    // No lock, spawn or network operation belongs on the settlement path.
+    // Workers only mutate a claimed record. Requeue can therefore publish fresh
+    // intent even while an earlier generation is finishing or exhausting.
+    match directory.atomic_write(
+        request_name(request).as_ref(),
+        "completion",
+        &serde_json::to_vec(&record)?,
+        provenant_os::fs::PublishMode::NoReplace,
+    ) {
+        Ok(publication) => {
+            publication.require_durable()?;
+            Ok(())
+        }
+        Err(provenant_os::fs::FsError::Rename { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            directory.sync()?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
-fn dispatch_lock(
-    retries: &provenant_os::fs::Directory,
-) -> Result<provenant_os::fs::LockGuard, Box<dyn std::error::Error>> {
-    let clock = SystemClock;
-    Ok(retries.lock(
-        "dispatch.lock".as_ref(),
+fn claimed_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    format!("{}.claim", name.to_string_lossy()).into()
+}
+
+// Called under the stable request lock. A dead worker leaves the whole record
+// here; the host tick can resume it as soon as its OS lock is released.
+fn load_claimed(
+    directory: &provenant_os::fs::Directory,
+    name: &std::ffi::OsStr,
+) -> Result<Option<Completion>, Box<dyn std::error::Error>> {
+    let claimed = claimed_name(name);
+    match directory.read_bounded(&claimed, 128 * 1024) {
+        Ok(bytes) => return Ok(Some(Completion::decode(&bytes)?)),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    match directory.rename_noreplace(name, directory, &claimed) {
+        Ok(()) => directory.sync()?,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(Some(Completion::decode(
+        &directory.read_bounded(&claimed, 128 * 1024)?,
+    )?))
+}
+
+fn claim(
+    state: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<Option<provenant_os::fs::LockGuard>, Box<dyn std::error::Error>> {
+    let locks = provenant_config::private_directory(&state.join("gc/completion-locks"), true)?;
+    match locks.try_lock(
+        format!("{}.lock", name.to_string_lossy()).as_ref(),
         provenant_os::fs::LockMode::Exclusive,
-        WaitBudget::cli(clock.mono_now(), 120)?,
-        &CancelToken::new(),
-        &clock,
-    )?)
+    ) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
-fn reconcile_orphan(
-    requests: &provenant_os::fs::Directory,
-    retries: &provenant_os::fs::Directory,
+fn exhaust(
+    directory: &provenant_os::fs::Directory,
+    state: &Path,
     name: &std::ffi::OsStr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match requests.read_bounded(name, 64 * 1024) {
-        Ok(_) => {}
-        Err(error) if error.is_not_found() => match retries.unlink(name) {
-            Ok(()) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        },
-        Err(error) => return Err(error.into()),
+    let exhausted =
+        provenant_config::private_directory(&state.join("gc/completion-exhausted"), true)?;
+    // One rename moves both intent and budget. There is no half-deleted state.
+    #[cfg(test)]
+    exhaustion_checkpoint(ExhaustionPhase::BeforeRename)?;
+    directory.replace(&claimed_name(name), &exhausted, name)?;
+    #[cfg(test)]
+    exhaustion_checkpoint(ExhaustionPhase::AfterRename)?;
+    exhausted.sync()?;
+    directory.sync()?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExhaustionPhase {
+    BeforeRename,
+    AfterRename,
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXHAUSTION_CRASH: std::cell::Cell<Option<ExhaustionPhase>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn exhaustion_checkpoint(phase: ExhaustionPhase) -> Result<(), Box<dyn std::error::Error>> {
+    if EXHAUSTION_CRASH.get() == Some(phase) {
+        EXHAUSTION_CRASH.set(None);
+        return Err("injected exhaustion crash".into());
     }
     Ok(())
 }
 
 /// Retry only due transient work, with a bounded batch and durable backoff.
 pub(crate) fn retry_pending(state: &Path, home: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    retry_pending_with(state, |request| spawn(request, home))
+}
+
+fn retry_pending_with(
+    state: &Path,
+    mut dispatch: impl FnMut(&str) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let directory = provenant_config::private_directory(&state.join("gc/completions"), true)?;
-    let metadata = provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
-    let _dispatch = match metadata.try_lock(
-        "dispatch.lock".as_ref(),
-        provenant_os::fs::LockMode::Exclusive,
-    ) {
-        Ok(lock) => lock,
-        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in metadata.entries()? {
-        let name = entry?;
-        if Path::new(&name)
-            .extension()
-            .is_some_and(|ext| ext == "json")
-        {
-            reconcile_orphan(&directory, &metadata, &name)?;
-        }
-    }
     let now = now_seconds()?;
     let mut dispatched = 0;
+    let mut names = std::collections::BTreeSet::new();
     for entry in directory.entries()? {
-        let name = entry?;
-        let bytes = match directory.read_bounded(&name, 64 * 1024) {
-            Ok(bytes) => bytes,
-            Err(error) if error.is_not_found() => continue,
-            Err(error) => return Err(error.into()),
+        let entry = entry?;
+        let text = entry.to_string_lossy();
+        let name = text.strip_suffix(".claim").unwrap_or(&text);
+        if Path::new(name).extension().is_some_and(|ext| ext == "json") {
+            names.insert(std::ffi::OsString::from(name));
+        }
+    }
+    for name in names {
+        let Some(worker) = claim(state, &name)? else {
+            continue;
         };
-        let mut retry = match metadata.read_bounded(&name, 1024) {
-            Ok(bytes) => serde_json::from_slice::<Retry>(&bytes)?,
-            Err(error) if error.is_not_found() => Retry::default(),
-            Err(error) => return Err(error.into()),
+        let Some(mut record) = load_claimed(&directory, &name)? else {
+            continue;
         };
-        if now < retry.next_at {
+        if now < record.retry.next_at {
             continue;
         }
-        if retry.attempts >= 5 {
-            // Preserve the exhausted request as diagnostic evidence outside
-            // the active queue; it is never automatically spawned again.
-            let exhausted =
-                provenant_config::private_directory(&state.join("gc/completion-exhausted"), true)?;
-            exhausted.atomic_write(
-                &name,
-                "exhausted",
-                &bytes,
-                provenant_os::fs::PublishMode::Replace,
-            )?;
-            directory.unlink(&name)?;
-            metadata.unlink(&name)?;
+        if record.retry.attempts >= 5 {
+            exhaust(&directory, state, &name)?;
             continue;
         }
-        dispatch(
-            &metadata,
-            &name,
-            &mut retry,
-            std::str::from_utf8(&bytes)?,
-            home,
-            now,
-        )?;
+        // Reserve dispatch durably before spawning. A dead child is retried
+        // after this bounded delay; OS locks disappear when a worker dies.
+        record.retry.attempts += 1;
+        record.retry.next_at = now.saturating_add(600 * (1_u64 << (record.retry.attempts - 1)));
+        record.retry.last_cause = Some("worker dispatched; completion not yet confirmed".into());
+        record.save(&directory, &claimed_name(&name))?;
+        let reservation = serde_json::to_vec(&record)?;
+        drop(worker);
+        if let Err(error) = dispatch(&serde_json::to_string(&record)?) {
+            // Preserve the actual failure if this reservation still owns the
+            // claimed record. A worker or another tick may already have moved it.
+            if let Some(_claim) = claim(state, &name)? {
+                match directory.read_bounded(&claimed_name(&name), 128 * 1024) {
+                    Ok(bytes) if bytes == reservation => {
+                        record.retry.last_cause = Some(error.to_string());
+                        record.save(&directory, &claimed_name(&name))?;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         dispatched += 1;
         if dispatched == 4 {
             break;
@@ -220,28 +288,26 @@ pub(crate) fn run(
     if provenant_cli::fabric::in_lane() {
         return Err("lane cleanup requires host custody".into());
     }
+    let dispatched = Completion::decode(request.as_bytes())?;
     let (settled, delivery): (
         provenant_run::HolderContext,
         Option<provenant_run::WriterDeliveryReceipt>,
-    ) = serde_json::from_str(request)?;
+    ) = serde_json::from_str(&dispatched.request)?;
     let mut inputs =
         provenant_core::RootInputs::new(settled.roots.home.clone(), settled.roots.checkout.clone());
     inputs.state_dir = Some(settled.roots.state_root.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let directory =
         provenant_config::private_directory(&roots.state.as_path().join("gc/completions"), true)?;
-    let locks = provenant_config::private_directory(
-        &roots.state.as_path().join("gc/completion-locks"),
-        true,
-    )?;
-    let _worker = match locks.try_lock(
-        format!("{}.lock", settled.attempt_id).as_ref(),
-        provenant_os::fs::LockMode::Exclusive,
-    ) {
-        Ok(lock) => lock,
-        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
-        Err(error) => return Err(error.into()),
+    let name = request_name(&dispatched.request);
+    let Some(_worker) = claim(roots.state.as_path(), name.as_ref())? else {
+        return Ok(());
     };
+    // Reload after claiming: a delayed child must not resurrect drained work.
+    let Some(mut record) = load_claimed(&directory, name.as_ref())? else {
+        return Ok(());
+    };
+    let claimed = claimed_name(name.as_ref());
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -257,29 +323,29 @@ pub(crate) fn run(
     let store = provenant_run::RunStore::open(&context, &call)?;
     // A later explicit delivery may supersede an earlier final retention.
     // Finality belongs to this request, not every request for the attempt.
-    if collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())?
-        == CollectionOutcome::Busy
-    {
-        return Ok(());
-    }
-    if store
-        .worktree_settlement(settled.attempt_id, &call)?
-        .is_some_and(|receipt| final_receipt(&receipt))
-    {
-        let retries = provenant_config::private_directory(
-            &roots.state.as_path().join("gc/completion-retries"),
-            true,
-        )?;
-        let _dispatch = dispatch_lock(&retries)?;
-        match directory.unlink(request_name(request).as_ref()) {
-            Ok(()) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
+    let outcome = collect_owned_worktree(&settled, &roots, workers, delivery.as_ref());
+    let receipt = store.worktree_settlement(settled.attempt_id, &call)?;
+    match outcome {
+        Ok(CollectionOutcome::Finished) if receipt.as_ref().is_some_and(final_receipt) => {
+            directory.unlink(&claimed)?;
+            directory.sync()?;
         }
-        match retries.unlink(request_name(request).as_ref()) {
-            Ok(()) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
+        result => {
+            record.retry.last_cause = Some(match &result {
+                Err(error) => error.to_string(),
+                Ok(CollectionOutcome::Busy) => crate::worktrees::COLLECTION_BUSY.to_owned(),
+                Ok(CollectionOutcome::Finished) => receipt
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "cleanup has no final receipt".into()),
+            });
+            // Direct invocations also get durable backoff, before leaving the claim.
+            if record.retry.attempts == 0 {
+                record.retry.attempts = 1;
+                record.retry.next_at = now_seconds()?.saturating_add(600);
+            }
+            record.save(&directory, &claimed)?;
+            result?;
         }
     }
     Ok(())
@@ -871,110 +937,230 @@ mod tests {
     }
 
     #[test]
-    fn retry_tick_removes_orphan_from_interrupted_exhaustion()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let state = temporary.path();
-        let retries =
-            provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
-        let name = request_name("interrupted exhaustion");
-        retries.atomic_write(
-            name.as_ref(),
-            "fixture",
-            &serde_json::to_vec(&Retry {
-                attempts: 5,
-                next_at: 0,
-            })?,
-            provenant_os::fs::PublishMode::Replace,
-        )?;
-        let exhausted =
-            provenant_config::private_directory(&state.join("gc/completion-exhausted"), true)?;
-        exhausted.atomic_write(
-            name.as_ref(),
-            "fixture",
-            b"interrupted exhaustion",
-            provenant_os::fs::PublishMode::Replace,
-        )?;
-        // Crash after the request delete, before the retry delete; even a
-        // missing active queue directory must not prevent reconciliation.
-        retry_pending(state, &state.join("must-not-spawn"))?;
-        assert!(
-            retries
-                .read_bounded(name.as_ref(), 1024)
-                .unwrap_err()
-                .is_not_found()
-        );
-        assert_eq!(
-            exhausted.read_bounded(name.as_ref(), 1024)?,
-            b"interrupted exhaustion"
-        );
-        retry_pending(state, &state.join("must-not-spawn"))?;
-        Ok(())
-    }
-
-    #[test]
-    fn retry_tick_honours_backoff_and_drains_exhausted_requests()
+    fn exhaustion_moves_one_record_and_requeue_gets_fresh_budget()
     -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let state = temporary.path();
         let requests = provenant_config::private_directory(&state.join("gc/completions"), true)?;
-        let retries =
-            provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
-        // A missing child working directory makes accidental dispatch fail;
-        // these requests must only be deferred or moved into diagnostics.
-        let missing_home = state.join("must-not-spawn");
-        let waiting_name = request_name("waiting fixture");
-        let exhausted_name = request_name("exhausted fixture");
-        for name in [&waiting_name, &exhausted_name] {
-            requests.atomic_write(
-                name.as_ref(),
-                "fixture",
-                b"not a cleanup request",
-                provenant_os::fs::PublishMode::Replace,
-            )?;
-        }
-        let deferred = serde_json::to_vec(&Retry {
-            attempts: 2,
-            next_at: u64::MAX,
-        })?;
-        retries.atomic_write(
-            waiting_name.as_ref(),
-            "fixture",
-            &deferred,
-            provenant_os::fs::PublishMode::Replace,
-        )?;
-        retries.atomic_write(
-            exhausted_name.as_ref(),
-            "fixture",
-            &serde_json::to_vec(&Retry {
+        let request = "exhaustion fixture";
+        let name = request_name(request);
+        let record = Completion {
+            request: request.into(),
+            retry: Retry {
                 attempts: 5,
                 next_at: 0,
-            })?,
-            provenant_os::fs::PublishMode::Replace,
-        )?;
+                last_cause: Some("worker died".into()),
+            },
+        };
+        record.save(&requests, name.as_ref())?;
+        let bytes = requests.read_bounded(name.as_ref(), 4096)?;
+        // Crash immediately before the rename: the entire exhausted record is
+        // still pending. Repeated host ticks complete this transition once.
         for _ in 0..2 {
-            retry_pending(state, &missing_home)?;
+            retry_pending_with(state, |_| panic!("exhausted work must not dispatch"))?;
+            assert!(!state.join("gc/completions").join(&name).exists());
             assert_eq!(
-                requests.read_bounded(waiting_name.as_ref(), 1024)?,
-                b"not a cleanup request"
-            );
-            assert_eq!(retries.read_bounded(waiting_name.as_ref(), 1024)?, deferred);
-            assert!(!state.join("gc/completions").join(&exhausted_name).exists());
-            assert!(
-                !state
-                    .join("gc/completion-retries")
-                    .join(&exhausted_name)
-                    .exists()
-            );
-            assert_eq!(
-                std::fs::read(state.join("gc/completion-exhausted").join(&exhausted_name))?,
-                b"not a cleanup request"
+                std::fs::read(state.join("gc/completion-exhausted").join(&name))?,
+                bytes
             );
         }
-        requests.unlink(waiting_name.as_ref())?;
-        retries.unlink(waiting_name.as_ref())?;
-        retry_pending(state, &missing_home)?;
-        assert_eq!(requests.entries()?.count(), 0);
+        // Crash immediately after rename (before any later operation): there
+        // is no retry sidecar to reconcile and identical intent gets a new budget.
+        publish(&requests, request)?;
+        let fresh = Completion::decode(&requests.read_bounded(name.as_ref(), 4096)?)?;
+        assert_eq!(fresh.request, request);
+        assert_eq!(fresh.retry.attempts, 0);
+        assert_eq!(fresh.retry.next_at, 0);
+        assert_eq!(fresh.retry.last_cause, None);
+        assert_eq!(
+            std::fs::read(state.join("gc/completion-exhausted").join(&name))?,
+            bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exhaustion_crash_points_preserve_one_complete_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for phase in [ExhaustionPhase::BeforeRename, ExhaustionPhase::AfterRename] {
+            let temporary = tempfile::tempdir()?;
+            let state = temporary.path();
+            let requests =
+                provenant_config::private_directory(&state.join("gc/completions"), true)?;
+            let name = request_name("crash fixture");
+            let record = Completion {
+                request: "crash fixture".into(),
+                retry: Retry {
+                    attempts: 5,
+                    next_at: 0,
+                    last_cause: Some("collection busy".into()),
+                },
+            };
+            record.save(&requests, &claimed_name(name.as_ref()))?;
+            let bytes = requests.read_bounded(&claimed_name(name.as_ref()), 4096)?;
+            EXHAUSTION_CRASH.set(Some(phase));
+            let result = retry_pending_with(state, |_| panic!("exhausted work must not dispatch"));
+            EXHAUSTION_CRASH.set(None);
+            assert_eq!(result.unwrap_err().to_string(), "injected exhaustion crash");
+            let active = state
+                .join("gc/completions")
+                .join(claimed_name(name.as_ref()));
+            let diagnostic = state.join("gc/completion-exhausted").join(&name);
+            assert_ne!(active.exists(), diagnostic.exists());
+            assert_eq!(
+                std::fs::read(if phase == ExhaustionPhase::BeforeRename {
+                    &active
+                } else {
+                    &diagnostic
+                })?,
+                bytes
+            );
+            retry_pending_with(state, |_| panic!("exhausted work must not dispatch"))?;
+            assert!(!active.exists());
+            assert_eq!(std::fs::read(&diagnostic)?, bytes);
+            publish(&requests, "crash fixture")?;
+            assert_eq!(
+                Completion::decode(&requests.read_bounded(name.as_ref(), 4096)?)?
+                    .retry
+                    .attempts,
+                0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn requeue_during_exhausted_claim_keeps_fresh_intent_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let state = temporary.path();
+        let requests = provenant_config::private_directory(&state.join("gc/completions"), true)?;
+        let name = request_name("requeue fixture");
+        let exhausted = Completion {
+            request: "requeue fixture".into(),
+            retry: Retry {
+                attempts: 5,
+                next_at: 0,
+                last_cause: Some("busy".into()),
+            },
+        };
+        exhausted.save(&requests, &claimed_name(name.as_ref()))?;
+        let lock = claim(state, name.as_ref())?.ok_or("claim")?;
+        publish(&requests, "requeue fixture")?;
+        let bytes = requests.read_bounded(name.as_ref(), 4096)?;
+        assert_eq!(Completion::decode(&bytes)?.retry.attempts, 0);
+        drop(lock);
+        retry_pending_with(state, |_| panic!("exhausted claim must be archived first"))?;
+        assert_eq!(requests.read_bounded(name.as_ref(), 4096)?, bytes);
+        let mut calls = 0;
+        retry_pending_with(state, |_| {
+            calls += 1;
+            Ok(())
+        })?;
+        assert_eq!(calls, 1);
+        assert_eq!(
+            Completion::decode(&requests.read_bounded(&claimed_name(name.as_ref()), 4096)?)?
+                .retry
+                .attempts,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_exhaustion_rename_leaves_complete_request_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let state = temporary.path();
+        let requests = provenant_config::private_directory(&state.join("gc/completions"), true)?;
+        let name = request_name("failed rename");
+        let record = Completion {
+            request: "failed rename".into(),
+            retry: Retry {
+                attempts: 5,
+                next_at: 0,
+                last_cause: Some("busy".into()),
+            },
+        };
+        record.save(&requests, name.as_ref())?;
+        let bytes = requests.read_bounded(name.as_ref(), 4096)?;
+        // A directory at the diagnostic destination forces the rename to fail.
+        std::fs::create_dir_all(state.join("gc/completion-exhausted").join(&name))?;
+        assert!(retry_pending_with(state, |_| panic!("must not dispatch")).is_err());
+        assert_eq!(
+            requests.read_bounded(&claimed_name(name.as_ref()), 4096)?,
+            bytes
+        );
+        std::fs::remove_dir(state.join("gc/completion-exhausted").join(&name))?;
+        retry_pending_with(state, |_| panic!("must not dispatch"))?;
+        assert_eq!(
+            std::fs::read(state.join("gc/completion-exhausted").join(&name))?,
+            bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dead_claim_is_retried_with_durable_backoff() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::BufRead;
+        let temporary = tempfile::tempdir()?;
+        let state = temporary.path();
+        let requests = provenant_config::private_directory(&state.join("gc/completions"), true)?;
+        publish(&requests, "dead claim")?;
+        let name = request_name("dead claim");
+        // Create the stable lock through the production primitive, then let
+        // a separate process hold it and die without releasing it explicitly.
+        let initial_claim = claim(state, name.as_ref())?.ok_or("initial claim")?;
+        assert!(load_claimed(&requests, name.as_ref())?.is_some());
+        drop(initial_claim);
+        let path = state
+            .join("gc/completion-locks")
+            .join(format!("{name}.lock"));
+        let mut child = std::process::Command::new("python3")
+            .args(["-c", "import fcntl,sys,time; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('claimed', flush=True); time.sleep(60)"])
+            .arg(path).stdout(std::process::Stdio::piped()).spawn()?;
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stdout.take().ok_or("child stdout")?)
+            .read_line(&mut ready)?;
+        assert_eq!(ready.trim(), "claimed");
+        let mut calls = 0;
+        retry_pending_with(state, |_| {
+            calls += 1;
+            Ok(())
+        })?;
+        assert_eq!(calls, 0, "a live claim excludes dispatch");
+        child.kill()?;
+        child.wait()?;
+        retry_pending_with(state, |_| {
+            calls += 1;
+            Ok(())
+        })?;
+        assert_eq!(calls, 1, "a dead claim must not strand work");
+        let bytes = requests.read_bounded(&claimed_name(name.as_ref()), 4096)?;
+        let reserved = Completion::decode(&bytes)?;
+        assert_eq!(reserved.retry.attempts, 1);
+        assert!(reserved.retry.next_at > now_seconds()?);
+        assert!(reserved.retry.last_cause.is_some());
+        retry_pending_with(state, |_| panic!("backoff must prevent redispatch"))?;
+        assert_eq!(
+            requests.read_bounded(&claimed_name(name.as_ref()), 4096)?,
+            bytes
+        );
+        // A child that dies after reservation is retried when the backoff expires.
+        let mut due = reserved;
+        due.retry.next_at = 0;
+        due.save(&requests, &claimed_name(name.as_ref()))?;
+        retry_pending_with(state, |_| {
+            calls += 1;
+            Ok(())
+        })?;
+        assert_eq!(calls, 2);
+        assert_eq!(
+            Completion::decode(&requests.read_bounded(&claimed_name(name.as_ref()), 4096)?)?
+                .retry
+                .attempts,
+            2
+        );
         Ok(())
     }
 }

@@ -12,9 +12,9 @@ Set these in `[domains.lanes]` in the host configuration. Omit a key for its def
 |---|---|---|
 | `user_skills` | discover | Discover host user skills for lanes read-only. off disables host user skill discovery unless overridden by domains.lanes.projects.{project_id}.user_skills or route policy lane.user_skills. Route policy wins over project, then host. Inspect value, default and origin with config show or config schema. (discover or off). |
 | `skill_stage_max_bytes` | 16777216 | Maximum bytes copied into an attempt's read-only user skill tree. Content exceeding the bound is skipped with a warning. Inspect value and origin with config show. (bytes, 0 or more). |
-| `projects.{project}.capabilities` | [] | Capabilities granted by default to this project's writer lanes; node settings and invocation flags may override them. Read-only lanes do not inherit them. (postgres). |
-| `projects.{project}.shared_paths` | [] | Existing paths shared read-write with this project's writers. Absolute, ~/ and primary-checkout-relative paths are accepted. Git, credential, protected and executable paths are omitted with a warning. Read-only lanes receive no additional writes. (existing absolute, ~/ or checkout-relative paths). |
-| `projects.{project}.exec_roots` | [] | Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key. (directory paths relative to the primary checkout). |
+| `projects.{project}.capabilities` | empty | Capabilities granted by default to this project's writer lanes; node settings and invocation flags may override them. Read-only lanes do not inherit them. (postgres). |
+| `projects.{project}.shared_paths` | empty | Existing paths shared read-write with this project's writers. Absolute, ~/ and primary-checkout-relative paths are accepted. Git, credential, protected and executable paths are omitted with a warning. Read-only lanes receive no additional writes. (existing absolute, ~/ or checkout-relative paths). |
+| `projects.{project}.exec_roots` | empty | Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key. (directory paths relative to the primary checkout). |
 
 ## Host lane build settings
 
@@ -29,16 +29,16 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation. (1024 to 65535 or -1 for auto). |
 | `lane_port_block` | 16 | Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT). (1 to 1024 or -1 for auto). |
 | `lane_port_blocks` | 64 | Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block. (0 to 1024 or -1 for auto). |
-| `max_lanes` | 64 | Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source. (1 to 64 or -1 for auto). |
-| `max_project_lanes` | 32 | Most lanes of any class live at once for one project; at most max_lanes. (1 to 32 or -1 for auto). |
-| `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
-| `max_project_writer_lanes` | 30 | Most writer lanes live at once for one project; at most max_writer_lanes. (1 to 32 or -1 for auto). |
+| `max_lanes` | unset (no limit) | Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source. (1 to 64 or -1 for auto). |
+| `max_project_lanes` | unset (no limit) | Most lanes of any class live at once for one project; at most max_lanes. (1 to 32 or -1 for auto). |
+| `max_writer_lanes` | unset (no limit) | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
+| `max_project_writer_lanes` | unset (no limit) | Most writer lanes live at once for one project; at most max_writer_lanes. (1 to 32 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
 | `cargo_incremental` | false | CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence. (true or false). |
 | `cargo_debug` | line-tables-only | CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence. (none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false). |
-| `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, after a lane settles, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over. (bytes, 0 or more). |
+| `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, during manual or scheduled GC, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over. (bytes, 0 or more). |
 | `build_dir_grace_seconds` | 900 (15 minutes) | A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held. (seconds, 0 or more). |
-| `build_dir_survey_interval_seconds` | 300 (5 minutes) | Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement. (seconds, 0 or more). |
+| `build_dir_survey_interval_seconds` | 300 (5 minutes) | Legacy survey interval, retained for readable existing configurations. Settlement no longer surveys lane caches; manual and scheduled GC own those surveys. (seconds, 0 or more). |
 
 ## Host run settings
 
@@ -58,6 +58,9 @@ Set these in `[domains.run]` in the host configuration. Omit a key for its defau
 | `source_view_seconds` | 300 | Total time allowed to build the pinned source view of a `--use review` lane. The view is built with one batched object read, so a healthy large repository needs far less. Raise it on a slow disk or a heavily loaded host. (1 or more seconds). |
 | `source_view_entries` | 100000 | Maximum files in a pinned source view. A larger tree is refused, naming this limit. (1 to 4294967295 files). |
 | `source_view_bytes` | 536870912 | Maximum total file bytes in a pinned source view. A larger tree is refused, naming this limit. (1 or more bytes). |
+| `writer_writes` | [] | Directories writer lanes may read, write and execute as subtrees; read-only lanes are unchanged (up to 16 absolute, safe directory paths outside credential roots). |
+| `review_exempt` | ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"] | Paths that do not count toward an uncommitted outcome; a project list replaces the host list and an empty list disables exemptions (repository-relative paths without wildcards). |
+| `push_conflict_markers` | true | Refuse pushes that add lines starting with <<<<<<< or >>>>>>> (true or false). |
 | `projects.{project}.writer_writes` | host writer_writes | Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]. (up to 16 absolute, safe directory paths outside credential roots). |
 
 ## Host land settings
@@ -193,6 +196,55 @@ Set these in `[gc]` in the host configuration. Omit a key for its default.
 | Key | Default | Effect |
 |---|---|---|
 | `graph_checkpoint_days` | 90 | Retain terminal graph checkpoints for at least this many days after their last save (1 to 3650 days). |
+| `schedule` | true | Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run (true or false). |
+| `idle_days` | 7 | Minimum idle age before a lane cache or declared output is collected (1 to 3650 days). |
+| `free_floor` | 10% of the state volume, at least 50 GiB | Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first (whole B, K, M, G, T or KiB to TiB; a plain number means GiB). |
+| `lane_cargo_cache_max` | 32G | Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody (same syntax as free_floor). |
+| `alert_below` | free_floor | Free space below which an applied collection emits one gc.low_disk note per dip (same syntax as free_floor). |
+| `projects.{project}.regenerable` | ["target"] with a root Cargo.toml, otherwise [] | Git-ignored directory names collected at any depth in the project's linked worktrees (directory names; not .git, .worktrees, absolute or parent paths). |
+| `projects.{project}.keep` | [] | Paths, their descendants and any matching directory containing them that collection preserves (worktree-relative paths). |
+| `projects.{project}.foreign_worktrees` | keep | merged-clean removes clean, merged linked worktrees with no known writer after a complete free census (keep or merged-clean). |
+
+## Host retention settings
+
+Set these in `[retention]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `provider_state_days` | 7 | Days a terminal attempt's provider state stays resumable; reread on each sweep (1 to 3650 days). |
+| `logs_days` | 30 | Days before captures over 64 KiB and intermediate event rows of closed runs expire; the last 64 KiB is kept as a .tail file (1 to 3650 days). |
+| `session_revisions` | 8 | Checkpoint revisions a session keeps, the current one included; reread on each save (1 to 64). |
+| `chair_log_days` | 30 | Days a chair log payload is kept (1 to 3650 days). |
+| `chair_log_entries` | 10000 | Chair log entries kept per session (1 to 100000). |
+| `chair_log_bytes` | 16777216 (16 MiB) | Chair log payload bytes kept per session (65536 to 1073741824 bytes). |
+| `chair_log_replay_days` | chair_log_days, at least 7 | Days chair log replay receipts are kept (7 to 3650 days). |
+| `projects.{project}.checkpoint_soft_bytes` | 2048 | Advisory checkpoint size above which a save warns; the hard limit is unchanged (1 to 262144 bytes). |
+
+## Host quota settings
+
+Set these in `[domains.quota]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `max_parallel` | 3 | Accounts per quota probe batch; batches and probes currently run sequentially. Out-of-range values refuse the file (1 to 16). |
+| `wall_budget_seconds` | 55 | Wall-clock budget for a whole quota tick. Out-of-range values refuse the file (1 to 600 seconds). |
+
+## Host OpenCode Go settings
+
+Set these in `[domains.routing.opencode_go]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `min_monthly_allowance_usd` | 60 | Lowest documented monthly allowance an OpenCode Go model needs to be routed or selected; a model with an unknown allowance is refused while the floor is on (0 or more; 0 disables the floor). |
+
+## Host Codex cloud settings
+
+Set these in `[providers.codex.cloud]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `transport` | official | official uses codex cloud exec, status and list; thread uses a client for the cloud thread API (official or thread). |
+| `command` | codex for official, codex-cloud-task for thread | Cloud client executable, resolved through the host PATH (one executable name or path; no arguments). |
 
 ## Host store settings
 

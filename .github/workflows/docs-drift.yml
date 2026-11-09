@@ -1,4 +1,4 @@
-name: Advisory documentation drift
+name: Documentation drift
 
 on:
   schedule:
@@ -38,9 +38,17 @@ jobs:
       - name: Build the worktree CLI
         working-directory: tools/front-door
         run: cargo build --locked --quiet -p provenant --bin provenant
-      - name: Collect advisory references and header inventory
-        run: scripts/check-doc-truth --binary "$CARGO_TARGET_DIR/debug/provenant" > "$RUNNER_TEMP/doc-truth.txt"
+      - name: Enforce documentation evidence and collect advisory references
+        id: truth
+        run: |
+          set +e
+          scripts/check-doc-truth --binary "$CARGO_TARGET_DIR/debug/provenant" \
+            --strict-inventory --strict-citations --exclude-reserved > "$RUNNER_TEMP/doc-truth.txt"
+          truth_status=$?
+          cat "$RUNNER_TEMP/doc-truth.txt"
+          exit "$truth_status"
       - name: Update the documentation epic summary comment
+        if: ${{ always() && steps.truth.outcome != 'skipped' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -56,7 +64,7 @@ jobs:
               report = report[:48000].rsplit('\n', 1)[0] + '\n[report truncated]\n'
           run = (f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
                  f"/actions/runs/{os.environ['GITHUB_RUN_ID']}")
-          body = ('<!-- provenant-docs-drift -->\n## Advisory documentation drift\n\n'
+          body = ('<!-- provenant-docs-drift -->\n## Documentation drift\n\n'
                   f'[{os.environ["GITHUB_SHA"][:12]}]({run})\n\n'
                   + ('```text\n' + report + '```\n' if report else 'No unresolved references or missing headers.\n'))
           (temporary / 'doc-truth-comment.json').write_text(json.dumps({'body': body}))
