@@ -128,6 +128,13 @@ class HarnessChecks(unittest.TestCase):
         self.assertIn("HARNESS.md: line 1: ambient file names repository path docs/runbooks/x.md", self.check(1))
         ambient.write_text("Governed by `MAINTAINING.md`.\n")
         self.assertIn("ambient file names repository path MAINTAINING.md", self.check(1))
+        ambient.write_text("See `../docs/x.md`.\n")
+        self.assertIn("ambient file names repository path ../docs/x.md", self.check(1))
+        ambient.unlink()
+        rules = self.root / "GLOBAL-AGENTS.md"
+        rules.write_text("See `scripts/verify`.\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        self.assertIn("GLOBAL-AGENTS.md: line 1: ambient file names repository path scripts/verify", self.check(1))
 
 
 if __name__ == "__main__":

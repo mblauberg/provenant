@@ -262,7 +262,7 @@ def main():
             except (OSError, ValueError, KeyError, TypeError) as error:
                 fail(path, f"invalid route fixture: {error}")
 
-    ambient_path = re.compile(r"(?<![\w./~-])(?:docs|config|scripts)/[\w./-]+|\bMAINTAINING\.md\b")
+    ambient_path = re.compile(r"(?<![\w./~-])(?:\.\.?/)*(?:docs|config|scripts)/[\w./-]*|(?<![\w-])MAINTAINING\.md\b")
     for path in (Path("GLOBAL-AGENTS.md"), Path("HARNESS.md")):
         if path in paths:
             for number, line in enumerate((root / path).read_text().splitlines(), 1):

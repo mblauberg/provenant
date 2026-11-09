@@ -13,7 +13,7 @@ work does not need it.
   and synthesis, keeping only steps too small to brief. Vary provider, model
   and effort (`orchestrate`). A delegated agent owns its brief and may delegate
   parts of it within its own authority, which only narrows. User communication,
-  gates, final synthesis and removing other writers' branches stay with the
+  run state, gates, final synthesis and removing other writers' branches stay with the
   chair.
 - **Continuity.** Use `session` at session start, before compaction and at
   handoff. Use `tracker` when the project tracks work in GitHub issues.
@@ -55,7 +55,7 @@ work does not need it.
   Check the output, not just the exit code, before
   trusting an empty result or a green run.
 
-Platform safety policy and the user's explicit instructions come first. These
-rules are durable authorisation for what they name. Project instructions may
+Platform safety policy and the user's explicit instructions come first. The Git
+rule above is durable authorisation for the actions it names. Project instructions may
 strengthen them but never broaden authority, weaken safety or redefine
 cross-project preferences.
