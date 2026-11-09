@@ -1070,6 +1070,7 @@ pub fn project_lane(
     now_wall: Option<WallTime>,
     observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
+    let usage = lane.effective_usage();
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
     let waiting_for = wait.map(|wait| wait.waiting_for.clone()).or_else(|| {
         lane.provider_silent_for_ms
@@ -1144,9 +1145,9 @@ pub fn project_lane(
                 )
                 .exists(),
             cache_read_share: provenant_routing::cache_read_share(
-                lane.usage.uncached_input,
-                lane.usage.cache_read,
-                lane.usage.cache_write,
+                usage.uncached_input,
+                usage.cache_read,
+                usage.cache_write,
             ),
             ..Default::default()
         },

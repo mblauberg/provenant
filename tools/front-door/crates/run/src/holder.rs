@@ -15,16 +15,18 @@ fn codex_attempt_usage(
     usage: &mut UsageRecord,
     session: Option<&str>,
     prior: Option<(Option<&str>, &UsageRecord)>,
+    baseline_unknown: bool,
 ) {
     let total = usage.clone();
-    let baseline = match prior {
-        None => Some(UsageRecord::default()),
-        Some((previous_session, _))
+    let baseline = match (baseline_unknown, prior) {
+        (true, _) => None,
+        (false, None) => Some(UsageRecord::default()),
+        (false, Some((previous_session, _)))
             if session.is_some() && previous_session.is_some() && previous_session != session =>
         {
             Some(UsageRecord::default())
         }
-        Some((previous_session, previous_usage))
+        (false, Some((previous_session, previous_usage)))
             if session.is_some() && previous_session == session =>
         {
             previous_usage
@@ -32,7 +34,7 @@ fn codex_attempt_usage(
                 .get("session_total")
                 .and_then(|v| serde_json::from_value::<UsageRecord>(v.clone()).ok())
         }
-        Some(_) => None,
+        (false, Some(_)) => None,
     };
     let delta = |current: Option<u64>, previous: Option<u64>| match baseline.as_ref() {
         None => None,
@@ -87,7 +89,7 @@ mod codex_usage_tests {
             output_excluding_reasoning: Some(7),
             ..Default::default()
         };
-        codex_attempt_usage(&mut first, Some("t"), None);
+        codex_attempt_usage(&mut first, Some("t"), None, false);
         assert_eq!(first.uncached_input, Some(20));
         assert_eq!(first.extra["session_total"]["cache_read"], 80);
         let mut second = UsageRecord {
@@ -96,7 +98,7 @@ mod codex_usage_tests {
             output_excluding_reasoning: Some(12),
             ..Default::default()
         };
-        codex_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)));
+        codex_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)), false);
         assert_eq!(second.uncached_input, Some(30));
         assert_eq!(second.cache_read, Some(20));
         assert_eq!(second.output_excluding_reasoning, Some(5));
@@ -106,6 +108,7 @@ mod codex_usage_tests {
             &mut unknown,
             Some("t"),
             Some((Some("t"), &UsageRecord::default())),
+            false,
         );
         assert_eq!(unknown.uncached_input, None);
     }
@@ -1460,19 +1463,25 @@ impl RunStore {
             .and_then(|r| r.provider.as_deref())
             == Some("codex")
         {
-            let request = self.request(record.run_id, call)?;
             let prior_id = if record.continuation.as_deref() == Some("automatic") {
-                record.retry_of
-            } else if request.fresh_continuation.is_none() {
-                request.parent
+                Ok(record.retry_of)
             } else {
-                None
+                self.request(record.run_id, call).map(|request| {
+                    if request.fresh_continuation.is_none() {
+                        request.parent
+                    } else {
+                        None
+                    }
+                })
             };
-            let prior = prior_id.map(|id| self.record(id, call)).transpose()?;
+            let prior = prior_id.and_then(|id| id.map(|id| self.record(id, call)).transpose());
+            let baseline_unknown = prior.is_err();
+            let prior = prior.ok().flatten();
             codex_attempt_usage(
                 &mut decoded.usage,
                 decoded.session.as_deref(),
                 prior.as_ref().map(|p| (p.session.as_deref(), &p.usage)),
+                baseline_unknown,
             );
         }
         if !cancelled && matches!(exit.termination, Some(Termination::Signal(_))) {

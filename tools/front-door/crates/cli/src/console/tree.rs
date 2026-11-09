@@ -146,7 +146,8 @@ pub(super) fn read_inner(
                     continue;
                 }
                 seen.insert(key, (identity, parents, store_path.clone()));
-                let usage = serde_json::to_value(&attempt.usage).map_err(|_| Error::Encode)?;
+                let usage =
+                    serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
                 for (name, (sum, missing)) in &mut totals {
                     if let Some(value) = usage[*name].as_u64() {
                         *sum = sum.checked_add(value).ok_or(Error::Encode)?;
@@ -320,7 +321,20 @@ mod tests {
         request.parent = None;
         request.parent_attempt = None;
         other_store.create(&prepared(4, 4, request)?, &call)?;
+        // Simulate a pre-fix Codex row containing only a running session total.
+        let mut legacy = store.record(AttemptId::from_bytes([1; 16]), &call)?;
+        legacy.applied_route = Some(provenant_records::run::RouteRecord {
+            provider: Some("codex".into()),
+            ..Default::default()
+        });
+        legacy.usage.uncached_input = Some(42);
+        let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
+        db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_vec(&legacy)?, legacy.attempt_id.to_string()],
+        )?;
         let tree = read(&roots, None, 3, 100, false)?;
+        assert_eq!(tree["totals"]["usage"]["uncached_input"]["missing"], 4);
         assert_eq!(tree["totals"]["attempts"], 4);
         assert_eq!(tree["totals"]["usage"]["reasoning"]["missing"], 4);
         assert_eq!(tree["identity_conflicts"], json!([]));
