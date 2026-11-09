@@ -12,9 +12,10 @@ work does not need it.
   substantial work by default and spends its effort on coordination, decisions
   and synthesis, keeping only steps too small to brief. Vary provider, model
   and effort (`orchestrate`). A delegated agent owns its brief and may delegate
-  parts of it within its own authority, which only narrows. User communication,
-  run state, gates, final synthesis and removing other writers' branches stay with the
-  chair.
+  parts of it within its own authority, which only narrows. A brief carries the
+  intended outcome and the reasoning behind it as well as the task. User
+  communication, judgement on the user's ideas, run state, gates, final
+  synthesis and removing other writers' branches stay with the chair.
 - **Continuity.** Use `session` at session start, before compaction and at
   handoff. Use `tracker` when the project tracks work in GitHub issues.
 - **Repository docs.** A repository's AGENTS.md, CONTRIBUTING and runbooks own
@@ -32,7 +33,8 @@ work does not need it.
 - **Checks.** Locally, run only fast targeted checks: lint, type checks and the
   tests you touched. Full suites and release scans run in CI: push the branch,
   open the pull request, run the lens review its risk requires
-  (`provenant run --use review`) and gate the merge on its CI run.
+  (`provenant run --use review --over @review-panel`) and gate the merge on its
+  CI run.
 - **Waiting.** Do not poll with `sleep` or repeated status or `gh` reads. Block
   on `provenant status --wait --target ...` or `provenant pr watch`, in the
   background where the harness allows, and carry on with other work until it
@@ -55,7 +57,7 @@ work does not need it.
   Check the output, not just the exit code, before
   trusting an empty result or a green run.
 
-Platform safety policy and the user's explicit instructions come first. The Git
-rule above is durable authorisation for the actions it names. Project instructions may
-strengthen them but never broaden authority, weaken safety or redefine
-cross-project preferences.
+Platform and system policy, and the user's explicit authority, come first. The
+Git rule above is durable authorisation for the actions it names. Project
+instructions may strengthen these rules but never broaden authority, weaken
+safety or redefine cross-project preferences.

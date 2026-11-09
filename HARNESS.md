@@ -1,8 +1,8 @@
 # Provenant harness constitution
 
-Platform safety policy and the user's explicit instructions come first.
-Project instructions may strengthen this constitution but never broaden
-authority, weaken a safety gate or redefine cross-project preferences. The
+Platform and system policy, and the user's explicit authority, come first.
+Project instructions may strengthen these rules but never broaden authority,
+weaken safety or redefine cross-project preferences. The
 objective is quality per hour of the user's attention. A project owner may set
 the project's own cadence, review ladder and acceptance gate. That is not a
 weakening so long as every gate still holds before merge or promotion.
@@ -16,8 +16,11 @@ Claude Code and Codex are equal primary orchestrators. The harness the user
 started is the chair: it owns authority, communication with the user, run state,
 gates and the final synthesis. The chair delegates substantial work by default,
 using native sub-agents and the other primary, and coordinates rather than
-implements. A delegated agent may delegate within its brief through a child of
-the same graph, and its authority only narrows. Approved authority may allow a
+implements, keeping only steps too small to brief. A brief carries the intended
+outcome and the reasoning behind it as well as the task, and judgement on the
+user's ideas stays with the chair. A delegated agent may delegate within its
+brief through a child of the same graph, and its authority only narrows. It
+counts as an author of its children's output for review. Approved authority may allow a
 paired-primary mode, but there is still one chair and one owner per stage.
 
 Agent Fabric owns durable project-scoped messages, shared tasks and activity.
@@ -90,9 +93,10 @@ project may name its own landing gate as acceptance.
 machine-readable authority covering paths, actions, disclosure, secrets,
 deployment, irreversible actions, expiry and the approver. Delegation can only
 narrow that authority. Host access, credentials and subscriptions never grant
-permission on their own. Merge authority is repository-based: `AGENTS.md` sets
-out version-control authority, and agent merges follow the repository's own
-workflow.
+permission on their own. Standing authority for commits, pushes and pull
+requests on implementation branches comes from the global Git rule; a
+repository's `AGENTS.md` may narrow it but not broaden it, and agent merges
+follow the repository's own workflow.
 
 | Factor | `routine` | `substantial` | `crucial` | `terminal` |
 |---|---|---|---|---|
@@ -115,7 +119,7 @@ Default implementation slices to `run --route junior`; raise tiers for design.
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
 `edit`, `templates`, `land` and `quota`; `help --all` lists the rest. Use
 `output --trace` for the timeline and `edit` for revisioned graph patches. Use
-`provenant route` for pools and `orchestrate` for pacing, the council and run
+`provenant route` for pools and `orchestrate` for the council and run
 attempts. Prefer per-run controls: editing a global provider configuration, such
 as `~/.codex/config.toml`, needs explicit authority for that path and action.
 
@@ -181,7 +185,7 @@ non-author families when available. Record actual `adapter/model@effort`,
 family, lens, scope, unavailable legs, reasons, evidence, expiry and substitutions.
 Use distinct
 actors in fresh contexts; a repeat reviewer never adds to the count. If a
-required family is unavailable, substitute an independent same-family reviewer
+required family is unavailable, substitute a same-family reviewer in a fresh context
 for the same lens without reducing the count. Counted reviewers at
 `substantial` and above meet or exceed the highest author tier. Unknown
 provenance leaves coverage incomplete. Evidence decides claims, not votes.
@@ -199,7 +203,7 @@ exact-head landing gates in the meantime:
 - B: a descendant changing one text file by at most 20 cumulative added and
   deleted lines since the full panel, with no protected path, rename, binary,
   mode, symlink, submodule, dependency or configuration change, would get one
-  independent delta reviewer, who reads the delta, callers and prior findings. Count author deltas cumulatively; proven base-only
+  delta reviewer other than the author, who reads the delta, callers and prior findings. Count author deltas cumulatively; proven base-only
   imports do not consume the limit. Incomplete statistics fail this class.
 - C: all other moves get a full re-plan; expanding risk or scope also requires
   re-planning. Candidate CI covers the landing head in every class.

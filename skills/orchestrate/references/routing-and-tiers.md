@@ -2,7 +2,7 @@
 
 Inspect `provenant route list` and resolve a proposed pool with
 `provenant route resolve --route POOL`. Catalogue presence does not establish
-live availability. Use `--state-dir` on any command to select the state root.
+live availability. Use `--state-dir` with an absolute directory on any command to select the state root.
 
 Choose a template and override its requested `tier` where the brief needs it.
 Use junior by default for implementation slices, senior for contained design
