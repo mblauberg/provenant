@@ -287,6 +287,8 @@ environment; Agy's private home links only one keychain, the selected account's 
 (`Library/Keychains/login.keychain-db` in its registered directory, refused when
 missing) or, for the user's own home, the login keychain; Cursor
 executes only its resolved version; OpenCode denies shell and web fetch.
+Agy’s selected native keychain mechanism permits its client and IPC in both
+account modes; see [authentication diagnosis](../runbooks/agy-authentication.md).
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
 - Why: the launch spec carries credentials and authority.
 - Test: `crates/providers/src/tests.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;

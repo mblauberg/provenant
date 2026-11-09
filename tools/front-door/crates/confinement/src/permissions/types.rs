@@ -265,7 +265,7 @@ pub struct NetworkEndpoint {
     pub port: u64,
 }
 
-/// The keychain IPC service already proven by the selected Agy mechanism.
+/// Native keychain IPC selected by the adapter authentication mechanism.
 /// No free-form Mach service or blanket keychain authority is accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

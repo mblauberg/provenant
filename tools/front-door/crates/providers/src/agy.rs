@@ -524,10 +524,41 @@ struct Usage {
     input_tokens: u64,
     output_tokens: u64,
 }
-/// Only the CLI's recorded headless auto-denial is diagnostic evidence. Do not
-/// copy arbitrary stderr into results or infer completion or identity from it.
+/// Classify explicit CLI/keyring failures without copying arbitrary stderr.
+/// The vendor's combined failure contains no evidence of which cause occurred.
 fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
     let stderr = std::str::from_utf8(stderr).ok()?;
+    // Prefer a specific observation anywhere in stderr over the CLI's closing
+    // combined failure. Never infer a timeout merely from the word "timed out"
+    // in that combined message.
+    for line in stderr.lines() {
+        let message = line.trim().strip_prefix("error: ").unwrap_or(line.trim());
+        let diagnostic = match message {
+            "authentication timed out" | "authentication timeout" => {
+                Some("agy authentication timed out")
+            }
+            "Authentication required. Please login to continue." | "not signed in" => {
+                Some("agy is signed out; sign in to the selected account with headless agy")
+            }
+            "security: SecKeychainSearchCopyNext: User interaction is not allowed."
+            | "security: SecKeychainItemCopyContent: User interaction is not allowed." => {
+                Some("agy keychain access denied: user interaction is not allowed")
+            }
+            "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." => {
+                Some("agy keychain contains no saved sign-in")
+            }
+            _ => None,
+        };
+        if let Some(diagnostic) = diagnostic {
+            return Some(diagnostic.into());
+        }
+    }
+    if stderr.lines().any(|line| {
+        line.trim().strip_prefix("error: ").unwrap_or(line.trim())
+            == "authentication failed or timed out"
+    }) {
+        return Some("agy authentication failed; the CLI supplied no cause (inspect provider stderr and macOS sandbox denials)".into());
+    }
     stderr.lines().find_map(|line| {
         let permission = line
             .strip_prefix("jetski: no output produced \u{2014} a tool required the \"")?
@@ -700,6 +731,48 @@ fn resets_in(message: &str) -> Option<u64> {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+
+    #[test]
+    fn agy_authentication_diagnostics_require_specific_evidence() {
+        for (stderr, expected) in [
+            (
+                "error: authentication timed out",
+                "agy authentication timed out",
+            ),
+            (
+                "Authentication required. Please login to continue.",
+                "agy is signed out",
+            ),
+            (
+                "security: SecKeychainSearchCopyNext: User interaction is not allowed.",
+                "agy keychain access denied",
+            ),
+            (
+                "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.",
+                "agy keychain contains no saved sign-in",
+            ),
+            (
+                "error: authentication failed or timed out",
+                "agy authentication failed; the CLI supplied no cause",
+            ),
+        ] {
+            assert!(
+                failure_diagnostic(stderr.as_bytes())
+                    .unwrap()
+                    .starts_with(expected)
+            );
+        }
+        assert_eq!(
+            failure_diagnostic(b"prompt says authentication timed out"),
+            None
+        );
+        assert_eq!(failure_diagnostic(b"unrelated failure: secret"), None);
+        let stderr = b"error: authentication failed or timed out\nerror: authentication timed out";
+        assert_eq!(
+            failure_diagnostic(stderr).as_deref(),
+            Some("agy authentication timed out")
+        );
+    }
 
     #[test]
     fn agy_identity_cache_expires_and_invalidates_when_keychain_changes() {
