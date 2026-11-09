@@ -3574,6 +3574,7 @@ fn ledger_capacity_upgrades_preserve_terminal_attempt_references() -> TestResult
             |row| row.get(0),
         )?;
         assert!(event_count > 0);
+        store.db.execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations;")?;
         if version == 9 {
             // Exercise the real former SQL cap, not just its version marker.
             store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
