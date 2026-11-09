@@ -1039,6 +1039,10 @@ pub fn resolve_review_family(
                 false,
                 |context, records, policies, settings| {
                     let rules = effective_exclusion_rules(exclude, roots)?;
+                    // Preview has no availability probes. Account exclusions
+                    // are evaluated against registered account keys below,
+                    // rather than treating an empty probe set as no alternatives.
+                    let route_rules: Vec<_> = rules.iter().filter(|rule| !matches!(rule.selector, provenant_routing::ExclusionSelector::Account { .. })).cloned().collect();
                     let mut excluded = Vec::new();
                     let mut refusals = Vec::new();
                     loop {
@@ -1050,7 +1054,7 @@ pub fn resolve_review_family(
                                 "review-family-preview",
                                 0,
                                 &excluded,
-                                &rules,
+                                &route_rules,
                                 required_family,
                             )
                             .map_err(|error| {
@@ -1086,6 +1090,12 @@ pub fn resolve_review_family(
                             .collect();
                         let mut accounts = Vec::new();
                         for key in keys {
+                            if matches!(request.choice, RouteChoice::NamedRoute(_))
+                                && let Some(rule) = rules.iter().find(|rule| matches!(&rule.selector, provenant_routing::ExclusionSelector::Account { adapter, key: excluded } if adapter == &selected.adapter && excluded == key))
+                            {
+                                accounts.push(rule.to_string());
+                                continue;
+                            }
                             if let Some(read) = recorded.iter().find(|read| read.account_key == key) {
                                 let observation = &read.observation;
                                 let current = observation.observed_scope.is_some()

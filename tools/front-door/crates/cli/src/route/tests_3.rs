@@ -89,6 +89,12 @@
         assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("anthropic"), &[])?, "anthropic");
         let absent = super::resolve_review_family(&roots, &serde_json::json!("test"), Some("missing-family"), &[]).unwrap_err();
         assert!(absent.contains("missing-family") && absent.contains("count 1"), "{absent}");
+        let original_config = std::fs::read_to_string(&path)?;
+        std::fs::write(&path, format!("{original_config}\n[domains.accounts.entries.first]\nadapter='codex'\nlabel='first'\nkey='first'\ndirectory={:?}\n[domains.accounts.entries.second]\nadapter='codex'\nlabel='second'\nkey='second'\ndirectory={:?}\n", temp.path().join("first"), temp.path().join("second")))?;
+        assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &["first".into()])?, "openai");
+        let blocked = super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &["first".into(), "second".into()]).unwrap_err();
+        assert!(blocked.contains("account codex/first") && blocked.contains("account codex/second"), "{blocked}");
+        std::fs::write(&path, original_config)?;
         let catalogue = super::Catalogue::bundled()?;
         let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
