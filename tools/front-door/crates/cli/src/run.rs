@@ -301,6 +301,20 @@ impl Registry<'_> {
         resume: Option<&run::AttemptRecord>,
         wait: Option<u64>,
     ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+        let resume = if task.extra.get("automatic_continuation") == Some(&serde_json::json!(true)) {
+            resume.filter(|prior| {
+                self.check_continuable(prior).is_ok()
+                    && self
+                        .state_root
+                        .zip(self.roots)
+                        .is_some_and(|(state, roots)| {
+                            provider::continuation_available(prior, state, roots.state.as_path())
+                                .is_ok()
+                        })
+            })
+        } else {
+            resume
+        };
         let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
         #[cfg(feature = "fixture")]
         let prepared = {

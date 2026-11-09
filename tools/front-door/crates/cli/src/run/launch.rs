@@ -428,6 +428,29 @@ pub(super) fn launch_on_host_with_wait(
     ready: Option<&run::PreparedStart>,
     provider_lease_wait: Option<u64>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_with_authority(
+        session,
+        run,
+        edge,
+        call,
+        host,
+        ready,
+        provider_lease_wait,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_with_authority(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    ready: Option<&run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
+    sealed: Option<&run::SealedTask>,
+) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
@@ -454,7 +477,7 @@ pub(super) fn launch_on_host_with_wait(
             fixture_state_write: false,
         },
     };
-    if session.context.state_root != edge.roots.state {
+    if session.context.state_root != edge.roots.state && sealed.is_none() {
         return Err(Fail::new(
             Status::Refused,
             ErrorKind::Refused,
@@ -464,6 +487,10 @@ pub(super) fn launch_on_host_with_wait(
     let read = session.store.request(run, call)?;
     let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
+    if sealed.is_some_and(|sealed| sealed.request_digest != request_digest) {
+        return Err(run::RunError::Validation("request changed after launch validation").into());
+    }
+
     {
         let operation = match request.parent {
             Some(_) => Some(session.store.run(run, call)?.operation_id),
@@ -716,5 +743,44 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         }
         return Err(fail);
     }
+    Ok(())
+}
+
+/// Drive queued successors using host-owned launch inputs after custody release.
+pub fn launch_successors(
+    execution: run::ExecutionContext,
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+    host: &run::HostLaunchContext,
+    run: RunId,
+    sealed: Option<&run::SealedTask>,
+) -> Result<(), Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let mut store =
+        run::RunStore::open(&execution, &call)?.with_writer_registry(roots.state.as_path());
+    if let Some(sealed) = sealed {
+        store = store.with_sealed_parent_network(sealed.effective_network);
+    }
+    if !store
+        .pending_attempts(run, &call)?
+        .iter()
+        .any(|attempt| attempt.continuation.as_deref() == Some("automatic"))
+    {
+        return Ok(());
+    }
+    let session = Session {
+        context: execution,
+        store,
+    };
+    let edge = Edge {
+        roots,
+        home,
+        assets,
+        cwd: &host.cwd,
+    };
+    launch_with_authority(&session, run, &edge, &call, Some(host), None, None, sealed)?;
     Ok(())
 }

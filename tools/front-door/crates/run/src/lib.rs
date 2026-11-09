@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 mod admission;
 mod artifacts;
+mod automatic;
 mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};

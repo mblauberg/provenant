@@ -1482,6 +1482,9 @@ impl RunStore {
         if old.revision != expected_revision {
             return Err(RunError::Conflict);
         }
+        next.superseded_by = self
+            .automatic_continuation(&old)?
+            .map(|successor| successor.id());
         super::reader::validate_attempt(&next)?;
         let intent = crate::db::attempt_bytes(&next)?;
         let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
@@ -1783,6 +1786,10 @@ impl RunStore {
         };
         let id = old.attempt_id;
         let request = self.request(old.run_id, call)?;
+        let successor = self.automatic_continuation(old)?;
+        let staged = successor
+            .as_ref()
+            .map(|successor| successor.id().to_string());
         let reaction = self.freeze_reaction(
             next,
             request
@@ -1790,7 +1797,7 @@ impl RunStore {
                 .iter()
                 .find(|task| task.task_id == old.task_id)
                 .is_some_and(|task| task.writer.is_some()),
-            None,
+            staged.as_deref(),
         )?;
         let attempt = self.attempt_dir(old.run_id, id, false)?;
         let mut receipts = SettlementReceipts {
@@ -1818,6 +1825,9 @@ impl RunStore {
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             Self::insert_reaction(tx, &reaction)?;
             insert_event(tx, next)?;
+            if let Some(successor) = &successor {
+                self.queue_automatic_continuation(tx, successor, &request)?;
+            }
             let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)", [old.run_id.to_string()], |r| r.get(0))?;
             let mut run = self.run_on(tx, old.run_id)?;
             run.revision = run.revision.checked_add(1).ok_or(RunError::Conflict)?;

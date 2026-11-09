@@ -214,9 +214,9 @@ impl ModelPolicy {
             lines.push(format!("Compaction payback estimate: {turns:.1} future turns for a 15k summary and zero rework. Rework raises this estimate; use judgement at the task boundary."));
         }
         if self.compaction.mode == Some(CompactionMode::TaskBoundary) {
-            lines.push(format!("Compact deliberately at a task boundary while the cache is warm, after at least {} turns. Prefer a fresh lane with a handoff over repeated compaction. Compaction window guidance: {:?} tokens.", self.compaction.min_turns.unwrap_or(0), self.compaction.window));
+            lines.push(format!("Compact deliberately at a task boundary while the cache is warm, after at least {} turns. Continue the original brief after compaction. Compaction window guidance: {:?} tokens.", self.compaction.min_turns.unwrap_or(0), self.compaction.window));
         } else if self.compaction.mode == Some(CompactionMode::Never) {
-            lines.push("Do not deliberately compact; hand off to a fresh lane when needed.".into());
+            lines.push("Do not deliberately compact; keep the handoff current so the original brief can continue.".into());
         }
         if let Some(context) = self.lane.max_context {
             lines.push(format!(
@@ -1040,6 +1040,23 @@ mod tests {
     fn bundled_policy_has_valid_rules_and_schedules() -> Result<(), Box<dyn std::error::Error>> {
         let policies: ModelPolicies =
             toml_edit::de::from_str(include_str!("../assets/model-policy.toml"))?;
+        let knobs: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))?;
+        let documented = &knobs["host_model_policy_settings"]["settings"]["defaults.lane.max_continuations"]
+            ["default"];
+        assert_eq!(policies.defaults.lane.max_continuations, Some(2));
+        // Model and project layers remain free to override the common default.
+        for model in ["codex/gpt-6.1-terra", "claude/claude-sonnet-5-5"] {
+            assert_eq!(
+                ModelPolicies::default()
+                    .effective(&ModelId::parse(model)?, None, at(0))
+                    .policy
+                    .lane
+                    .max_continuations,
+                Some(2)
+            );
+        }
+        assert_eq!(documented.as_str(), Some("2"));
         assert!(!policies.rules.is_empty());
         let mut errors = Vec::new();
         policies.validate(&mut errors);

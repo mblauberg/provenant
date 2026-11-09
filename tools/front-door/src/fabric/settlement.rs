@@ -17,7 +17,7 @@ pub(crate) fn advance_settled_graphs(
             actor: settled.actor_id,
             run: settled.run_id,
         },
-        settled.launch.clone(),
+        Some(settled),
         workers,
     )
 }
@@ -43,12 +43,38 @@ pub(crate) fn recovery_launch(
 /// If those cannot be derived the graph reaction stays pending.
 pub(crate) fn settlement_reactions(
     subject: &crate::settlement::Subject,
-    live: Option<provenant_run::HostLaunchContext>,
+    live: Option<provenant_run::HolderContext>,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let launch = match live.as_ref().and_then(|live| live.launch.as_ref()) {
+        Some(launch) => launch.clone(),
+        None => recovery_launch(&subject.state_root, &subject.checkout)?,
+    };
+    let roots = crate::roots::child(
+        &subject.home,
+        &subject.checkout,
+        launch.configuration_root.clone(),
+    )?;
+    let execution_roots =
+        crate::roots::child(&subject.home, &subject.checkout, subject.state_root.clone())?;
+    provenant_cli::run::launch_successors(
+        provenant_run::ExecutionContext {
+            state_root: execution_roots.state,
+            project_id: subject.project,
+            actor_id: subject.actor,
+            read_prompts: true,
+        },
+        &roots,
+        &subject.home,
+        &subject.checkout,
+        &launch,
+        subject.run,
+        live.as_ref().and_then(|live| live.sealed.as_ref()),
+    )
+    .map_err(|error| error.message)?;
     crate::settlement::drain_run(subject, &mut |reaction| {
-        let launch = match &live {
-            Some(live) => live.clone(),
+        let launch = match live.as_ref().and_then(|live| live.launch.as_ref()) {
+            Some(launch) => launch.clone(),
             None => recovery_launch(&subject.state_root, &subject.checkout)?,
         };
         let settled = provenant_run::HolderContext {
@@ -296,7 +322,9 @@ pub(crate) fn settle_owned_worktree(
     let store =
         provenant_run::RunStore::open(&context, &call)?.with_writer_registry(roots.state.as_path());
     let record = store.record(settled.attempt_id, &call)?;
-    if !matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
+    if record.superseded_by.is_some()
+        || !matches!(record.state, provenant_run::AttemptState::Terminal { .. })
+    {
         return Ok(());
     }
     let task = store

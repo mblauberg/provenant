@@ -600,11 +600,34 @@ fn fixture() -> Result {
             json!({"schema_version":2,"status":"stopped_early","note":"Fixture stopped partway.","remaining":["rest"],"decisions":[],"verify":[]})
         )
     } else if prompt.contains("fixture policy continuation") {
-        let status = if args.iter().any(|arg| arg == "resume") {
-            "done"
+        let continuing =
+            prompt.contains("Continue and finish the original brief on the same worktree.");
+        if continuing {
+            assert_eq!(
+                args.iter().any(|arg| arg == "resume"),
+                !prompt.contains("fixture fresh continuation")
+            );
+            assert_eq!(
+                fs::read("auto-worktree.txt")?,
+                std::env::current_dir()?.as_os_str().as_encoded_bytes()
+            );
+            assert!(prompt.contains("Fixture continuation state."));
+            fs::write("auto-finished.txt", "original brief completed")?;
         } else {
-            "stopped_early"
-        };
+            fs::write(
+                "auto-worktree.txt",
+                std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+            )?;
+        }
+        let committed = std::process::Command::new("/bin/sh")
+            .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git commit -qm 'test: continue original brief'"])
+            .output()?;
+        assert!(
+            committed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&committed.stderr)
+        );
+        let status = if continuing { "done" } else { "stopped_early" };
         format!(
             "```handoff\n{}\n```",
             json!({"schema_version":2,"status":status,"note":"Fixture continuation state.","remaining":[],"decisions":[],"verify":[]})
@@ -3285,6 +3308,71 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
+fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for fresh in [false, true] {
+        let rig = policy_codex_fixture()?;
+        let cleanup = rig.process_cleanup();
+        fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n",
+                if fresh { 1 } else { 100000 }
+            ),
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let tree = rig.project.join(".worktrees/auto-writer");
+        let out = rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "auto-writer",
+                tree.to_str().ok_or("tree")?,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&out), 0, "{out:?}");
+        let prompt = if fresh {
+            "fixture policy continuation fixture fresh continuation"
+        } else {
+            "fixture policy continuation"
+        };
+        let lane = run_graph_provider_with_wait(
+            &rig,
+            "auto-continuation",
+            json!({
+                "id":"writer", "prompt":prompt, "access":"worktree_write", "worktree":tree,
+                "route":{"model":"codex/gpt-6-luna","effort":"low"}
+            }),
+            "30s",
+        )?;
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        assert_eq!(
+            fs::read_to_string(tree.join("auto-finished.txt"))?,
+            "original brief completed"
+        );
+        let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+        let mut query = db.prepare("SELECT record FROM attempts ORDER BY sequence")?;
+        let records: Vec<Vec<u8>> = query
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let attempts = records
+            .iter()
+            .map(|raw| serde_json::from_slice::<provenant_run::AttemptRecord>(raw))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].run_id, attempts[1].run_id);
+        assert_eq!(attempts[0].superseded_by, Some(attempts[1].attempt_id));
+        assert_eq!(attempts[1].retry_of, Some(attempts[0].attempt_id));
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
 fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Value> {
     run_graph_provider_with_wait(rig, graph_id, node, "5s")
 }
@@ -4229,6 +4317,10 @@ fn main() -> ExitCode {
             (
                 "opencode_usage_limit_settlement_is_bounded",
                 opencode_usage_limit_settlement_is_bounded,
+            ),
+            (
+                "graph_writer_automatically_continues_retained_or_fresh",
+                graph_writer_automatically_continues_retained_or_fresh,
             ),
             (
                 "host_native_preparation_uses_the_provider_contract",
