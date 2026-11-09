@@ -3509,6 +3509,13 @@ impl BoundGraphOwner<'_> {
                                     // Output pages prove the redacted stream. Graph evidence
                                     // still identifies the peer's sealed original artifact.
                                     result.digest = artifact.digest.to_string();
+                                    // The peer's sealed settlement handoff, carried in its
+                                    // status; the output pages hold only text.
+                                    result.handoff = match attempt.extra.get("graph_handoff") {
+                                        Some(value) => serde_json::from_value(value.clone())
+                                            .map_err(|_| "peer handoff unreadable"),
+                                        None => Ok(None),
+                                    };
                                 }
                                 (Some(Box::new(result)), None)
                             }
@@ -4547,18 +4554,10 @@ fn capture_graph_output(
         capture.push(&bytes);
         offset = next_offset;
         if eof {
-            let mut result = capture.finish();
+            let result = capture.finish();
             if result.digest != digest.to_string() {
                 return Err(FacadeError::StateCorrupt);
             }
-            result.handoff = result.handoff.and_then(|handoff| {
-                handoff
-                    .map(|handoff| {
-                        provenant_run::sanitise_handoff(&handoff)
-                            .map_err(|_| "handoff sanitisation failed")
-                    })
-                    .transpose()
-            });
             return Ok(result);
         }
     }

@@ -241,16 +241,11 @@ impl RunStore {
             .map_err(|_| RunError::Validation("output redaction failed"))?;
         capture.push(&safe);
         let mut result = capture.finish();
-        // Graph continuations consume decoded handoff data. Byte redaction
-        // alone cannot see token boundaries hidden behind JSON escapes.
-        result.handoff = result.handoff.and_then(|handoff| {
-            handoff
-                .map(|handoff| {
-                    crate::completion::sanitise_handoff(&handoff)
-                        .map_err(|_| "handoff sanitisation failed")
-                })
-                .transpose()
-        });
+        // One handoff rule: the settled attempt's sealed, sanitised snapshot,
+        // not a re-reading of the text.
+        result.handoff = self
+            .handoff(&record)
+            .map_err(|_| "handoff snapshot unreadable");
         result.digest = digest.to_string();
         Ok(result)
     }

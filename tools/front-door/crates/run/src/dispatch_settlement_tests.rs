@@ -970,3 +970,53 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
     Ok(())
 }
+#[test]
+fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestResult {
+    use provenant_records::handoff::TurnEnd;
+    let first = format!("Done: parser.\n\n{STOPPED_EARLY}");
+    let answer = format!("{first}\nThe wait was redundant; nothing changed.");
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Succeeded),
+        answer: Some(answer.clone()),
+        turns: vec![
+            TurnEnd {
+                at: first.len(),
+                tool_activity: true,
+            },
+            TurnEnd {
+                at: answer.len(),
+                tool_activity: false,
+            },
+        ],
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    // The text ends with an acknowledgement, which the whole-answer rule
+    // would call "no handoff"; the graph's capture carries the settled one.
+    let capture = store.stream_result(id, &call, None)?;
+    let sealed = store.handoff(&record)?.ok_or("sealed handoff")?;
+    assert_eq!(capture.handoff, Ok(Some(sealed)));
+    Ok(())
+}

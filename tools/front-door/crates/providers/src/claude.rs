@@ -1296,6 +1296,53 @@ mod overload_tests {
     }
 
     #[test]
+    fn tool_work_in_a_turn_that_never_finishes_ends_a_turn_and_voids_the_handoff() {
+        let tool_use = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Bash\",\"input\":{}}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let result = |text: &str| {
+            format!(
+                "{{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"{text}\"}}\n"
+            )
+        };
+        let fence = "```handoff\\n{\\\"schema_version\\\":2,\\\"status\\\":\\\"done\\\",\\\"note\\\":\\\"n\\\",\\\"remaining\\\":[],\\\"decisions\\\":[],\\\"verify\\\":[]}\\n```";
+        let error = "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"result\":\"\"}\n";
+        let finished = format!("{tool_use}{}{}", result(fence), result("noted"));
+        let turns = |events: &[E]| -> Vec<bool> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    E::TurnEnd { tool_activity } => Some(*tool_activity),
+                    _ => None,
+                })
+                .collect()
+        };
+        // No tool work after the last result: no extra turn.
+        assert_eq!(turns(&finish_text(&finished)), [true, false]);
+        // Unfinished tool work, by error result or by a stream that just stops.
+        for tail in [format!("{tool_use}{error}"), tool_use.to_owned()] {
+            let events = finish_text(&format!("{finished}{tail}"));
+            assert_eq!(turns(&events), [true, false, true]);
+            let mut text = String::new();
+            let mut ends = Vec::new();
+            for event in &events {
+                match event {
+                    E::Text(piece) => text.push_str(piece),
+                    E::TurnEnd { tool_activity } => {
+                        ends.push(provenant_records::handoff::TurnEnd {
+                            at: text.len(),
+                            tool_activity: *tool_activity,
+                        })
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                provenant_records::handoff::Handoff::from_turns(&text, &ends),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
     fn text_followed_by_later_tool_work_is_not_the_fallback() {
         let text = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"I will stop early\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
         let tool_use = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Bash\",\"input\":{}}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";

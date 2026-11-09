@@ -429,6 +429,14 @@ impl StreamState {
         } else {
             OutcomeStatus::Partial
         };
+        // A turn that ran a tool and never produced its own `result` (an error
+        // result, a kill or a timeout) is still a turn: record its boundary so
+        // an earlier turn's handoff does not stand over unfinished work.
+        if std::mem::take(&mut self.turn_tool_activity) {
+            final_events.push(ProviderEvent::TurnEnd {
+                tool_activity: true,
+            });
+        }
         // Recover only a clean, complete terminal stream, using the same
         // answer identity checks as an ordinary result event.
         if self.adapter == "claude"
