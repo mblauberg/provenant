@@ -3,7 +3,7 @@
 Owner: `crates/workflow` (coverage, receipts, sessions, chair logs, writing),
 `crates/fabric-runtime/src/handoff/session` (session handoff)
 Anchor: `crates/workflow/src/coverage.rs`, `crates/workflow/src/store/tests.rs`,
-`crates/workflow/src/session.rs`, `crates/workflow/src/log.rs`, `tests/workflow.rs`
+`tests/workflow.rs`
 
 Workflow is a small synchronous library: a pure review coverage check,
 a minimal delivery receipt, bounded session checkpoints, a SQLite-backed chair
@@ -22,10 +22,10 @@ descriptive fields is skipped with a warning when another valid entry remains;
 if none remains, the findings block is invalid.
 
 - Why: reviewers can reconcile findings by identity without repeating their descriptions.
-- Test: `crates/fabric-runtime/src/graph/outputs.rs::alias_tests::unknown_identity_warns_when_another_disposition_is_valid`;
-  `crates/fabric-runtime/src/graph/graph_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
-  `tests/dispatch_provider.rs::review_resolves_identity_only_dispositions`
-- Owner: `src/preset.rs`, `crates/fabric-runtime/src/graph/outputs.rs`
+- Test: `crates/fabric-runtime/src/graph/outputs.rs::unknown_identity_warns_when_another_disposition_is_valid`;
+  `crates/fabric-runtime/src/graph/graph_synthesis_findings_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
+  `crates/fabric-runtime/src/graph/graph_synthesis_findings_tests.rs::identity_only_dispositions_inherit_selected_findings`
+- Owner: `crates/fabric-runtime/src/graph/outputs.rs`
 
 ## Review coverage
 
@@ -38,10 +38,8 @@ has one slot. Additions sit outside the slot count and are deduplicated when
 panel. Repository routing config can replace or extend
 `review.lenses.by_paths`; an empty table disables the bundled path rules.
 - Why: small test changes need test-design review as well as the shape's base lens.
-- Test: `crates/routing/src/review.rs::quick_panel_adds_test_paths_and_markers_without_changing_other_diffs`;
-  `src/preset/panel.rs::tests::default_preset_scans_test_paths_without_changing_shape_selection`;
-  `src/preset/panel.rs::tests::plan_additions_are_included_once_even_when_lenses_are_caller_supplied`
-- Owner: `crates/routing/src/review.rs`, `src/preset/panel.rs`
+- Test: `crates/routing/src/review.rs::selected_panels_keep_change_driven_lenses`
+- Owner: `crates/routing/src/review.rs`
 
 ### Only independent, exact reviews count
 
@@ -59,7 +57,7 @@ Counted reviewers must be at least the highest author tier, and family separatio
 measured against all authors.
 - Why: self-review or a stale subject proves nothing.
 - Test: `crates/workflow/src/coverage.rs::authors_decision_makers_repeats_and_low_tiers_do_not_count`;
-  `::a_review_of_another_subject_never_counts`
+  `crates/workflow/src/coverage.rs::a_review_of_another_subject_never_counts`
 - Owner: `crates/workflow/src/coverage.rs`
 
 ### Required coverage by risk
@@ -79,7 +77,7 @@ A blocker needs source references and an expiry; a reason string alone never
 waives a leg.
 - Why: higher-risk changes need diverse, independent eyes.
 - Test: `crates/workflow/src/coverage.rs::crucial_needs_two_distinct_lenses_and_terminal_an_adversarial_one`;
-  `::duplicate_blocker_evidence_waives_only_one_cross_family_leg`
+  `crates/workflow/src/coverage.rs::duplicate_blocker_evidence_waives_only_one_cross_family_leg`
 - Owner: `crates/workflow/src/coverage.rs`, `crates/workflow/src/risk.rs`
 
 ### Provenance
@@ -152,10 +150,10 @@ identity and the `--project` recovery command. Explicit selection permits an
 intentional session ID reuse. Successful saves name the selected project ID.
 - Why: restoring the wrong checkpoint misdirects an agent.
 - Test: `crates/workflow/src/session.rs::refuses_traversal_and_command_injection_in_host_keys`;
-  `::refuses_symlinked_directories_checkpoints_and_locks`;
+  `crates/workflow/src/session.rs::refuses_symlinked_directories_checkpoints_and_locks`;
   `tests/workflow.rs::session_save_outside_checkout_requires_project`;
-  `::session_save_refuses_conflicting_explicit_project`;
-  `::session_save_refuses_another_registered_project`;
+  `tests/workflow.rs::session_save_refuses_conflicting_explicit_project`;
+  `tests/workflow.rs::session_save_refuses_another_registered_project`;
   `tests/workflow.rs::long_checkpoints_save_up_to_the_documented_bound`
 - Owner: `crates/workflow/src/session.rs`, `crates/cli/src/workflow.rs`, `src/roots.rs`
 
@@ -178,9 +176,8 @@ marks it. A revision whose text fails its hash is refused with `HISTORY`.
 - Why: a bad save or a compaction must not destroy the only copy of earlier
   state, and the history must stay bounded.
 - Test: `crates/workflow/src/session.rs::each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision`;
-  `::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
-  `::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
-  `::unreadable_history_never_blocks_a_save_and_a_changed_revision_is_refused`;
+  `crates/workflow/src/session.rs::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
+  `crates/workflow/src/session.rs::an_existing_checkpoint_or_an_interrupted_save_is_recorded_not_lost`;
   `crates/workflow/src/session/diff.rs::a_newline_only_change_is_a_difference_with_a_note`;
   `src/handoff.rs::a_handoff_checkpoint_keeps_the_configured_number_of_revisions`;
   `tests/workflow.rs::session_checkpoints_keep_bounded_revisions_and_show_what_changed`
@@ -206,124 +203,40 @@ revision it rendered, and missing retained history remains unavailable.
 
 ### Explicit chairs are discoverable
 
-Catalogue composition uses the bounded discovery reader with a shared entry
-budget. Every enumerated session-directory entry consumes that budget, even if
-its name is invalid or it has no discovery record. Reaching the budget reports
-truncation without reading a further entry; an exact fit is conservatively
-reported as truncated. The original discovery reader retains its existing limit
-and error behaviour for other callers.
+An explicit checkpoint save registers the exact Fabric host, bound project,
+host session ID and trusted actor as a chair. The shared inbox derivation owns
+actor identity; explicit clients disambiguate conflicting harness markers.
+A worker's provider session never establishes a chair. Lanes cannot register
+or overwrite chairs, including with rebind. Autosave and reads never register.
 
-**Contract for later slices:** `discovery.json` is advisory. The checkpoint and
-revision manifest commit before the separate discovery replacement. Failure of
-that replacement returns a successful save with a warning; the next save repairs
-the entry. Readers must compare its revision and hash with the manifest and
-checkpoint and explicitly report stale metadata before using it.
+Checkpoint, revision manifest and discovery publish in that order under the
+save lock. Each replacement is atomic; the group is not a transaction.
+Discovery publication failure warns after a successful checkpoint save, and
+the next save reconciles it. Readers compare discovery revision/hash with the
+manifest and checkpoint and report stale or missing evidence. They never infer
+liveness from discovery or repair it during a read. Malformed discovery blocks
+a save before checkpoint replacement.
 
-`workflow session save SESSION` registers the caller's exact Fabric host,
-bound project, supplied host session ID and trusted actor as a chair.
-Chair identity paths use Fabric's shared inbox derivation: host plus the first
-nonempty label from `PROVENANT_AGENT_LABEL`, configured `fabric.agent_label`,
-the harness client, then configured `fabric.client_label` (default `agent`).
-The client is explicit `--client HARNESS` when supplied. Hook-generated save
-commands pass the installing harness as `--client claude` or `--client codex`.
-Otherwise, a nonempty `CODEX_THREAD_ID` identifies Codex; `CLAUDECODE=1`,
-`CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID` identifies Claude.
-If both families have markers, no harness is inferred: supply `--client`.
-Configuration directory variables do not identify an active harness.
-With the same labels and client, the chair actor equals its Fabric inbox actor;
-unlabelled Claude and Codex chairs on the same host have different actors.
-The same derivation applies to CLI saves, MCP and source checkpoint saves
-during `session handoff`. Hooks include the client in
-`provenant workflow session save SESSION --file <checkpoint.md> --client HARNESS`.
-General CLI Fabric and lane commands retain their configured actor and
-`identity.client` (default `agent`); harness markers do not change either.
-Handoff validates the binding before peer delivery. Its recovery command
-includes the supplied client or `--client HARNESS` when none was supplied.
-Lanes (`context.in_lane`) are refused before saving or registering a
-chair, including when they request `--rebind`. The workflow
-owner stores a per-session index entry in
-`workflow/projects/<project>/sessions/<session>/discovery.json` (at most 4 KiB):
+Changing an explicit host/actor binding requires rebind and retains bounded
+prior-binding evidence. Rebind cannot bypass corrupt metadata or key mismatch.
+An interrupted first publication may leave a checkpoint without registration;
+only another explicit save can register it. Separate host-state roots are
+independent; a shared state directory across hosts is unsupported.
 
-| Field | Contract |
-|---|---|
-| `schema_version` | `1` |
-| `host`, `project_id`, `host_session_id` | Exact session key; host/project IDs come from their existing owners |
-| `chair_actor` | Canonical Fabric actor; only an explicit `save --rebind` may replace it or the host |
-| `created_at`, `last_saved_at` | Canonical RFC3339 UTC with microseconds; first registration and latest save whose discovery was published, including unchanged saves |
-| `checkpoint` | The complete current `Revision`: revision, parent, SHA-256, bytes and saved time |
-| `rebound_from` | Optional list of the last 8 previous host/actor bindings and `changed_at`, oldest first; preserved by ordinary saves. Longer lists are truncated to the newest 8 on read. Legacy single-hop objects remain readable and become lists on save |
-
-The discovery key is scoped to this host's state directory. Separate host state
-directories can contain the same project/session ID without collision. Shared
-state directories across hosts are unsupported; peer composition belongs to
-slice 16.
-
-The entry denotes role `chair` and evidence source `checkpoint_save`. No
-provider, provider session, label, title, parent, route, summary, log, lifecycle,
-lane association or interaction channel is inferred. Those absent facts remain
-unknown; later slices own their capture. A provider session handle in a worker
-attempt is never registration evidence. Autosave and checkpoint reads do not
-register chairs. Legacy manifests and bare checkpoints remain readable with no
-discovery entry; summaries remain unavailable.
-
-The save holds `checkpoint.lock` across checkpoint replacement, atomic revision
-manifest replacement, then atomic discovery replacement, in that order. Each
-replacement is atomic; the group is not a transaction. A discovery publication
-failure is returned in `warnings` (handoff: `checkpoint_warnings`), with the
-checkpoint save still successful. The revision manifest stays unchanged
-in shape, so older binaries can read and save it without losing history; an
-older writer leaves the discovery entry stale. There is no shared index that
-can race another session's writer. If a process stops after publishing the
-checkpoint or manifest but before discovery, an earlier entry remains at its
-earlier revision/hash. `SessionStore::discovery` compares the
-held checkpoint's hash and manifest revision against that entry, returning
-`current`, `checkpoint_changed` or `checkpoint_missing`. These are bounded
-observations, not a lease or an assertion that the provider is alive. Unreadable
-files return an error. A crash on the first save can leave a readable checkpoint
-without registration, which remains unknown until an explicit save succeeds.
-Unreadable discovery metadata blocks a save before replacing checkpoint or
-history. An explicit host/actor mismatch is refused as `IDENTITY`, with an error
-instructing callers to repeat `workflow session save <id>` with the same options
-and add `--rebind`. Handoff refusals provide a save command with the actual
-session ID, explicit client, project and state directory. To recover an older
-binding under `agent` or deliberately change labels, run
-`provenant workflow session save SESSION --file FILE --client HARNESS --rebind`.
-This records the previous identity and change time under the checkpoint lock.
-Human and JSON saves report discovery warnings. If publication warns, repeat
-the same command, including `--rebind` when used, to commit the new binding.
-For unreadable discovery, restore a readable record from backup before retrying;
-`--rebind` does not bypass corrupt metadata or a project/session key mismatch.
-The next save reconciles revisions and publishes the corresponding entry;
-identity must be supplied again when registration was never committed.
-
-`discover_sessions` enumerates only committed explicit entries, in session-key
-order, with a 16,384-directory-entry scan ceiling. Exceeding it or encountering
-unreadable state returns an error rather than claiming complete coverage.
-Discovery, `session show` (all modes) and `session diff` create no files, locks,
-directories or project/host identities, and never repair state. These CLI reads
-also skip demand-usage recording. Consumers must
-check consistency before treating cached checkpoint metadata as current.
-`show` and `diff` honour `--project` and `--state-dir`, including missing stores
-and unbound projects, without allocating state.
-
-CLI error codes: `IDENTITY` for a binding/key mismatch; `IN_LANE` for a lane's
-chair save; `HISTORY` for malformed discovery JSON or invalid revision history;
-`IO` for unreadable discovery files (permissions, symlinks, size limits or other
-filesystem failures), checkpoint encoding and pre-commit filesystem/deadline
-errors; `MISSING` for an unbound project or absent checkpoint/revision; `INVALID`
-for invalid session IDs, options or oversized checkpoint input. A post-manifest
-discovery publication failure is a warning, not an error code. Discovery library
-readers return `SessionError::History`, `DiscoveryIdentity` or `Filesystem`
-rather than claiming complete coverage of unreadable state.
+Discovery scans consume a shared entry budget, including invalid and
+unregistered names. Exhaustion is explicit, never complete coverage. Reads
+honour the selected project and state directory without allocating state,
+locks or identities. The
+[discovery owner](../../tools/front-door/crates/workflow/src/session/discovery.rs)
+owns the record schema and consistency states; the
+[CLI owner](../../tools/front-door/crates/cli/src/workflow.rs) owns recovery commands
+and error mapping.
 
 - Why: later delivery and catalogue readers need durable exact identities without guessing ownership.
 - Test: `crates/workflow/src/session.rs::session_save_discovery_restart`;
-  `::discovery_reports_interrupted_publication_without_read_repair`;
-  `::discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs`;
-  `tests/workflow.rs::session_save_discovery_restart`;
-  `::session_reads_allocate_nothing`;
-  `::session_show_honours_project_and_state_dir_without_allocating`;
-  `::a_lane_cannot_register_or_overwrite_a_chair`
+  `crates/workflow/src/session.rs::discovery_reports_interrupted_publication_without_read_repair`;
+  `crates/workflow/src/session.rs::discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs`;
+  `tests/workflow.rs::session_save_discovery_restart`
 - Owner: `crates/workflow/src/session/discovery.rs`, `crates/cli/src/workflow.rs`
 
 ### Session hooks are advisory
@@ -334,7 +247,7 @@ checkpoint for its own key, or a missing or stale status. It never emits the
 latest file, withholds stale content and caps output at 8 KiB.
 - Why: a hook must never block the user or inject another session.
 - Test: `crates/workflow/src/session.rs::malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback`;
-  `::native_host_fixtures_select_only_their_key_and_emit_native_json`
+  `crates/workflow/src/session.rs::native_host_fixtures_select_only_their_key_and_emit_native_json`
 - Owner: `crates/workflow/src/session.rs`
 
 ### Session state is derived, bounded and never authority
@@ -351,8 +264,8 @@ characters before they are shown.
 - Why: a restarted chair must see real lane state quickly, and absence of
   evidence must not read as an empty queue.
 - Test: `crates/workflow/src/session/state.rs::output_is_bounded_and_says_when_it_was`;
-  `::unreadable_sections_are_named_not_shown_empty`;
-  `::hostile_fields_cannot_forge_markers_or_headings`;
+  `crates/workflow/src/session/state.rs::unreadable_sections_are_named_not_shown_empty`;
+  `crates/workflow/src/session/state.rs::hostile_fields_cannot_forge_markers_or_headings`;
   `tests/hooks_session.rs::restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair`
 - Owner: `crates/workflow/src/session/state.rs`, `src/hook_state.rs`, `src/hooks.rs`
 
@@ -380,17 +293,10 @@ following it reaches the store the hook used; one that cannot is not printed.
   or hide that the chair has not saved notes; separate files remove the
   ownership question a shared file raises.
 - Test: `tests/hooks_session.rs::autosave_never_writes_the_chair_file_and_output_shows_both_parts`;
-  `::a_legacy_block_in_the_checkpoint_stays_chair_text`;
-  `::pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing`;
-  `::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
-  `::lane_sessions_report_but_never_write_checkpoint_state`;
+  `tests/hooks_session.rs::pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing`;
+  `tests/hooks_session.rs::stop_hook_refreshes_only_an_existing_quiet_checkpoint`;
   `crates/workflow/src/session/state.rs::a_next_page_command_shows_only_if_it_survives_rendering_byte_for_byte`;
-  `::the_digest_title_names_the_store_it_was_read_from`;
-  `::the_bounded_fallback_lists_the_store_the_digest_came_from`;
-  `crates/workflow/src/session.rs::a_damaged_or_unreadable_autosave_never_hides_a_readable_checkpoint`;
-  `tests/hooks_session.rs::a_damaged_autosave_leaves_the_chair_notes_visible_at_session_start`;
-  `crates/workflow/src/session.rs::the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one`;
-  `::the_excerpt_notice_carries_the_state_dir_and_stays_within_the_cap`
+  `crates/workflow/src/session.rs::a_damaged_or_unreadable_autosave_never_hides_a_readable_checkpoint`
 - Owner: `crates/workflow/src/session/state.rs`, `crates/workflow/src/session.rs`, `src/hooks.rs`
 
 ## Chair logs
@@ -416,10 +322,10 @@ and the replay horizon, not the session's lifetime history.
 - Why: retries must not duplicate updates, and inactive or long-lived sessions
   must remain bounded without preventing read-only use.
 - Test: `crates/workflow/src/log.rs::log_operation_replay_pagination_correction_pruning_and_restart`;
-  `::replay_horizon_expires_receipts_and_survives_clock_and_config_changes`;
-  `::replay_store_has_no_lifetime_receipt_cap`;
+  `crates/workflow/src/log.rs::replay_horizon_expires_receipts_and_survives_clock_and_config_changes`;
+  `crates/workflow/src/log.rs::replay_store_has_no_lifetime_receipt_cap`;
   `tests/workflow.rs::chair_log_cli_replay_and_pages`;
-  `::chair_log_cli_retention_replay_and_lane_refusal`
+  `tests/workflow.rs::chair_log_cli_retention_replay_and_lane_refusal`
 - Owner: `crates/workflow/src/log.rs`, `src/chair.rs`
 
 ## Session handoff
@@ -434,7 +340,7 @@ only after the peer accepts, and a repeated operation never launches again.
 - Why: a handoff must not lose work, launch twice or use an unregistered
   account.
 - Test: `crates/fabric-runtime/src/handoff/session/tests.rs::receive_refuses_until_the_host_opts_in`;
-  `::the_peer_takes_the_lease_only_for_a_launch_or_no_launch`
+  `crates/fabric-runtime/src/handoff/session/tests.rs::the_peer_takes_the_lease_only_for_a_launch_or_no_launch`
 - Owner: `crates/fabric-runtime/src/handoff/session/`, `crates/fabric-runtime/src/handoff.rs`
 
 ## Writing checks
@@ -458,8 +364,9 @@ not approval: release, promotion, activation, sharing, provider login, live
 installation, push and destructive action stay gated by current user
 authority.
 - Why: evidence must never be mistaken for permission.
-- Test: none (review gate); `crates/workflow/src/risk.rs::lowering_risk_requires_matching_current_user_authority`
-  covers the one gate workflow holds.
+- Test: none (review gate for external-action authority);
+  `crates/workflow/src/risk.rs::lowering_risk_requires_matching_current_user_authority`
+  covers risk downgrades only.
 - Owner: the orchestrate and evaluate skills; `crates/workflow/src/`
 
 ## Not provided
@@ -472,73 +379,16 @@ authority.
 
 ## Lane delivery evidence
 
-Lane delivery modes and later `lane deliver` pickup use the run owner's sealed
-terminal result and exact Git head. PR bodies are supplied from that result,
-and graph PRs combine bounded node result excerpts with their attempt IDs.
-A host delivery or worktree cleanup receipt is separate from the chair's
-workflow acceptance receipt. Successful push or local integration grants no
-additional review, protected-branch merge or release authority.
-Delivery modes refused before admission when targeting a protected branch are
-`integrate` and direct `push`, including graph nodes, legacy delivery flags and
-manifests. The protected branches are the primary checkout branch, each configured
-remote's recorded default, or `main` and `master` when no remote default is
-recorded. PR mode onto the default branch is allowed, using the default branch
-as its base while publishing an unprotected head branch. Replay of an accepted
-operation is not refused before admission if branch protection changes later,
-though actual delivery still rechecks protection.
-A succeeded lane whose delivery outcome is `NoNewCommits` keeps its worktree
-on purpose, because cleanup requires a Delivered receipt. The tree is kept so
-idle runs or uncommitted edits can be inspected, and is reclaimed later
-through gc or disk reclaim.
-- Why: lifecycle automation must preserve the distinction between publishing
-  evidence and accepting a change under the repository's workflow.
-- Test: `crates/run/src/delivery_tests.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
-  `src/fabric.rs::graph_submission_refuses_a_push_to_main_before_admission`;
-  `src/fabric.rs::graph_submission_replays_an_accepted_push_after_protection_changes`;
-  `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`.
-- Owner: `crates/run/src/delivery.rs`, `src/fabric.rs`; acceptance remains with `crates/workflow`
+[Run](run.md#delivery-modes-and-settled-pickup) owns delivery modes, protected
+publication targets, replay and host pickup. Host delivery and worktree cleanup
+receipts remain separate from workflow acceptance. Publishing or integrating a
+head grants no additional review, protected-branch merge or release authority.
 
 ## Bounded planner pattern expansion
 
-A plan node may declare an allow-list of patterns with typed parameters and
-fixed nodes. A fragment instantiates a listed pattern by name and parameter
-values only; it cannot replace the pattern's access, role, source or read
-roots. The runtime validates parameters against their schemas and expands the
-pattern at the same composite boundary a statically written preset uses, with
-the pattern name and effective parameters retained in the expansion. Unlisted
-patterns, invalid parameters and widening attempts pause the graph without
-admitting children. Expanded nodes count against the graph node limit and the
-plan's node limit.
-- Why: a plan may grow a pipeline from known-good shapes without letting the
-  planner choose authority or exceed host limits.
-- Test: `crates/fabric-runtime/src/graph/plan_tests.rs::allowed_pattern_instantiation_records_parameters_and_matches_a_static_composite`;
-  `::plan_patterns_refuse_unlisted_invalid_and_widening_instances`;
-  `::pattern_expansion_counts_against_the_graph_node_limit`;
-  `::pattern_children_obey_plan_node_and_kind_limits`.
-- Owner: `crates/fabric-runtime/src/graph/plans.rs`,
-  `crates/fabric-runtime/src/graph/pattern_plan.rs`
-
-### Waves, patterns-only plans and closed route lists
-
-Three opt-in `plan` fields tighten a plan node without changing hand-written
-graphs. `patterns_only` refuses raw fragment nodes, so a fragment can only
-instantiate listed patterns. `disjoint_waves` refuses, before admission, two
-writer instances with overlapping write scopes unless a dependency orders them;
-a later wave depends on the earlier wave's barrier. A pattern's `route`,
-`routes` or `read_roots` field may be a `${parameter}` placeholder only when
-that parameter is a string with an `enum` (a closed list: route names, or the
-registered worktrees a lane's reviewers read); every other sensitive field
-(kind, access, role, source) still refuses placeholders. A `read_roots` entry
-is exactly that one placeholder, never joined to other text, and every value of
-its `enum` is a clean absolute path with no `..`. The front-end also confines
-each value to the project's registered worktrees and `allowed_read_roots`
-before the graph is admitted, as it does a literal root, and replaces it with
-the canonical path it resolved to, so retargeting a link afterwards moves no
-grant. A budget is a bounded
-integer parameter whose `max` is the graph timeout
-(`limits.graph_timeout_seconds`). The planned lane node carries this value as
-`deadline_seconds`; the runtime applies the smaller of it and the graph timeout
-to the lane's run deadline. When omitted, a node uses the graph timeout.
+[Fabric](fabric.md#plan-expansion-and-honest-stop-continuation) owns planner
+expansion, parameter validation, authority bounds and writer ordering. Planner
+output is evidence to validate, never permission to widen an admitted graph.
 
 ### Template planner front door
 

@@ -91,9 +91,9 @@ jobs:
 
       - name: Check generated contract reference
         run: scripts/generate-reference --check
-      # Advisory: continue-on-error keeps this outside the ci-status gate.
-      - name: Require Owner and Anchor headers on specs and runbooks
-        run: scripts/check-doc-truth --inventory-only --strict-inventory
+      - name: Require documentation inventory and resolvable evidence
+        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations --exclude-reserved
+      # Commands and non-evidence inline references remain advisory.
       - name: Report unresolved documentation references
         continue-on-error: true
         run: |

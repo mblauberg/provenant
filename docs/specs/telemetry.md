@@ -1,17 +1,13 @@
 # Telemetry
 
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
-Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
-`crates/telemetry/src/native.rs`, `crates/telemetry/src/ingest/tests.rs`,
-`crates/telemetry/src/mileage.rs`, `crates/telemetry/src/chair/tests.rs`,
-`tests/usage.rs`, `tests/telemetry_native.rs`, `tests/telemetry_ingest.rs`,
-`tests/telemetry_mileage.rs`, `tests/chair.rs`,
-`crates/telemetry/tests/telemetry_pipeline.rs`, `tests/telemetry_pipeline_cli.rs`
+Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/ingest/tests.rs`,
+`crates/telemetry/tests/telemetry_pipeline.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
 prices) using the bundled price table, and exports a trace.
-There is no ledger, store or collector. Grammar is in the generated [CLI
+There is no billing ledger or collector. Grammar is in the generated [CLI
 reference](../reference/cli-all.md); quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
@@ -24,10 +20,10 @@ routes do not fill missing resolved values.
 
 ## A report cannot touch a lane
 
-Telemetry owns no store, lock, background collection or provider operation,
-and run does not depend on it. It reads only through run's `AttemptReader`.
-An absent run store gives an empty report and creates nothing; a corrupt one
-is an error.
+Reporting starts no provider operation or background collection, and run does
+not depend on telemetry. Attempt reports read through run's `AttemptReader`;
+native-session ingest owns separate usage records. An absent run store gives
+an empty attempt report and creates nothing; a corrupt one is an error.
 - Why: measurement must never perturb what it measures.
 - Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
   `crates/telemetry/src/tests.rs::empty_reader_has_complete_zero_cost`
@@ -39,15 +35,10 @@ The reducer accepts at most 100,000 attempts, 10,000 groups and 1 MiB of keys.
 It checks each limit before inserting and returns `TooLarge`, never partial
 totals.
 Sums add known values and count the rest as missing; `cost.complete` is null
-when any cost is unknown. Each `totals.cost` object (including route and detail
-groups) contains `complete` and `known_lower_bound`, each a money object
-(`microdollars`, integer, and `usd`, decimal string) or null, plus
-`priced_attempts` and `missing_attempts` counts. Their sum equals `totals.attempts`.
-`priced_attempts` counts attempts with complete cost data. If no attempt is
-priced and no partial cost contribution is known, `known_lower_bound` is null
-and the CLI prints `cost unknown (N attempts missing cost data)`. With partial
-coverage it prints `at least $X (N of M attempts priced)`. Known contributions
-from partially priced attempts remain in the lower bound. Measured zero and
+when any cost is unknown. Known totals and missing coverage must be reported
+separately. A report with no known contribution says cost is unknown; partial
+coverage is labelled as a lower bound. Known contributions from partially priced
+attempts remain in the lower bound. Measured zero and
 an empty report retain a numeric zero. An unpriced subscription is not free.
 The latest task outcome is the highest-numbered attempt.
 `subscription_attempts` counts attempts whose exact provider and model have a
@@ -56,7 +47,7 @@ Unknown identities are not classified as subscriptions, and this classification
 does not verify account billing.
 - Why: a partial or zero-filled total reads as a real one.
 - Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;
-  `::missing_usage_and_prices_preserve_known_lower_bounds`
+  `crates/telemetry/src/tests.rs::missing_usage_and_prices_preserve_known_lower_bounds`
 - Owner: `crates/telemetry/src/`
 
 ## Exact money and prices
@@ -68,7 +59,7 @@ rate is unknown. A zero rate must be verified. There is no runtime fetch,
 regex or alias. Cost is an estimate, not a bill.
 - Why: rounding drift or a guessed price corrupts route comparison.
 - Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
-  `::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
+  `crates/telemetry/src/tests.rs::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
 - Owner: `crates/telemetry/src/`, `../../config/telemetry-prices.toml`
 
 ## Native Claude Code sub-agents
@@ -97,15 +88,10 @@ unknown or incomplete prices remain unknown.
 
 ## Cache-read share is a first-class figure
 
-Every `totals` object carries `cache`: the records that reported cache reads
-and those that did not, their input tokens (uncached input, cache reads and
-cache writes), `read_tokens`, `write_tokens`, `write_1h_tokens` and
-`read_share_basis_points`, cache reads as a share of all input. Only records
+Reports show cache-read share alongside its coverage. Only records
 whose provider reported cache reads enter the share; a record that reports no
-cache split is counted as `missing`, never as a miss. The report's `cache`
-section rolls the same figures up `by_model`, `by_account`, `by_provider` and
-`by_source` (`lane` or `chair`). The share is the figure to raise: cache reads
-are the cheapest input. Provider decoders keep the categories disjoint. Codex
+cache split is counted as `missing`, never as a miss. Cache reads are the
+cheapest input. Provider decoders keep the categories disjoint. Codex
 counts cached and newly cached tokens inside `input_tokens`, so the decoder
 subtracts both; Claude and Cursor report them beside the uncached count. Agy's
 `cache_read_tokens` is not recorded, because nothing shows whether its
@@ -117,7 +103,7 @@ priced at the output rate and providers count it inside output.
 - Why: a share that counts providers which never report a split reads as a
   cache miss, and a token total that includes cached input is not input.
 - Test: `crates/telemetry/src/tests.rs::cache_read_share_is_reported_per_model_account_provider_and_source`;
-  `crates/providers/src/tests.rs::codex_cached_input_is_cache_read_and_leaves_uncached_input`
+  `crates/providers/src/tests_stream_outcomes.rs::codex_cached_input_is_cache_read_and_leaves_uncached_input`
 - Owner: `crates/telemetry/src/reducer.rs`, `crates/providers/src/`
 
 ## Chair usage is read from the session transcript
@@ -141,83 +127,41 @@ shows them per account and project beside lane tokens.
   hides who spent it.
 - Test: `crates/telemetry/src/chair/tests.rs`;
   `tests/chair.rs::chair_start_records_serving_account_without_a_pending_handoff`;
-  `::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`
+  `tests/chair.rs::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`
 - Owner: `crates/telemetry/src/chair.rs`, `src/chair.rs`, `crates/cli/src/quota.rs`
 
 ## Native session ingest
 
-`provenant telemetry ingest [--provider P] [--since T]` reads each Claude
-session transcript under a config directory's `projects/<project>/<session>.jsonl`
-and its `subagents/agent-*.jsonl`, and stores one row per assistant message in
-`ingest.jsonl` under the state root. A row carries the account label, provider,
-model, effort when the transcript names one, the five disjoint token buckets,
-the message timestamp, session ID, message ID and a `source` of `chair`,
-`subagent` or `lane`. Prompt, reply, tool and path text is never stored, and a
-row is keyed by session and message ID, so a re-run adds nothing. A message
-that streams repeatedly is kept once at its largest counts, mixing the
-short-TTL and one-hour cache-write parts into separate buckets; a one-hour
-count with no cache-write total still counts. A row first stored as a `lane`
-becomes a `chair` when a later run finds its session recorded by the hook. A
-line the build cannot read, such as a row another schema version wrote or a
-torn line, is kept byte for byte when the store is rewritten.
-`--since` skips files last written before it and messages stamped before it;
-`--provider` other than `claude` ingests nothing.
+Native ingest reads supported session metadata and stores disjoint token
+buckets without prompt, reply, tool or path text. Attribution uses registered
+directories, never credentials. Unregistered sessions remain visible as
+unattributed; identity must never be guessed. Message identity is scoped to its
+session and serving directory. Repeated streamed messages merge at their largest
+counts, and rerunning ingest adds no duplicate usage. Hook attribution may
+upgrade an existing worker row to chair usage. Rows this build cannot decode
+survive rewriting byte for byte.
 
-A caller can track a native Claude tool call with `provenant native start
---id TOOL_USE_ID --session SESSION --alias ALIAS --model MODEL [--effort EFFORT]`,
-then settle it with `provenant native end --id TOOL_USE_ID --session SESSION
-[--agent AGENT_ID] --settlement succeeded|failed|cancelled`. The agent ID, when
-available, is the
-portion between `agent-` and `.jsonl`. The record contains those identifiers,
-a digest of the serving config directory, start and end times and settlement;
-it never contains a prompt or reply. The ID is scoped to its config directory
-and chair session. Ingest joins a subagent row on that directory digest,
-session and agent ID. A later settlement links already ingested rows without
-rereading the transcript. Unmatched rows remain visible. `status` lists tracked
-native attempts, and `telemetry stats` shows a host-wide native breakdown by
-attempt and model, plus unlinked usage. This breakdown can overlap the chair
-section and is not added to its totals a second time. Settling an attempt
-also requests a best-effort ingest.
+Tracked native attempts join sub-agent usage only by the matching serving
+directory, session and agent identity. A later settlement can link existing
+rows without rereading transcripts; unmatched usage remains visible. Native and
+chair breakdowns may overlap and must not be added twice.
 
-Attribution uses directories only, never credentials. Each registered account's
-`directory` and its extra `directories` attribute to its label; a directory
-claimed twice is visited once. Every other `~/.claude*` directory with a
-`projects` child, including the default `~/.claude`, is stored under
-`unattributed` and never dropped. A session recorded by the chair's
-SessionStart hook is a `chair`, a file under a session's `subagents` directory
-is a `subagent`, and every other session is a `lane`. The chair's SessionStart and Stop
-hooks also ingest transcripts modified in the last day, best effort, so the
-interactive session is captured without a manual command. Once a file qualifies,
-the hook reads all its messages, including older messages in a long session. That run stops at a three-second wall
-deadline, inside the hook's five-second timeout, and writes the rows it has
-read. Hook ingests resume each transcript after the last complete line stored;
-they retain only a path digest, file identity, offset and a digest of preceding
-bytes. A replaced or truncated file, or a changed usage store, invalidates its
-cursor and is read again. Incomplete lines are retried and streamed updates
-merge with existing messages. Cursors are published only after the usage store,
-so an interruption can cause a reread but cannot skip committed input. A manual
-`telemetry ingest` scans the selected range independently. A `telemetry ingest`
-run has no deadline, and its report sets
-`deadline_reached` only when one stopped it.
-Reads are bounded (1 GiB a transcript, 128 MiB a store, 8 MiB a line, 100,000
-sessions, 2,000 subagent files a session) and never follow links. A message
-without a timestamp is counted as skipped, not guessed. When the store reaches
-its cap, ingest stops adding rows and the report says the store is full.
+Hooks request best-effort ingest within their wall deadline; manual ingest
+scans the requested range independently. Incremental cursors retain only bounded
+non-secret file identity and digest evidence. Replacements, truncation or store
+changes invalidate a cursor. Incomplete lines are retried. Publish usage before
+its cursor, so interruption can cause a reread but never skip committed input.
+
+Reads and stores are bounded and never follow links. Missing message timestamps
+are counted as skipped. Reaching the store cap stops additions visibly instead
+of manufacturing complete coverage. The [CLI reference](../reference/cli-all.md)
+owns invocation; `crates/telemetry/src/ingest.rs` owns limits and record layout.
 - Why: most Claude spend is the interactive chair and its native sub-agents,
   which no supervised attempt record sees.
 - Test: `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
-  `::registered_directories_get_their_label_and_the_rest_are_unattributed`;
-  `::lines_this_build_cannot_read_survive_a_rewrite`;
-  `::a_lane_row_is_upgraded_to_chair_when_the_hook_records_it`;
-  `::an_expired_deadline_reads_nothing_and_keeps_the_store`;
-  `::incremental_ingest_resumes_complete_lines_and_recovers_replacements`;
-  `::incremental_ingest_upgrades_existing_chair_without_rereading`;
-  `::native_attempt_links_only_its_matching_subagent_and_updates_after_settlement`;
-  `::one_message_in_two_session_files_counts_twice`;
-  `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
-  `::chair_session_start_ingests_the_session_as_chair`;
-  `::chair_stop_ingests_new_usage`;
-  `::native_attempt_is_visible_in_status_and_linked_usage`
+  `crates/telemetry/src/ingest/tests.rs::lines_this_build_cannot_read_survive_a_rewrite`;
+  `crates/telemetry/src/ingest/tests.rs::incremental_ingest_resumes_complete_lines_and_recovers_replacements`;
+  `crates/telemetry/src/ingest/tests.rs::native_attempt_links_only_its_matching_subagent_and_updates_after_settlement`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
 
 ## Mileage and effective rates
@@ -257,10 +201,10 @@ microdollars, rounded once.
 - Why: a subscription's value is what a percentage point costs, not what the
   list price says a token costs.
 - Test: `crates/telemetry/src/mileage.rs::tests::three_readings_give_exact_mileage_and_capacity`;
-  `::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
-  `::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
-  `::reset_time_jitter_under_a_minute_stays_in_one_window`;
-  `::full_price_coverage_still_reports_the_bound_note`;
+  `crates/telemetry/src/mileage.rs::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
+  `crates/telemetry/src/mileage.rs::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
+  `crates/telemetry/src/mileage.rs::reset_time_jitter_under_a_minute_stays_in_one_window`;
+  `crates/telemetry/src/mileage.rs::full_price_coverage_still_reports_the_bound_note`;
   `crates/cli/src/mileage.rs::tests::an_interval_takes_each_row_once_in_its_half_open_bounds`;
   `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_capacity_and_effective_rates`
 - Owner: `crates/telemetry/src/mileage.rs`, `crates/cli/src/mileage.rs`
@@ -344,8 +288,7 @@ carrying the same expiry; append its row if `model_choices` already exists. To a
 through the CLI, use `provenant route override set --model ADAPTER/ID
 --risk-tier TIER --task-kind KIND --until RFC3339`, using the suggestion's
 values. Pattern and lens suggestions remain advisory with `accept: null`.
-Whole-patch-read measurement remains in the backlog of #2225; there is no
-read-event source for that measurement.
+Whole-patch-read measurement has no read-event source and is unmeasured.
 
 - Why: post-merge quality and verified value need evidence coverage, comparable
   cohorts and an explicit decision before changing policy.
@@ -384,8 +327,8 @@ A failed refresh keeps the last snapshot, marked stale. The menu bar
 never shows a stale value as zero usage. An unregistered icon account falls back
 to `most_constrained` with a warning and leaves config unchanged.
 - Why: stale data must not look like free headroom.
-- Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_stale_marker`;
-  `::show_warns_when_display_icon_account_is_not_registered`
+- Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_auth_marker`;
+  `tests/quota.rs::show_warns_when_display_icon_account_is_not_registered`
 - Owner: `crates/cli/src/quota.rs`
 
 `telemetry stats --detail --json` includes the recorded route decision and pool

@@ -34,8 +34,9 @@ Wire forms belong to the providers crate.
 
 Attempts retain actual route lineage, observed exit and output paths once in
 the run store. They may be partial or failed. Workflow's delivery receipt
-separately binds verification, review and acceptance, and may refer to those
-attempts without duplicating their transcripts.
+separately binds the subject, authors, risk, review attempts and delivery
+decision. Verification and release evidence have separate owners; the receipt
+does not attest every lifecycle gate or duplicate execution transcripts.
 
 ## Consequences
 

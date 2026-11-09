@@ -17,8 +17,8 @@ Four boundaries are strict and fail closed:
 
 1. **Lane Git:** a writer lane works in its private Git directory and cannot
    reach shared refs except through host-owned delivery.
-2. **Credentials:** a networked writer lane receives the GitHub credential
-   unless `lanes.publish=false`; credentials never cross hosts.
+2. **Credentials:** credentials never cross hosts. GitHub access and its
+   read-only credential-store exception are governed by [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md#permitted-exceptions).
 3. **Object integrity:** Git objects are digest-checked and fsck-verified on
    receipt, and results bind base and head.
 4. **Authority gates:** landing, publishing, handoff acceptance and chair
