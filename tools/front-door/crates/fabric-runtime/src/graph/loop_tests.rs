@@ -2395,6 +2395,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
         .find(|node| node.id.ends_with("continue--slice"))
         .unwrap();
     assert_eq!(expanded.continues.as_deref(), Some("delivery--implement"));
+    assert!(!repair_writer(expanded));
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()

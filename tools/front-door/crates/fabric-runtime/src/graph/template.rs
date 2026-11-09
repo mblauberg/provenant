@@ -1589,6 +1589,11 @@ impl<'a> Compiler<'a> {
                 fix.as_object_mut()
                     .ok_or("repair writer must be a node")?
                     .remove("inputs");
+                // The principal supplies a new acceptance brief, not the
+                // previous round's grouped fix items.
+                fix.as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("repair_writer");
                 fix["acceptance_checks"] = serde_json::json!([
                     "Meet the principal's acceptance evidence within the approved scope"
                 ]);
