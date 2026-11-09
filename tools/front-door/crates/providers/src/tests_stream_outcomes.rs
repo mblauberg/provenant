@@ -104,9 +104,29 @@ fn codex_usage_limit_is_quota_limited() -> Result<(), ProviderError> {
     assert_eq!(outcome.status(), OutcomeStatus::Refused);
     assert!(events.contains(&ProviderEvent::QuotaLimited {
         message: "You've hit your usage limit.".into(),
-        pool: None,
+        pool: Some(provenant_quota::ACCOUNT_ROUTE.into()),
         resets_in_seconds: None,
     }));
+    Ok(())
+}
+#[test]
+fn codex_usage_limit_text_without_error_info_is_quota_limited() -> Result<(), ProviderError> {
+    // Codex exec reports a spent plan as an error and a failed turn whose
+    // only evidence is the message.
+    let message = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
+    let raw = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type": "error", "message": message}),
+        serde_json::json!({"type": "turn.failed", "error": {"message": message}}),
+    );
+    let (events, outcome) = replay(&codex::Codex, &raw, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Refused);
+    assert!(events.contains(&ProviderEvent::QuotaLimited {
+        message: message.into(),
+        pool: Some(provenant_quota::ACCOUNT_ROUTE.into()),
+        resets_in_seconds: None,
+    }));
+    assert!(!events.contains(&ProviderEvent::Error), "{events:?}");
     Ok(())
 }
 #[test]

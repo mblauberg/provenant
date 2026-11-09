@@ -601,6 +601,44 @@ fn persisted_mismatch_excludes_account_and_selects_another()
 }
 
 #[test]
+fn account_usage_limit_excludes_the_spent_account_for_every_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = two_accounts();
+    // The plan limit was hit while serving another model on this account.
+    let spent = [provenant_quota::record_refusal(
+        None,
+        &account_scope("opaque-account"),
+        "codex/other-model",
+        Some(provenant_quota::ACCOUNT_ROUTE),
+        90,
+        Some(10_000),
+    )?
+    .replacement
+    .ok_or("record")?];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &ACCESS;
+    ctx.accounts = &spent;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(route.account_key.as_deref(), Some("other-account"));
+    // Alone, the spent account is unavailable with the refusal as its reason.
+    let single = [availability[0].clone()];
+    ctx.availability = &single;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::ProviderRefused,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn invalid_account_evidence_excludes_only_that_account() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();

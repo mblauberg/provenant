@@ -17,6 +17,11 @@ pub struct Refusal {
     pub resets_unix_seconds: Option<i64>,
 }
 impl Refusal {
+    /// Whether the refusal covers every model on its account: a provider's
+    /// plan usage limit, recorded with the account route as its pool.
+    pub fn account_wide(&self) -> bool {
+        self.pool.as_deref() == Some(ACCOUNT_ROUTE)
+    }
     /// When the refusal stops holding: its reset, or one hour after it was
     /// observed when the provider named no reset.
     pub fn expires_unix_seconds(&self) -> Result<i64, QuotaError> {
@@ -119,7 +124,8 @@ pub enum AccountBlock {
     Mismatch,
     /// A live refusal on the adapter's keyless free pool.
     FreeTierRefusal,
-    /// A live refusal scoped to the model or one of its verified pools.
+    /// A live refusal scoped to the model, one of its verified pools, or the
+    /// whole account when the provider's plan usage limit is spent.
     ScopedRefusal,
 }
 impl AccountBlock {
@@ -197,8 +203,12 @@ impl Admission<'_> {
                         let mut windows = s
                             .windows
                             .iter()
-                            .filter(|w| matches_pool(adapter, &w.pool, pool))
+                            .filter(|w| {
+                                pool == ACCOUNT_ROUTE || matches_pool(adapter, &w.pool, pool)
+                            })
                             .peekable();
+                        // An account-wide refusal clears only when every
+                        // window the account reports has headroom again.
                         windows.peek().is_some()
                             && windows.all(|w| {
                                 // A lapsed reset alone cannot clear a refusal.
@@ -234,7 +244,8 @@ impl Admission<'_> {
             }
         }
         let free = free_pool(adapter);
-        // Only the adapter's own keyless free pool spans models.
+        // Only the adapter's own keyless free pool and an account-wide usage
+        // limit span models.
         let in_free = |pool: Option<&str>| free.is_some() && pool == free;
         for refusal in record
             .into_iter()
@@ -243,12 +254,14 @@ impl Admission<'_> {
                 r.account.adapter == adapter
                     && r.account.account_key == account_key
                     && (r.model == model
+                        || r.account_wide()
                         || (in_free(r.pool.as_deref())
                             && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
             })
         {
             if self.refusal_holds(adapter, record, refusal)?
                 && ((in_free(refusal.pool.as_deref()) && refusal.model == model)
+                    || refusal.account_wide()
                     || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
                 return Ok(Some(if in_free(refusal.pool.as_deref()) {
@@ -381,8 +394,9 @@ pub fn partial_headroom(
 
 /// Build a compare-and-swap update for structured provider quota evidence.
 /// The provider message is intentionally excluded from durable quota state.
-/// Without a pool the refusal holds only the model, until `resets_unix_seconds`
-/// or the one-hour backoff.
+/// Without a pool the refusal holds only the model, and with the account route
+/// (`ACCOUNT_ROUTE`) as its pool every model on the account, until
+/// `resets_unix_seconds` or the one-hour backoff.
 pub fn record_refusal(
     current: Option<&AccountRecord>,
     account: &AccountScope,
@@ -964,6 +978,71 @@ mod admission_tests {
             }
         }
         assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
+    }
+    #[test]
+    fn account_usage_limit_holds_every_model_until_its_reset() {
+        let account = record(QuotaStatus::Available).account;
+        let mut route = route();
+        route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99_999,
+        };
+        // Recorded while serving another model on the same account.
+        let other = format!("{}/other-model", account.adapter);
+        let intent = record_refusal(
+            None,
+            &account,
+            &other,
+            Some(ACCOUNT_ROUTE),
+            1000,
+            Some(30_000),
+        )
+        .expect("refusal");
+        let mut refused = intent.replacement.expect("record");
+        assert!(refused.refusals[0].account_wide());
+        refused.snapshot = None;
+        for (now, allowed) in [(1000, false), (29_999, false), (30_000, true)] {
+            let admission = Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(&refused),
+                pools: &[],
+            };
+            assert_eq!(admission.check(&route).is_ok(), allowed, "now={now}");
+            assert_eq!(
+                admission
+                    .account_block(&account.adapter, &account.account_key, &route.model)
+                    .unwrap(),
+                (!allowed).then_some(AccountBlock::ScopedRefusal),
+            );
+        }
+        // A newer reading with headroom in every window clears it early;
+        // one spent window does not.
+        let mut fresh = record(QuotaStatus::Available);
+        fresh.refusals = refused.refusals.clone();
+        let snapshot = fresh.snapshot.as_mut().expect("snapshot");
+        snapshot.observed_unix_seconds = 1500;
+        let admit = |record: &AccountRecord| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 1600,
+                records: std::slice::from_ref(record),
+                pools: &[],
+            }
+            .account_block(&account.adapter, &account.account_key, &route.model)
+            .unwrap()
+        };
+        snapshot.windows[0].used_basis_points = 1_000;
+        snapshot.windows.push(QuotaWindow {
+            window_seconds: None,
+            pool: "pool-b".into(),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(30_000),
+        });
+        assert_eq!(admit(&fresh), Some(AccountBlock::ScopedRefusal));
+        fresh.snapshot.as_mut().expect("snapshot").windows[1].used_basis_points = 2_000;
+        assert_eq!(admit(&fresh), None);
     }
     #[test]
     fn capacity_evidence_does_not_refuse_admission_but_quota_refusal_does() {

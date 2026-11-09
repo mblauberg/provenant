@@ -266,6 +266,105 @@ struct Usage {
     cache_write_input_tokens: Option<u64>,
     output_tokens: u64,
 }
+/// The host's wall time in its own zone, which Codex uses for a named reset.
+fn local_now() -> Option<jiff::Zoned> {
+    use provenant_core::Clock;
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    Some(
+        jiff::Timestamp::from_second(now)
+            .ok()?
+            .to_zoned(jiff::tz::TimeZone::system()),
+    )
+}
+
+/// Codex's spent plan allowance, read only for the limit and its reset.
+/// `You've hit your usage limit.` spends the whole account; a limit that
+/// names a model (`usage limit for <model>`) holds that model only.
+fn usage_limit(message: &str, now: Option<&jiff::Zoned>) -> Option<E> {
+    let lower = message.to_ascii_lowercase();
+    let at = lower.find("hit your usage limit")?;
+    let account_wide = !lower[at..].starts_with("hit your usage limit for ");
+    Some(E::QuotaLimited {
+        message: message.to_owned(),
+        pool: account_wide.then(|| provenant_quota::ACCOUNT_ROUTE.to_owned()),
+        resets_in_seconds: now.and_then(|now| usage_limit_reset(&lower, now)),
+    })
+}
+
+/// Seconds until the reset Codex names: `try again at 3:05 PM` (today),
+/// `try again at Nov 14th, 2026 3:05 PM`, both in local time, or
+/// `try again in 2 days 3 hours 5 minutes`. Anything else names no reset.
+fn usage_limit_reset(lower: &str, now: &jiff::Zoned) -> Option<u64> {
+    let clock = |time: &str, meridiem: &str| -> Option<(i8, i8)> {
+        let (hour, minute) = time.split_once(':')?;
+        let (hour, minute) = (hour.parse::<i8>().ok()?, minute.parse::<i8>().ok()?);
+        if !(1..=12).contains(&hour) || !(0..60).contains(&minute) {
+            return None;
+        }
+        match meridiem {
+            "am" => Some((hour % 12, minute)),
+            "pm" => Some((hour % 12 + 12, minute)),
+            _ => None,
+        }
+    };
+    let seconds = if let Some((_, rest)) = lower.split_once("try again at ") {
+        let rest = rest
+            .split(['\n', '('])
+            .next()?
+            .trim_end()
+            .trim_end_matches('.');
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let date = match words.as_slice() {
+            [time, meridiem] => {
+                let (hour, minute) = clock(time, meridiem)?;
+                now.date().at(hour, minute, 0, 0)
+            }
+            [month, day, year, time, meridiem] => {
+                const MONTHS: [&str; 12] = [
+                    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                    "dec",
+                ];
+                let month = MONTHS.iter().position(|name| month.starts_with(name))? + 1;
+                let day = day
+                    .trim_end_matches(',')
+                    .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                    .parse::<i8>()
+                    .ok()?;
+                let (hour, minute) = clock(time, meridiem)?;
+                jiff::civil::Date::new(year.parse().ok()?, i8::try_from(month).ok()?, day)
+                    .ok()?
+                    .at(hour, minute, 0, 0)
+            }
+            _ => return None,
+        };
+        let reset = date.to_zoned(now.time_zone().clone()).ok()?;
+        reset.timestamp().as_second() - now.timestamp().as_second()
+    } else {
+        let (_, rest) = lower.split_once("try again in ")?;
+        let rest = rest
+            .split(['\n', '('])
+            .next()?
+            .trim_end()
+            .trim_end_matches('.');
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let mut total = 0_i64;
+        for pair in words.chunks(2) {
+            let [count, unit] = pair else { return None };
+            let count = count.parse::<i64>().ok()?;
+            let unit = match unit.trim_end_matches(',').trim_end_matches('s') {
+                "day" => 86_400,
+                "hour" => 3_600,
+                "minute" => 60,
+                "second" => 1,
+                _ => return None,
+            };
+            total = total.checked_add(count.checked_mul(unit)?)?;
+        }
+        total
+    };
+    u64::try_from(seconds).ok().filter(|seconds| *seconds > 0)
+}
+
 /// The provider's own refusal of the requested model, in its words.
 fn model_refusal(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
@@ -310,6 +409,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 E::TransientError
             } else if model_refusal(&message) {
                 E::ModelUnavailable { message }
+            } else if let Some(limited) = usage_limit(&message, local_now().as_ref()) {
+                limited
             } else if lower.contains("too many requests") || lower.contains("status: 429") {
                 E::RateLimited { message }
             } else {
@@ -333,6 +434,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 };
                 if refused.is_some() {
                     return refused;
+                }
+                if let Some(limited) =
+                    message().and_then(|message| usage_limit(&message, local_now().as_ref()))
+                {
+                    return Some(limited);
                 }
                 match error.get("codex_error_info")?.as_str()? {
                     // Without the capacity message the failure stays generic.
@@ -381,6 +487,67 @@ mod live_usage_tests {
             assert_eq!(LiveUsage.decode(other).unwrap(), FrameEvent::Progress);
         }
         assert!(LiveUsage.reports_usage());
+    }
+}
+
+#[cfg(test)]
+mod usage_limit_tests {
+    use super::*;
+
+    fn at(text: &str) -> jiff::Zoned {
+        text.parse().expect("zoned time")
+    }
+
+    #[test]
+    fn a_plan_usage_limit_holds_the_account_until_its_named_reset() {
+        let now = at("2026-11-10T12:00:00+00:00[UTC]");
+        let plan = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Nov 14th, 2026 3:05 PM.";
+        let Some(E::QuotaLimited {
+            pool,
+            resets_in_seconds,
+            ..
+        }) = usage_limit(plan, Some(&now))
+        else {
+            panic!("a usage limit is typed");
+        };
+        assert_eq!(pool.as_deref(), Some(provenant_quota::ACCOUNT_ROUTE));
+        assert_eq!(resets_in_seconds, Some(4 * 86_400 + 3 * 3_600 + 300));
+        for (text, reset) in [
+            (
+                "You've hit your usage limit. Try again at 3:05 PM.",
+                Some(11_100),
+            ),
+            ("You've hit your usage limit. Try again at 12:30 AM.", None),
+            (
+                "You've hit your usage limit. Try again in 2 days 3 hours.",
+                Some(183_600),
+            ),
+            ("You've hit your usage limit. Try again later.", None),
+            ("You've hit your usage limit. Try again at teatime.", None),
+        ] {
+            assert!(
+                matches!(
+                    usage_limit(text, Some(&now)),
+                    Some(E::QuotaLimited { resets_in_seconds, .. }) if resets_in_seconds == reset
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_usage_limit_holds_only_that_model() {
+        let now = at("2026-11-10T12:00:00+00:00[UTC]");
+        let text = "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 3:05 PM.";
+        assert!(matches!(
+            usage_limit(text, Some(&now)),
+            Some(E::QuotaLimited {
+                pool: None,
+                resets_in_seconds: Some(11_100),
+                ..
+            })
+        ));
+        assert!(usage_limit("stream disconnected before completion", Some(&now)).is_none());
     }
 }
 
