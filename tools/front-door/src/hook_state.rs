@@ -594,6 +594,7 @@ esac
                 digest: &digest,
                 commands: &commands,
                 client: None,
+                is_compact: false,
             },
         );
         let output = String::from_utf8(context.stdout).unwrap();

@@ -37,6 +37,12 @@ struct Input {
     session_id: HostSessionId,
     cwd: PathBuf,
     transcript_path: Option<PathBuf>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    is_synthetic: Option<bool>,
 }
 struct Context {
     roots: Roots,
@@ -486,6 +492,9 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
             session_id: HostSessionId::parse(&id)?,
             cwd: context.cwd.clone(),
             transcript_path: None,
+            prompt: None,
+            source: None,
+            is_synthetic: None,
         };
         switch(&context, &input, to.as_deref(), dry_run, false, None)?
             .ok_or_else(|| "no switch decision".into())
@@ -1192,6 +1201,52 @@ fn record_start(context: &Context, input: &Input) {
         config_hint(context).as_deref(),
     );
 }
+fn capture_prompt_if_user(context: &Context, input: &Input, deadline: Instant) {
+    if Instant::now() >= deadline {
+        return;
+    }
+    let Some(prompt) = &input.prompt else {
+        return;
+    };
+    if input.is_synthetic.unwrap_or(false) {
+        return;
+    }
+    if input
+        .source
+        .as_deref()
+        .is_some_and(|s| s == "system" || s == "hook" || s == "synthetic")
+    {
+        return;
+    }
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if trimmed.starts_with("Checkpoint ")
+        || trimmed.starts_with("## Provenant session state")
+        || trimmed.starts_with("[Checkpoint excerpt")
+    {
+        return;
+    }
+
+    let project = crate::hooks::with_git(|runtime, executor, budget, cancel| {
+        let location = runtime
+            .project_location(executor, &context.cwd, budget, cancel)?
+            .location;
+        let binding =
+            provenant_config::lookup_project(&context.roots, &location)?.ok_or("project not bound")?;
+        Ok(binding.project_id())
+    });
+    if let Ok(project) = project {
+        let store = provenant_workflow::session::SessionStore::new(
+            context.roots.state.clone(),
+            project,
+            input.session_id.clone(),
+        );
+        let _ = store.append_intent(prompt, &context.clock);
+    }
+}
+
 // The hook protocol imposes real wall-time input and execution caps.
 #[allow(clippy::disallowed_methods)]
 pub fn hook(start: bool, globals: &Globals) -> u8 {
@@ -1239,6 +1294,7 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
                 json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":text}}),
             ))
         } else {
+            capture_prompt_if_user(&context, &input, deadline);
             let Some(value) = switch(&context, &input, None, false, true, Some(deadline))? else {
                 return Ok(None);
             };

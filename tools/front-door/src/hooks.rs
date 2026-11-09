@@ -682,6 +682,7 @@ fn checkpoint(
             digest: &digest,
             commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),
             client,
+            is_compact: moment == Moment::Compact,
         },
     ))
 }

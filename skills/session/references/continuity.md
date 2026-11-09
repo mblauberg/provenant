@@ -2,7 +2,7 @@
 
 ## Host checkpoint
 
-Rewrite about 2 KiB of Markdown for the explicit host session ID. Use the
+Rewrite about 3 KiB of Markdown for the explicit host session ID. Use the
 [checkpoint template](../templates/checkpoint.template.md): goal and owner;
 direction and authority; process and evidence pointers; next actions, blockers
 and resume trigger. Keep PR references as `PR #N` for the derived digest.
@@ -17,8 +17,13 @@ writes its checkpoint. The [runtime runbook](../../../docs/runbooks/session-chec
 owns revision history, identity rebinding and summary metadata.
 
 Before compaction, retain rulings, authority, evidence pointers, unresolved
-questions and the next action. Drop transcripts, tool output and contents
-that can be reopened. Move needed results from disposable scratch to their
+questions and the next action. For each ruling, record what the user wants,
+their reason in their terms (understanding rather than mere quotation),
+alternatives rejected and why, open disagreement, and any reading the chair
+is unsure of. A correction replaces the earlier reading rather than sitting
+beside it. Quote the user only where the wording itself matters: an authority
+grant, or a correction of a misreading. Drop transcripts, tool output and
+contents that can be reopened. Move needed results from disposable scratch to their
 declared owner before the invocation ends. Durable decisions belong in project
 docs; only architectural decisions become ADRs. Apply existing cleanup
 authority, including the merge workflow's own pruning, rather than treating

@@ -17,6 +17,8 @@ pub enum HookEvent {
 struct HostInput {
     hook_event_name: HookEvent,
     session_id: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +87,7 @@ pub fn hook_context(
             digest: "",
             commands: &CommandPrefix::default(),
             client: None,
+            is_compact: false,
         },
     )
 }
@@ -95,6 +98,7 @@ pub struct Advice<'a> {
     pub digest: &'a str,
     pub commands: &'a CommandPrefix,
     pub client: Option<provenant_records::Harness>,
+    pub is_compact: bool,
 }
 
 /// As [`hook_context`], with a freshly derived `digest` of lane and pull
@@ -112,23 +116,39 @@ pub fn hook_context_with(
     advice: Advice<'_>,
 ) -> HookContext {
     let mut bytes = Vec::new();
-    let parsed = input
+    let host_input = input
         .take(HOOK_INPUT_LIMIT + 1)
         .read_to_end(&mut bytes)
         .ok()
         .filter(|_| bytes.len() as u64 <= HOOK_INPUT_LIMIT)
         .and_then(|_| serde_json::from_slice::<HostInput>(&bytes).ok())
-        .filter(|host| host.hook_event_name == event)
-        .and_then(|host| host.session_id)
-        .and_then(|id| HostSessionId::parse(&id).ok());
+        .filter(|host| host.hook_event_name == event);
+    let parsed = host_input
+        .as_ref()
+        .and_then(|host| host.session_id.as_deref())
+        .and_then(|id| HostSessionId::parse(id).ok());
     let Advice {
         digest,
         commands,
         client,
+        is_compact,
     } = advice;
+    let is_compact = is_compact
+        || host_input
+            .as_ref()
+            .and_then(|h| h.source.as_deref())
+            .is_some_and(|s| s == "compact");
     let Some(session) = parsed else {
-        return render(event, None, CheckpointStatus::InvalidInput, digest,
-            "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(), None, "");
+        return render(
+            event,
+            None,
+            CheckpointStatus::InvalidInput,
+            digest,
+            "",
+            "Checkpoint unavailable: missing/invalid host session ID or hook input; no checkpoint loaded.".into(),
+            None,
+            "",
+        );
     };
     let store = SessionStore::new(root.clone(), project, session.clone());
     // The chair's checkpoint and the hook-owned autosave file are read apart
@@ -201,13 +221,32 @@ pub fn hook_context_with(
     let cause = cause
         .map(|cause| format!("\nCause: {cause}."))
         .unwrap_or_default();
+    let (intent_text, intent_problem) = if is_compact {
+        match store.read_intent_log() {
+            Ok(Some(prompts)) if !prompts.is_empty() => {
+                let log_path = store.intent_log_path();
+                let text =
+                    format_recent_prompts(&prompts, &log_path, super::INTENT_INJECTION_LIMIT);
+                (Some(text), None)
+            }
+            Ok(_) => (None, Some("missing".to_string())),
+            Err(error) => (None, Some(read_cause(error))),
+        }
+    } else {
+        (None, None)
+    };
     let cause = format!(
-        "{cause}{}",
+        "{cause}{}{}",
         autosave_problem
             .map(|problem| format!(
                 "\nAutosave unavailable: {problem}; its saved state is not shown."
             ))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        intent_problem
+            .map(|problem| format!(
+                "\nIntent log unavailable: {problem}; recent user prompts are not shown."
+            ))
+            .unwrap_or_default(),
     );
     // The save must reach the store this hook read. When the command cannot be
     // shown so that it round-trips, say so rather than show one that would
@@ -240,10 +279,52 @@ pub fn hook_context_with(
         Some(session),
         status,
         digest,
+        intent_text.as_deref().unwrap_or_default(),
         message,
         markdown,
         &more,
     )
+}
+
+/// Formats the most recent user prompts within `bound`, newest kept, and names the full log path.
+pub fn format_recent_prompts(
+    prompts: &[String],
+    log_path: &std::path::Path,
+    bound: usize,
+) -> String {
+    let header = format!(
+        "## Recent user prompts\nFull intent log: {}\n",
+        log_path.display()
+    );
+    let mut selected_reversed = Vec::new();
+    let mut current_len = header.len();
+
+    for prompt in prompts.iter().rev() {
+        let entry_len = 5 + prompt.len(); // "\n---\n" + prompt.len()
+        if current_len + entry_len <= bound {
+            selected_reversed.push(prompt.as_str());
+            current_len += entry_len;
+        } else {
+            if selected_reversed.is_empty() {
+                let max_prompt_len = bound.saturating_sub(header.len() + 5);
+                if max_prompt_len > 0 {
+                    let mut end = max_prompt_len.min(prompt.len());
+                    while end > 0 && !prompt.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    selected_reversed.push(&prompt[..end]);
+                }
+            }
+            break;
+        }
+    }
+
+    let mut out = header;
+    for prompt in selected_reversed.into_iter().rev() {
+        out.push_str("\n---\n");
+        out.push_str(prompt);
+    }
+    out
 }
 
 /// Bounded read cause for the diagnostic: OS kind and code, never paths.
@@ -259,6 +340,7 @@ fn render(
     session_id: Option<HostSessionId>,
     status: CheckpointStatus,
     digest: &str,
+    intent: &str,
     diagnostic: String,
     markdown: Option<String>,
     more: &str,
@@ -272,6 +354,7 @@ fn render(
         event,
         &diagnostic,
         digest,
+        intent,
         &retained,
         ExcerptState::Complete,
     );
@@ -293,6 +376,7 @@ fn render(
                 event,
                 &diagnostic,
                 digest,
+                intent,
                 retained.get(..end).unwrap_or_default(),
                 ExcerptState::Truncated(more),
             );
@@ -307,6 +391,7 @@ fn render(
             event,
             &diagnostic,
             digest,
+            intent,
             retained.get(..end).unwrap_or_default(),
             ExcerptState::Truncated(more),
         );
@@ -324,6 +409,7 @@ fn encode(
     event: HookEvent,
     diagnostic: &str,
     digest: &str,
+    intent: &str,
     retained: &str,
     excerpt: ExcerptState<'_>,
 ) -> Vec<u8> {
@@ -331,6 +417,10 @@ fn encode(
     if !digest.is_empty() {
         text.push_str("\n\n");
         text.push_str(digest);
+    }
+    if !intent.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(intent);
     }
     if let ExcerptState::Truncated(more) = excerpt {
         text.push_str("\n[Checkpoint excerpt; ");

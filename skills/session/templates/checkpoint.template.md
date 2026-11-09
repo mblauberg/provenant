@@ -1,13 +1,15 @@
 # Session checkpoint
 
-Rewrite the current context near 2 KiB. The continuity reference owns the
+Rewrite the current context near 3 KiB. The continuity reference owns the
 content contract; this template supplies headings only.
 
 ## Goal
 Outcome, done-criteria and the tracker or project document that owns them.
 
 ## Direction
-User rulings, authority pointers, one-way doors and unresolved gates.
+User rulings, each with the user's reason in their terms, alternatives rejected
+and why, and any open disagreement; authority pointers, one-way doors and
+unresolved gates.
 
 ## Process
 Governing skills, retained evidence locations and verification responsibility.

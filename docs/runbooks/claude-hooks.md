@@ -11,8 +11,9 @@ diagnostics to stderr.
 | Event | Handler | What it does |
 |---|---|---|
 | `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
+| `UserPromptSubmit` | `hook claude chair-prompt` | Appends user prompts verbatim to `intent.log`, respecting deadline without blocking prompts |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
-| `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
+| `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction, plus recent verbatim user prompts from `intent.log` |
 | `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md`, preserving the chair checkpoint |
 | `Stop` | `hook claude stop` | Refreshes `autosave.md` if an existing session is 10 minutes quiet |
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
@@ -108,6 +109,29 @@ Auto-saved: 2026-10-27T03:00:00Z
   then reports that it holds only automatically saved state and that chair
   notes still need saving. `stop` never creates either.
 - Hooks inside a lane (a confined Claude lane) report but never write.
+
+## What the intent log keeps across compaction
+
+- `chair-prompt` (`UserPromptSubmit`) appends each user prompt verbatim to
+  `intent.log` in the session directory beside `checkpoint.md` and
+  `autosave.md`. Synthetic, hook-injected or system text is never logged as a
+  user prompt. Writes respect the hook deadline and never block a prompt on I/O
+  error or timeout.
+- Claude's `PreCompact` hook cannot pass instructions to the compaction summary
+  because Claude discards `PreCompact` output (`systemMessage`); the summary is
+  model-generated without hook steering.
+- On `hook claude compact` (`SessionStart` with `source: compact`), the hook
+  reads `intent.log` and injects the most recent user messages verbatim within a
+  3 KiB byte bound, keeping the newest prompts, along with the full path to
+  `intent.log`. The checkpoint excerpt shrinks first under the 8 KiB hook output
+  limit.
+- If `intent.log` is damaged or missing, `compact` reports `Intent log
+  unavailable: <cause>; recent user prompts are not shown.` on its own line and
+  never hides a readable checkpoint.
+- Codex hook capabilities: Codex does not provide a `UserPromptSubmit` prompt
+  capture hook or a `compact` event hook. Codex sessions run on the degraded path
+  where prompts are not captured by hook and post-compaction intent injection
+  reports the missing log.
 
 ## Worktree hooks
 

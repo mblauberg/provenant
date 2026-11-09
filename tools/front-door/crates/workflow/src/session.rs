@@ -280,6 +280,8 @@ pub enum SessionError {
     Journal,
     #[error("summary update would exceed the 8192-byte frontmatter limit")]
     SummaryTooLarge,
+    #[error("intent log is damaged: {0}")]
+    DamagedIntentLog(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -297,6 +299,27 @@ pub struct Autosave {
 }
 /// Hook-owned file beside `checkpoint.md`.
 const AUTOSAVE_FILE: &str = "autosave.md";
+
+/// Hook-owned intent log beside `checkpoint.md`.
+pub const INTENT_LOG_FILE: &str = "intent.log";
+/// 1 MiB bound on raw intent log reading.
+pub const INTENT_LOG_LIMIT: u64 = 1024 * 1024;
+/// 3 KiB bound on verbatim prompts injected during compaction.
+pub const INTENT_INJECTION_LIMIT: usize = 3 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentRecord {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawIntentEntry {
+    Record(IntentRecord),
+    Text(String),
+}
 
 /// StateRoot must already exist. Reads create nothing; saves create only this key.
 pub struct SessionStore {
@@ -727,6 +750,82 @@ impl SessionStore {
             Err(error) => Err(error),
         }
     }
+
+    /// Absolute path to the session's intent log in the state root.
+    pub fn intent_log_path(&self) -> std::path::PathBuf {
+        self.root.as_path().join(format!(
+            "workflow/projects/{}/sessions/{}/{}",
+            self.project,
+            self.session.as_str(),
+            INTENT_LOG_FILE
+        ))
+    }
+
+    /// Appends a user prompt verbatim to the session's intent log.
+    pub fn append_intent(&self, prompt: &str, clock: &dyn Clock) -> Result<(), SessionError> {
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let record = IntentRecord {
+            prompt: prompt.to_owned(),
+            timestamp: clock
+                .wall_now()
+                .ok()
+                .map(|t| (t.as_micros() / 1_000_000) as i64),
+        };
+        let mut line = serde_json::to_vec(&record)
+            .map_err(|e| SessionError::DamagedIntentLog(e.to_string()))?;
+        line.push(b'\n');
+        let dir = self.directory(true)?;
+        let mut file = dir.open_append(OsStr::new(INTENT_LOG_FILE))?;
+        use std::io::Write;
+        file.write_all(&line).map_err(|e| {
+            SessionError::Filesystem(FsError::Io {
+                operation: "write",
+                path: self.intent_log_path(),
+                source: e,
+            })
+        })?;
+        Ok(())
+    }
+
+    /// Reads the session's intent log entries in chronological order.
+    pub fn read_intent_log(&self) -> Result<Option<Vec<String>>, SessionError> {
+        let read = || -> Result<_, SessionError> {
+            let dir = self.directory(false)?;
+            let mut file = dir.open_read(OsStr::new(INTENT_LOG_FILE))?;
+            let bytes = file.read_bounded(INTENT_LOG_LIMIT)?;
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            let text = std::str::from_utf8(&bytes)?;
+            let mut prompts = Vec::new();
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let entry: RawIntentEntry = serde_json::from_str(trimmed)
+                    .map_err(|e| SessionError::DamagedIntentLog(e.to_string()))?;
+                let prompt = match entry {
+                    RawIntentEntry::Record(record) => record.prompt,
+                    RawIntentEntry::Text(s) => s,
+                };
+                prompts.push(prompt);
+            }
+            if prompts.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(prompts))
+            }
+        };
+        match read() {
+            Ok(found) => Ok(found),
+            Err(SessionError::Filesystem(error)) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     /// Read, edit and replace the checkpoint under one exclusive lock, so a
     /// concurrent `save` is never overwritten from a stale read. `edit` gets the
     /// current Markdown and returns the replacement, or `None` to leave the file
@@ -1141,6 +1240,7 @@ mod tests {
                     digest: "",
                     commands: &CommandPrefix::default(),
                     client: Some(harness),
+                    is_compact: false,
                 },
             );
             let text = context(&response);
@@ -2589,6 +2689,7 @@ mod tests {
                 digest: &digest,
                 commands: &CommandPrefix::default(),
                 client: None,
+                is_compact: false,
             },
         );
         let text = String::from_utf8(response.stdout).unwrap();
@@ -2644,6 +2745,7 @@ mod tests {
                 digest: "",
                 commands,
                 client: None,
+                is_compact: false,
             },
         )
     }
@@ -2867,5 +2969,213 @@ mod tests {
             DurationMicros::ZERO,
         );
         assert_eq!(response.status, CheckpointStatus::Unavailable);
+    }
+
+    #[test]
+    fn intent_log_appends_prompts_and_reads_in_chronological_order() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        assert_eq!(selected.read_intent_log().unwrap(), None);
+
+        let test_clock = clock(1_000_000);
+        selected
+            .append_intent("Why we chose SQLite over PostgreSQL", &test_clock)
+            .unwrap();
+        selected
+            .append_intent(
+                "Keep zero-configuration storage because users requested it",
+                &test_clock,
+            )
+            .unwrap();
+
+        let prompts = selected.read_intent_log().unwrap().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0], "Why we chose SQLite over PostgreSQL");
+        assert_eq!(
+            prompts[1],
+            "Keep zero-configuration storage because users requested it"
+        );
+
+        let path = selected.intent_log_path();
+        assert!(path.exists());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("Why we chose SQLite over PostgreSQL"));
+    }
+
+    #[test]
+    fn compact_fixture_emits_recent_prompts_within_bound_newest_kept_and_names_log_path() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        save(
+            &selected,
+            b"# Goal\nChair authority: user approved #3069 only.",
+        )
+        .unwrap();
+
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let test_clock = clock(mtime);
+        // Add multiple prompts, some older and some newer
+        selected
+            .append_intent("First prompt: initial goal", &test_clock)
+            .unwrap();
+        selected
+            .append_intent(
+                "Second prompt: user rejected Redis because of extra daemon",
+                &test_clock,
+            )
+            .unwrap();
+        selected
+            .append_intent(
+                "Third prompt: keep intent log simple and robust",
+                &test_clock,
+            )
+            .unwrap();
+
+        // Compact fixture (with source: compact)
+        let compact_json = format!(
+            r#"{{"hook_event_name":"SessionStart","session_id":"{FIXTURE_ID}","source":"compact"}}"#
+        );
+        let response = hook_context_with(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            compact_json.as_bytes(),
+            &test_clock,
+            DurationMicros::from_micros(3_600_000_000),
+            Advice {
+                digest: "Lanes: none",
+                commands: &CommandPrefix::default(),
+                client: None,
+                is_compact: true,
+            },
+        );
+
+        assert_eq!(response.status, CheckpointStatus::Present);
+        let text = context(&response);
+        assert!(text.contains("user approved #3069 only"), "{text}");
+        assert!(text.contains("## Recent user prompts"), "{text}");
+        let log_path = selected.intent_log_path();
+        assert!(text.contains(&log_path.display().to_string()), "{text}");
+        assert!(text.contains("Third prompt: keep intent log simple and robust"), "{text}");
+        assert!(
+            text.contains("Second prompt: user rejected Redis because of extra daemon"),
+            "{text}"
+        );
+        assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
+
+        // Test newest kept when bound is small
+        let short_path = std::path::Path::new("/workflow/sessions/intent.log");
+        let header_len = format!(
+            "## Recent user prompts\nFull intent log: {}\n",
+            short_path.display()
+        )
+        .len();
+        let bound = header_len + 35;
+        let formatted = super::hooks::format_recent_prompts(
+            &[
+                "Old prompt 1 that is too old".into(),
+                "Old prompt 2 that is too old".into(),
+                "Newest prompt that fits".into(),
+            ],
+            short_path,
+            bound,
+        );
+        assert!(formatted.contains("Newest prompt that fits"), "{formatted}");
+        assert!(!formatted.contains("Old prompt 1"), "{formatted}");
+        assert!(formatted.len() <= bound, "len {} > bound {}", formatted.len(), bound);
+    }
+
+    #[test]
+    fn compact_fixture_reports_damaged_or_missing_intent_log_on_own_line_without_hiding_checkpoint() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, FIXTURE_ID);
+        save(
+            &selected,
+            b"# Goal\nChair authority: user approved #3069 only.",
+        )
+        .unwrap();
+
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let test_clock = clock(mtime);
+        let compact_json = format!(
+            r#"{{"hook_event_name":"SessionStart","session_id":"{FIXTURE_ID}","source":"compact"}}"#
+        );
+
+        // 1. Missing intent log:
+        let response = hook_context_with(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            compact_json.as_bytes(),
+            &test_clock,
+            DurationMicros::from_micros(3_600_000_000),
+            Advice {
+                digest: "",
+                commands: &CommandPrefix::default(),
+                client: None,
+                is_compact: true,
+            },
+        );
+        assert_eq!(response.status, CheckpointStatus::Present);
+        let text = context(&response);
+        assert!(text.contains("user approved #3069 only"), "{text}");
+        assert!(
+            text.contains("\nIntent log unavailable: missing; recent user prompts are not shown."),
+            "{text}"
+        );
+        // Must be on its own line
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("Intent log unavailable: missing"));
+        assert!(line.is_some(), "{text}");
+
+        // 2. Damaged intent log (invalid UTF-8):
+        let log_file = selected.intent_log_path();
+        std::fs::create_dir_all(log_file.parent().unwrap()).unwrap();
+        std::fs::write(&log_file, [0xff, 0xfe]).unwrap();
+
+        let response = hook_context_with(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            compact_json.as_bytes(),
+            &test_clock,
+            DurationMicros::from_micros(3_600_000_000),
+            Advice {
+                digest: "",
+                commands: &CommandPrefix::default(),
+                client: None,
+                is_compact: true,
+            },
+        );
+        assert_eq!(response.status, CheckpointStatus::Present);
+        let text = context(&response);
+        assert!(text.contains("user approved #3069 only"), "{text}");
+        assert!(text.contains("\nIntent log unavailable: "), "{text}");
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("Intent log unavailable: "));
+        assert!(line.is_some(), "{text}");
+
+        // 3. Damaged intent log (corrupt JSON):
+        std::fs::write(&log_file, b"this is not json lines\n").unwrap();
+        let response = hook_context_with(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            compact_json.as_bytes(),
+            &test_clock,
+            DurationMicros::from_micros(3_600_000_000),
+            Advice {
+                digest: "",
+                commands: &CommandPrefix::default(),
+                client: None,
+                is_compact: true,
+            },
+        );
+        assert_eq!(response.status, CheckpointStatus::Present);
+        let text = context(&response);
+        assert!(text.contains("user approved #3069 only"), "{text}");
+        assert!(text.contains("\nIntent log unavailable: "), "{text}");
     }
 }

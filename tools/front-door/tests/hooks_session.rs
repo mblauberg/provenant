@@ -1001,3 +1001,200 @@ fn worktree_remove_keeps_a_tree_with_only_ignored_output_and_says_why() -> Resul
     assert!(path.join("target/out.o").is_file());
     Ok(())
 }
+
+#[test]
+fn user_prompt_submit_appends_verbatim_survives_restart_and_injected_during_compaction() -> Result {
+    let rig = TestRig::new()?;
+    let session = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37";
+    let s = store(&rig, session)?;
+    save(
+        &s,
+        "# Goal\nChair notes: retain reasoning; user approved #3069 only.",
+    )?;
+
+    // 1. UserPromptSubmit appends prompt verbatim to session's log; survives process restart.
+    let prompt1 = "Why we chose SQLite over PostgreSQL: simplicity and zero configuration.";
+    let input1 = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": prompt1
+    });
+    let out1 = run_hook(&rig, "chair-prompt", &input1)?;
+    assert_eq!(code(&out1), 0, "{:?}", out1.stderr.bytes);
+
+    // Process restart: new run_hook process call
+    let prompt2 = "User rejected Redis because of extra daemon requirement.";
+    let input2 = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": prompt2
+    });
+    let out2 = run_hook(&rig, "chair-prompt", &input2)?;
+    assert_eq!(code(&out2), 0, "{:?}", out2.stderr.bytes);
+
+    // Verify log contents directly
+    let entries = s.read_intent_log()?.expect("intent log present");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0], prompt1);
+    assert_eq!(entries[1], prompt2);
+
+    // 2. Compact fixture emits recent prompts verbatim, newest kept, within byte bound, and names full log path.
+    let compact_out = run_hook(&rig, "compact", &start(&rig, session, "compact"))?;
+    assert_eq!(code(&compact_out), 0, "{:?}", compact_out.stderr.bytes);
+    assert!(compact_out.stdout.bytes.len() <= 8192);
+    let text = context(&compact_out)?;
+    assert!(text.contains("user approved #3069 only"), "{text}");
+    assert!(text.contains("## Recent user prompts"), "{text}");
+    assert!(text.contains(&s.intent_log_path().display().to_string()), "{text}");
+    assert!(text.contains(prompt1), "{text}");
+    assert!(text.contains(prompt2), "{text}");
+
+    Ok(())
+}
+
+#[test]
+fn hook_injected_system_or_synthetic_text_is_not_captured_as_user_prompt() -> Result {
+    let rig = TestRig::new()?;
+    let session = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a38";
+    let s = store(&rig, session)?;
+    save(&s, "# Goal\nBaseline goal.")?;
+
+    // Valid user prompt first
+    let user_prompt = "Genuine user prompt about feature architecture.";
+    let input = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": user_prompt
+    });
+    assert_eq!(code(&run_hook(&rig, "chair-prompt", &input)?), 0);
+
+    // System prompt (source: "system")
+    let system_input = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": "System prompt instructions that must never enter intent log",
+        "source": "system"
+    });
+    assert_eq!(code(&run_hook(&rig, "chair-prompt", &system_input)?), 0);
+
+    // Hook-injected prompt (source: "hook")
+    let hook_input = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": "Hook injected text",
+        "source": "hook"
+    });
+    assert_eq!(code(&run_hook(&rig, "chair-prompt", &hook_input)?), 0);
+
+    // Synthetic prompt (is_synthetic: true)
+    let synthetic_input = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": "Synthetic agent prompt",
+        "is_synthetic": true
+    });
+    assert_eq!(code(&run_hook(&rig, "chair-prompt", &synthetic_input)?), 0);
+
+    // Checkpoint excerpt / state text
+    for excerpt in [
+        "## Provenant session state\nLanes: none",
+        "Checkpoint excerpt; read full file...",
+        "Checkpoint state...",
+    ] {
+        let excerpt_input = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "cwd": rig.project,
+            "transcript_path": rig.root.join("transcript.jsonl"),
+            "prompt": excerpt
+        });
+        assert_eq!(code(&run_hook(&rig, "chair-prompt", &excerpt_input)?), 0);
+    }
+
+    // Only the genuine user prompt was captured
+    let entries = s.read_intent_log()?.expect("intent log present");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], user_prompt);
+
+    Ok(())
+}
+
+#[test]
+fn damaged_or_missing_intent_log_is_reported_on_own_line_and_never_hides_checkpoint() -> Result {
+    let rig = TestRig::new()?;
+    let session = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a39";
+    let s = store(&rig, session)?;
+    save(&s, "# Goal\nCritical checkpoint that must remain visible.")?;
+
+    // 1. Missing intent log:
+    let out = run_hook(&rig, "compact", &start(&rig, session, "compact"))?;
+    assert_eq!(code(&out), 0);
+    let text = context(&out)?;
+    assert!(text.contains("Critical checkpoint that must remain visible."), "{text}");
+    assert!(
+        text.contains("\nIntent log unavailable: missing; recent user prompts are not shown."),
+        "{text}"
+    );
+    let line = text.lines().find(|l| l.starts_with("Intent log unavailable: missing"));
+    assert!(line.is_some(), "{text}");
+
+    // 2. Corrupted intent log (invalid UTF-8 bytes):
+    let log_path = s.intent_log_path();
+    fs::create_dir_all(log_path.parent().unwrap())?;
+    fs::write(&log_path, [0xff, 0xfe])?;
+
+    let out = run_hook(&rig, "compact", &start(&rig, session, "compact"))?;
+    assert_eq!(code(&out), 0);
+    let text = context(&out)?;
+    assert!(text.contains("Critical checkpoint that must remain visible."), "{text}");
+    assert!(text.contains("\nIntent log unavailable: "), "{text}");
+    let line = text.lines().find(|l| l.starts_with("Intent log unavailable: "));
+    assert!(line.is_some(), "{text}");
+
+    // 3. Corrupted intent log (non-JSON line):
+    fs::write(&log_path, b"not valid json\n")?;
+    let out = run_hook(&rig, "compact", &start(&rig, session, "compact"))?;
+    assert_eq!(code(&out), 0);
+    let text = context(&out)?;
+    assert!(text.contains("Critical checkpoint that must remain visible."), "{text}");
+    assert!(text.contains("\nIntent log unavailable: "), "{text}");
+
+    Ok(())
+}
+
+#[test]
+fn intent_log_writes_respect_hook_deadline_and_cannot_block_a_prompt() -> Result {
+    let rig = TestRig::new()?;
+    let session = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a40";
+    let s = store(&rig, session)?;
+    save(&s, "# Goal\nUnblockable prompt test.")?;
+
+    // Make the intent log path a directory so writing fails
+    let log_path = s.intent_log_path();
+    fs::create_dir_all(&log_path)?;
+
+    let input = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": rig.project,
+        "transcript_path": rig.root.join("transcript.jsonl"),
+        "prompt": "Prompt when intent log write fails"
+    });
+    let out = run_hook(&rig, "chair-prompt", &input)?;
+    // Exits 0 cleanly; prompt is never blocked by a failed write
+    assert_eq!(code(&out), 0, "{:?}", out.stderr.bytes);
+
+    Ok(())
+}
