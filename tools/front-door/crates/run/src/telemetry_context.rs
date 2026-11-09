@@ -58,11 +58,18 @@ static INSTALLED_RELEASE: std::sync::OnceLock<Option<InstalledRelease>> =
 /// upgraded selector. Development builds have no such manifest and stay unknown.
 fn installed_release() -> Option<InstalledRelease> {
     let build = BUILD_IDENTITY.get()?;
-    let path = std::env::current_exe().ok()?;
+    release_for_executable(&std::env::current_exe().ok()?, build)
+}
+
+/// `current_exe` may be the `~/.local/bin/provenant` symlink (macOS), so
+/// resolve it before deriving the release directory on every platform.
+fn release_for_executable(exe: &Path, build: &VersionInfo) -> Option<InstalledRelease> {
+    let path = std::fs::canonicalize(exe).ok()?;
+    let path = path.as_path();
     if path.file_name()? != "provenant" || path.parent()?.file_name()? != "bin" {
         return None;
     }
-    let size = std::fs::metadata(&path).ok()?.len();
+    let size = std::fs::metadata(path).ok()?.len();
     let manifest: provenant_records::ReleaseManifest = serde_json::from_slice(&bytes(
         &path.parent()?.parent()?.join("release.json"),
         1 << 20,
@@ -156,4 +163,58 @@ pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> ExtraFields {
         extra.insert(TelemetryContext::TRACE_KEY.into(), value);
     }
     extra
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_records::{FileDigest, PathWire, ReleaseFile, ReleaseManifest, SourceDigest};
+
+    #[cfg(unix)]
+    #[test]
+    fn release_is_found_through_install_symlink() {
+        let binary = b"fake provenant";
+        let build = VersionInfo {
+            extra: Default::default(),
+            source_digest: SourceDigest::from_bytes([1; 32]),
+            asset_digest: SourceDigest::from_bytes([2; 32]),
+            target: "t".into(),
+            toolchain: "tc".into(),
+            record_schema_version: 1,
+            config_schema_version: 1,
+        };
+        let manifest = ReleaseManifest {
+            extra: Default::default(),
+            schema_version: 1,
+            source_digest: build.source_digest,
+            asset_digest: build.asset_digest,
+            target: build.target.clone(),
+            toolchain: build.toolchain.clone(),
+            files: vec![ReleaseFile {
+                extra: Default::default(),
+                path: PathWire::from_relative(
+                    &provenant_core::RelativePath::parse("bin/provenant").unwrap(),
+                )
+                .unwrap(),
+                digest: FileDigest::from_bytes([3; 32]),
+                bytes: binary.len() as u64,
+                mode: 0o755,
+            }],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("releases/abc");
+        std::fs::create_dir_all(release.join("bin")).unwrap();
+        std::fs::write(release.join("bin/provenant"), binary).unwrap();
+        std::fs::write(
+            release.join("release.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join(".local/bin")).unwrap();
+        let link = dir.path().join(".local/bin/provenant");
+        std::os::unix::fs::symlink(release.join("bin/provenant"), &link).unwrap();
+
+        let found = release_for_executable(&link, &build).expect("manifest found");
+        assert_eq!(found.executable.bytes, binary.len() as u64);
+    }
 }
