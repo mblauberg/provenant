@@ -494,19 +494,17 @@ pub(super) fn repository_lock<'a>(
     mode: LockMode,
     cancel: &CancelToken,
 ) -> Result<LockGuard, WorktreeError> {
-    context
-        .project_state
-        .lock(
-            OsStr::new(REPOSITORY_LOCK),
-            mode,
-            context.lock_budget,
-            cancel,
-            context.clock,
-        )
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
-            other => other.into(),
-        })
+    lock_repository(
+        context.repo.common_dir(),
+        mode,
+        context.lock_budget,
+        cancel,
+        context.clock,
+    )
+    .map_err(|error| match error {
+        FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+        other => other.into(),
+    })
 }
 
 pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> {

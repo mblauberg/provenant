@@ -433,7 +433,8 @@ pub(super) fn apply_attempt_observation(
                     }
                     AttemptOutcome::AuthRequired
                     | AttemptOutcome::UsageLimited
-                    | AttemptOutcome::AdapterUnavailable => {
+                    | AttemptOutcome::AdapterUnavailable
+                    | AttemptOutcome::PreparationRefused(_) => {
                         let review_limit_reached = review_preparation_substitution(node, attempt)
                             && progress
                                 .attempts

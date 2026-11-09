@@ -631,8 +631,13 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let budget = WaitBudget::cli(detached_factory.clock.mono_now(), 30)?;
     let run = detached_factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
     let node = &run.checkpoint.nodes[0];
-    assert!(node.advance_error.is_none(), "{node:#?}");
-    let key = &node.attempts.first().ok_or("review attempt missing")?.key;
+    // The fixture has no runnable provider. Admission of the detached reader
+    // reaches preparation, whose refusal now has an explicit graph cause.
+    assert_eq!(node.advance_error_code.as_deref(), Some("preparation_refused"), "{node:#?}");
+    let attempt = node.attempts.first().ok_or("review attempt missing")?;
+    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::PreparationRefused)), "{node:#?}");
+    assert!(!attempt.launched, "{node:#?}");
+    let key = &attempt.key;
     let operation = graph_operation("graph-attempt-operation", key)?;
     let owner = BinaryRunOwner { factory: &detached_factory, allow_remote: true, actor: None, chair: None };
     assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some(), "review was not submitted");

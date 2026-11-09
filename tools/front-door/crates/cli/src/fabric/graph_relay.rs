@@ -1819,16 +1819,9 @@ mod provisioning_tests {
         // A child binding must survive registry contention beyond a short
         // settlement deadline too. The original budget remains expired afterwards.
         let clock = provenant_os::clock::SystemClock;
-        let directory = provenant_os::fs::Directory::open_anchor(
-            &context
-                .roots
-                .state
-                .as_path()
-                .join("worktrees")
-                .join(context.identity.project.to_string()),
-        )?;
+        let directory = provenant_os::fs::Directory::open_anchor(&project.join(".git"))?;
         let held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
             provenant_os::fs::LockMode::Exclusive,
             WaitBudget::nonblocking(clock.mono_now()),
             &cancel,
@@ -2130,7 +2123,7 @@ mod provisioning_tests {
             std::fs::Permissions::from_mode(0o700),
         )?;
         std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o700))?;
-        let directory = Directory::open_anchor(&registry)?;
+        let directory = Directory::open_anchor(&project.join(".git"))?;
         let socket = root.path().join("relay/socket");
         let context = std::sync::Arc::new(context);
         let host = std::sync::Arc::clone(&context);
@@ -2147,7 +2140,7 @@ mod provisioning_tests {
         // Disjoint scopes keep these independent children in separate checkouts.
         let request = |id: &str| json!({"op":"add","id":id,"use":"implement","brief":"Write","writer":true,"write_scope":[format!("src/{id}")],"idempotency_key":id});
         let held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
             LockMode::Exclusive,
             WaitBudget::nonblocking(clock.mono_now()),
             &cancel,
@@ -2189,7 +2182,7 @@ mod provisioning_tests {
         // A queued caller confirms only its remainder. The host must return a
         // named refusal within that remainder instead of starting sixty seconds again.
         let _held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
             LockMode::Exclusive,
             WaitBudget::nonblocking(clock.mono_now()),
             &cancel,
@@ -2768,15 +2761,9 @@ mod provisioning_tests {
         journal.save(&reloaded)?;
         drop(journal);
         use provenant_os::fs::{Directory, LockMode};
-        let registry = context
-            .roots
-            .state
-            .as_path()
-            .join("worktrees")
-            .join(context.identity.project.to_string());
-        let directory = Directory::open_anchor(&registry)?;
+        let directory = Directory::open_anchor(&project.join(".git"))?;
         let held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
             LockMode::Exclusive,
             WaitBudget::nonblocking(clock.mono_now()),
             &cancel,

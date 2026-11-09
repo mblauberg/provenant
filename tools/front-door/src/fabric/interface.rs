@@ -102,6 +102,7 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
 pub(super) fn relay_error(error: ServiceError) -> FacadeError {
     match error {
         ServiceError::Facade(error) => error,
+        ServiceError::Mutation { source, .. } => relay_error(*source),
         ServiceError::Cli { code, .. } if code == "UPGRADE_DRAIN_REQUIRED" => {
             FacadeError::GraphRelayRefused {
                 refusal_code: code,
@@ -110,7 +111,7 @@ pub(super) fn relay_error(error: ServiceError) -> FacadeError {
         }
         error => FacadeError::GraphRelayRefused {
             refusal_code: error.code().to_owned(),
-            detail: Some(InvalidInputDetail::graph_reason(error)),
+            detail: Some(InvalidInputDetail::OperationFailed),
         },
     }
 }
@@ -2152,15 +2153,14 @@ mod tests {
             assert!(matches!(
                 &error,
                 FacadeError::GraphRelayRefused {
-                    detail: Some(InvalidInputDetail::GraphReason(reason)), ..
-                } if reason.contains(detail)
+                    detail: Some(InvalidInputDetail::OperationFailed),
+                    ..
+                }
             ));
             let diagnostic = error.diagnostic();
             assert_eq!(diagnostic.code, code);
-            assert_eq!(
-                diagnostic.detail.as_deref(),
-                Some("graph input could not be processed")
-            );
+            assert_eq!(diagnostic.detail.as_deref(), Some("graph operation failed"));
+            assert!(!serde_json::to_string(&error)?.contains(detail));
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);

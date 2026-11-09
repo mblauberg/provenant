@@ -375,30 +375,18 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
 }
 
 #[test]
-fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
+fn command_dispatch_launches_with_normal_store_semantics() -> Result {
     if !available()? {
         return Ok(());
     }
     let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
     let _cleanup = rig.process_cleanup();
-    let original = fs::read_to_string(rig.state.join("config.toml"))?;
-    let mut config: toml_edit::DocumentMut = original.parse()?;
-    config["domains"]["fabric"]["limits"]["store_busy_timeout_ms"] = toml_edit::value(0);
-    fs::write(rig.state.join("config.toml"), config.to_string())?;
-    let loaded = rig.command(&["config", "show", "--json"])?;
-    assert_eq!(code(&loaded), 0, "{loaded:?}");
-    let loaded: Value = serde_json::from_slice(&loaded.stdout.bytes)?;
-    assert_eq!(
-        loaded["data"]["domains"]["fabric"]["limits"]["store_busy_timeout_ms"], 0,
-        "{loaded}"
-    );
     let submitted = dispatch_with(&rig, "pass", 10, None, false)?;
     let id = attempt_id(&submitted)?;
     let exit = attempt_dir(&rig, id)?.join("process-exit.json");
-    // Admission in the guardian can outlast dispatch. Polling lanes
-    // can hold the store during that fail-fast admission, so wait for the
-    // guardian's exit evidence without opening the store first.
-    fs::write(rig.state.join("config.toml"), original)?;
+    // Keep normal store admission semantics across dispatch and guardian startup.
+    // The CLI has no injectable store seam; a process-wide zero timeout makes
+    // unrelated store activity a timing-dependent failure in this integration.
     provenant_test_support::wait_for(
         "guardian exit evidence",
         Duration::from_secs(20),

@@ -1323,3 +1323,104 @@ fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
     let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
     assert!(decoded.diagnostic().detail.unwrap().contains("setup anchor changed"));
 }
+
+#[cfg(test)]
+#[test]
+fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, GitMutationOperation, Occupancy, WorkerObserver, WorktreeCreate,
+    };
+    use std::collections::BTreeMap;
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    for path in [&home, &project, &state] {
+        std::fs::create_dir_all(path)?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+    // A real Git ref lock gives deterministic mutation failure without a timeout.
+    std::fs::write(
+        project.join(".git/refs/heads/refused-lane.lock"),
+        b"credential-sentinel",
+    )?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let error = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: "refused-lane".into(),
+                    base: Some("HEAD".into()),
+                },
+                &cancel,
+            )
+        },
+    )
+    .expect_err("Git ref lock must refuse worktree addition");
+    assert_eq!(
+        error.mutation_failure(),
+        Some((GitMutationOperation::WorktreeAdd, true))
+    );
+    let facade = graph_writer_initialisation_error("HEAD", error);
+    let relayed = interface::relay_error(ServiceError::Facade(facade));
+    assert!(matches!(
+        relayed,
+        FacadeError::GitMutationFailed {
+            operation: GitMutationOperation::WorktreeAdd,
+            lock_failure: true,
+        }
+    ));
+    let wire = serde_json::to_string(&relayed)?;
+    assert!(!wire.contains(&project.to_string_lossy().to_string()));
+    assert!(!wire.contains("credential-sentinel"));
+    let restored: FacadeError = serde_json::from_str(&wire)?;
+    let diagnostic = restored.diagnostic();
+    assert_eq!(restored.code(), "io");
+    assert!(diagnostic.detail.as_deref().is_some_and(
+        |detail| detail.contains("git worktree add") && detail.contains("lock failure: true")
+    ));
+    let untyped = interface::relay_error(ServiceError::Cli {
+        code: "io".into(),
+        message: "credential-sentinel".into(),
+        data: serde_json::Value::Null,
+    });
+    let untyped_wire = serde_json::to_string(&untyped)?;
+    assert!(!untyped_wire.contains("credential-sentinel"));
+    assert_eq!(
+        untyped.diagnostic().detail.as_deref(),
+        Some("graph operation failed")
+    );
+    assert!(
+        !diagnostic
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("graph input")
+    );
+    Ok(())
+}
