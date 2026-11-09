@@ -79,6 +79,35 @@ An unreadable reservation prevents deletion. Resolve custody through normal
 reconciliation or chair recovery, then rerun GC. Filesystem errors produce a
 failed result with their paths; completed removals remain reported.
 
+## Bound run payload bytes
+
+`retention.payload_cap_bytes` (default 16 GiB; see
+[configuration](configuration.md)) caps the bulk payload under `runs/`:
+`provider-state/`, `provider-history/`, `scratch/` and capture bytes beyond the
+64 KiB tails. When the accounted total exceeds the cap, GC evicts the oldest
+eligible attempts first, whole attempts at a time, until the total is at or
+below 75% of the cap.
+
+- A payload whose attempt finished under 24 hours ago is never evicted.
+- Provider state and logs older than `retention.provider_state_days` (seven by
+  default) and `retention.logs_days` expire regardless of the cap, as above.
+- An attempt that holds unique private Git objects (including after a refused
+  import), is abandoned, reserved, unproven lost or the source of a pending
+  continuation is pinned: neither age nor pressure evicts it. Eviction takes the
+  attempt's publication and writer locks and rechecks custody under them.
+- Records, results, exit evidence, receipts and capture tails stay. The attempt
+  gains `payload-evicted.json` and `provider-state-expired.json`; `output` and
+  `status` still work and report `payload: "evicted"`, and resume returns
+  `PROVIDER_STATE_EXPIRED`.
+
+Sizes come from `<state>/payload-ledger.json`, rewritten by full `gc` (the daily
+tick). Settlement-time pressure collection only reads the ledger, so the
+settlement path never walks payload trees. Inspect `data.provider_state.payload`
+in the GC JSON: `accounted_bytes`, `pinned_bytes` (cannot be evicted),
+`reclaimed_bytes` (this pass; planned in a dry run), `total_reclaimed_bytes`
+(lifetime), `evicted` and `kept`. `provenant disk report` shows `payload`
+with the same pinned and lifetime-reclaimed bytes.
+
 Directory removal first renames to an identity-bearing tombstone. A later
 sweep retries an interrupted deletion only for the authorised path and
 matching device and inode. Do not manually rename a refused tree into a

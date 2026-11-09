@@ -570,6 +570,23 @@ fn gc_data_summary(data: &GcData) -> String {
             temporary.bytes,
         ));
     }
+    let payload = &data.provider_state.payload;
+    if payload.cap_bytes > 0 {
+        human.push_str(&format!(
+            "payload {} bytes accounted of {} cap, {} pinned, {} {} ({} attempt(s)), {} reclaimed in total\n",
+            payload.accounted_bytes,
+            payload.cap_bytes,
+            payload.pinned_bytes,
+            payload.reclaimed_bytes,
+            if data.report.dry_run {
+                "reclaimable"
+            } else {
+                "reclaimed"
+            },
+            payload.evicted.len(),
+            payload.total_reclaimed_bytes,
+        ));
+    }
     if data.provider_state.expired_events > 0 {
         human.push_str(&format!(
             "{} {} event rows\n",
@@ -1269,6 +1286,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &assets,
             config.retention.provider_state_days,
             config.retention.logs_days,
+            config.retention.payload_cap_bytes,
             command.dry_run,
         )
     } else {
@@ -1278,6 +1296,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &assets,
             config.retention.provider_state_days,
             config.retention.logs_days,
+            config.retention.payload_cap_bytes,
             command.dry_run,
         )
     };

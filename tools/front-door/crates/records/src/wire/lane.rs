@@ -76,6 +76,7 @@ lane_row! {
         provider_error: String => string();
         cloud: Value => open_object();
         cloud_state: String => string();
+        payload: String => choices(&["evicted"]);
         capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
     }
 }
@@ -173,6 +174,8 @@ pub struct LaneProjectionFacts {
     pub host: Option<String>,
     pub git_import_head: Option<String>,
     pub retained_git_objects: Option<crate::StructuredPathWire>,
+    /// Retention evicted the attempt's bulk payload; its records remain.
+    pub payload_evicted: bool,
 }
 
 fn project_route(route: Option<&crate::run::RouteRecord>) -> Value {
@@ -466,6 +469,7 @@ impl LaneRow {
             cloud: lane.cloud_view.0.clone(),
             cloud_state,
             capabilities: None,
+            payload: facts.payload_evicted.then(|| "evicted".to_owned()),
         }
     }
 }

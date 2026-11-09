@@ -31,6 +31,12 @@ impl RunStore {
             &terminal,
             report,
         );
+        if let Some((pinned_bytes, reclaimed_bytes)) = crate::payload_totals(&self.root) {
+            report.payload = Some(provenant_os::disk::PayloadRetention {
+                pinned_bytes,
+                reclaimed_bytes,
+            });
+        }
         Ok(())
     }
 

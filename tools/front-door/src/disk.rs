@@ -65,6 +65,7 @@ pub fn run(globals: &Globals) -> u8 {
 fn human_report(mut value: serde_json::Value) -> String {
     let volume = value.as_object_mut().and_then(|map| map.remove("volume"));
     let totals = value.as_object_mut().and_then(|map| map.remove("totals"));
+    let payload = value.as_object_mut().and_then(|map| map.remove("payload"));
     let mut text = provenant_cli::terse(&value);
     if let Some(volume) = volume {
         text.push_str(&format!("volume {}", provenant_cli::terse(&volume)));
@@ -73,6 +74,9 @@ fn human_report(mut value: serde_json::Value) -> String {
         for (class, total) in totals {
             text.push_str(&format!("total {class} {}", provenant_cli::terse(&total)));
         }
+    }
+    if let Some(payload) = payload {
+        text.push_str(&format!("payload {}", provenant_cli::terse(&payload)));
     }
     text
 }

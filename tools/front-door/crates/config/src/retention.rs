@@ -17,6 +17,9 @@ pub struct RetentionSettings {
     pub chair_log_replay_days: Option<u64>,
     pub chair_log_entries: u64,
     pub chair_log_bytes: u64,
+    /// Cap on reclaimable run payload (provider state, scratch, captures)
+    /// under `runs/`; eviction runs down to 75% of it, oldest first.
+    pub payload_cap_bytes: u64,
 }
 
 impl Default for RetentionSettings {
@@ -30,6 +33,7 @@ impl Default for RetentionSettings {
             chair_log_replay_days: None,
             chair_log_entries: 10_000,
             chair_log_bytes: 16 * 1024 * 1024,
+            payload_cap_bytes: 16 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -72,6 +76,9 @@ impl RetentionSettings {
         }
         if !(65_536..=1_073_741_824).contains(&self.chair_log_bytes) {
             return Err("chair_log_bytes_range");
+        }
+        if !(1_048_576..=1_125_899_906_842_624).contains(&self.payload_cap_bytes) {
+            return Err("payload_cap_bytes_range");
         }
         Ok(())
     }
