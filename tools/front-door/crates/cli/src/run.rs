@@ -912,7 +912,7 @@ impl Registry<'_> {
                     .into(),
             );
         }
-        if let Some(ProviderEvent::Denied { .. }) = events
+        if let Some(ProviderEvent::Denied { action }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::Denied { .. }))
         {
@@ -924,11 +924,14 @@ impl Registry<'_> {
                     .iter()
                     .any(|event| matches!(event, ProviderEvent::Error))
             {
-                decoded.reason = Some(
-                    provenant_records::diagnostic::ProviderFailureFact::Denied
-                        .reason()
-                        .into(),
-                );
+                // The provider reported the refusal in a structured field and
+                // produced no answer: a distinct failed state, never `succeeded`.
+                // The action name is adapter-validated; paths stay in the capture.
+                decoded.outcome = run::Outcome::PermissionDenied;
+                decoded.reason = Some(format!(
+                    "{}; denied action: {action}",
+                    provenant_records::diagnostic::ProviderFailureFact::Denied.reason()
+                ));
             }
         } else if let Some(ProviderEvent::QuotaLimited {
             message: _,

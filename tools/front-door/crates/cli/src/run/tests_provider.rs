@@ -215,10 +215,14 @@ fn agy_denials_preserve_answers_and_prior_failures() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    // A refusal the provider reports with no answer is its own failed state,
+    // never `succeeded`, and names the denied action (adapter-validated).
+    assert_eq!(decoded.outcome, run::Outcome::PermissionDenied);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied an action; check account access and inspect the result")
+        Some(
+            "provider denied an action; check account access and inspect the result; denied action: unknown action"
+        )
     );
     let mut failed_exit = clean_exit();
     failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
