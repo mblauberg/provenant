@@ -59,9 +59,9 @@ fn completion_queue_publishes_promptly_while_dispatch_is_contended()
     let locks = provenant_config::private_directory(
         &fixture.roots.state.as_path().join("gc/completion-retries"), true)?;
     let _dispatch = locks.try_lock("dispatch.lock".as_ref(), provenant_os::fs::LockMode::Exclusive)?;
-    let started = std::time::Instant::now();
+    let started = SystemClock.mono_now();
     gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(SystemClock.mono_now().as_micros().saturating_sub(started.as_micros()) < 5_000_000);
     let requests = fixture.roots.state.as_path().join("gc/completions");
     let paths = std::fs::read_dir(&requests)?.collect::<Result<Vec<_>, _>>()?;
     assert_eq!(paths.len(), 1);

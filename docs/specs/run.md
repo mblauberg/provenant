@@ -1340,7 +1340,7 @@ Only the host tick enumerates and dispatches the queue. Each request contains
 its identity payload, attempt count, next-retry time and last cause; the filename
 hash covers only identity. A worker claims the entire record by rename to the
 same filename with `.claim` appended, under a non-blocking OS lock. The host tick
-retries abandoned claims after their durable backoff. Requeueing publishes fresh
+retries abandoned claims after their durable backoff. Requeuing publishes fresh
 pending intent independently of any claimed record, including an exhausted one.
 Exhaustion renames the complete claimed record into diagnostics in one operation;
 there is no separate retry file or orphan reconciliation.

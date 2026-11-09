@@ -1101,6 +1101,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise OS lock release after a real child process dies.
     fn dead_claim_is_retried_with_durable_backoff() -> Result<(), Box<dyn std::error::Error>> {
         use std::io::BufRead;
         let temporary = tempfile::tempdir()?;
