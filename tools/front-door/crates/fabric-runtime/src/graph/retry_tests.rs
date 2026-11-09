@@ -2014,6 +2014,14 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
             .unwrap()
             .is_some()
     );
+    // Every node looks settled here, but status must not call the graph
+    // complete: a waiter would return the stopped attempt as final.
+    let (stopped, owing) =
+        FileJournal::read_status_checkpoint_owing_restart(&root, project, &document.graph_id)
+            .unwrap()
+            .unwrap();
+    assert!(stopped.nodes.iter().all(|node| node.state.settled()));
+    assert!(owing);
     let mut journal = open();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.calls.len(), 2);
@@ -2031,6 +2039,12 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
         FileJournal::pending_execution(&root, project, &document.graph_id)
             .unwrap()
             .is_none()
+    );
+    assert!(
+        !FileJournal::read_status_checkpoint_owing_restart(&root, project, &document.graph_id)
+            .unwrap()
+            .unwrap()
+            .1
     );
     let events = FileJournal::read_events(&root, project, &document.graph_id).unwrap();
     assert_eq!(

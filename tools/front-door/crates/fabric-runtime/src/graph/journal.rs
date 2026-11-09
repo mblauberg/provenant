@@ -568,6 +568,21 @@ impl FileJournal {
         project: ProjectId,
         graph_id: &str,
     ) -> Result<Option<GraphCheckpoint>, JournalError> {
+        Ok(
+            Self::read_status_checkpoint_owing_restart(root, project, graph_id)?
+                .map(|(checkpoint, _)| checkpoint),
+        )
+    }
+
+    /// Read a status snapshot and whether a stopped writer still owes its host
+    /// restart. The advance saves the stop before the restart patch, so every
+    /// node can look settled between the two saves; a status reader must not
+    /// report that checkpoint as complete.
+    pub fn read_status_checkpoint_owing_restart(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<(GraphCheckpoint, bool)>, JournalError> {
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId);
         }
@@ -593,7 +608,8 @@ impl FileJournal {
             super::recover_status_minima(&stored.execution.document, &mut stored.checkpoint)
                 .map_err(|_| JournalError::BadEnvelope)?;
         }
-        Ok(Some(stored.checkpoint))
+        let owing = no_work::pending(&stored.execution.document, &stored.checkpoint);
+        Ok(Some((stored.checkpoint, owing)))
     }
 
     /// Read a checkpoint with compacted findings expanded for reporting.

@@ -39,14 +39,25 @@ pub(super) fn redact_checkout_paths(
 }
 
 pub(super) fn graph_snapshot(
+    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> provenant_fabric_runtime::graph::GraphRun {
+    graph_snapshot_owing(checkpoint, false)
+}
+
+/// `restart_owed` marks a saved writer stop whose host restart is not yet
+/// saved. That graph is still pending, so a waiter keeps polling rather than
+/// returning the stopped attempt as the node's final one.
+pub(super) fn graph_snapshot_owing(
     mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+    restart_owed: bool,
 ) -> provenant_fabric_runtime::graph::GraphRun {
     use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
     redact_checkout_paths(&mut checkpoint);
-    let unfinished = checkpoint
-        .nodes
-        .iter()
-        .any(|node| node.expansion_pause.is_some())
+    let unfinished = restart_owed
+        || checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.expansion_pause.is_some())
         || (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful())
         || checkpoint
             .nodes
