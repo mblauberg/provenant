@@ -58,6 +58,8 @@ pub(crate) enum Error {
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
     Budget,
+    #[error("graph checkpoint collection failed: {0}")]
+    GraphGc(String),
     #[error("{0}")]
     GcObservation(&'static str),
     #[error("cannot read disk space: {0}")]
@@ -385,6 +387,7 @@ struct GcData {
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
+    graph_checkpoints_removed: usize,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
@@ -478,6 +481,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 chair_logs: Default::default(),
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
+                graph_checkpoints_removed: 0,
                 worktree_cleanup,
                 alerts,
                 notice: None,
@@ -697,6 +701,7 @@ enum GcOutput<'a> {
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
         build_dir_bytes: u64,
+        graph_checkpoints_removed: usize,
         errors: &'a [provenant_run::ProviderStateIssue],
         unobserved_projects: &'a [PathBuf],
         alerts: &'a [String],
@@ -716,6 +721,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
         build_dir_bytes: data.build_dirs.cache_bytes,
+        graph_checkpoints_removed: data.graph_checkpoints_removed,
         errors: &data.provider_state.errors,
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
@@ -1127,6 +1133,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
+    let graph_checkpoints_removed = if !command.scheduled && !command.pressure {
+        crate::tick::collect_graph_checkpoints(
+            &roots.state,
+            project_ids.iter().copied(),
+            config.gc.graph_checkpoint_days,
+            command.dry_run,
+            &SystemClock,
+        )
+        .map_err(Error::GraphGc)?
+    } else {
+        0
+    };
     let free_floor = command
         .free_floor
         .map(Ok)
@@ -1396,6 +1414,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         chair_logs,
         target_seeds,
         build_dirs,
+        graph_checkpoints_removed,
         unobserved_projects,
         skipped_transient,
         worktree_cleanup,

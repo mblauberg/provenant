@@ -424,6 +424,40 @@ fn check_install_source_failures_keep_the_typed_outcome() -> Result {
 }
 
 #[test]
+fn managed_install_prunes_releases_beyond_the_two_previous() -> Result {
+    let rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let first = rig.execute_os(binary, &args(&stage, false), None)?;
+    assert_eq!(code(&first), 0, "{first:?}");
+    let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
+        fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
+        provenant_records::Limits::CONFIG,
+    )?;
+    let releases = rig.state.join("releases");
+    let older: Vec<_> = (1..=4).map(|n| format!("{n:064x}")).collect();
+    for (index, name) in older.iter().enumerate() {
+        let path = releases.join(name);
+        fs::create_dir_all(&path)?;
+        fs::write(path.join("release.json"), b"managed release")?;
+        let file = fs::File::open(&path)?;
+        file.set_times(fs::FileTimes::new().set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 - (index as u64 + 1) * 86_400),
+        ))?;
+    }
+
+    let second = rig.execute_os(binary, &args(&stage, false), None)?;
+    assert_eq!(code(&second), 0, "{second:?}");
+    assert!(releases.join(receipt.source_digest.to_string()).exists());
+    assert!(releases.join(&older[0]).exists());
+    assert!(releases.join(&older[1]).exists());
+    assert!(!releases.join(&older[2]).exists());
+    assert!(!releases.join(&older[3]).exists());
+    Ok(())
+}
+
+#[test]
 fn install_resolves_source_through_symlinked_temp_ancestor() -> Result {
     let rig = TestRig::new()?;
     let stage = staged(&rig)?;

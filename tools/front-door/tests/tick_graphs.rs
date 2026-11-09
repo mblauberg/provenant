@@ -139,6 +139,31 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
             .is_some_and(Vec::is_empty),
         "{second}"
     );
+    // The daily tick and manual GC share graph checkpoint retention. Age a
+    // terminal checkpoint beyond the configured window and exercise `gc`.
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\ngraph_checkpoint_days=1\n",
+    )?;
+    let checkpoint = state
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-present.json");
+    let file = std::fs::OpenOptions::new().write(true).open(&checkpoint)?;
+    file.set_times(
+        std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400),
+        ),
+    )?;
+    let manual = rig.command(&["gc", "--apply", "--json"])?;
+    assert_eq!(code(&manual), 0, "{manual:?}");
+    let manual: Value = serde_json::from_slice(&manual.stdout.bytes)?;
+    assert_eq!(manual["data"]["graph_checkpoints_removed"], 1, "{manual}");
+    assert!(
+        !checkpoint.exists(),
+        "manual GC left the old terminal checkpoint"
+    );
     Ok(())
 }
 

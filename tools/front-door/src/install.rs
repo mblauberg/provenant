@@ -1096,6 +1096,16 @@ fn apply_install(
         });
         Ok(combined)
     })();
+    if let Ok(outcome) = &result
+        && !outcome.dry_run
+    {
+        // A just-installed release is immutable, but old copies can be
+        // removed once no process is executing them. An incomplete process
+        // census cannot prove that safe, so retention fails closed.
+        if let Ok(Some(receipt)) = read_install_receipt(&targets) {
+            let _ = prune_old_releases(&state, receipt.source_digest);
+        }
+    }
     // The release is installed first; the agent then serves the new binary.
     let peer_agent = match &result {
         Ok(outcome) if agents && !outcome.dry_run => {
@@ -1128,6 +1138,142 @@ fn apply_install(
         peer_agent,
         tick_agent,
     })
+}
+
+fn prune_old_releases(state: &Path, active: provenant_records::SourceDigest) -> io::Result<()> {
+    use provenant_os::pid::CwdObserver;
+
+    let releases = state.join("releases");
+    let census = match provenant_supervisor::census::SystemProcessObserver
+        .census(provenant_supervisor::census::MAX_CENSUS_ENTRIES)
+    {
+        Ok(census) if census.listing_is_complete() => census,
+        _ => return Ok(()),
+    };
+    let processes = provenant_os::pid::SystemCwdObserver;
+    let mut in_use = Vec::new();
+    let pids = census
+        .facts()
+        .filter(|fact| !fact.zombie)
+        .map(|fact| fact.identity.pid)
+        .chain(census.unknown_pids().keys().copied());
+    for pid in pids {
+        let Some(executable) = processes.executable(pid) else {
+            // A process can exit between listing and path lookup; inaccessible
+            // system executables cannot use this private managed release tree.
+            continue;
+        };
+        if executable.starts_with(&releases)
+            && let Some(release) = executable.parent().and_then(Path::parent)
+        {
+            in_use.push(release.to_path_buf());
+        }
+    }
+    prune_release_directories(&releases, active.to_string().as_str(), &in_use)
+}
+
+fn prune_release_directories(
+    releases: &Path,
+    active: &str,
+    in_use: &[std::path::PathBuf],
+) -> io::Result<()> {
+    const PREVIOUS_RELEASES_TO_KEEP: usize = 2;
+    let entries = match std::fs::read_dir(releases) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || name.len() != 64
+            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !path.join("release.json").is_file()
+        {
+            continue;
+        }
+        candidates.push((
+            name.to_owned(),
+            metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            path,
+        ));
+    }
+    candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+    let mut keep: std::collections::BTreeSet<String> = candidates
+        .iter()
+        .filter(|(name, _, _)| name != active)
+        .take(PREVIOUS_RELEASES_TO_KEEP)
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    keep.insert(active.to_owned());
+    for protected in in_use {
+        if let Some(name) = protected.file_name().and_then(|name| name.to_str()) {
+            keep.insert(name.to_owned());
+        }
+    }
+    for (name, _, path) in candidates {
+        if !keep.contains(&name) {
+            std::fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod release_retention_tests {
+    use super::prune_release_directories;
+    use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn release_pruning_keeps_recent_active_and_running_releases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let releases = temp.path().join("releases");
+        fs::create_dir(&releases)?;
+        let names: Vec<_> = (1..=6).map(|n| format!("{n:064x}")).collect();
+        for name in &names {
+            let release = releases.join(name);
+            fs::create_dir(&release)?;
+            fs::write(release.join("release.json"), b"managed release")?;
+        }
+        // An unrelated symlink under releases is not a managed release and
+        // must never be followed or removed by retention.
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside)?;
+        fs::write(outside.join("release.json"), b"outside")?;
+        symlink(&outside, releases.join(format!("{:064x}", 7)))?;
+
+        prune_release_directories(&releases, &names[0], &[releases.join(&names[1])])?;
+
+        for name in [&names[0], &names[1], &names[4], &names[5]] {
+            assert!(
+                releases.join(name).exists(),
+                "expected retained release {name}"
+            );
+        }
+        assert!(
+            !releases.join(&names[2]).exists() && !releases.join(&names[3]).exists(),
+            "old unused releases should be removed"
+        );
+        assert!(
+            releases
+                .join(format!("{:064x}", 7))
+                .symlink_metadata()?
+                .file_type()
+                .is_symlink()
+        );
+        assert!(outside.join("release.json").exists());
+        Ok(())
+    }
 }
 
 /// Reapplies the installed release to every registered account directory and

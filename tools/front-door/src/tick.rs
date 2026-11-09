@@ -59,6 +59,41 @@ fn write_result(
     Ok(())
 }
 
+/// Rebuild pending markers and collect old, terminal graph checkpoints using
+/// the same cutoff for manual and scheduled collection.
+pub(crate) fn collect_graph_checkpoints(
+    state: &provenant_core::StateRoot,
+    projects: impl IntoIterator<Item = provenant_core::ProjectId>,
+    retention_days: u64,
+    dry_run: bool,
+    clock: &dyn Clock,
+) -> Result<usize, String> {
+    if dry_run {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    for project in projects {
+        provenant_fabric_runtime::graph::FileJournal::rebuild_pending(state, project)
+            .map_err(|error| error.to_string())?;
+        let before_ns = i128::from(
+            clock
+                .wall_now()
+                .map_err(|error| error.to_string())?
+                .as_micros(),
+        ) * 1_000
+            - i128::from(retention_days) * 86_400 * 1_000_000_000;
+        removed += provenant_fabric_runtime::graph::FileJournal::collect_terminal(
+            state,
+            project,
+            before_ns,
+            &CancelToken::new(),
+            clock,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(removed)
+}
+
 /// The cadence lock is held by the caller. Spawn errors retain a due deadline;
 /// completion belongs to the collector's one-shot worker, never the scheduler.
 fn queue_gc(
@@ -159,30 +194,16 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                 &provenant_cli::domains::SECTIONS,
             )
             .map_err(|error| error.to_string())?;
-            for binding in provenant_config::registered_projects(&resolved.roots)
-                .map_err(|error| error.to_string())?
-            {
-                provenant_fabric_runtime::graph::FileJournal::rebuild_pending(
-                    &resolved.roots.state,
-                    binding.project_id(),
-                )
-                .map_err(|error| error.to_string())?;
-                let before_ns = i128::from(
-                    clock
-                        .wall_now()
-                        .map_err(|error| error.to_string())?
-                        .as_micros(),
-                ) * 1_000
-                    - i128::from(config.gc.graph_checkpoint_days) * 86_400 * 1_000_000_000;
-                provenant_fabric_runtime::graph::FileJournal::collect_terminal(
-                    &resolved.roots.state,
-                    binding.project_id(),
-                    before_ns,
-                    &CancelToken::new(),
-                    &clock,
-                )
-                .map_err(|error| error.to_string())?;
-            }
+            collect_graph_checkpoints(
+                &resolved.roots.state,
+                provenant_config::registered_projects(&resolved.roots)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .map(|binding| binding.project_id()),
+                config.gc.graph_checkpoint_days,
+                false,
+                &clock,
+            )?;
             crate::worktrees::scheduled_gc(globals, config.gc.idle_days, workers)
         })();
         write_gc_result(
