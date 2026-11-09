@@ -278,6 +278,49 @@ fn route_stats_human_output_matches_golden() -> Result {
 }
 
 #[test]
+fn telemetry_stats_reports_context_coverage_reasoning_and_acceptance_denominator() -> Result {
+    let rig = rig()?;
+    terminal_run::seed(&rig, "context-report", &[Value::Null])?;
+    let config = rig.root.join("claude-context");
+    register_account(&rig, "claude", "context", "context", &config)?;
+    write_session(
+        &config,
+        "fixture-context-session",
+        "fixture-context-message",
+        13,
+    )?;
+    let ingest = rig.command(&["telemetry", "ingest", "--json"])?;
+    assert_eq!(code(&ingest), 0, "{ingest:?}");
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = &value["data"];
+    assert_eq!(
+        data["attempt_context"]["coverage"]["system_prompt"]["unknown"],
+        1
+    );
+    assert_eq!(
+        data["reply_context"]["reasoning_unit"],
+        "provider-reported reasoning tokens"
+    );
+    let unknown = &data["reply_context"]["thinking_per_trigger"]["unknown"];
+    assert_eq!(unknown["reasoning_unknown"], 1);
+    assert_eq!(unknown["reasoning_tokens"], 0);
+    assert_eq!(unknown["output_tokens_proxy"], 13);
+    let accepted = &data["task_context"]["accepted_outcomes"];
+    assert_eq!(accepted["denominator"], 0);
+    assert!(
+        accepted["definition"]
+            .as_str()
+            .is_some_and(|text| text.contains("recorded accepted workflow receipt"))
+    );
+    assert!(data["cli_ergonomics"]["counts"].is_object());
+    let store = fs::read_to_string(rig.state.join("ingest.jsonl"))?;
+    assert!(!store.contains("PRIVATE PROMPT"));
+    Ok(())
+}
+
+#[test]
 fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
     let rig = rig()?;
     let config = rig.root.join("claude");

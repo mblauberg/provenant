@@ -8,6 +8,15 @@ from `config/telemetry-prices.toml`. Optional `--since`, `--until DATE`,
 number of seconds ago, a date or an RFC3339 timestamp. Use `--json` for
 structured output. The contract is in the [telemetry spec](../specs/telemetry.md).
 
+For behaviour comparisons, inspect `attempt_context` and `task_context` for
+source, effective time and known/unknown coverage, then `reply_context` for
+thinking per inferred trigger and `cli_ergonomics` for help, retry, wait and
+poll counts. Native replies and CLI counts cover the host window; attempt
+context covers this project's finished attempts. Missing fields remain unknown.
+The report states when release changes, harness experiments, task difficulty
+and user activity cannot be separated. Accepted-outcome cost uses recorded
+workflow acceptance and reports its numerator scope and denominator.
+
 Cost is an API-equivalent estimate, not a bill. The report separately counts
 attempts whose price-table entry is marked as a subscription, including those
 whose token usage or API-equivalent price is unavailable. This classification

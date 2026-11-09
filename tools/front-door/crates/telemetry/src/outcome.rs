@@ -15,6 +15,75 @@ pub enum OutcomeError {
 }
 type Result<T> = std::result::Result<T, OutcomeError>;
 
+/// Numeric difficulty of the exact observed committed comparison. Binary
+/// changes have a file count but no line count. No paths or patch text escape.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DiffSize {
+    pub files: u64,
+    pub lines: Option<u64>,
+    pub binary_files: u64,
+}
+
+/// Reuse the offline outcome reader's bounded Git environment. Callers pass
+/// captured task base/head, never the checkout's current moving HEAD.
+pub fn diff_size(repo: &Path, base: &str, head: &str) -> Result<DiffSize> {
+    let oid = |value: &str| {
+        matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    if !oid(base) || !oid(head) {
+        return Err(OutcomeError::Evidence(
+            "diff context requires captured object IDs".into(),
+        ));
+    }
+    let stats = git(
+        repo,
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            head,
+            "--",
+        ],
+    )?;
+    let mut result = DiffSize {
+        files: 0,
+        lines: Some(0),
+        binary_files: 0,
+    };
+    for record in stats.split('\0').filter(|record| !record.is_empty()) {
+        let mut fields = record.splitn(3, '\t');
+        let added = fields.next();
+        let removed = fields.next();
+        if fields.next().is_none() {
+            return Err(OutcomeError::Evidence("invalid diff numstat".into()));
+        }
+        result.files += 1;
+        if added == Some("-") && removed == Some("-") {
+            result.binary_files += 1;
+            result.lines = None;
+        } else {
+            let parse = |value: Option<&str>| {
+                value
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| OutcomeError::Evidence("invalid diff line count".into()))
+            };
+            let lines = parse(added)?
+                .checked_add(parse(removed)?)
+                .ok_or_else(|| OutcomeError::Evidence("diff line count overflow".into()))?;
+            if let Some(total) = result.lines.as_mut() {
+                *total = total
+                    .checked_add(lines)
+                    .ok_or_else(|| OutcomeError::Evidence("diff line count overflow".into()))?;
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// One node's retained evidence. Unknown measurements stay absent.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Evidence {

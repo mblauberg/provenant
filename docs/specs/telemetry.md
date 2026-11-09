@@ -164,6 +164,79 @@ owns invocation; `crates/telemetry/src/ingest.rs` owns limits and record layout.
   `crates/telemetry/src/ingest/tests.rs::native_attempt_links_only_its_matching_subagent_and_updates_after_settlement`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
 
+## Behaviour context and comparability
+
+`telemetry stats` exposes `attempt_context`, `task_context`, `reply_context`
+and `cli_ergonomics`. Attempt figures cover selected finished project attempts;
+native reply and demand-log figures cover the host's selected time window.
+These breakdowns do not add usage to the totals again. A run selection omits
+the host-wide reply breakdown because it cannot be attributed to that run.
+
+At attempt creation, the host stores observations in the existing trace,
+with source, effective time and scope. It captures the compiled run-package
+version, SHA-256 and size of observed executable bytes, and the release source
+digest when an adjacent release manifest matches that executable's bytes.
+The instruction observation hashes only the observed source-root `AGENTS.md`,
+not the full effective session instructions. Cloud execution leaves that local
+file observation absent. Harness version, harness experiment, system prompt
+and tool schema remain unknown when the host does not expose them. A recorded
+Provenant experiment arm is separate from a harness experiment.
+
+Chair attribution reads the existing host-owned chair index by project and
+run identity; request proposals and provider session identifiers cannot supply
+that join. Graph and node labels come from existing work context. Each field
+reports known and unknown coverage. Missing historical context is never filled
+from the reporting host's current release or instructions.
+
+Native reply rows retain structural event enums separately from inferred
+trigger labels. Narrow status questions and recognised notification/error
+wrappers may inform inference; their text is discarded. Multiple causes are
+mixed, unsupported evidence remains unknown or mixed, and no lane's aggregate
+reasoning count is allocated to native replies. Thinking means provider-reported
+reasoning tokens. Output counts remain `output_tokens_proxy`, with their own
+unit. Explicit compaction boundaries attach to the next reply; absent historical
+reply context has unknown compaction coverage.
+
+CLI ergonomics counts help calls, failures followed by the same verb within
+five minutes, first observed successes, waits and polls. Retry correlation
+requires an existing attempt identity, or session plus project identity. Help calls
+do not interrupt a sequence. The log is lossy; first observed success is not
+proof of first-ever success. Parse errors have no known verb and cannot supply
+a same-verb retry. Historical wait modes and missing correlation stay unknown.
+
+Task difficulty joins risk tier and distinct graph/node pairs. Committed diff
+size and file counts use captured task base/head object IDs, with at most 100
+distinct comparisons; missing objects and binary line totals remain unknown.
+Review findings and repair rounds reuse the latest graph checkpoint. Acceptance
+item counts, first-pass CI and per-attempt reverts remain unknown without
+retained attributable evidence; post-merge outcomes still use the separate
+offline pipeline. Prompt text is not parsed into a guessed acceptance count.
+
+An accepted outcome is one distinct delivery ID with a recorded accepted
+workflow receipt among selected attempts. Provider success alone is not
+acceptance. Cost per accepted outcome divides the complete API-equivalent cost
+of selected attempts linked to those accepted deliveries by that count, as an
+exact rational number of microdollars. Missing cost or a zero denominator stays
+unknown. This excludes unattributed chair cost and attempts outside the selected
+window; receipt decisions and graph checkpoints are labelled latest snapshots.
+
+These are observational comparisons. Missing joint coverage or simultaneous
+changes prevent separating a release effect from harness experiments, task
+difficulty or user activity; every stats report states that limitation.
+
+Storage adds optional trace, row, demand-log and cursor fields without changing
+their existing versions. Serde defaults read pending and historical records;
+unknown row versions continue to survive rewriting. Cursor state retains pending
+structural events across a routine upgrade. No prompt or response text, remote
+collection or parallel identity store is introduced.
+- Test: `crates/telemetry/src/tests.rs::lane_context_fixture_joins_existing_chair_and_graph`;
+  `crates/telemetry/src/ingest/tests.rs::ambiguous_native_trigger_and_unreported_reasoning_stay_distinct`;
+  `crates/telemetry/src/ingest/tests.rs::enrichment_preserves_existing_token_buckets_and_excludes_text`;
+  `crates/telemetry/src/usage/tests.rs::failed_verb_retry_help_and_wait_poll_are_counted`;
+  `tests/telemetry_ingest.rs::telemetry_stats_reports_context_coverage_reasoning_and_acceptance_denominator`
+- Owner: `crates/telemetry/src/context.rs`, `crates/telemetry/src/signals.rs`,
+  `crates/run/src/telemetry_context.rs`, `crates/cli/src/run/telemetry_context.rs`
+
 ## Mileage and effective rates
 
 `provenant telemetry mileage [--account] [--window] [--model] [--since] [--json]`
@@ -338,4 +411,4 @@ these fields.
 ## Not provided
 
 - A ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
-- Delivery cost columns, a telemetry MCP tool or an `--account` selector on `telemetry stats`.
+- A telemetry MCP tool or an `--account` selector on `telemetry stats`.
