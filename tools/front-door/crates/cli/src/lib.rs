@@ -545,10 +545,12 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
                 }
             })
             .collect();
-        if matches!(
-            parse(fixed.iter().skip(1).cloned()),
-            ParseOutcome::Invocation(_)
-        ) {
+        if command_model().try_get_matches_from(fixed.clone()).is_ok()
+            && matches!(
+                parse(fixed.iter().skip(1).cloned()),
+                ParseOutcome::Invocation(_)
+            )
+        {
             let quoted: Option<Vec<String>> = fixed
                 .iter()
                 .map(|arg| {
