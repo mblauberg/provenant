@@ -1927,7 +1927,7 @@ mod alias_tests {
         );
         for finding in outputs.findings {
             assert_eq!(finding.id, "F1");
-            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.severity, "note");
             assert_eq!(finding.file, "src/lib.rs");
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));

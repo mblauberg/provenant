@@ -1142,6 +1142,9 @@ fn required_verdict_rejects_invalid_contracts() {
 #[test]
 fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
     let mut confirmed: serde_json::Value = serde_json::from_str(&entry("")).unwrap();
+    confirmed["trigger"] = serde_json::json!({"sequence":"Invoke the default operation with x","reach":"default_path","observed":true});
+    confirmed["triage"] = serde_json::json!({"decision":"confirmed","reason":"Input x reproduces the failure","worth_fixing":true,
+        "root_cause":"unchecked input x","blocking_class":"default_path_defect","shared_flaw":false});
     confirmed["id"] = "confirmed".into();
     let mut rejected = confirmed.clone();
     rejected["id"] = "rejected".into();

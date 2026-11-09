@@ -136,11 +136,11 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     assert_eq!(lens.state, NodeState::Succeeded);
     let outputs = lens.outputs.as_ref().unwrap();
     assert_eq!(outputs.findings.len(), 3);
-    assert_eq!(outputs.findings[0].severity, "blocking");
-    assert_eq!(outputs.findings[1].severity, "blocking");
+    assert_eq!(outputs.findings[0].severity, "note");
+    assert_eq!(outputs.findings[1].severity, "note");
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
-    assert_eq!(outputs.findings[2].severity, "high");
+    assert_eq!(outputs.findings[2].severity, "note");
     assert_eq!(outputs.findings[2].summary, "valid finding");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
     assert!(
@@ -656,7 +656,7 @@ fn qualified_findings_survive_model_synthesis() {
                 .unwrap();
             let finding = &node.outputs.as_ref().unwrap().findings[0];
             assert!(finding.id.ends_with(":F1"));
-            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.severity, "note");
             assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
             assert_eq!(finding.extra["lens"], "tests");
             assert_eq!(finding.extra["evidence"], "observed failure");

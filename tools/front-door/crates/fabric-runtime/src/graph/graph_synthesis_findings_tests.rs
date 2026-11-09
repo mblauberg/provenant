@@ -55,7 +55,7 @@ fn identity_only_dispositions_inherit_selected_findings() {
             let finding = &progress.outputs.as_ref().unwrap().findings[0];
             assert_eq!(finding.summary, "s");
             assert_eq!(finding.file, "a.rs");
-            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.severity, "note");
             assert_eq!(finding.status, "open");
             assert_eq!(finding.reason.as_deref(), Some("falsified"));
         } else {
@@ -396,7 +396,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     assert_eq!(outputs.findings.len(), 8 * MAX_FINDINGS);
     assert!(
         outputs.findings.iter().all(|finding| finding.id == "F1"
-            && finding.severity == "high"
+            && finding.severity == "note"
             && finding.file == "a.rs")
     );
     assert_eq!(
@@ -404,7 +404,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
         NodeState::Succeeded
     );
     let prompt = owner.prompts.last().unwrap();
-    assert!(prompt.contains("F1") && prompt.contains("high") && prompt.contains("a.rs"));
+    assert!(prompt.contains("F1") && prompt.contains("note") && prompt.contains("a.rs"));
     let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
     journal.0 = Some(serde_json::from_slice(&stored).unwrap());
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
@@ -468,7 +468,11 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         next.depends_on = vec!["synthesis".into()];
         next.inputs = vec![input("synthesis")];
         nodes.push(next);
-        let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"falsified"});
+        let mut decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"falsified"});
+        if verifying {
+            decisions["triage"] = serde_json::json!({"decision":"rejected","reason":"falsified against code","worth_fixing":false,
+                "root_cause":"input handling","blocking_class":"none"});
+        }
         observations.push_back(terminal_with_result(
             AttemptOutcome::Succeeded,
             &findings_text(&format!(
@@ -538,7 +542,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         }
         assert!(reconstructed.iter().all(|finding| {
             (finding.id == "F1" || finding.id == "F2")
-                && finding.severity == "high"
+                && finding.severity == "note"
                 && finding.file == long_file
                 && finding
                     .extra
@@ -564,7 +568,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         assert!(
             prompt.contains("F1")
                 && prompt.contains("F2")
-                && prompt.contains("high")
+                && prompt.contains("note")
                 && prompt.contains(&long_file)
         );
         let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
@@ -691,14 +695,14 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     assert!(canonical_len(&run.checkpoint) <= bound);
     assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
     assert!(reconstructed.iter().all(|finding| finding.id == "F1"
-        && finding.severity == "high"
+        && finding.severity == "note"
         && finding.file == long_file));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Succeeded
     );
     let prompt = owner.prompts.last().unwrap();
-    assert!(prompt.contains("F1") && prompt.contains("high") && prompt.contains(&long_file));
+    assert!(prompt.contains("F1") && prompt.contains("note") && prompt.contains(&long_file));
     let identities = truncated_finding_ids(
         &plan.nodes[positions["next"]],
         &plan,
