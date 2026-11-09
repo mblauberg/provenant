@@ -57,6 +57,17 @@ pub(super) struct ConfinementRoots<'a> {
     pub(super) prompt_file: Option<&'a Path>,
 }
 
+/// Native tools and confinement must both permit progress updates.
+pub(super) fn adapter_handoff_writable(
+    adapter: &str,
+    permissions: &PlanPermissions,
+    private_state: &Path,
+) -> bool {
+    (!matches!(permissions.mode, AccessMode::ReadOnly)
+        || AdapterSpec::get(adapter).is_some_and(|spec| spec.read_only_private_state_write))
+        && handoff_writable(permissions, private_state)
+}
+
 /// Name progress only when the candidate subtree is writable under the policy.
 /// Any overlapping denial can prevent an atomic update.
 pub(super) fn handoff_writable(permissions: &PlanPermissions, private_state: &Path) -> bool {

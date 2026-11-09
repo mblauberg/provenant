@@ -198,7 +198,8 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
     let handoff = private.path.join("handoff.json");
     let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
     let stdin = String::from_utf8_lossy(&launch.stdin);
-    assert!(prompt.contains(&handoff.display().to_string()) || stdin.contains(&handoff.display().to_string()));
+    assert!(!prompt.contains(&handoff.display().to_string()));
+    assert!(!stdin.contains(&handoff.display().to_string()));
     let policy = provenant_confinement::permissions::snapshot::render(permissions, &confinement.profile, &fixture.home)?;
     assert!(policy.contains(&format!("(allow file-write* (subpath \"{}\"))", private.path.display())));
     let denial = policy.lines().find(|line| line.starts_with("(deny file-write* (require-all") && line.contains(fixture.state.to_str().unwrap())).ok_or("state denial")?;

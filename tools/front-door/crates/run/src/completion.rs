@@ -233,6 +233,84 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn read_only_plan_progress_is_collected_at_settlement() -> TestResult {
+        use provenant_confinement::{
+            ConfinedPlan, PlanRequest,
+            permissions::{AccessMode, NetworkAccess, PathGrant, PlanPermissions, ProviderProfile},
+            plan::{CodexPolicy, ExtensionPolicy},
+        };
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        assert!(input.request.tasks[0].access.write_roots.is_empty());
+        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
+        let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
+        let base = store.context.state_root.as_path().join(format!(
+            "runs/{}/attempts/{}",
+            record.run_id, record.attempt_id
+        ));
+        let subtree = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: provenant_core::WorkScope::Project(store.context.project_id),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                policy: None,
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: subtree(base.join("tmp/candidate-0")),
+                private_state: Some(subtree(base.join("provider-state/candidate-0"))),
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+        })?;
+        let profile = ProviderProfile {
+            spec: Default::default(),
+            observations: Default::default(),
+        };
+        record.write_grants = provenant_confinement::write_grants(plan.permissions(), &profile)
+            .into_iter()
+            .map(|grant| {
+                Ok(WriteGrantRecord {
+                    extra: Default::default(),
+                    source: grant.source,
+                    path: AbsolutePath::new(&grant.path)?,
+                    scope: grant.scope,
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let bytes = snapshot("stopped_early");
+        seal(&candidate, "handoff.json", &bytes, HANDOFF_BYTES as u64)?;
+        let expected = Handoff::from_json(&bytes)?;
+        assert_eq!(
+            store.progress_handoff(&attempt, &record)?,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            store.capture_handoff(&attempt, &record, &decoded())?,
+            Some(expected.clone())
+        );
+        assert_eq!(store.handoff(&record)?, Some(expected));
+        Ok(())
+    }
+
     /// Provider boundary for exercising holder recovery when this host cannot
     /// launch nested confinement. No launch or Git settlement is simulated.
     struct RecoveringAccounts;

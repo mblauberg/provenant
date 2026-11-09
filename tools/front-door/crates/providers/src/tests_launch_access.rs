@@ -1262,7 +1262,7 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
 fn read_only_handoff_native_permissions_match_private_state() -> Result<(), ProviderError> {
     let prompt = Prompt::new("publish progress atomically".into());
     let token = fixture_token();
-    for id in ["codex", "claude", "agy", "opencode"] {
+    for id in ["codex", "claude", "agy", "opencode", "cursor"] {
         let auth = match id {
             "codex" | "opencode" => Some("login"),
             "agy" => Some("keychain"),
@@ -1286,7 +1286,16 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
             (id == "claude").then_some(&token),
         ))?;
         assert_eq!(spec.cwd, cwd);
+        assert_eq!(
+            provenant_records::AdapterSpec::get(id)
+                .unwrap()
+                .read_only_private_state_write,
+            id != "cursor"
+        );
         match id {
+            "cursor" => assert!(
+                spec.argv.windows(2).any(|args| args[0] == "--mode" && args[1] == "ask")
+            ),
             "codex" => assert!(
                 spec.argv
                     .iter()

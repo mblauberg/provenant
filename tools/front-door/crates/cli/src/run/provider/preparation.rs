@@ -2718,7 +2718,7 @@ pub(super) fn prepare_candidates(
         } else {
             text
         };
-        let mut request = confinement_request(
+        let mut request = match confinement_request(
             project_id,
             ConfinementRoots {
                 host_roots: Some(roots),
@@ -2738,9 +2738,19 @@ pub(super) fn prepare_candidates(
             &host_writes,
             adapter.id(),
             publishing_gh.is_some(),
-        )?;
+        )
+        .map_err(PlanCheckError::from)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                reason_boundaries.insert(reasons.len(), error.boundary_class());
+                reasons.push(error.skipped(&label));
+                continue;
+            }
+        };
         let handoff = private_state.join("handoff.json");
-        let writable_handoff = handoff_writable(&request.permissions, private_state);
+        let writable_handoff =
+            adapter_handoff_writable(adapter.id(), &request.permissions, private_state);
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
@@ -2780,7 +2790,15 @@ pub(super) fn prepare_candidates(
                 scope: PathScope::Exact,
             };
             if let Some(policy) = request.permissions.policy.as_mut() {
-                policy.mandatory_mut().add_state_read(grant.clone())?;
+                if let Err(error) = policy
+                    .mandatory_mut()
+                    .add_state_read(grant.clone())
+                    .map_err(PlanCheckError::from)
+                {
+                    reason_boundaries.insert(reasons.len(), error.boundary_class());
+                    reasons.push(error.skipped(&label));
+                    continue;
+                }
             }
             request.permissions.read_roots.push(grant);
         }
@@ -3313,7 +3331,12 @@ pub(super) fn prepare_candidates(
             }
         }
         if writable_handoff && !handoff_writable(plan.permissions(), private_state) {
-            return Err("handoff path is denied by the final confinement policy".into());
+            let error = PlanCheckError::from(
+                provenant_confinement::permissions::PermissionError::InvalidReadOnlyPolicy,
+            );
+            reason_boundaries.insert(reasons.len(), error.boundary_class());
+            reasons.push(error.skipped(&label));
+            continue;
         }
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,

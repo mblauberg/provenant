@@ -1454,7 +1454,28 @@ mod tests {
                 path.display()
             );
         }
-        assert!(!profile.contains("(allow process-exec (subpath"));
+        for exec in profile
+            .lines()
+            .filter_map(|line| line.strip_prefix("(allow process-exec (subpath \""))
+            .filter_map(|line| line.strip_suffix("\"))"))
+        {
+            for lane_path in [
+                &cwd,
+                &home,
+                &plan.permissions().scratch.path,
+                &plan
+                    .permissions()
+                    .private_state
+                    .as_ref()
+                    .ok_or("private state")?
+                    .path,
+            ] {
+                assert!(
+                    !Path::new(exec).starts_with(lane_path),
+                    "lane exec subtree: {exec}"
+                );
+            }
+        }
         Ok(())
     }
 
