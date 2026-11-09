@@ -15,9 +15,16 @@ Produce a one-screen digest and ask for one approval:
 - risk tier and authority (paths, effects, expiry)
 - one-way doors: release, publish, send, spend, destroy, widening authority
 - assumptions made, and open calls with a recommended default for each
+- the structural option beside the small one, a recommendation, and whether the
+  idea is weak or a better one exists
 
-Only the user can downgrade risk. Approval covers the digest; a changed criterion
-needs a new revision and a new approval. Implementers cannot weaken criteria.
+Approval covers the digest. A spec is the best current statement of the outcome,
+and it can be wrong. An implementer may not silently weaken it, and raises a flaw
+with evidence in handoff `decisions`, including an insight that is not a failure.
+The chair may amend or drop an agent-written criterion on that evidence through a
+dated revision that cites it, with no new approval (format in `tracker`). Criteria
+the owner wrote, one-way doors, widened authority and tightened acceptance still
+need the owner.
 
 ## Size to the class
 
@@ -33,6 +40,9 @@ Write each criterion as one observable statement, `When <event>, <behaviour>`,
 tagged with how it is verified: `[test]`, `[command]`, `[capture]` or `[review]`.
 Check premises against the tree, give each deletion or move one owner, and say
 how verification catches a wrong implementation; test behaviour, not wording.
+A verification step beyond the stated outcome names the failure it prevents and
+how likely that failure is; otherwise do not write it, because every later
+implementer must honour it.
 Add must-not-change behaviour and the verify command. The readiness test: could a
 fresh agent build and verify this without asking? If not, it is not ready.
 

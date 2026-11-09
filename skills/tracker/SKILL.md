@@ -34,11 +34,22 @@ Outcome; Evidence (required for agent-filed defects); Scope and Out of scope;
 Acceptance, each item with how it is verified; Must not change; Verify; Durable home
 (the doc that absorbs any settled rule in the same PR, or "none"). Cite
 `path#Symbol`, never line numbers or scratch paths. The spec dies with the PR.
-Implementers cannot change acceptance criteria. These headings are a default shape, not a form.
+These headings are a default shape, not a form.
+
+A spec is the best current statement of the outcome, and it can be wrong. An
+implementer may not silently weaken it, and raises a flaw with evidence in handoff
+`decisions`, including an insight that is not a failure. The chair may amend or
+drop an agent-written criterion on that evidence with no new approval, by editing
+the body and adding `Revised YYYY-MM-DD: <change>; <evidence>`. Criteria the owner
+wrote, one-way doors, widened authority and tightened acceptance still need the
+owner; when authorship is unclear, treat a criterion as the owner's.
 
 Check each premise against the tree. For each criterion, identify how a wrong
 implementation would be caught and a feasible verification route. Give each
 deletion or move one owner. Test behaviour, not wording or line counts.
+A verification step beyond the stated outcome names the failure it prevents and
+how likely that failure is; otherwise do not write it, because every later
+implementer must honour it.
 For design-heavy issues, an optional read-only critique by one fresh implementer
 and one fresh reviewer reports only what would stop or misdirect them. A delivery
 spec gap can become a tracker regression case; retain a rule only while a case
