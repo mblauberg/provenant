@@ -187,13 +187,8 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         "another worktree's unreadable reservation is not this attempt's"
     );
     std::fs::remove_dir_all(&broken)?;
-    let writer = worktrees.join("retained");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&writer)?;
     let lease = provenant_supervisor::custody::acquire_reader(
-        Directory::open_anchor(&writer)?,
+        directory.try_clone()?,
         RunStore::scope(&record),
         call.lock_budget(),
         call.cancel,
@@ -202,7 +197,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     drop(lease);
     assert!(
         !store.custody_released(&record, &call)?,
-        "a free lock does not clear a retained writer fence"
+        "a free lock does not clear a retained reader fence"
     );
     record.state = AttemptState::Running {
         extra: Default::default(),

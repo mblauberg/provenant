@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Status and lane listing select small pages without scanning retained run history, including when checking for refused operations (#3079).
+- Status and lane listing check custody in each displayed attempt’s own slot instead of inventorying every retained worktree reservation (#3079).

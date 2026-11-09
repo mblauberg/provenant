@@ -171,7 +171,7 @@ fn receipt_migration_snapshots_committed_wal() -> TestResult {
     drop(store);
     let db = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
     db.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE admission_windows; PRAGMA user_version=7; CREATE TABLE wal_snapshot_marker(value INTEGER NOT NULL); INSERT INTO wal_snapshot_marker VALUES (42);",
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; DROP TABLE admission_windows; PRAGMA user_version=7; CREATE TABLE wal_snapshot_marker(value INTEGER NOT NULL); INSERT INTO wal_snapshot_marker VALUES (42);",
     )?;
     let store = RunStore::open(&context, &call)?;
     assert_eq!(

@@ -2743,7 +2743,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_current_version_without_spacing() -> TestResult {
+fn the_store_initialises_at_version_ten_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2756,7 +2756,7 @@ fn the_store_initialises_at_current_version_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, crate::db::SCHEMA_VERSION);
+    assert_eq!(version, 10);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -2776,7 +2776,7 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
     // Shape the store exactly as version 7 left it.
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE admission_windows; PRAGMA user_version=7;")?;
+        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     let store = RunStore::open(&context, &call)?;
     let version: i64 =
         store
@@ -2784,7 +2784,7 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, crate::db::SCHEMA_VERSION);
+    assert_eq!(version, 10);
     let operation = OperationId::parse("admit-after-upgrade")?;
     assert!(store.admission_window(&operation, &call)?.is_none());
     let deadline = WallTime::from_micros(1_000_000)?;
@@ -2836,26 +2836,25 @@ fn a_store_failure_omits_source_text_at_every_destination() {
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_supported() -> TestResult {
+fn the_store_refuses_a_version_newer_than_ten() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
-    let future = crate::db::SCHEMA_VERSION + 1;
     RunStore::open(&context, &call)?
         .db
-        .pragma_update(None, "user_version", future)?;
+        .execute_batch("PRAGMA user_version=11;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(found)) if found == future
+        Err(RunError::Version(11))
     ));
     let state = context.state_root.as_path();
     let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
         .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
             r.get(0)
         })?;
-    assert_eq!(version, future, "a refused store stays as it was");
+    assert_eq!(version, 11, "a refused store stays as it was");
     assert!(
         !std::fs::read_dir(state)?
             .filter_map(std::result::Result::ok)
@@ -2882,7 +2881,7 @@ fn version_five_lets_one_run_continue_several_targets() -> TestResult {
     let run = input.run_id.to_string();
     // Shape the table as version 4 left it, with one row to carry over.
     store.db.execute_batch(&format!(
-        "DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
+        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
     ))?;
     drop(store);
     let store = RunStore::open(&context, &call)?;
@@ -3046,14 +3045,14 @@ fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResu
     let store = RunStore::open(&context, &call)?;
     store
         .db
-        .execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE admission_windows; PRAGMA user_version=7;")?;
+        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     drop(store);
 
     let store = RunStore::open(&context, &call)?;
     let version: i64 = store
         .db
         .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, crate::db::SCHEMA_VERSION);
+    assert_eq!(version, 10);
     let backup = context.state_root.as_path().join(format!(
         "run.sqlite3.bak-{}",
         call.clock.wall_now()?.as_micros()
@@ -3508,7 +3507,7 @@ fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
         let store = RunStore::open(&context, &call)?;
         store.create(&input, &call)?;
         store.db.execute_batch(
-            "DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions;",
+            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions;",
         )?;
         if version < 5 {
             store.db.execute_batch("DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;")?;
@@ -3574,7 +3573,6 @@ fn ledger_capacity_upgrades_preserve_terminal_attempt_references() -> TestResult
             |row| row.get(0),
         )?;
         assert!(event_count > 0);
-        store.db.execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations;")?;
         if version == 9 {
             // Exercise the real former SQL cap, not just its version marker.
             store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;

@@ -356,7 +356,7 @@ pub(crate) fn open_database(
 /// Ordered run-store migrations. A step's index is the version it upgrades from,
 /// so the current version follows from this list and a new step cannot be missed
 /// when an existing store opens.
-const SCHEMA_STEPS: [&str; 11] = [
+const SCHEMA_STEPS: [&str; 10] = [
     include_str!("schema.sql"),
     include_str!("schema_v2.sql"),
     include_str!("schema_v3.sql"),
@@ -367,9 +367,8 @@ const SCHEMA_STEPS: [&str; 11] = [
     include_str!("schema_v8.sql"),
     include_str!("schema_v9.sql"),
     include_str!("schema_v10.sql"),
-    include_str!("schema_v11.sql"),
 ];
-pub(crate) const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
+const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
 
 fn version(db: &Connection) -> Result<i64> {
     Ok(provenant_sqlite::read_version(db, SCHEMA_STEPS.len())? as i64)

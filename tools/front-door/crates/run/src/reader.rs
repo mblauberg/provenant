@@ -649,36 +649,33 @@ impl RunStore {
             Err(error) if error.is_not_found() && record.provider_launched == Some(false) => None,
             Err(error) => return Err(error.into()),
         };
-        let fences = self.writer_fence_listing()?;
-        if fences
-            .reservations
-            .iter()
-            .any(|fence| fence.scope == Self::scope(record))
-        {
-            return Ok(false);
-        }
-        if fences.issues.is_empty() {
-            return Ok(true);
-        }
-        // An unreadable reservation names no scope. It holds this attempt's
-        // custody only in this writer's directory; other entries block only
-        // a writer that needs them.
+        // Custody has one location: the reader's attempt or the writer's
+        // persisted worktree slot. Inventorying every slot here made each
+        // terminal row pay for the host's entire retained writer history.
         let request = self.request(record.run_id, call)?;
-        let Some(writer) = request
+        let writer = request
             .tasks
             .iter()
             .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.writer.as_ref())
-        else {
-            return Ok(true);
+            .ok_or(RunError::Validation("attempt task association"))?
+            .writer
+            .as_ref();
+        let slot = if let Some(writer) = writer {
+            match Directory::open_anchor(&self.writer_slot(writer, record.project_id)?) {
+                Ok(slot) => slot,
+                Err(error) if error.is_not_found() => return Ok(true),
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            directory
         };
-        let slot = self.writer_slot(writer, record.project_id)?;
-        let evidence = slot
-            .join(record.attempt_id.to_string())
-            .join("reservation.json");
-        Ok(!fences.issues.iter().any(|issue| {
-            issue.reservation == evidence || issue.reservation == slot.join("reservation.json")
-        }))
+        // An unreadable or malformed own reservation remains a fence. The
+        // supervisor owns its layout; predecessor and sibling slots are not
+        // evidence about this attempt's custody.
+        Ok(!provenant_supervisor::custody::reservation_present(
+            &slot,
+            Self::scope(record),
+        )?)
     }
     fn record_with_run(
         &self,
@@ -1370,122 +1367,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod listing_work_tests {
-    use super::*;
-    use rusqlite::StatementStatus;
-
-    #[test]
-    fn listing_pages_bound_sql_work_after_upgrade()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = crate::tests::context(temp.path())?;
-        let clock = crate::tests::clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        // Populate index rows directly: this checks selection work, before any
-        // selected records are hydrated. A large history must not be visited.
-        store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
-        store.db.execute_batch(r#"INSERT INTO operations(project,actor,operation,digest,run,record) VALUES
-            ('p','actor','anchor-other','digest','other',x'7b7d'),('p','actor','anchor-target','digest','target',x'7b7d');
-            INSERT INTO runs(id,project,record) VALUES ('other','p',x'7b7d'),('target','p',x'7b7d');
-            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
-            INSERT INTO attempts(sequence,id,run,project,task,number,revision,terminal,record)
-            SELECT i,printf('attempt-%d',i),CASE WHEN i%100=0 THEN 'target' ELSE 'other' END,'p','task',i,1,i>11,x'7b7d' FROM n;
-            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
-            INSERT INTO operations(project,actor,operation,digest,run,record)
-            SELECT 'p','actor',printf('op-%d',i),'digest',printf('run-%d',i),CAST(CASE WHEN i<=11 THEN '{"state":"refused"}' ELSE '{"state":"accepted"}' END AS BLOB) FROM n;"#)?;
-        // Exercise the actual upgrade on populated data, rather than relying
-        // only on indexes created for a brand-new store.
-        store.db.execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; PRAGMA user_version=10;")?;
-        drop(store);
-        let store = RunStore::open(&context, &call)?;
-        for all in [false, true] {
-            for newest_first in [false, true] {
-                for after in [0, 50000] {
-                    for limit in [1, 10] {
-                        let query = LaneQuery {
-                            targets: vec![],
-                            all,
-                            limit,
-                            after,
-                            newest_first,
-                            owner: None,
-                            unseen_after: None,
-                        };
-                        for targeted in [false, true] {
-                            let sql = lane_page_sql(&query, targeted);
-                            let mut statement = store.db.prepare(&sql)?;
-                            let fetch = (limit + 1) as i64;
-                            let params: Vec<rusqlite::types::Value> = if targeted {
-                                vec![
-                                    String::from("p").into(),
-                                    (after as i64).into(),
-                                    String::from("target").into(),
-                                    rusqlite::types::Value::Null,
-                                    rusqlite::types::Value::Null,
-                                    fetch.into(),
-                                    rusqlite::types::Value::Null,
-                                ]
-                            } else {
-                                vec![
-                                    String::from("p").into(),
-                                    (after as i64).into(),
-                                    i64::from(all).into(),
-                                    fetch.into(),
-                                    rusqlite::types::Value::Null,
-                                    rusqlite::types::Value::Null,
-                                ]
-                            };
-                            let rows = statement
-                                .query_map(rusqlite::params_from_iter(params), |row| {
-                                    row.get::<_, i64>(0)
-                                })?
-                                .collect::<rusqlite::Result<Vec<_>>>()?;
-                            let mut expected: Vec<i64> = (1..=100000)
-                                .filter(|i| {
-                                    (if newest_first {
-                                        after == 0 || *i < after as i64
-                                    } else {
-                                        *i > after as i64
-                                    }) && (if targeted {
-                                        i % 100 == 0
-                                    } else {
-                                        all || *i <= 11
-                                    })
-                                })
-                                .collect();
-                            if newest_first {
-                                expected.reverse();
-                            }
-                            expected.truncate(fetch as usize);
-                            assert_eq!(rows, expected);
-                            let steps = statement.get_status(StatementStatus::VmStep);
-                            assert!(
-                                steps < 1000,
-                                "page selection visited history: {steps} VM steps; {query:?}; targeted={targeted}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        let mut statement = store.db.prepare(RECENT_REFUSALS_SQL)?;
-        let operations = statement
-            .query_map(params!["p", "actor", 10], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(
-            operations,
-            (2..=11)
-                .rev()
-                .map(|i| format!("op-{i}"))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            statement.get_status(StatementStatus::VmStep) < 1000,
-            "refusal selection parsed retained operation records"
-        );
-        Ok(())
-    }
-}
