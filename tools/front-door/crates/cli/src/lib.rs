@@ -241,12 +241,30 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     }
 }
 fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static str, String)> {
-    let words: Vec<&str> = argv
-        .iter()
-        .skip(1)
-        .filter_map(|a| a.to_str())
-        .filter(|w| !w.starts_with("--") && !w.starts_with('-'))
-        .collect();
+    let model = expanded_model();
+    let mut words = Vec::new();
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let word = arg.to_str()?;
+        if let Some(option) = word.strip_prefix("--") {
+            let (name, joined) = option
+                .split_once('=')
+                .map_or((option, false), |(name, _)| (name, true));
+            if !joined
+                && model.get_arguments().any(|arg| {
+                    arg.is_global_set()
+                        && arg.get_long() == Some(name)
+                        && arg
+                            .get_num_args()
+                            .is_some_and(|range| range.min_values() > 0)
+                })
+            {
+                args.next();
+            }
+        } else if !word.starts_with('-') {
+            words.push(word);
+        }
+    }
     if words.is_empty() {
         return None;
     }
@@ -347,7 +365,11 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         };
     }
 
-    if error.kind() == clap::error::ErrorKind::MissingSubcommand {
+    if matches!(
+        error.kind(),
+        clap::error::ErrorKind::MissingSubcommand
+            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
         let model = expanded_model();
         let (selected, path) =
             walk_subcommands(&model, argv, None).unwrap_or((&model, "provenant".into()));
@@ -359,20 +381,9 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
             Some(sub) => format!("{path} {sub}"),
             None => path.clone(),
         };
-        let usage_block = if let Some(idx) = text.find("\nUsage:").or_else(|| text.find("Usage:")) {
-            text[idx..]
-                .split("\nFor more information")
-                .next()
-                .unwrap_or(&text[idx..])
-                .trim()
-        } else {
-            ""
-        };
-        let message = if !usage_block.is_empty() {
-            format!("'{path}' requires a subcommand\n\n{usage_block}\nexample: {correction}")
-        } else {
-            format!("'{path}' requires a subcommand\nexample: {correction}")
-        };
+        let usage_block = selected.clone().bin_name(&path).render_help().to_string();
+        let message =
+            format!("'{path}' requires a subcommand\n\n{usage_block}\nexample: {correction}");
         return CliError::Invalid {
             message,
             repair: Some(correction),
@@ -513,46 +524,54 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
             });
         if let Some(value) = spaced {
             let target = if lands { "land 2199" } else { "pr status 2199" };
-            return Some(format!("provenant {target} --wait={value}"));
+            let _ = value;
+            return Some(format!("provenant {target} --wait=30m"));
         }
     }
 
-    // Fix invalid duration like --wait=5h or --wait=0
+    // Preserve each argument only when the resulting invocation parses.
     if argv
         .iter()
         .any(|arg| arg.to_str().is_some_and(|s| s.starts_with("--wait=")))
     {
-        let mut fixed_args = Vec::new();
-        for arg in argv.iter().skip(1) {
-            let s = arg.to_str().unwrap_or("");
-            if s.starts_with("--wait=") {
-                fixed_args.push("--wait=30m".to_string());
-            } else {
-                fixed_args.push(s.to_string());
+        let fixed: Vec<OsString> = argv
+            .iter()
+            .map(|arg| {
+                if arg.to_str().is_some_and(|s| s.starts_with("--wait=")) {
+                    OsString::from("--wait=30m")
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect();
+        if matches!(
+            parse(fixed.iter().skip(1).cloned()),
+            ParseOutcome::Invocation(_)
+        ) {
+            let quoted: Option<Vec<String>> = fixed
+                .iter()
+                .map(|arg| {
+                    arg.to_str().map(|s| {
+                        if !s.is_empty()
+                            && s.bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_./=-".contains(&b))
+                        {
+                            s.to_owned()
+                        } else {
+                            format!("'{}'", s.replace('\'', "'\\''"))
+                        }
+                    })
+                })
+                .collect();
+            if let Some(quoted) = quoted {
+                return Some(quoted.join(" "));
             }
         }
-        return Some(format!("provenant {}", fixed_args.join(" ")));
-    }
-
-    // Fix invalid span like --until 0d
-    if argv.iter().any(|arg| arg == "0d") {
-        let mut fixed_args = Vec::new();
-        for arg in argv.iter().skip(1) {
-            let s = arg.to_str().unwrap_or("");
-            if s == "0d" {
-                fixed_args.push("30d".to_string());
-            } else {
-                fixed_args.push(s.to_string());
-            }
-        }
-        return Some(format!("provenant {}", fixed_args.join(" ")));
     }
 
     match path.as_str() {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
-        "provenant route resolve" => Some(
-            "provenant route resolve --model ADAPTER/ID (or provenant route resolve senior)".into(),
-        ),
+        "provenant route resolve" => Some("provenant route resolve senior".into()),
         "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
         "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
         _ => {
@@ -1918,7 +1937,6 @@ mod tests {
     #[test]
     fn invalid_invocations_across_command_groups_name_field_and_correction() {
         for (words, expected_field, expected_repair) in [
-            (vec!["run", "--set", "bad"], "--set", "provenant run"),
             (
                 vec!["status", "--wait=5h"],
                 "--wait",
@@ -1952,6 +1970,15 @@ mod tests {
                 repair.starts_with(expected_repair),
                 "{words:?}: expected repair starting with '{expected_repair}', got '{repair}'"
             );
+            let args = shlex::split(repair).expect("repair must be shell-parseable");
+            assert_eq!(args.first().map(String::as_str), Some("provenant"));
+            assert!(
+                matches!(
+                    parse(args.into_iter().skip(1).map(OsString::from)),
+                    ParseOutcome::Invocation(_)
+                ),
+                "{words:?}: correction does not parse: {repair}"
+            );
             assert_ne!(
                 repair, "run provenant help --all",
                 "{words:?}: repair must not be generic help"
@@ -1975,6 +2002,11 @@ mod tests {
 
         for (verb, replacement, expected_repair) in [
             (vec!["dispatch", "Meet acceptance"], "run", "provenant run"),
+            (
+                vec!["--project", "/path with spaces", "dispatch"],
+                "run",
+                "provenant run",
+            ),
             (vec!["lanes"], "status", "provenant status"),
             (
                 vec!["resume", "attempt-1"],

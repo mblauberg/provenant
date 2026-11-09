@@ -1674,6 +1674,7 @@ mod diagnostic_tests {
                     node: Some(secret.into()),
                     template: secret.into(),
                     fault,
+                    example: None,
                 },
             )));
             let diagnostic = error.diagnostic();

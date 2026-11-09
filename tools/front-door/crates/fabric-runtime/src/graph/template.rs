@@ -254,6 +254,8 @@ pub struct ParameterRefusal {
     pub node: Option<String>,
     pub template: String,
     pub fault: ParameterFault,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,17 +284,7 @@ pub enum ParameterFault {
 
 impl ParameterRefusal {
     pub fn example(&self) -> Option<String> {
-        match &self.fault {
-            ParameterFault::Missing { key, keys } => {
-                let list = if keys.is_empty() {
-                    std::slice::from_ref(key)
-                } else {
-                    keys.as_slice()
-                };
-                template_example(&self.template, list)
-            }
-            _ => None,
-        }
+        self.example.clone()
     }
 
     pub(crate) fn redacted(&self) -> Self {
@@ -300,6 +292,7 @@ impl ParameterRefusal {
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
         safe.template = clean(&safe.template);
+        safe.example = safe.example.as_deref().map(clean);
         match &mut safe.fault {
             ParameterFault::NotTable => {}
             ParameterFault::Unknown {
@@ -328,20 +321,52 @@ impl ParameterRefusal {
     }
 }
 
-pub fn template_example(template: &str, missing: &[String]) -> Option<String> {
-    if missing.is_empty() {
-        return None;
-    }
+fn template_example(
+    template: &str,
+    parameters: &BTreeMap<String, TemplateParameter>,
+    supplied: &Map<String, Value>,
+    missing: &[String],
+) -> Option<String> {
     let mut args = Vec::new();
-    for key in missing {
-        let set = match key.as_str() {
-            "worktree" => "--set 'worktree=\"/path/to/worktree\"'".to_string(),
-            "write_scope" => "--set 'write_scope=[\"src\"]'".to_string(),
-            "brief" => "--set 'brief=\"Task\"'".to_string(),
-            "items" => "--set 'items=[\"item1\"]'".to_string(),
-            other => format!("--set '{other}=\"value\"'"),
+    for (key, parameter) in parameters {
+        if !supplied.contains_key(key) && !missing.contains(key) {
+            continue;
+        }
+        let value = parameter
+            .allowed
+            .first()
+            .cloned()
+            .unwrap_or_else(|| match parameter.kind {
+                ParameterKind::String => serde_json::json!(if key == "worktree" {
+                    "/path/to/worktree"
+                } else {
+                    "value"
+                }),
+                ParameterKind::Integer => {
+                    serde_json::json!(parameter.min.as_ref().and_then(Value::as_i64).unwrap_or(1))
+                }
+                ParameterKind::Number => parameter
+                    .min
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!(1)),
+                ParameterKind::Boolean => serde_json::json!(true),
+                ParameterKind::List => serde_json::json!(["src"]),
+                ParameterKind::Table => serde_json::json!({}),
+            });
+        if check_value(parameter, &value).is_err() {
+            return None;
+        }
+        let literal = if value.is_object() {
+            if value.as_object()?.is_empty() {
+                "{}".to_owned()
+            } else {
+                return None;
+            }
+        } else {
+            value.to_string()
         };
-        args.push(set);
+        let binding = format!("{key}={literal}");
+        args.push(format!("--set '{}'", binding.replace('\'', "'\\''")));
     }
     Some(format!("provenant run --use {template} {}", args.join(" ")))
 }
@@ -387,7 +412,7 @@ impl std::fmt::Display for ParameterRefusal {
                 } else {
                     write!(f, "template {template} requires parameter {}", list[0])?;
                 }
-                if let Some(example) = template_example(template, list) {
+                if let Some(example) = &self.example {
                     write!(f, "; example: {example}")?;
                 }
                 Ok(())
@@ -798,6 +823,7 @@ impl Template {
             node: None,
             template: name.to_owned(),
             fault,
+            example: None,
         };
         let supplied = match supplied {
             Value::Null => Map::new(),
@@ -823,7 +849,10 @@ impl Template {
         }
         if !missing.is_empty() {
             let key = missing[0].clone();
-            return Err(refuse(ParameterFault::Missing { key, keys: missing }));
+            let example = template_example(name, &self.parameters, &supplied, &missing);
+            let mut refusal = refuse(ParameterFault::Missing { key, keys: missing });
+            refusal.example = example;
+            return Err(refusal);
         }
         let mut effective = Map::new();
         for (key, parameter) in &self.parameters {

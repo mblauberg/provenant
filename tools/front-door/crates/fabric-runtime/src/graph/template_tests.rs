@@ -1228,6 +1228,7 @@ fn failing_node_inside_a_composite_is_named() {
         node,
         template,
         fault,
+        ..
     }) = &refusal
     else {
         panic!("expected a parameter refusal, got {refusal}");
@@ -1246,13 +1247,14 @@ fn template_launch_missing_parameters_names_them() {
     let bundled = TemplateLibrary::bundled();
     let compiler = Compiler::new(&bundled);
     let error = compiler
-        .compile(&serde_json::json!({"id": "d", "use": "deliver", "with": {}}))
+        .compile(
+            &serde_json::json!({"id": "d", "use": "deliver", "with": {"worktree":"/some/path"}}),
+        )
         .unwrap_err();
     let CompileError::Parameter(refusal) = error else {
         panic!("expected a parameter refusal: {error}");
     };
     let text = refusal.to_string();
-    assert!(text.contains("worktree"), "{text}");
     assert!(text.contains("write_scope"), "{text}");
     assert!(text.contains("example:"), "{text}");
     let example = refusal.example().expect("example");

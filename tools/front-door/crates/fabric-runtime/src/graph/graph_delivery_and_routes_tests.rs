@@ -468,6 +468,11 @@ fn route_with_exact_model_alias_fails_validation_for_dry_run_and_launch() {
         validate_plan(&document).err(),
         Some("node one: route alias must be an identifier; exact models require an adapter or --model")
     );
+    let mut exact = document.clone();
+    let route = exact.nodes[0].route.as_mut().unwrap();
+    route.adapter = Some("codex".into());
+    route.model = Some("gpt-6-luna".into());
+    assert!(validate_plan(&exact).is_ok());
 }
 
 #[test]

@@ -552,6 +552,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "thiserror",
  "toml_edit",

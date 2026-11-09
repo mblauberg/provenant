@@ -100,6 +100,23 @@ pub struct GraphRoute {
     pub account: Option<String>,
 }
 
+/// The selector used when launching a graph route.
+pub enum GraphRouteSelector<'a> {
+    Model(&'a str),
+    Adapter(&'a str),
+    Alias(Option<&'a str>),
+}
+
+impl GraphRoute {
+    pub fn selector(&self) -> GraphRouteSelector<'_> {
+        match (self.model.as_deref(), self.name.as_deref()) {
+            (Some(model), _) => GraphRouteSelector::Model(model),
+            (None, Some(name)) => GraphRouteSelector::Adapter(name),
+            (None, None) => GraphRouteSelector::Alias(self.alias.as_deref()),
+        }
+    }
+}
+
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphExecution {
