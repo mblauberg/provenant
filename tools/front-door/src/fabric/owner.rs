@@ -3989,16 +3989,24 @@ mod journal_error_tests {
         ) {
             // Equal bound inputs fail in the scheduler; derived empty ranges are
             // invalid-input refusals from the launch owner.
-            let expected = if scenario == "same-head" {
-                "review_empty_range"
+            if scenario == "same-head" {
+                assert_eq!(
+                    review.advance_error_code.as_deref(),
+                    Some("review_empty_range"),
+                    "{scenario}: {result:?} {checkpoint:?}"
+                );
             } else {
-                "invalid_input"
-            };
-            assert_eq!(
-                review.advance_error_code.as_deref(),
-                Some(expected),
-                "{scenario}: {result:?} {checkpoint:?}"
-            );
+                assert_eq!(
+                    review.advance_error_code.as_deref(),
+                    Some("launch_refused"),
+                    "{scenario}: {result:?} {checkpoint:?}"
+                );
+                assert_eq!(
+                    review.advance_owner_code.as_deref(),
+                    Some("invalid_input"),
+                    "{scenario}: {result:?} {checkpoint:?}"
+                );
+            }
             assert!(
                 review
                     .attempts
