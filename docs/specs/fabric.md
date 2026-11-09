@@ -103,23 +103,6 @@ claim complete coverage.
 
 ## Human requests
 
-Viewer request presentation state is separate from resolution and blocking.
-Viewer names are caller-supplied labels, like agent labels: they are not an
-authentication boundary. A local caller that knows a label can change that
-viewer's state; the direct SQLite access residual above also applies.
-A lane may dismiss or snooze a request in any viewer, including `console`.
-Snoozing never grants authority.
-A lane may change only the bounded request presentation fields `seen_revision`,
-`snoozed_until` and `dismissed`; it never changes resolution, answers or the
-blocking state, and summary baselines remain outside a lane.
-Quotas are per project and viewer, with a combined per-project cap. Writes
-reclaim closed or expired request rows. A new summary baseline is refused at
-capacity rather than evicting an existing one.
-- Why (default): viewing and snoozing do not authorise an answer or unblock work.
-- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`;
-  `tests/inbox.rs::viewer_cli_isolation_and_render_race`
-- Owner: `crates/fabric-store/src/viewer.rs`, `src/chair.rs`
-
 Human requests, immutable answers, revision history and the delivery outbox
 belong to Fabric. CLI and MCP must use the same service. The service binds
 project, host and actor from Fabric identity; request JSON cannot supply them.

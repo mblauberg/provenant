@@ -1293,11 +1293,7 @@ mod tests {
         assert!(diff["next"].is_null());
         saved(&selected, &header(3, "Third", "[]"));
         saved(&selected, &header(4, "Fourth", "[]"));
-        assert!(selected.viewer_summary_diff(None, None).unwrap().is_none());
-        let diff = selected
-            .viewer_summary_diff(Some(1), None)
-            .unwrap()
-            .unwrap();
+        let diff = selected.summary_diff(1, None).unwrap();
         assert_eq!(diff.unavailable, vec![1]);
         assert!(diff.now.is_none());
         saved(&selected, &header(4, "Conflicting", "[]"));
