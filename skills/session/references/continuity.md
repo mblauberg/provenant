@@ -4,7 +4,7 @@
 
 Rewrite about 2 KiB of Markdown for the explicit host session ID. Use the
 [checkpoint template](../templates/checkpoint.template.md): goal and owner;
-direction and authority; process and evidence pointers; next actions, blockers
+direction and authority; intent; process and evidence pointers; next actions, blockers
 and resume trigger. Keep PR references as `PR #N` for the derived digest.
 Link live lanes and current criteria back to their owners instead of copying
 their changing status. A checkpoint grants no new authority.
@@ -16,6 +16,18 @@ save chair checkpoints. Hooks derive a separate autosave; the chair alone
 writes its checkpoint. Inspect `provenant workflow session show --help` for
 revision history and metadata, and `provenant workflow session save --help`
 for identity options.
+
+Include an Intent section: the chair's understanding, not quotation. For each
+live ruling record what the user wants, the reason as you understand it,
+alternatives rejected and why, open disagreement, and any reading you are
+unsure of. A correction replaces the earlier reading; keep only the current
+one. Quote the user only where the wording matters: an authority grant, or a
+correction of a misreading. Interpret once, when you save the checkpoint; do
+not log messages. Hooks show the section first after compaction and name the
+host transcript, which holds the exact words to check an entry in doubt.
+Compaction summaries are asked for the same section; if the host cannot do
+that, only the saved section survives, so save the checkpoint with its Intent
+section at each ruling or correction and before a long task.
 
 Before compaction, retain rulings, authority, evidence pointers, unresolved
 questions and the next action. Drop transcripts, tool output and contents
