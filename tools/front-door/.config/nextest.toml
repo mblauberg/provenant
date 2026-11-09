@@ -81,6 +81,16 @@ not (
 [test-groups]
 serial-process = { max-threads = 1 }
 
+# This fixture runs two provider commands, each with its own 30-second wait.
+# Keep the outer limit above their combined budgets so failures reach assertions.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # Two data-home variants each launch four real graph providers against an open
 # WAL. Allow for shared-host contention without dropping session-read cases.
 [[profile.default.overrides]]

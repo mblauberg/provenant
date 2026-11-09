@@ -1793,9 +1793,18 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         elapsed < std::time::Duration::from_secs(4),
         "expanded provisioning exceeded its deadline: {elapsed:?}"
     );
-    assert_ne!(code(&output), 0, "{output:?}");
+    assert_eq!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(response["error"]["code"], "writer_lock_busy", "{response}");
+    assert_eq!(response["status"], "waiting", "{response}");
+    assert_eq!(response["data"]["timed_out"], true, "{response}");
+    let writer = response["data"]["checkpoint"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "writer"))
+        .ok_or("writer")?;
+    assert_eq!(
+        writer["advance_owner_code"], "writer_lock_busy",
+        "{response}"
+    );
     let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
         &roots.state,
         binding.project_id(),
