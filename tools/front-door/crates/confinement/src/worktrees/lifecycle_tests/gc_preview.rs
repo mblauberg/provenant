@@ -617,9 +617,11 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
         )
     };
     let bind = |branch: &str| -> Result<_, WorktreeError> {
+        let tree = verify_worktree(&fixture.repo, &path)?;
         writer_custody(
             context.project_state,
-            &verify_worktree(&fixture.repo, &path)?,
+            &tree,
+            tree.path(),
             &GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?,
             fixture.head().map_err(|_| WorktreeError::InvalidOutput)?,
             inventory,
@@ -641,6 +643,25 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
         "listing creates no state"
     );
     let (state, _) = bind("native")?;
+    // Readers locate custody from the persisted path alone. One that now
+    // resolves elsewhere, such as a checkout moved behind a symlink, would
+    // reserve a slot no reader looks at.
+    let moved = fixture._temp.path().join("moved-root");
+    std::os::unix::fs::symlink(&fixture.root, &moved)?;
+    let alias = moved.join(".worktrees/native");
+    let tree = verify_worktree(&fixture.repo, &alias)?;
+    assert!(matches!(
+        writer_custody(
+            context.project_state,
+            &tree,
+            &alias,
+            &GitRefName::branch("native").map_err(|_| "branch")?,
+            fixture.head()?,
+            inventory,
+        ),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    drop(tree);
     assert!(
         state
             .metadata_at(OsStr::new("identity.json"), false)
