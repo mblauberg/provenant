@@ -43,7 +43,7 @@ jobs:
         run: |
           set +e
           scripts/check-doc-truth --binary "$CARGO_TARGET_DIR/debug/provenant" \
-            --strict-inventory --strict-citations --exclude-reserved > "$RUNNER_TEMP/doc-truth.txt"
+            --strict-inventory --strict-citations > "$RUNNER_TEMP/doc-truth.txt"
           truth_status=$?
           cat "$RUNNER_TEMP/doc-truth.txt"
           exit "$truth_status"

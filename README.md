@@ -296,8 +296,9 @@ Read [`AGENTS.md`](AGENTS.md) for repository instructions and
 [GitHub workflow](docs/runbooks/github-workflow.md) for branches, issues and
 delivery. Rust code lives under [`tools/front-door/`](tools/front-door); keep a
 change inside the crate that owns it, and follow the accepted specification
-before changing a public command or record. CI runs the full checks on every
-pull request.
+before changing a public command or record. Pull requests run the tests for the
+changed crates and their dependents; the full workspace runs on pushes to `main`
+and for changes outside a crate. See the [CI runbook](docs/runbooks/ci.md).
 
 ## Security
 
