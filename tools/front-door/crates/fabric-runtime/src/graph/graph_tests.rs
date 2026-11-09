@@ -763,7 +763,10 @@ fn parent_and_child(
 fn capture(text: &str) -> crate::result_capture::CapturedResult {
     let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(text.as_bytes());
-    capture.finish()
+    // The sealed handoff a settled attempt carries, as the fixture text declares it.
+    let mut result = capture.finish();
+    result.handoff = provenant_records::handoff::Handoff::from_result(text);
+    result
 }
 
 fn check_fallback(

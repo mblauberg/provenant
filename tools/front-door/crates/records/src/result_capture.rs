@@ -19,13 +19,13 @@ pub struct ResultCapture {
     line_invalid: bool,
     utf8: Vec<u8>,
     verdict: VerdictCapture,
-    handoff: crate::handoff::HandoffCapture,
     dispositions: DispositionCapture,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedResult {
-    /// Final declaration parsed with fence context from the complete stream.
+    /// The settled attempt's sealed handoff. Capture never parses it from text;
+    /// the caller that holds the sealed snapshot sets it.
     pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
     /// Exactly one well-formed verdict, on the final non-empty line of the
     /// complete stream, ignoring a closed trailing `handoff` fence. Only lines
@@ -62,14 +62,12 @@ impl ResultCapture {
             line_invalid: false,
             utf8: Vec::with_capacity(4),
             verdict: VerdictCapture::default(),
-            handoff: crate::handoff::HandoffCapture::default(),
             dispositions: DispositionCapture::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
         self.verdict.push(chunk);
-        self.handoff.push(chunk);
         self.dispositions.push(chunk);
         self.hash.update(chunk);
         self.bytes = self.bytes.saturating_add(chunk.len() as u64);
@@ -170,7 +168,7 @@ impl ResultCapture {
             || String::from_utf8_lossy(&self.head).len() > HEAD_BYTES;
         let (verdict, verdict_invalid, declarations) = self.verdict.finish();
         CapturedResult {
-            handoff: self.handoff.finish(),
+            handoff: Ok(None),
             verdict,
             verdict_invalid,
             declarations,
@@ -508,37 +506,6 @@ mod tests {
         }
         let mid = run("I will say the verdict: soon.\nVERDICT: PASS\n");
         assert_eq!(mid.verdict.as_deref(), Some("VERDICT: PASS"));
-    }
-
-    #[test]
-    fn handoff_fence_context_survives_chunks_and_clipped_windows() {
-        let handoff = serde_json::json!({"schema_version":2,"status":"stopped_early","note":"Continue","remaining":[],"decisions":[],"verify":[]});
-        let block = format!("```handoff\n{handoff}\n```");
-        for fence in ["````", "~~~"] {
-            let example = format!("{fence}markdown\n{}\n{block}\n{fence}", "x".repeat(28_000));
-            for (text, expected) in [
-                (example.clone(), false),
-                (format!("{example}\n{block}"), true),
-            ] {
-                for size in [1, 7, 8192] {
-                    let mut capture = ResultCapture::new(None);
-                    for chunk in text.as_bytes().chunks(size) {
-                        capture.push(chunk);
-                    }
-                    let result = capture.finish();
-                    assert!(result.tail_truncated);
-                    let parsed = result.handoff.unwrap();
-                    assert_eq!(parsed.is_some(), expected);
-                    if let Some(parsed) = parsed {
-                        assert_eq!(parsed.note, "Continue");
-                    }
-                }
-            }
-        }
-        // A previous declaration outside the tail still makes the final one ambiguous.
-        let mut capture = ResultCapture::new(None);
-        capture.push(format!("{block}\n{}\n{block}", "x".repeat(28_000)).as_bytes());
-        assert!(capture.finish().handoff.is_err());
     }
 
     #[test]

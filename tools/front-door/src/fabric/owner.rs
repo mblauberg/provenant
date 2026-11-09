@@ -4549,6 +4549,9 @@ fn capture_graph_output(
     mut read: impl FnMut(u64) -> Result<OutputResult, FacadeError>,
 ) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
     let mut capture = provenant_records::result_capture::ResultCapture::new(required);
+    // Only a peer that predates `graph_handoff` declares its handoff in the
+    // answer text; `peer_handoff` reads this when the sealed key is absent.
+    let mut text_handoff = provenant_records::handoff::HandoffCapture::default();
     let mut offset = 0;
     let mut expected_digest = None;
     loop {
@@ -4586,9 +4589,11 @@ fn capture_graph_output(
             return Err(FacadeError::StateCorrupt);
         }
         capture.push(&bytes);
+        text_handoff.push(&bytes);
         offset = next_offset;
         if eof {
-            let result = capture.finish();
+            let mut result = capture.finish();
+            result.handoff = text_handoff.finish();
             if result.digest != digest.to_string() {
                 return Err(FacadeError::StateCorrupt);
             }

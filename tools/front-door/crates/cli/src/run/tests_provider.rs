@@ -464,7 +464,11 @@ fn agy_repeated_answer_is_captured_once() {
         let mut capture = provenant_records::result_capture::ResultCapture::new(None);
         capture.push(decoded.result.as_bytes());
         let captured = capture.finish();
-        assert!(captured.handoff.unwrap().is_some());
+        assert!(
+            provenant_records::handoff::Handoff::from_result(&decoded.result)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(captured.declarations, 1);
         assert_eq!(decoded.result.matches("```findings").count(), 1);
@@ -702,8 +706,7 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
     let mut capture = provenant_records::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(decoded.result.as_bytes());
     let captured = capture.finish();
-    let declared = captured
-        .handoff
+    let declared = provenant_records::handoff::Handoff::from_result(&decoded.result)
         .expect("handoff parses")
         .expect("handoff found");
     assert_eq!(declared.note, "n");

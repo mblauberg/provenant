@@ -138,7 +138,7 @@ pub struct TurnEnd {
 /// Parse the complete stream, independently of clipped result windows. Lines
 /// and declaration JSON are bounded; oversized fence syntax fails closed.
 #[derive(Default)]
-pub(crate) struct HandoffCapture {
+pub struct HandoffCapture {
     line: Vec<u8>,
     overflow: bool,
     fence: Option<(u8, usize)>,
@@ -148,7 +148,7 @@ pub(crate) struct HandoffCapture {
 }
 
 impl HandoffCapture {
-    pub(crate) fn push(&mut self, bytes: &[u8]) {
+    pub fn push(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if byte == b'\n' {
                 self.end_line();
@@ -226,7 +226,7 @@ impl HandoffCapture {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Result<Option<Handoff>, &'static str> {
+    pub fn finish(mut self) -> Result<Option<Handoff>, &'static str> {
         self.end_line();
         if let Some(error) = self.error {
             Err(error)
@@ -255,6 +255,35 @@ fn fence(line: &str) -> Option<(u8, usize, &str)> {
 mod tests {
     use super::*;
     const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Parser done.\",\"remaining\":[\"Renderer\"],\"decisions\":[],\"verify\":[\"Parser tests pass\"]}\n```";
+
+    #[test]
+    fn handoff_fence_context_survives_chunks_and_long_examples() {
+        let handoff = serde_json::json!({"schema_version":2,"status":"stopped_early","note":"Continue","remaining":[],"decisions":[],"verify":[]});
+        let block = format!("```handoff\n{handoff}\n```");
+        for fence in ["````", "~~~"] {
+            let example = format!("{fence}markdown\n{}\n{block}\n{fence}", "x".repeat(28_000));
+            for (text, expected) in [
+                (example.clone(), false),
+                (format!("{example}\n{block}"), true),
+            ] {
+                for size in [1, 7, 8192] {
+                    let mut capture = HandoffCapture::default();
+                    for chunk in text.as_bytes().chunks(size) {
+                        capture.push(chunk);
+                    }
+                    let parsed = capture.finish().unwrap();
+                    assert_eq!(parsed.is_some(), expected);
+                    if let Some(parsed) = parsed {
+                        assert_eq!(parsed.note, "Continue");
+                    }
+                }
+            }
+        }
+        // A previous declaration outside the tail still makes the final one ambiguous.
+        let mut capture = HandoffCapture::default();
+        capture.push(format!("{block}\n{}\n{block}", "x".repeat(28_000)).as_bytes());
+        assert!(capture.finish().is_err());
+    }
 
     /// Join turns as the decoder does, recording where each one ended.
     fn turns(parts: &[(&str, bool)]) -> (String, Vec<TurnEnd>) {
