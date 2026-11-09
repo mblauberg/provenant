@@ -104,6 +104,21 @@ class HarnessChecks(unittest.TestCase):
         readme.write_text("`[literal](missing.md)` and [real](missing.md)\n")
         self.assertIn("warning: README.md:1: unresolved local link", self.check())
 
+    def test_skill_references_are_named_only_by_their_skill(self):
+        reference = self.root / "skills/example/references/depth.md"
+        reference.parent.mkdir()
+        reference.write_text("# Depth\n")
+        self.skill.write_text("---\nname: example\ndescription: Example fixture skill.\n---\n[depth](references/depth.md)\n")
+        (self.root / "NOTICE.md").write_text("Covers skills/example/references/depth.md\n")
+        readme = self.root / "README.md"
+        readme.write_text("[skill](skills/example/SKILL.md)\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        readme.write_text("[depth](skills/example/references/depth.md)\n")
+        self.assertIn("README.md: line 1: names skills/example/references/depth.md", self.check(1))
+        readme.write_text("See `skills/example/references/depth.md`.\n")
+        self.assertIn("README.md: line 1: names", self.check(1))
+
 
 if __name__ == "__main__":
     unittest.main()

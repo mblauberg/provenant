@@ -1,39 +1,56 @@
 # Harness configuration
 Owner: provenant-config
-Anchor: config/harness-knobs.json
+Anchor: [`config/harness-knobs.json`](../../config/harness-knobs.json); [`LaneBuildSettings`](../../tools/front-door/crates/config/src/gc.rs)
 
-Use `provenant config schema` for the compact settings, `config schema --all`
-for advanced tuning and `config show` for effective values. The Rust config
-owner reads the selected state root's `config.toml` and validates owner sections.
-Run `provenant config check` to list every warning with its file and key.
-Use `--state-dir /absolute/path` to select an isolated root. Change the
-profile or a knob with `provenant config set profile economy` or
-`provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
+Settings live in the selected state root's `config.toml`. The
+[configuration keys](../reference/config-keys.md) and the
+[advanced reference](../reference/config-keys-all.md) are generated from the
+registry and list every key with its table, default, effect and bounds. This
+runbook covers what the reference cannot: precedence, safety rules and the
+operator decisions behind each setting.
 
-Profiles are `balanced` and `economy`. Template documents carry per-run
-limits; MCP `fabric_run` uses the same document service.
+```sh
+provenant config schema [--all]        # editable fields, bounds, defaults, source
+provenant config show                  # effective values, sources and revision
+provenant config check                 # every warning with its file and key
+provenant config set lanes.max_concurrency 4
+provenant config unset lanes.max_concurrency
+provenant config apply --file PATCH.json --expect-revision REV [--dry-run]
+provenant config history [--since T] [--limit N]
+```
+
+`--state-dir /absolute/path` selects an isolated root. `config set`, `unset`
+and `apply` share one lock and one editor that validates the whole result
+before replacing the file. `apply` takes a flat JSON object of field to value
+(null clears a field) and commits all of it or none; a stale revision is
+refused and names the current one. History redacts secret-looking values.
+Host tables outside `[knobs]`, such as `[domains.fabric.lanes]` and `[gc]`,
+are edited by hand.
 
 ## Precedence and stamps
 
-The header requires `schema_version = 1`. `profile` selects `balanced` or
-`economy`, and a missing file selects defaults. Unknown knobs are refused;
-other unknown keys and invalid optional values warn and use defaults; invalid
-optional rows are isolated so valid rows still apply. Effective values retain their source in
-`config show`. Each warning names the offending key, so an invalid value
-inside a table drops only that value and its valid siblings still apply. A
-model policy rule or pacing override whose selector or schedule is malformed
-is dropped whole, since without it the record would apply more widely.
-Syntax, file size and schema-version errors remain hard failures, as do
-invalid known credentials, authority, confinement and Git-boundary settings.
-Recovery never widens an enforced restriction, so these also refuse the file:
+The file needs `schema_version = 1`; a missing file selects defaults. A knob in
+`[knobs]` wins over the `profile` preset (`balanced` or `economy`), which wins
+over the registry default. There is no project overlay or environment layer.
+A dispatch's `--knob NAME=VALUE`, or `knobs: ["NAME=VALUE"]` on `fabric_run`,
+wins over configuration. Each sealed task and attempt records the profile,
+effective knob values and dispatch overrides, and continuations keep that
+stamp.
 
-- knobs marked `strict` in the registry (`lanes.publish`, which defaults on
-  for every networked lane: a malformed value refuses the file rather than
-  falling back to the default, so `lanes.publish = false` is the only way to
-  withhold GitHub credentials and a typo never silently re-enables them;
-  `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
-  `lanes.max_depth` and `confinement.census_ignore_unreadable`), whose defaults could grant what the user withheld, and a
-  `knobs` or `domains` value that is not a table;
+Unknown knobs are refused. Other unknown keys and invalid optional values warn
+and fall back to their defaults; each warning names the key, and valid siblings
+in the same table still apply. A model policy rule or pacing override whose
+selector or schedule is malformed is dropped whole, because without it the
+record would apply more widely. Syntax, file size and schema-version errors are
+hard failures. Recovery never widens a restriction, so these also refuse the
+file:
+
+- knobs marked `strict` in the registry, whose default could grant what the
+  user withheld (`lanes.publish`, `fabric.accept_handoff`, `chair.auto_switch`,
+  `chair.switch_accounts`, `lanes.max_depth`,
+  `confinement.census_ignore_unreadable`), and a `knobs` or `domains` value
+  that is not a table;
+- invalid known credentials, authority, confinement and Git-boundary settings;
 - enforced model policy (`lane.read_only`, `lane.max_context`,
   `lane.max_turns`), and a malformed rule that carries one;
 - Fabric protocol caps (`limits.*`, which may only be lowered), graph limits
@@ -41,88 +58,47 @@ Recovery never widens an enforced restriction, so these also refuse the file:
   overrides;
 - quota probe and history bounds.
 
-Bundled assets remain strict. Knob overrides live in a `[knobs]` table:
+The `review` knobs and the `rigorous` profile are refused; run
+`provenant config migrate` to remove them.
 
-```toml
-schema_version = 1
-profile = "economy"
-```
+For model effort, context and compaction, see [model policy](model-policy.md);
+for pools, councils and pacing, see [model routing](model-routing.md).
 
-A knob in `[knobs]` wins over the profile preset, which wins over the registry
-default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
-layer. `config set|unset|show` read and write this file through one editor
-that validates the whole result before replacing it, and `config show` reports
-each value and its source. `config show` also returns the file's `revision`.
-`config schema` lists every editable field with its type, bounds, default,
-effective value, source layer and restart need. `config apply --file PATCH.json
---expect-revision REV [--dry-run]` takes a flat JSON object of field to value
-(null clears a field), validates it through the domain owners and commits all of
-it or none; a stale revision is refused and names the current one. Every edit
-command takes the same lock and appends to a bounded history that `config
-history [--since T] [--limit N]` lists, with secret-looking values redacted;
-`config.history_max_entries`, `config.history_max_age_days` and
-`config.history_max_bytes` set its retention. `fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
-overrides win over configuration. Each sealed task and attempt records the
-profile name, effective knob values and exact dispatch overrides, and
-continuations keep that stamp.
+### Refusal notices
 
-`chair.refusal_notice` accepts `inbox` (the default) or `off`. For a recorded
-pre-admission refusal with a bound chair, the graph submission posts a
-path-free notice to that chair's inbox. Retrying the same operation reuses the
-message identity. If posting fails or the dispatcher stops before sending,
-restore inbox access and run `provenant reconcile` from the submitting session.
-Reconcile retries all pending notices, continuing past an individual failure,
-and reports when any notice still needs recovery.
+`chair.refusal_notice = "inbox"` (the default) posts a path-free notice to the
+bound chair's inbox when a graph submission is refused before admission;
+retries reuse the message identity. If posting fails, restore inbox access and
+run `provenant reconcile` from the submitting session. It retries every pending
+notice and reports any that still need recovery.
 
 ## Lane GitHub access and `ps`
 
-Every lane with open network, read-only lanes included, receives the host's `gh` login (the
-host-only lookup in `gh_auth.rs`, bounded token) and a Git credential helper by
-default, so `gh issue view` and `gh issue comment` work, and a writer can `git push` its own branch. Set
-`lanes.publish = false` in `[knobs]`, or `knobs: ["lanes.publish=false"]` on a
-dispatch, to withhold it. Launch environments set `GIT_CONFIG_GLOBAL` to a lane
-file, so the credential comes from the generated `publishing.gitconfig`
-included by the `git` wrapper on the lane's `PATH`, not from host Git
-configuration. Lanes without open network get no publishing setup, and provider credential files and keychains stay denied.
+Every lane with open network, read-only lanes included, receives the host's
+`gh` login and a Git credential helper, so it can read and comment on issues
+and a writer can push its own branch. `lanes.publish = false` withholds them;
+because the knob is strict, a typo refuses the file rather than silently
+re-enabling access. The credential comes from a generated
+`publishing.gitconfig` that the lane's `git` wrapper includes through
+`GIT_CONFIG_GLOBAL`, not from host Git configuration. Provider credential files
+and keychains stay denied.
 
-The host runs `gh auth token` up to three times (20 seconds each) when it hits a
-timeout or signal, which heavy host load can cause, and reuses the token for
-later routes. If every attempt fails, the launch prints
+The host runs `gh auth token` up to three times when it times out or is
+signalled. If every attempt fails, the launch prints
 `warning: <route>: GitHub login lookup failed (<cause>)` and the lane starts
-without `GH_TOKEN`; with a keychain login, `git push` then fails with `could not
-read Username`. The warning never contains the token.
+without `GH_TOKEN`; with a keychain login, `git push` then fails with
+`could not read Username`. The warning never contains the token.
 
-`/bin/ps` exits with "Operation not permitted" in a confined lane. This is
-macOS, not the profile: the writer profile allows `process-exec` broadly, yet
-every setuid-root binary (`/bin/ps`, `/usr/bin/top`, `/usr/bin/su`,
-`/usr/bin/sudo`) is refused while non-setuid tools such as `/usr/bin/uptime`
-run. A sandboxed process cannot exec a setuid image. Use a tool that needs no
-privilege instead, such as `pgrep` or `kill -0 PID`; there is no setting that
-changes this.
-
-## Graph launch retries
-
-`lanes.launch_retry_limit` sets the number of retries after a transient launch
-failure (default 3, range 0–20). `lanes.launch_retry_first_seconds` sets the
-first delay (default 5, range 1–3600), and `lanes.launch_retry_max_seconds`
-sets the cap (default 600, range 1–86400). Delays double up to the greater of
-the configured cap and first delay. The attempt records its effective policy;
-the admission deadline can end the wait sooner. `config show` and `config
-schema` identify the source layer.
+`/bin/ps`, `top`, `su` and `sudo` exit with "Operation not permitted" in a
+confined macOS lane: a sandboxed process cannot exec a setuid image. Use
+`pgrep` or `kill -0 PID`. No setting changes this.
 
 ## Unreadable process census exceptions
 
-The `confinement.census_ignore_unreadable` exception list is host-owned and
-applies to each command's census session. Session reuse ends when effective
-host policy, ancestor mode, verified root identity, or relevant command-owned
-process, custody or worktree state changes. The exception list grants no
-process signalling or removal authority; destructive operations take fresh
-evidence under writer custody. Run admission's ancestor exclusion does not
-change land policy.
-
-The host owner may accept specific signed executables that the built-in macOS
-daemon census policy cannot exclude. Configure the strict knob
-`confinement.census_ignore_unreadable`; its default is an empty list:
+Land cleanup refuses an incomplete process census and reports the first
+unlisted daemon with its pid, path, uids, code-signing flags and team
+identifier. The host owner may accept specific signed executables that the
+built-in macOS daemon policy cannot exclude:
 
 ```toml
 [knobs]
@@ -132,69 +108,34 @@ daemon census policy cannot exclude. Configure the strict knob
 ]
 ```
 
-Use `provenant config set confinement.census_ignore_unreadable` with the same
-list encoded as JSON, or `config apply` with an array of these objects.
-`config show` and `config schema` expose its value and source; `config unset`
-restores the empty list. Up to 128 entries are accepted, each with exactly
-`path` and `team_id`. Paths are exact absolute normalised spellings (at most
-4096 bytes), not prefixes, globs or aliases. Duplicate paths, unknown fields,
-control characters, empty identities and malformed entries refuse the whole
-configuration. A team identifier is at most 64 ASCII alphanumeric bytes;
-`platform` selects Apple platform signing state instead of a team string.
+`config set` and `config apply` accept the same list as JSON. Entries are exact
+absolute paths, not prefixes or globs; `platform` selects Apple platform
+signing instead of a team string. Any malformed entry refuses the whole file.
+The knob is host-only: task overrides refuse it, even an empty list. It grants
+no signalling or removal authority, and destructive operations still take fresh
+evidence under writer custody.
 
-This knob is host-only: Fabric task overrides refuse it, even
-for an empty list. The runtime reads the selected state root's host config,
-never project data or a task/attempt's profile stamp. No restart is required.
-Every listed executable still requires actual cwd `EPERM`, valid live signing
-state without ad-hoc, linker-signed, invalid-allowed, debugged or get-task-allow
-flags, and an exact kernel executable-path match opened with `O_NOFOLLOW`.
-Real, effective and saved uids must all be in 0–499 and each must differ from
-every candidate root's owner. They are read together through `PROC_PIDT_SHORTBSDINFO`
-and rechecked; query failure stays unplaceable.
-`csops(CS_OPS_TEAMID)` must match the team exactly, or `platform` must match
-`CS_PLATFORM_BINARY`. The platform bit is the signing control for Apple
-platform entries. `CS_ADHOC` is checked but is not a reliable signal by itself:
-live ad-hoc code can omit it. A reported team string is not an independent trust
-anchor; named-team entries rely on the exact path and the host owner's explicit
-acceptance as well as the live signing checks.
+Each match also requires live signing checks, an exact kernel executable path,
+and system-account uids that differ from every candidate root's owner; a
+`platform` entry additionally needs a root-owned, non-writable path to `/`.
+The [supervisor spec](../specs/supervisor.md) owns those conditions. The
+accepted residual risk is that a listed executable may be sitting in a
+worktree: a signature does not prove non-occupancy. List only executable and
+signer pairs whose occupancy risk you accept.
 
-At match time a `platform` entry additionally requires the executable and every
-ancestor directory up to `/` to be owned by uid 0 with no group or other write
-permission. The runtime walks from a root descriptor using `O_NOFOLLOW`
-descriptor-relative opens, checks each fd with fstat, and requires the leaf's
-device/inode to equal the originally opened executable. Any symlink, unsafe
-owner/mode, wrong type, identity mismatch or query failure refuses the listing.
-A writable `/usr/local` or user-owned parent therefore cannot host a matching
-`platform` entry merely because an Apple binary was copied there.
+`confinement.census_exclude_ancestors` (default `true`) excludes the invoking
+shell's ancestor chain from run admission's live-writer detection. Set it to
+`false` to treat an ancestor shell inside the worktree as a live writer. It
+does not change land policy.
 
-The accepted residual risk is a listed executable sitting in a worktree. A
-signature or team identifier does not prove non-occupancy. Entries may admit
-root or other foreign system-account processes, may name `/bin` or `/usr/bin` tools, and
-do not require a sealed volume. Keep the list limited to executable/signer
-pairs whose occupancy risk the host owner accepts. A readable occupant remains
-Live. An unreadable process with any real, effective or saved uid equal to any
-candidate root's owner is never excluded. This refuses an owner's setuid tool;
-an owner-launched sudo command that resets all three uids to root still falls
-within the accepted cwd-history risk when its image otherwise qualifies.
-
-After listing this host's unreadable daemons, set
-`PROVENANT_CENSUS_HOST_LIST_COMPLETE=1` when running the native acceptance test
-to assert clean-Free. The declaration grants no process exception or cleanup
-authority. The test always audits unplaceable processes and checks a same-user
-sleep occupant; without the variable it reports that the clean-Free assertion
-was skipped.
-
-The host `[domains.run]` settings `grant_limit` (default 128) and
-`profile_limit_bytes` (default 524288) bound the total plan roots and each
-provider grant family, and the rendered macOS sandbox profile respectively.
-Raise either positive integer when a lane needs more capacity. The profile
-travels in an argument, so the operating system can still impose its own
-transport limit. These settings do not bypass path, credential, or Git checks.
+To assert a clean census in the native acceptance test, list this host's
+unreadable daemons, then set `PROVENANT_CENSUS_HOST_LIST_COMPLETE=1`. Without it
+the test reports that the clean-Free assertion was skipped.
 
 ## Run host policy
 
-`[domains.run.host_policy]` in the selected state root's `config.toml` adds
-optional read, write and network restrictions to the mandatory lane boundaries:
+`[domains.run.host_policy]` adds optional read, write and network restrictions
+to the mandatory lane boundaries:
 
 ```toml
 [domains.run.host_policy]
@@ -203,338 +144,190 @@ deny_write = ["/absolute/archive"]
 network = "local" # open, local or provider
 ```
 
-With no table, effective optional policy is `deny_read = []`,
-`deny_write = []` and `network = "open"` (`ambient`). A configured table has
-no project, lane or child override layer; its effective source identifies the
-exact config file and section. Read and write paths are absolute normalised
-subtrees. The filesystem root is omitted with a warning. Invalid entries warn
-individually and valid siblings still apply; malformed network values fall back
-to `open`. Unknown fields warn and have no effect. These tolerant rules apply
-only to optional host policy, not authority controls or the mandatory
-credential, state, Git and source boundaries.
+With no table, nothing is denied and the network is `open`. The table has no
+project, lane or child override; `config show` names the file and section it
+came from. Paths are absolute normalised subtrees; the filesystem root is
+omitted with a warning. Invalid entries warn individually, and a malformed
+network value falls back to `open`. These tolerant rules apply only to this
+optional policy, never to the mandatory credential, state, Git and source
+boundaries.
 
-The effective network is the narrower of this host ceiling and the lane's
-request. Adapter offline requirements still deny all network. Open-network
-lanes may read GitHub CLI stores, including read-only lanes; those stores stay
-immutable, explicit credential denials win, and lanes without open network
-cannot read them. Other selected authentication exceptions are host-derived
-and limited to the selected mechanism's exact inputs and permitted refresh
-files. macOS enforces the policy with Seatbelt. Linux has no enforcing backend
-and refuses launch rather than running unconfined. See
+The effective network is the narrower of this ceiling and the lane's request,
+and adapter offline requirements still deny all network. macOS enforces the
+policy with Seatbelt; Linux has no enforcing backend and refuses to launch
+rather than run unconfined. See
 [lane policy and credential exceptions](providers.md#lane-filesystem-and-network-policy).
 
-Continuation refusals caused by large retained state name the limiting
-`[domains.run]` setting, its value and its source. Increase
-`continuation_copy_limit_bytes`, `continuation_copy_entries` or
-`continuation_copy_depth` when the retained session needs more capacity, then
-retry the continuation. The byte copy budget also respects available disk
-space. These settings preserve credential, state-root, filesystem, hard-link
-and worktree-overlap guards.
+`[domains.run]` also holds the capacity limits for sandbox profiles, grants and
+continuation copies. A refusal names the limiting setting, its value and its
+source; raise it and retry. These limits never relax path, credential or Git
+checks.
 
-`confinement.census_exclude_ancestors` controls whether run admission excludes the
-invoking process's ancestor chain (such as the invoking shell) from live-writer detection.
-This strict boolean defaults to `true`. When set to `false`, only the invoking process
-itself is excluded, so an ancestor shell with its working directory inside the worktree
-is treated as a live writer and refused. Set it with
-`provenant config set confinement.census_exclude_ancestors false` or in `[knobs]`.
+## Writer extra write paths
 
-Land cleanup still refuses an incomplete census and reports the first unlisted
-daemon. Its diagnostic includes pid, path, real/effective/saved uids, CS flags and, for non-platform
-images, the kernel's `CS_OPS_TEAMID` or `unavailable`. Use that information to
-choose an exact path/team pair whose occupancy risk you accept; the completeness
-declaration does not make an unlisted process admissible.
-
-Batch concurrency resolves from the profile by batch class. A batch with any
-`worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a
-batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
-A `lanes.max_concurrency` you set yourself in `[knobs]` also
-caps the read-only default unless you set `lanes.max_concurrency_read_only`
-too; a profile default does not. Document concurrency overrides the default.
-The `economy` profile sets 4 and 8 respectively.
-
-Batch concurrency is separate from host admission. Each lane has a class, and
-spacing defaults to zero. Set `[domains.fabric.lanes] start_spacing_ms` to
-space starts of both classes in milliseconds. Spacing is measured against
-the last start of the same class, so a read-only lane never waits behind a writer. Within one
-boot no two lanes of a class start less than one spacing apart, however the
-wall clock changes; a reboot resets spacing, except that the one-time upgrade
-of a version 1 ledger that recorded a start holds each class for one spacing.
-Spacing is enforced at admission, not at provider spawn, so a guardian
-suspended between the two can spawn alongside a later lane. The host
-admits writers without a host or project count limit by default.
-`max_writer_lanes` and `max_project_writer_lanes` optionally cap writers;
-`max_lanes` and `max_project_lanes` optionally cap all lane classes. All four
-limits are off when omitted or set to `-1`. Explicit host limits accept up to
-64 and project limits up to 32. A lane at a cap waits until
-the admission deadline and is then refused with the cap, setting and source. On
-macOS it defers starts at critical kernel memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
-to `warning` to defer at warning and critical, or `never` to disable this gate.
-The 5 % memory floor warns on every platform; the disk floor
-applies to both classes. `status` shows a queued or starting lane's
-class and what it is waiting for, such as `read-only startup spacing: 1.2 s
-left of 2.0 s`.
-
-Project-scoped `domains.lanes.projects.<project>.shared_paths` can share an
-existing host test-lock directory with writers when the resource is broader
-than Cargo. Relative paths resolve against the primary checkout; `~/` and
-absolute paths are also accepted. Unsafe or missing entries warn and are
-ignored. `exec_roots` in the same table grants read and execution access to
-checkout-relative toolchain directories without write access. Both default to
-empty arrays; `config show` reports their effective value and origin. See
-[project paths](providers.md#project-paths-and-host-checkout-identity).
-
-A project can set `domains.lanes.projects.<project>.capabilities = ["postgres"]`
-to grant database IPC to its writer lanes by default. A graph node may supply
-`capabilities`, including an empty array to remove the default. Read-only lanes
-do not inherit project defaults. `--capability` adds a grant and
-`--no-capability` removes it for an invocation.
-
-Build slots gate builds, not lanes. A writer is admitted on the writer caps
-and configured resource guards, however many writers are live, so one
-project's idle writers never block another's. The slots are a build throttle,
-not a hard cap and not a security boundary: they share CPU and memory fairly
-among our own lanes. `max_concurrent_builds` is the number of cargo builds
-that run at once on the host. The default is
-`max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))`, so a 10-core 16 GiB
-host with the default 5 jobs gets 2. A writer lane gets a `cargo` shim first on
-its PATH only when its environment sets `CARGO_TARGET_DIR` and
-`~/.cargo/bin/cargo` exists; other lanes run cargo ungated. A cargo command that compiles (`build`,
-`check`, `clippy`, `test`, `run`, `bench`, `doc`, `rustc`, `rustdoc`, `fix`,
-`install`, `package`, `publish`, `nextest`, `llvm-cov` and `miri`, and their
-short aliases) takes one slot before the real cargo starts. The shim process
-holds the slot itself, runs cargo as its child and releases the slot when that
-child exits, so `cargo run` and `cargo test` hold the slot for the whole of the
-program or test run, not only the compile. A `cargo nextest run` using both
-`--cargo-metadata` and `--binaries-metadata` reuses an existing build and takes
-no build slot; tier verification uses that path after a gated binary listing.
-Other commands, such as `fmt` and
-`metadata`, take none. A cargo started inside a gated build skips the gate only
-when the `PROVENANT_BUILD_SLOT` marker, `pid:start` (the holder shim's pid and
-native process start time), names a live ancestor of the nested shim that began
-at that time and is a provenant process. A marker that names another process,
-even a live ancestor such as the shell above the shim, a reused pid or a value a
-lane invents, is ignored and the command acquires normally. A nested cargo that
-a build starts with a scrubbed environment loses the marker, so it queues behind
-the slot its own parent holds and waits until it times out; keep
-`PROVENANT_BUILD_SLOT` in a build's environment when it runs cargo itself.
-
-A command that finds every slot taken waits, prints
-`provenant: waiting for a build slot (n of m in use)` on its own stderr, and
-repeats the message about every 60 seconds. While it waits it also writes
-`build-slot-wait.PID` (one per command) in the lane's scratch directory, and `status` and
-`status` show the lane as waiting (`build slot: ...`) the way they show an
-admission wait. The host trusts only which of two fixed waits the file names
-and that it was refreshed in the last 150 seconds. A slot wait also records when
-it began and how many slots were held, so `status` shows
-`build slot: waiting N of M (longest first); H of S slots held`: N is the lane's
-rank among this project's waiting lanes by time waited, M how many of them wait,
-and H of S the slots held by any project on the host. Slots go to whichever
-waiter polls first, so the rank is an estimate, not a queue position. Writer lanes are told in their preamble
-that this wait is normal and bounded, and to keep waiting rather than stop. It gives up after
-`build_wait_minutes` (default 30) with an error that names the slot count and
-suggests `provenant status` to find the holders. The same bounded wait and
-progress message apply while the command waits for another build's
-`.cargo-lock` on its target directory, which it does before it takes a slot so
-a slot is never held by a build that Cargo would queue anyway. Both waits share
-one deadline: together they take at most `build_wait_minutes`. A shim that
-receives SIGTERM, SIGINT or SIGHUP passes the signal to its cargo child, and on
-Linux the child is also signalled if the shim is killed outright, so a build
-does not keep compiling after the shim and its slot are gone. Provenant repairs
-the slot directory when it launches a lane: it restores the 0700 and 0600 modes
-and recreates a missing, non-regular or hard-linked slot file. Waiting blocks
-that command only, not the lane or its admission. `status` does not report
-build waits; the message is in the lane's output.
-
-The slots are files `slot-0.lock` to `slot-N-1.lock` under
-`<state>/build-slots/`, shared by every project on the same state directory and
-outside `fabric/locks`, where a lane creates its landing locks. Provenant
-creates them outside the sandbox when it launches a lane and refuses a slot
-directory another user owns. A lane has read access to that directory and its
-files and no write access, so it cannot create, unlink or replace a slot file;
-the shim opens a slot file read-only and takes `flock` on it. The descriptor is close-on-exec, so a
-daemon or an orphaned grandchild (sccache, a backgrounded test process) never
-keeps a slot after the build exits. The kernel releases the slot when the shim
-exits, even after a crash or `kill -9`. The slot directory, count and wait
-come from the environment written into the shim script by the host, not from
-arguments the lane chooses.
-
-What this does not do, by design: a build that runs `~/.cargo/bin/cargo`,
-`rustc` or a non-cargo build tool directly is not gated, and a lane can hold a
-slot by locking a slot file on purpose. Gating non-cargo builds is out of
-scope. If the slot directory cannot be opened or locked for an unexpected
-reason, the build runs without a slot and prints a single warning: fair
-sharing fails open. A slot that stays busy for the whole wait is an error, not
-an ungated build.
-
-`cargo_build_jobs` is the separate per-build parallelism: Cargo defaults to
-half the available cores, at least one. Set host overrides in `config.toml`:
+Writer lanes can write shared run state outside the worktree once the host
+owner lists the directories:
 
 ```toml
-[domains.fabric.lanes]
-max_concurrent_builds = 2
-cargo_build_jobs = 5
-build_wait_minutes = 30
-max_lanes = -1
-max_project_lanes = -1
-max_writer_lanes = -1
-max_project_writer_lanes = -1
-lane_port_base = 30000
-lane_port_block = 16
-lane_port_blocks = 64
+[domains.run]
+writer_writes = ["/Users/me/proj/.agent-run/locks"]
 ```
 
-Omit a key from `config.toml` to select its default. The host settings are
-not workflow knobs managed by `provenant config set`; edit the
-`[domains.fabric.lanes]` table directly. The value `-1` also selects automatic
-behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
-`build_wait_minutes` 1 to 1440, `max_lanes` 1 to 64 and
-`max_project_lanes` 1 to 32 (at most `max_lanes`); `max_writer_lanes` is 1 to
-64 and `max_project_writer_lanes` is 1 to 32 and, when set, at most `max_writer_lanes`
-(left unset it adds no project limit; the host cap still applies).
-`lane_port_base` is 1024 to 65535, `lane_port_block` 1 to 1024 and
-`lane_port_blocks` 0 to 1024 (0 turns off the per-lane port blocks described in
-[providers](providers.md#writer-lanes)); the range must end at or below 65536.
-Exhausting the default port pool warns and continues without an allocation;
-an explicitly configured pool refuses when full.
-An out-of-range value is rejected when configuration loads, so it never blocks
-lane admission. A lane keeps the slot count and wait it was launched with; a
-change applies to lanes launched afterwards.
+Each entry is an absolute directory, granted read, write and exec as a subtree
+to worktree-write lanes only. The file is refused if an entry is too broad or
+names a credential directory such as `~/.ssh`; a launch is refused if it
+overlaps the state directory's protected parts or Git metadata, or is or
+encloses another checkout. Other checkouts of the project stay read-only to a
+writer, except an entry strictly inside one, such as the lock directory above.
+Graph write roots get no such exemption; see
+[writer lanes](providers.md#writer-lanes).
 
-Higher values can reduce waiting but increase peak memory and CPU demand.
-An existing `CARGO_BUILD_JOBS` in the submitting environment takes precedence;
-a brief can also set it inside the lane. Memory pressure and the disk floor are
-checked before lane admission, not continuously during a build; the memory
-floor remains the guard against running out of memory.
+`review_exempt` lists repository-relative paths that do not count toward an
+`uncommitted` outcome: a trailing slash names a root directory, a bare filename
+matches at any depth, and other paths match exactly. A project list replaces
+the host list, and an empty list disables exemptions; `provenant status` shows
+the effective list.
+
+`push_conflict_markers = false` turns off the pre-push hook's advisory check
+for added `<<<<<<<` and `>>>>>>>` lines, for fixtures that need them. Pushes
+that delete, rewrite or push from a linked worktree to the default branch are
+refused either way, and an unreadable config keeps the check on.
+
+## Lane admission
+
+Batch concurrency comes from `lanes.max_concurrency` when any lane in the batch
+writes a worktree, and from `lanes.max_concurrency_read_only` otherwise. A
+`lanes.max_concurrency` you set yourself in `[knobs]` also caps the read-only
+default unless you set both; a profile value does not. Document concurrency
+overrides either.
+
+Host admission is separate. `[domains.fabric.lanes]` caps live lanes with
+`max_lanes`, `max_project_lanes`, `max_writer_lanes` and
+`max_project_writer_lanes`; every cap is off unless set. A lane at a cap waits
+until its admission deadline and is then refused with the cap, setting and
+source. `start_spacing_ms` spaces starts within each class, so a read-only lane
+never waits behind a writer; spacing is enforced at admission and resets on
+reboot. On macOS, starts defer at critical kernel memory pressure
+(`memory_pressure_threshold`). The `gc.free_floor` disk floor applies to both
+classes, and below it each running lane's supervisor pauses that lane's own
+builds until space returns; the [disk spec](../specs/disk.md) owns that rule
+and [GC](gc.md) owns the collection that runs first. `status` shows what a queued lane waits for, such as
+`read-only startup spacing: 1.2 s left of 2.0 s`.
+
+Under `[domains.lanes.projects.<project>]`, `shared_paths` shares an existing
+host test-lock directory with writers, `exec_roots` grants read and execute on
+checkout-relative toolchain directories, and `capabilities = ["postgres"]`
+grants database IPC to writer lanes by default. A graph node's `capabilities`
+(an empty array removes the default) and the `--capability` and
+`--no-capability` flags override it. See
+[project paths](providers.md#project-paths-and-host-checkout-identity).
+
+`lanes.launch_retry_limit`, `lanes.launch_retry_first_seconds` and
+`lanes.launch_retry_max_seconds` set retries after a transient launch failure;
+delays double up to the cap, and the admission deadline can end the wait
+sooner.
+
+## Build slots
+
+Build slots throttle Cargo builds so lanes share CPU and memory fairly. They
+are not a lane cap and not a security boundary: a writer is admitted on the
+writer caps, however many builds are running.
+
+A writer lane gets a `cargo` shim first on its `PATH` when its environment sets
+`CARGO_TARGET_DIR` and `~/.cargo/bin/cargo` exists. A cargo command that
+compiles (`build`, `check`, `clippy`, `test`, `run`, `nextest` and the rest of
+that set) takes one slot of `max_concurrent_builds` and holds it until cargo
+exits, so `cargo run` and `cargo test` hold it for the whole program or test
+run. `fmt`, `metadata` and `tree` take none, and nor does a `cargo nextest run`
+with both `--cargo-metadata` and `--binaries-metadata`, which reuses an
+existing build.
+
+A command that finds every slot taken prints
+`provenant: waiting for a build slot (n of m in use)` about every minute and
+waits up to `build_wait_minutes` in total, including any wait for another
+build's `.cargo-lock`; then it fails and suggests `provenant status` to find the
+holders. While it waits, `status` shows
+`build slot: waiting N of M (longest first); H of S slots held`. The rank is an
+estimate: slots go to whichever waiter polls first. Writer preambles tell lanes
+the wait is normal and bounded.
+
+A nested cargo skips the gate only when `PROVENANT_BUILD_SLOT` names a live
+provenant ancestor that holds a slot. A build that scrubs its environment loses
+the marker and queues behind its own parent's slot until it times out, so keep
+`PROVENANT_BUILD_SLOT` in the environment of any build that runs cargo itself.
+
+The slots are `flock`ed files under `<state>/build-slots/`, shared by every
+project on the state directory. Lanes can read but not replace them, and the
+kernel releases a slot when its shim exits, even after `kill -9`. A slot count
+and wait are fixed when a lane launches. By design, a lane that runs
+`~/.cargo/bin/cargo`, `rustc` or a non-cargo build directly is not gated, and a
+slot directory that cannot be locked lets the build run with one warning.
+
+`cargo_build_jobs` sets each build's `CARGO_BUILD_JOBS`; an existing value in
+the submitting environment or the lane wins. `lane_port_base`,
+`lane_port_block` and `lane_port_blocks` allocate a port block to each writer
+(see [providers](providers.md#writer-lanes)). Exhausting the default pool warns
+and continues; an explicitly configured pool refuses when full.
 
 ### Lane build output
 
-Lane builds are set up to stay small. Every lane gets `CARGO_INCREMENTAL=0`
-and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, so a lane's target holds no
-incremental sessions and carries line tables instead of full debug information.
-On `provenant-core` this measured about 65 MB against 76 to 85 MB with
-incremental compilation on, and the size did not grow on rebuild. The repository's
-`Cargo.toml` is unchanged. Override either default in `[domains.fabric.lanes]`:
-
-```toml
-[domains.fabric.lanes]
-cargo_incremental = true       # CARGO_INCREMENTAL=1
-cargo_debug = "full"           # CARGO_PROFILE_DEV_DEBUG
-build_dir_max_bytes = 21474836480
-build_dir_grace_seconds = 900
-build_dir_survey_interval_seconds = 300
-```
-
-`cargo_debug` takes any Cargo `debug` level: `none`, `line-directives-only`,
-`line-tables-only`, `limited`, `full`, `0`, `1`, `2`, `true` or `false`. A
-value already in the lane environment takes precedence over both settings.
+Every lane gets `CARGO_INCREMENTAL=0` and
+`CARGO_PROFILE_DEV_DEBUG=line-tables-only`, so its target holds no incremental
+sessions and carries line tables instead of full debug information. Override
+them with `cargo_incremental` and `cargo_debug`; a value already in the lane
+environment wins. Collection of idle lane build output, bounded by
+`build_dir_max_bytes`, is described in [GC](gc.md). Lane Cargo paths and the
+host Cargo seed are described in [worktrees](../worktrees.md).
 
 #### Which cargo commands a lane may run
 
-The knob `lanes.local_cargo` limits what the lane's `cargo` shim runs. It is
-enforced in the shim every provider's lane gets, so it does not depend on the
-brief or on the provider:
+`lanes.local_cargo` limits what the lane's `cargo` shim runs, for every
+provider:
 
 | Value | Runs | Refuses |
 |---|---|---|
 | `all` (default) | every cargo command | nothing |
-| `check` | `cargo check`, and subcommands that do not compile (`fmt`, `metadata`, `tree`) | `build`, `test`, `clippy`, `nextest`, `run`, `doc` and the rest of the compiling set |
-| `none` | subcommands that do not compile | every compiling command, `cargo check` included |
+| `check` | `cargo check` and subcommands that do not compile | every other compiling command |
+| `none` | subcommands that do not compile | every compiling command |
 
-A refused command exits 1 with one line, for example `provenant: cargo test is
-not run in lanes here (lanes.local_cargo = check); CI runs it. Set the
-lanes.local_cargo knob (or the node's attempt.local_cargo) to all to run it
-locally`. Set it for the host under `[knobs]`, for a run with
-`--knob lanes.local_cargo=check` (or `knobs` on a Fabric submit), and for one
-graph node with `"attempt": {"local_cargo": "check"}`; the node's value wins
-over the run's. A cargo run nested inside an allowed command (a build script,
-a test that spawns cargo) is not checked again. The shim is cooperative: a lane
-that calls `~/.cargo/bin/cargo` or `rustc` directly is not stopped, and a lane
-whose build slot shim could not be installed has no shim to enforce it.
-This repository has no project-level file the host reads for lane settings
-(`.provenant/verify.json` only maps tiers), so set `check` for it under
-`[knobs]` on each host that builds it.
+A refused command exits 1 with one line naming the knob and saying CI runs it.
+Set it under `[knobs]` for the host, with `--knob lanes.local_cargo=check` for
+a run, or with `"attempt": {"local_cargo": "check"}` for one graph node, which
+wins over the run. A cargo nested inside an allowed command is not checked
+again, and a lane that calls `~/.cargo/bin/cargo` or `rustc` directly is not
+stopped. No project file sets lane settings, so set `check` for this repository
+under `[knobs]` on each host that builds it.
 
-Fabric also collects idle build output. A Cargo profile directory in a lane
-cache (`target/debug`, `target/<triple>/release`, or the same under
-`target-lint/`) is idle when a non-blocking exclusive `flock` succeeds on all of
-its `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. Cargo holds
-all three while it builds, so a directory with any of them held is never
-removed. Idle directories go least recently used first, judged by the newest
-modification time below each, until the allocated bytes of all profile
-directories, idle and busy alike, are within `build_dir_max_bytes` (20 GiB by
-default) and free space on the cache volume is at least `gc.free_floor`. When
-busy directories alone exceed the cap, the sweep removes every eligible idle
-directory and the total stays over. The lock files are removed last. Space
-outside profile directories (`target/doc`, Cargo homes, other lane files) is
-not counted or collected here.
+## Lane cache collection
 
-Free locks do not prove a directory is unused: test and run binaries keep
-executing after Cargo drops its locks, and Cargo can open a lock file just
-before it takes the lock. The grace does not cover Cargo opening an existing
-lock file without writing anything; the `flock` probe covers that case. A directory whose newest modification is within
-`build_dir_grace_seconds` (15 minutes by default) is therefore never removed,
-and neither is one written after the sweep measured it. These directories still
-count toward the cap and are reported as `recent`. Set the grace to 0 to turn
-the protection off. The grace protects only recently written directories: a test or run binary that runs longer than the grace without writing under `target/` is unprotected unless a Cargo lock is still held.
+Retention and collection settings live in `[retention]` and `[gc]`:
 
-Collection runs on three events:
+```toml
+[retention]
+provider_state_days = 7
 
-- when a lane settles;
-- when lane admission finds free space below `gc.free_floor`, at most about
-  once a minute while the lane waits;
-- in `provenant gc`, including the scheduled sweep, `--pressure` and
-  `--dry-run`, which previews without taking the lock.
+[gc]
+schedule = true
+# free_floor = "100G"
 
-The walk that measures the caches takes no lock, and a sweep that finds the cap
-and the floor already met stops there. Only removal holds the host admission
-lock, so no lane is admitted mid-removal; it probes each candidate again under
-that lock. A settling lane waits at most 5 seconds for it.
+# Use the project ID from `provenant fabric identity`.
+[gc.projects."PROJECT_ID"]
+regenerable = ["node_modules", "target"]
+keep = ["web/target"]
+foreign_worktrees = "keep" # opt in with "merged-clean"
+```
 
-Settlement does not walk the caches every time. It walks only when free space is
-below `gc.free_floor`, when the last walk is older than
-`build_dir_survey_interval_seconds` (5 minutes by default), or when that walk
-found the total within 10% of the cap. The last result is kept in the state
-root, and a settlement that finds another walk running skips. `provenant gc`
-always walks. While free space stays below the floor, each settlement walks,
-because reclaiming is the point.
-
-`provenant gc` reports the directories removed or reclaimable, the bytes
-reclaimed, how many bytes of lane build output remain and how many directories
-were busy or recent. The JSON form has the same fields under `build_dirs`
-(`removed`, `bytes`, `cache_bytes`, `busy`, `recent`, `errors`); the summary form has
-`build_dirs_removed`, `build_dir_bytes_reclaimed` and `build_dir_bytes`.
-A directory that Cargo is building in is skipped and counted as busy; a later
-event collects it once Cargo has finished. A collection skipped because another
-sweep or an admission holds the host ledger is reported as an alert.
-
-## Knob registry
-
-`config/harness-knobs.json` owns the workflow knob registry and presets.
-Fabric's similarly named TOML assets supply only Fabric domain defaults; they
-are not a second source for the workflow knob values. The binary embeds the
-registry at build time and `config set` validates against it. The `review` knobs and the `rigorous` profile were removed and are refused.
-Run `provenant config migrate` to remove them.
-
-For model effort, context ceilings and compaction, see
-[model policy](model-policy.md); for council selection, pool routing and quota
-pacing, see [model routing](model-routing.md). The
-[session skill](../../skills/session/SKILL.md) covers context hygiene. Use
-`config show` to see each knob's value and source. Preview install registrations with
-`provenant install --source /absolute/path/to/release --harness claude --dry-run`
-before applying an authorised install.
+The [advanced reference](../reference/config-keys-all.md#host-gc-settings)
+lists every key with its default and bounds. [GC](gc.md) owns what each
+collection removes, keeps and reports; [disk inspection](disk.md) covers
+measuring what is using space.
 
 ## Provider updates
 
-Provider updates are enabled by default and checked on existing housekeeping
-events, with at least 24 hours between attempts. Updates run outside lanes
-when the provider is idle; lanes keep self-update disabled. Configure each
-provider in the same `config.toml`:
+Provider updates run by default, at most once a day per provider, outside
+lanes and only while the provider is idle. Lanes keep self-update disabled.
 
 ```toml
-[providers.claude]
-update_interval_seconds = 86400
-update_timeout_seconds = 300
-
 [providers.codex]
 update = { command = ["brew", "upgrade", "codex"] }
 
@@ -542,71 +335,23 @@ update = { command = ["brew", "upgrade", "codex"] }
 update = false
 ```
 
-`update = false` opts out, `true` selects the detected native updater, and
-`update = { command = ["program", "argument"] }` overrides it with an argv
-array executed directly without a shell. The array must contain a non-empty
-program name. The interval and timeout are positive numbers of seconds.
-Supported provider IDs are `claude`, `codex`, `cursor`, `agy` and `opencode`;
-providers without a known native update method need a command override.
+`update = true` selects the detected native updater (`claude update`,
+`opencode upgrade`, or Homebrew or npm for Codex); a provider without a known
+method needs a `command` argv, executed without a shell. A quota tick schedules
+due updates in a detached worker, at most once every 15 minutes; an unknown
+installation produces one activity note until it is resolved.
 
-Quota ticks are the housekeeping events. A tick schedules due work in a
-detached, one-shot process and returns without waiting for an updater. The
-worker takes exclusive leases without waiting and stops after one completed
-native update attempt. An error checking one provider is recorded without
-preventing checks of the remaining providers. Updates default to a 300-second
-timeout, configurable per provider with `update_timeout_seconds`.
-Claude uses `claude update`, OpenCode uses `opencode upgrade`, and Codex uses
-Homebrew or npm when its resolved executable identifies that installation.
-An unknown installation produces one activity note until its method becomes
-known or a command override is configured.
-
-Provider preparation takes shared leases; updates need an exclusive lease.
-Busy providers are excluded from a lane's candidates without delaying other
-providers. When every candidate is busy, preparation waits up to the caller's
-`--wait`, capped at 30 seconds (30 seconds by default), then refuses with
-`provider_updating`. A busy provider is never probed without its shared lease.
-Skipped routes and pool candidates report the update rather than a disclosure
-denial. An absent confinement plan reports `confinement_unavailable`;
-`disclosure_denied` requires an explicit disclosure-policy refusal.
-Cancellation interrupts this wait. Preparation releases its leases before
-launching the provider; providers and their children inherit no update lease.
-Nested launches retry missing executable discovery under the preparation lease
-using the host's sealed search directories.
-
-The detached update worker holds the exclusive lease across its version
-probes, update command and record writes. The scheduling check also briefly
-takes an exclusive lease to test availability. Version probes take at most
-four seconds each; the update command can take minutes (300 seconds by
-default). The updater inherits the lease, keeping it held if the worker is
-killed. An independent watchdog enforces the command's configured timeout even
-after worker death. Every command exit also kills remaining members of its
-private process group, so successful commands cannot leave background children
-holding the lease. The lease remains held until the last inheriting process
-exits. Custom update commands must remain in that group and must not daemonise:
-a descendant that escapes with `setsid` or `setpgid` cannot be killed by a group
-timeout and retains the fence until it exits, preventing concurrent mutation.
-Kernel lock release covers crashes;
-stable `.lock` files remain in
-`<state>/provider-updates/` to avoid inode replacement races. An interrupted
-update is recorded as failed and retried after the configured interval, as are
-other failed attempts. Interruption can leave a partially replaced installation;
-the next attempt uses the same native updater to repair it. Update failures
-are recorded once per interval, with updater output discarded. An independent
-attempt record preserves backoff if publishing the result record fails.
-The worker starts in the quota event's working directory, which need not be a
-Git checkout, and quota events launch it at most once every 15 minutes whatever
-its outcome. `<state>/provider-updates/worker.json` holds the last launch time
-and, if that run failed, its one cause. Worker failures surface through the
-activity note, that record and the update records only; the quota tick does not
-report them. Activity records the old and new versions.
-Each lane's `availability.json`
-also includes its observed version and the latest update result.
+An update holds an exclusive lease on its provider, and preparation of a lane
+holds a shared one. A busy provider drops out of a lane's candidates; when every
+candidate is busy, preparation waits up to `--wait` (at most 30 seconds) and
+then refuses with `provider_updating`. A timeout kills the update command's
+process group, so a custom command must not daemonise: a descendant that leaves
+the group with `setsid` keeps the lease until it exits. An interrupted update
+is recorded as failed and retried after the interval with the same updater.
+`<state>/provider-updates/worker.json` holds the last worker launch and its
+failure, if any; activity records old and new versions.
 
 ## Codex cloud transport
-
-Select the installed Codex cloud command in the host's state-root
-`config.toml`. The default is `transport = "official"`, using `codex cloud
-exec`, `status` and `list`. To use a client for the newer cloud thread API:
 
 ```toml
 [providers.codex.cloud]
@@ -614,95 +359,47 @@ transport = "thread"
 command = "codex-cloud-task"
 ```
 
-`command` is optional: it defaults to `codex-cloud-task` for `thread` and
-`codex` for `official`. It names one executable, resolved through the host's
-PATH, or an explicit executable path; arguments and shell strings are refused.
-These settings apply only to Codex cloud placement. Keep the same transport
-and command configured while observing saved jobs after a restart.
-
-On the real host checked on 8 November 2026, official codex-cli 0.167.0 did
-not list the workspace's ready thread-API environment and `codex cloud exec`
-reported `no cloud environments are available for this workspace`. Select
-`thread` for those environments and install a compatible client separately.
-The client must support `submit --env NAME_OR_ID [--read-only]` with the prompt
-on stdin and `status THREAD_ID` returning thread/turn JSON. See
-[cloud placement](providers.md#cloud-placement) for the result channel and
-verification limits.
+`official` uses `codex cloud exec`, `status` and `list`. Select `thread` when
+the workspace's environments use the cloud thread API, which official
+`codex cloud exec` may report as `no cloud environments are available for this
+workspace`, and install a compatible client separately. The client must accept
+`submit --env NAME_OR_ID [--read-only]` with the prompt on stdin, and
+`status THREAD_ID` returning thread and turn JSON. Keep the same transport and
+command while observing saved jobs after a restart. See
+[cloud placement](providers.md#cloud-placement).
 
 ## Lane runtime deadline
 
-A lane's wall-clock allowance is its task provider timeout (3600
-seconds, or 10800 for `worktree-write`; at most 14400). Cap it per provider with
-`runtime_deadline_seconds`; the shorter of the two applies:
-
-```toml
-[providers.codex]
-runtime_deadline_seconds = 7200
-```
-
-The deadline runs on the wall clock, so a host that sleeps through it stops the
-provider on waking. The attempt settles as `timed_out`, releases its worktree
-and lock, and `status` shows the deadline of each running lane and a
-`provenant retry` hint for a timed-out one.
+A lane may run for its task's provider timeout; `runtime_deadline_seconds` under
+`[providers.<id>]` caps it, and the shorter applies. The deadline is wall-clock,
+so a host that sleeps through it stops the provider on waking. The attempt
+settles as `timed_out`, releases its worktree and lock, and `status` shows a
+`provenant retry` hint.
 
 ## Store busy timeout
 
-Every local SQLite store sets one busy timeout when it opens. A command that
-finds a store locked by another writer waits inside SQLite for up to that long,
-then reports contention (exit 3). The stores' own advisory locks wait for the
-same bound. The default is 30 seconds; set it per host in `config.toml`:
+`[domains.fabric.limits] store_busy_timeout_ms` bounds how long a command waits
+for a locked local store before it reports contention (exit 3). Zero fails fast.
+It is read once when a command starts; a hook with a shorter deadline waits no
+longer than that.
 
-```toml
-[domains.fabric.limits]
-store_busy_timeout_ms = 10000
-```
+## OpenCode Go
 
-The value is read once when a command starts and accepts 0 to 600000. Zero
-fails fast on any contention. A hook or another reader with its own deadline
-waits no longer than that deadline. Cancellation still stops a wait loop
-between store operations.
-
-## OpenCode Go monthly allowance floor
-
-OpenCode Go models must have a documented monthly allowance at or above the
-configured floor. The default is $60 on the $10 plan; set the floor to zero to
-disable this policy:
-
-```toml
-[domains.routing.opencode_go]
-min_monthly_allowance_usd = 60
-```
-
-The floor applies to pool members and explicitly selected Go models, including
-uncatalogued exact IDs. A model with an unknown allowance is refused while the
-floor is enabled. Choose a model with a documented allowance at or above the
-floor, or lower the floor to admit it. The separate OpenCode Zen account is not subject to this
-floor. This policy is independent of the quota calibration below.
+`[domains.routing.opencode_go] min_monthly_allowance_usd` refuses Go models,
+including explicitly selected and uncatalogued IDs, whose documented monthly
+allowance is below the floor or unknown. Set it to zero to disable the policy.
+It does not apply to OpenCode Zen.
 
 ## Quota probe batching
 
-Quota probe ticks batch accounts and share one wall budget. Set them in
-`[domains.quota]` in the selected state root's `config.toml`:
-
-```toml
-[domains.quota]
-max_parallel = 3
-wall_budget_seconds = 55
-```
-
-`max_parallel` accepts 1 to 16 accounts per batch, and
-`wall_budget_seconds` accepts 1 to 600 seconds for the whole tick. The defaults
-remain 3 and 55. Batches and probes currently run sequentially, so
-`max_parallel` does not create concurrent probes. Each probe also has a
-55-second claim window and receives a deadline no later than one second before
-that claim expires; the tick wall budget bounds the total time across probes.
-Values outside these ranges refuse the file because they control probe
-admission and deadlines.
+`[domains.quota]` `max_parallel` and `wall_budget_seconds` bound a quota tick.
+Each probe also has a 55-second claim window and a deadline one second before
+that claim expires.
 
 ## OpenCode Go quota calibration
 
-Go usage from this host's ledger is a partial lower bound. Enter dashboard
-percentages under the quota domain in the selected state root's `config.toml`:
+Go usage from this host's ledger is a partial lower bound: OpenCode exposes no
+account-wide usage across devices. Enter dashboard percentages as floors:
 
 ```toml
 [domains.quota.calibration.opencode-go]
@@ -712,45 +409,20 @@ thirty_day = 59
 expires = "2026-11-04T00:00:00Z"
 ```
 
-The table key is the OpenCode account key, usually `opencode-go`. Each percentage is an
-integer from 0 to 100, and expiry is a required timestamp with a UTC offset.
-Quota and pacing use the maximum of the raw ledger and each floor until the
-expiry instant, even if a ledger window resets sooner. Set the expiry no later
-than the end of each included window. The table has one shared expiry, so use
-the earliest window end and refresh the floors afterwards. For example, a
-five-hour floor entered at 09:00 with a window ending at 13:00 should expire at
-13:00, within five hours. Editing or removing the table takes effect on the next read;
-floors are never written over the raw ledger cache. Zen does not use Go floors.
+The table key is the account key, usually `opencode-go`. Percentages are
+integers from 0 to 100, and `expires` is a required timestamp with a UTC
+offset. Quota and pacing use the higher of the ledger and each floor until
+expiry, even across a window reset. The table has one expiry, so set it to the
+earliest included window end; a five-hour floor entered at 09:00 for a window
+ending at 13:00 expires at 13:00. Recheck the dashboard and refresh the floors
+after a reset or heavy use on another device. Edits apply on the next read.
 
-DeepSeek V4.1 Flash (junior weight 2, senior 1) and GLM-5.3 Flash (junior 1,
-senior 1) are provisional Go pool members. Uncalibrated partial windows exclude
-them by default. To accept unknown headroom, set
-`provenant config set routing.allow_unknown_partial_headroom true`. This is a
-host setting and cannot be overridden by an individual dispatch. Route
-diagnostics identify partial coverage and uncalibrated windows; adding floors
-can tighten pacing. An observed lower bound at the limit remains exhausted.
-MiMo V2.6 Flash is catalogued for exact selection only. Paid OpenCode pacing
-remains `pace`.
-
-Without an observable reset, a calibrated window uses a full remaining window
-for conservative pacing. Floors stay binding until expiry even if a recorded
-reset passes. Recheck the dashboard and update the floors after a reset or
-substantial usage on another device. Peer ledgers are not aggregated.
-
-OpenCode 2.2.0's help, `stats --help`, `api --help` and an isolated
-`stats --standalone --json` were checked on 28 October 2026 without reading
-credentials. Stats contains session counts, tokens and costs, with no account
-allowance percentages. The [CLI docs](https://opencode.ai/docs/cli/#stats)
-describe session statistics, and the [server API docs](https://opencode.ai/docs/server/)
-describe the local server interface. No documented authoritative account-wide
-quota source was found. The [Go docs](https://opencode.ai/docs/go/)
-describe the allowance windows and per-response consumption; those do not
-establish total usage across devices.
+Provisional Go pool members are excluded while their partial windows are
+uncalibrated. To accept unknown headroom on this host, run
+`provenant config set routing.allow_unknown_partial_headroom true`; a dispatch
+cannot override it. An observed lower bound at the limit remains exhausted.
 
 ## Quota polling intervals
-
-Timer and panel polling intervals are set per adapter, in seconds, under the
-quota domain:
 
 ```toml
 [domains.quota.polling_intervals.codex]
@@ -758,316 +430,38 @@ timer_seconds = 600
 panel_seconds = 120
 ```
 
-The adapter must be a registered ID. Each value must be a whole number of
-seconds from 1 to `i64::MAX / 4`. Omitted values keep the provider default.
-Unlike the probe and history ceilings above, these may be raised or lowered.
-Battery doubles each interval. Low power quadruples it, and adapters that do not
-poll in low power stay idle. Manual ticks keep their 30-second interval. Quota
-ticks, `quota show` staleness and routing admission all use the configured
-values. `probe_seconds`, `low_power` and `solo` keep the provider's settings.
-
-## Lane cache collection
-
-GC also applies [terminal provider-state retention](gc.md). The separate
-`[retention] provider_state_days = 7` key accepts 1 to 3650 and is reread on
-each sweep without reinstalling. `[retention] session_revisions = 8` (1 to 64)
-sets how many [checkpoint revisions](session-checkpoints.md#earlier-saves) a
-session keeps and is reread on each save. Known credential entries expire after
-24 hours. GC also reclaims `tmp/` directories from indexed terminal attempts
-after 24 hours, across the state run store and its child stores. Nonterminal
-attempts, writer locks and retained reservations prevent deletion. GC JSON
-reports the paths and observed allocated bytes in `provider_state.attempt_tmp`;
-default output shows aggregate counts and exceptions; `--json` retains each path and byte count. `--dry-run` previews these removals.
-`retention.logs_days = 30` (range 1 to 3650) expires stdout and stderr
-captures larger than 64 KiB, and intermediate event log rows, from runs whose
-attempts are all terminal.
-
-Checkpoint saves warn above 2048 bytes. Override the soft budget for a project
-with `[retention.projects."PROJECT_ID"] checkpoint_soft_bytes = 4096` in the
-state config; the range is 1 to 262144 bytes. This is advisory and does not
-change the hard checkpoint size limit. A save also checks up to the first eight
-distinct issue and PR references for closed state; unavailable GitHub lookups
-are ignored.
-
-Chair log retention is per session: `[retention] chair_log_days = 30` (1 to
-3650), `chair_log_entries = 10000` (1 to 100000), and `chair_log_bytes =
-16777216` (65536 to 1073741824). Appends apply all three limits; listing
-shows the retained view, and full `gc` removes excess payloads. The optional
-`chair_log_replay_days` (7 to 3650) controls receipt retention and defaults to
-the larger of `chair_log_days` and 7 days. See the
-[chair log](session-checkpoints.md#chair-log) for replay and pruning behaviour.
-The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
-results, exit evidence, recorded digests and small captures survive. The same
-rule applies inside child stores, whose databases and retained evidence stay.
-GC reports `provider_state.attempt_logs`; disk reports measure `attempt_logs`.
-`gc.schedule = false` disables scheduled retention sweeps and admission
-collection; settlement pressure collection and landing cleanup still run.
-
-The optional `[gc]` section controls daily collection by the host tick:
-
-```toml
-[gc]
-schedule = true
-idle_days = 7
-graph_checkpoint_days = 90
-# free_floor = "100G"
-# alert_below = "150G"
-
-# Use the project ID from `provenant fabric identity`.
-[gc.projects."PROJECT_ID"]
-regenerable = ["node_modules", "target"]
-keep = ["web/target"]
-foreign_worktrees = "keep" # opt in with "merged-clean"
-```
-
-`gc.schedule` defaults to true. Setting it to false prevents subsequent
-scheduled collections. The host tick continues to serve graph deadlines.
-`gc.idle_days` accepts 1 to 3650 (default 7).
-`gc.graph_checkpoint_days` retains terminal graph checkpoints for at least the
-configured number of days after their last save (default 90, range 1 to 3650).
-Pending graphs and graphs with open asks or observations remain available.
-Older reports can show a missing checkpoint for a collected graph.
-`gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
-of 50 GiB. Set it to override that floor. GC requests additional cache
-collection until available disk space reaches the floor, after the usual
-orphaned, tombstoned and idle pass. Sizes are whole binary units: `B`, `K`,
-`M`, `G`, `T`, or `KiB` through `TiB`; plain numbers mean GiB.
-On APFS, local snapshots can keep deletions from increasing available space, so
-a floor may remove every eligible cache on each run.
-The idle threshold and floor are read from configuration each collection.
-Edit these keys in `config.toml`; they are separate from
-the harness knob registry.
-
-The macOS host tick runs at load and every 60 seconds, only for installations
-in the account's default state root. Collection runs when its persisted daily
-deadline is due. Logs are `<state>/tick/stdout.log` and `<state>/tick/stderr.log`.
-Collection runs in a detached one-shot worker, with its latest result in
-`<state>/tick/gc-result.json`, so a slow collection does not hold up graph wakes.
-It discovers registered projects without requiring a checkout as its working
-directory. Unobservable projects keep their caches.
-When a collection finishes it queues a second detached worker that refreshes
-each project's Cargo target seed from the freshly fetched `origin/main`, with
-its latest result in `<state>/tick/seed-result.json`; see `docs/worktrees.md`.
-Manual `provenant gc --dry-run --free-floor 20G` previews the selected
-project's cleanup, including oldest-first pressure removals. Live writers and
-reservations remain protected.
-
-Writer dispatch and resume check available space across the worktree, state
-and lane-cache volumes. Below the floor, admission makes one collection
-attempt (skipped when `gc.schedule = false`), capped at five seconds, and samples all three volumes again. The
-pressure collection skips worktree deletion and network fetches and shares
-GC's collection lock. If space remains low, the refusal names the limiting
-path, available bytes, floor and bytes reported reclaimed. Interrupted
-collection can reclaim space without returning a byte report, so zero reported
-bytes does not prove no removal occurred. Run `provenant gc --apply` for a full sweep. Read-only dispatch has the same
-admission floor. This is a point-in-time
-check with no space reservation: concurrent writers can each pass and then
-consume the same free space.
-
-Bare `provenant gc` deletes eligible caches and previews merged worktree and
-declared output cleanup. Pass `--apply` to delete those entries too, or
-`--dry-run` to preview all cleanup. The daily tick task applies those removals. Merged worktree cleanup fetches `origin`'s actual default branch;
-it does not need a fresh local `main`. Failed fetches keep worktrees and
-report the failure. Worktrees need known-terminal lanes and merged commits
-of their own: tips equal to upstream or on its first-parent history stay.
-Containment in the fetched default proves a merge, including a lane merged
-through a batch branch. A locally merged batch, or squash-only equivalence,
-does not prove containment. Eligible merged trees, their unchanged local
-branches and their own Cargo caches are collected on the next pass without an
-idle-age threshold. This does not change the age rules for standalone output
-and cache collection.
-
-`gc.projects` is keyed by the registered Fabric project ID. Each project's
-`regenerable` list contains directory names, matched at any depth in its
-registered linked worktrees. When the project has no entry, a root
-`Cargo.toml` defaults the list to `["target"]`; other projects default to an
-empty list. An explicit project entry overrides that default. `keep` contains
-optional paths relative to the worktree; those paths, their descendants and
-any matching directory containing them are preserved.
-Tracked paths are also preserved. `.git`, `.worktrees`, absolute names and
-parent traversal are refused. Declared output must be Git-ignored. An idle
-registered linked worktree can qualify without a terminal lane when no lane
-or writer lease is live. The minimum idle age is `--idle-days`, or one day
-below the free-space floor. Unknown-writer worktrees may also have ignored
-output reclaimed when the whole worktree is idle, a complete census finds no
-holder, and no lane is live. The primary checkout remains protected. JSON
-reports this class separately as `worktree_cleanup[].idle_output`.
-Failures skip individual entries. Lane caches still use their existing GC path.
-
-`foreign_worktrees = "merged-clean"` opts this project into removing linked
-worktrees that otherwise report `unknown_writer`. GC requires fetched-default
-ancestry, a clean tree after only declared ignored output is removed, no live
-lanes or reservations, a free existing writer lock where present, a complete
-free-process census. Missing process observations
-refuse removal. It verifies Git registration and filesystem identity again
-under repository custody. This policy also covers Git-registered worktrees
-outside `.worktrees/`; an unchanged branch not checked out elsewhere is deleted.
-Recent declared ignored output does not delay a proven merged tree. The default
-`"keep"` retains the existing terminal-lane requirement.
-
-Scheduled GC excludes missing Git roots, non-Git workspaces and known staging,
-probe, run and scratch roots before collecting project IDs for disk alerts.
-Old identity records stay available for indexed run evidence and keep their
-existing IDs. New transient
-and non-Git invocation roots receive a deterministic in-memory identity
-without a persistent registration. `unobserved_projects` in GC JSON is an
-array of paths whose project custody could not be observed. The separate
-`skipped_transient` array lists excluded transient common directories.
-
-After collection, GC checks available space on the state volume against the
-floor. `gc.alert_below` can raise the alert threshold and accepts the same
-size syntax as `free_floor`. Applied collections emit a Fabric note with
-entity `gc.low_disk` and a gc log message once per observed dip below the
-threshold. A reading at or above it rearms the alert. The latch persists
-under `<state>/gc/`; a preview reports low space without changing it. An alert
-failure is logged without blocking collection. This setting is read each run
-and does not require reinstalling the agent.
-
-## Disk pressure
-
-`gc.free_floor` is the floor for dispatch admission, running build pauses and
-settlement pressure collection. Its default is max(10% of the state volume,
-50 GiB). Below it, each active lane's supervisor pauses build processes proven
-to belong to that lane. It resumes them at the same floor, and before lane
-cleanup. The provider itself, other users' builds and nested lane owners are
-excluded. Each nested lane supervises its own builds.
-
-Checks run once per second only while the provider runs, using the supervisor's
-existing process census. No disk checker runs while the host has no lanes.
-A failed observation preserves the last pause decision. The running lane's
-status names a disk pause and the command `provenant gc --apply`.
-
-The `[disk_guard]` table and its separate warning, pause, resume and process
-settings have been removed. Remove that table from existing configuration.
-Install retires the old LaunchAgent once; the daily GC tick task remains a backstop.
-
-## Writer extra write paths
-
-Some projects keep shared run state outside the worktree. Writer lanes can
-write it once the host owner lists the directories in the state `config.toml`:
-
-```toml
-[domains.run]
-writer_writes = ["/Users/me/proj/.agent-run/locks", "/Users/me/proj/.worktrees/feature/target"]
-```
-
-Each entry is an absolute directory (letters, digits and `/._-` only, no `..`,
-at most 16), granted read, write and exec as a subtree to worktree-write
-lanes only, so build scripts under it run. Graph nodes can also declare write roots; see
-[providers](providers.md#writer-lanes).
-Read-only lanes are unchanged. The config is refused if an entry is too broad
-or names a credential directory such as `~/.ssh`; a launch is refused if an
-entry overlaps the state directory's protected parts or Git metadata.
-Other checkouts of the project, the primary one included, are read-only to a
-writer. An entry strictly inside one, such as the lock directory above, is
-exempt from that denial, and the rest of that checkout stays read-only. A launch
-is refused if an entry is a checkout itself or encloses one. Graph write roots
-get no such exemption.
-`/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
-
-## Writer review-exempt paths
-
-`[domains.run] review_exempt` lists repository-relative paths that do not
-count toward an `uncommitted` outcome. Project settings can override the
-host-wide list; `provenant status` reports the effective list. The defaults are
-`["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]`.
-Entries use repository-relative paths without wildcards: a trailing slash names
-a root directory, a bare filename matches at any depth, and other paths match
-exactly. Names compare without ASCII case. A project list replaces the host
-list; an empty list disables exemptions.
-
-Fabric supplies private Cargo paths to each lane; see
-[writer lanes](providers.md#writer-lanes). Native unconfined agents may share a
-per-host target outside worktrees, taking care to run the intended checkout's
-test binaries. The optional host Cargo registry seed is configured by hand in
-`config.toml`, not through `config set`; see [worktrees](../worktrees.md).
-
-## Pre-push conflict-marker check
-
-The Git pre-push hook refuses added lines that start with `<<<<<<<` or
-`>>>>>>>`. This literal check is advisory and can be turned off for fixtures
-that intentionally contain markers:
-
-```toml
-[domains.run]
-push_conflict_markers = false
-```
-
-The default is `true`. Default-branch deletion, non-fast-forward updates to the
-default branch and default-branch pushes from linked worktrees are still
-refused. An unreadable config keeps the check on.
+Set timer and panel intervals per registered adapter, in whole seconds;
+omitted values keep the provider default. Battery doubles each interval and
+low power quadruples it. Manual ticks keep their 30-second interval. Quota
+ticks, `quota show` staleness and routing admission all use these values.
 
 ## Routing pools
 
-Routing changes are stored per state root and apply on the next route command.
-To change routing, run `provenant route set` or `provenant route pacing`.
-Inspect configured weights with `provenant route list --pool NAME`; pacing and
-readiness apply at dispatch. Remove a member with
-`provenant route remove POOL MODEL`; restore the bundled pool with
-`provenant route reset POOL`.
+Routing changes are stored per state root and apply on the next route command:
+`provenant route set`, `route pacing`, `route remove POOL MODEL` and
+`route reset POOL`. Inspect weights with `provenant route list --pool NAME`.
 
 ## Quota menu display
 
-The menu bar reads display choices from `quota --json`. Per account, set
-them with `provenant accounts set <account> [--display-name NAME] [--hidden
-true|false] [--order N] [--headline auto|5h|weekly|default]`. `<account>` is an
-entry id such as `claude-work` or a label unique across adapters. An empty
-`--display-name`, `--order 0` and `--headline default` clear the field. Stored
-as `display_name`, `hidden`, `order` (1 to 999) and `headline` on
-`[domains.accounts.entries.<id>]`.
-
-Globally, `provenant quota display [--headline auto|5h|weekly] [--icon
-most_constrained|<account>]` writes `[domains.quota.display]` and returns the
-quota report. Reports carry a top-level `display` block and a per-row `display`
-block (`id`, `name`, `hidden`, `order`, `headline`). Hidden accounts and order
-are not applied by the CLI; the app does that.
-If `display.icon` names an unregistered account, `quota` reports a
-`display_icon_warning` field in JSON and one warning line in human output.
-The report uses `most_constrained` for the icon without changing config.
+Per account, run `provenant accounts set <account> [--display-name NAME]
+[--hidden true|false] [--order N] [--headline auto|5h|weekly|default]`, where
+`<account>` is an entry ID or a label unique across adapters. An empty name,
+`--order 0` and `--headline default` clear the field. Globally,
+`provenant quota display [--headline auto|5h|weekly] [--icon
+most_constrained|<account>]` writes `[domains.quota.display]`. The menu bar
+applies hidden accounts and order; the CLI does not. An icon naming an
+unregistered account falls back to `most_constrained` with a
+`display_icon_warning`.
 
 ## Chair account switching
 
 Claude chair switching is opt-in and has no daemon. Register each account with
-`provenant accounts register <label> --adapter claude --directory <dir>`.
-Registrations live in the selected state directory's `config.toml`, alongside
-optional quota metadata such as `--plan`, `--priority` and `--billing-anchor`.
-Each Claude account directory must be exactly `~/.claude-<label>`, already exist
-and be signed in separately. Labels and directories must be distinct, with no
-nested account directories. The current `CLAUDE_CONFIG_DIR` must match a
-registration. When unset, `~/.claude` is the sign-in source only; it cannot be
-registered or used as a switch target. Credentials and identity are never
-copied between directories. Provenant's own hooks, skills and MCP entry, and
-the allow-listed shared settings below, are kept identical in every registered
-directory by `install`, `accounts register` and `accounts sync` (see the
-[install runbook](install.md#account-sync)).
-
-Shared Claude settings are configured under `[domains.accounts]`:
-
-```toml
-[domains.accounts.shared_settings]
-source = "/Users/me/.claude/settings.json"   # default: ~/.claude/settings.json when it exists
-keys = ["permissions", "env", "statusLine", "enabledPlugins",
-        "outputStyle", "includeCoAuthoredBy", "cleanupPeriodDays"]   # the default allow-list
-
-[domains.accounts.entries.claude-work.settings]   # wins over the source for this account
-outputStyle = "verbose"
-```
-
-`source` is a JSON file; with no source file and no per-account `settings`,
-nothing is synced. Only keys in `keys` are synced, and a per-account `settings`
-key must be in `keys`. Identity and credential keys (`apiKeyHelper`,
-`awsAuthRefresh`, `awsCredentialExport`, `forceLoginMethod`,
-`forceLoginOrgUUID`, `otelHeadersHelper`) and `hooks` are refused even when
-listed. So is any key, or variable name inside `env`, that contains an `auth`,
-`credential`, `token`, `oauth`, `secret` or `password` word, an `api key`,
-`access key` or `private key` pair, or, after lower-casing and dropping
-separators and digits, any of `token`, `secret`, `password`, `passwd`,
-`credential`, `oauth`, `apikey`, `authtoken`, `privatekey`, `session`,
-`cookie` or `bearer`. The substring rule also catches glued names such as
-`ANTHROPICAUTHTOKEN`, `token2` and `oauth2`, and accepts some false positives;
-the one exemption is the default key `includeCoAuthoredBy`. The message names
-the key and the rule that matched. A refused configuration stops install,
-upgrade and sync, never uninstall.
+`provenant accounts register <label> --adapter claude --directory <dir>`. The
+directory must be exactly `~/.claude-<label>`, already exist and be signed in
+separately. The current `CLAUDE_CONFIG_DIR` must match a registration;
+`~/.claude` is never a switch target. Credentials and identity are never copied
+between directories. [Account sync](install.md#account-sync) keeps managed
+content and shared settings identical across registered directories.
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'
@@ -1077,51 +471,26 @@ provenant chair switch --dry-run
 provenant chair switch --to work-spare --session-id <host-session-id>
 ```
 
-`chair.auto_switch` defaults to `false`; `chair.switch_accounts` defaults to an
-empty list, which permits no targets. A manual switch bypasses the automatic
-trigger and enable flag, but still requires an allowed account with headroom.
-A real manual handoff requires `--session-id <host-session-id>` or an environment
-session ID: `CLAUDE_CODE_SESSION_ID` first, then `CLAUDE_SESSION_ID`. The flag
-takes precedence. `workflow session handoff` uses the same order. This keeps
-retries from launching another successor for the same source.
-A dry run reports the target, planned checkpoint path and exact launch command
-without writing a checkpoint or opening a pane.
+An empty `chair.switch_accounts` permits no targets. A manual switch bypasses
+`chair.auto_switch` but still needs an allowed account with headroom, and a
+session ID from `--session-id`, `CLAUDE_CODE_SESSION_ID` or `CLAUDE_SESSION_ID`,
+in that order, so a retry cannot launch a second successor. A dry run reports
+the target, checkpoint path and launch command without writing anything.
 
-The managed `UserPromptSubmit` hook checks cached quota only, never refreshes it.
-Either the five-hour or weekly window at or above the threshold triggers a
-handoff. The first allowed registered account with both windows below the
-threshold wins. Missing, expired, future-dated or more than 15-minute-old quota
-cannot establish target headroom. Unknown or stale current quota leaves the
-source running without a checkpoint or hook warning; diagnostics go to stderr. A failed refresh also invalidates retained
-headroom until a successful refresh. Refresh quota separately with
-`provenant quota tick --adapter claude` when needed. Install the managed hooks
-through the normal authorised install workflow.
+The managed `UserPromptSubmit` hook reads cached quota only. When either the
+five-hour or weekly window reaches the threshold, the first allowed account
+with both windows below it wins. Quota that is missing, expired, future-dated
+or more than 15 minutes old cannot establish headroom; refresh it with
+`provenant quota tick --adapter claude`. Unknown current quota leaves the
+source running. When no target qualifies, the hook records one refusal per
+source session and lets the turn continue.
 
 Before launch, the hook saves a private checkpoint under
-`<state>/chair-switch/<cwd-hash>/<source-session-id>.json`. It records the cwd,
-transcript path, the saved workflow session checkpoint path when present,
-open run/task/attempt IDs and creation time. Raw submitted prompts are never
-persisted. The run store remains authoritative for lane state. When the current
-account is over threshold and no target qualifies, one refusal per source session
-is recorded in the checkpoint log and hook output without stopping the turn.
-
-Inside a Herdr-managed pane, switching splits the current pane and submits the
-launch command to the returned new pane ID. Otherwise, or on a Herdr failure,
-it prints the exact command for the user. Pane admission is not proof that the
-new session is ready. The old session stops after the checkpoint is prepared;
-a repeated prompt is advisory and cannot launch the same source handoff again.
-Disabling `chair.auto_switch` always passes prompts through. The advisory retains
-an exact recovery command for use after checking that no successor is running.
-Hooks check their deadline between steps and skip snapshot or launch with less
-than three seconds remaining, leaving the source running.
-Incomplete checkpoint publication can be retried. The launch
-command supplies the resume hooks with `claude --settings`, so target accounts
-need no copied settings. If target settings already install these hooks, they
-may run twice; the prepared and consumed markers make repeats idempotent.
-SessionStart injects an unconsumed handoff within one hour for this cwd
-only in the selected account's new session and marks it consumed. Another source
-cannot replace an unconsumed handoff within that hour. Any new session in the
-selected account and cwd can consume it, so inspect the successor before starting
-another session there.
-Read the checkpoint and inspect its lane IDs before continuing; collect
-completed results rather than dispatching them again.
+`<state>/chair-switch/<cwd-hash>/<source-session-id>.json` with the cwd,
+transcript path, session checkpoint path and open lane IDs, never prompts. In a
+Herdr pane it splits the pane and submits the launch command; otherwise it
+prints the command. The source session then stops. The launch passes the resume
+hooks with `claude --settings`. The new session's `SessionStart` injects the
+handoff once, within an hour, for that cwd and account. Read the checkpoint and
+its lane IDs before continuing, and collect completed results rather than
+dispatching them again.
