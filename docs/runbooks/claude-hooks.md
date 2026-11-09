@@ -13,7 +13,7 @@ diagnostics to stderr.
 | `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
-| `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md`, preserving the chair checkpoint |
+| `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md`, preserving the chair checkpoint, and prints the summary instruction below |
 | `Stop` | `hook claude stop` | Refreshes `autosave.md` if an existing session is 10 minutes quiet |
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
@@ -108,6 +108,33 @@ Auto-saved: 2026-10-27T03:00:00Z
   then reports that it holds only automatically saved state and that chair
   notes still need saving. `stop` never creates either.
 - Hooks inside a lane (a confined Claude lane) report but never write.
+
+## Intent across compaction
+
+Claude Code takes plain `PreCompact` stdout on exit 0 as instructions for the
+compaction summary. `pre-compact` prints one: write an Intent section, with
+each live ruling's wanted outcome, reason, rejected alternatives, open
+disagreement and uncertain readings, replace on correction, and quote only an
+authority grant or a correction of a misreading. The summary is written with
+the full context, so it needs no earlier chair checkpoint. The hook only
+asks; whether the summary complied is checked in a live compaction.
+
+`session-start` and `compact` print the checkpoint's `## Intent` section
+first, after the status diagnostic and ahead of the digest and the rest of the
+checkpoint (capped at 3 KiB inside the 8 KiB output cap), and name the host
+transcript path from the hook input as the source of exact words when an entry
+is in doubt. A checkpoint with no intent section gets one `Intent:` line in
+the diagnostic, and the rest is shown as before. The hook reads no transcript
+and does nothing per prompt.
+
+If the summary does not carry an Intent section, the guarantee narrows to
+intent the chair saved in its checkpoint. The
+[session skill's continuity contract](../../skills/session/SKILL.md) says when
+the chair saves it.
+
+Codex: only the `SessionStart` rendering is shared, so a saved intent section
+is restored there. No Codex `PreCompact` hook is registered, so Codex has no
+summary instruction and relies on the saved section.
 
 ## Worktree hooks
 
