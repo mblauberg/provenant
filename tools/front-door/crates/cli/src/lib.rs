@@ -377,9 +377,13 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
             .get_subcommands()
             .find(|child| !child.is_hide_set())
             .map(|child| child.get_name());
-        let correction = match first_sub {
-            Some(sub) => format!("{path} {sub}"),
-            None => path.clone(),
+        let correction = if path == "provenant config" {
+            "provenant config show".to_owned()
+        } else {
+            match first_sub {
+                Some(sub) => format!("{path} {sub}"),
+                None => path.clone(),
+            }
         };
         let usage_block = selected.clone().bin_name(&path).render_help().to_string();
         let message =
@@ -2030,7 +2034,10 @@ mod tests {
             panic!("expected invalid for config without subcommand");
         };
         let text = error.to_string();
-        assert!(text.contains("Usage: provenant config <COMMAND>"), "{text}");
+        assert!(
+            text.contains("Usage: provenant config [OPTIONS] <COMMAND>"),
+            "{text}"
+        );
         assert!(text.contains("Commands:"), "{text}");
         assert_eq!(error.repair(), Some("provenant config show"));
 
