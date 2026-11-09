@@ -471,7 +471,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `"all"` |
-| `effect` | `"Which cargo subcommands a lane may run locally, enforced in the lane's cargo shim for every provider. all runs everything; check allows only `cargo check` (and subcommands that do not compile, such as fmt and metadata); none refuses every compiling command, `cargo check` included. A refused command exits non-zero with one line saying CI runs it. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs]."` |
+| `effect` | `"Which cargo subcommands a lane may run locally, enforced in the lane's cargo shim for every provider. all runs everything; check allows only &#96;cargo check&#96; (and subcommands that do not compile, such as fmt and metadata); none refuses every compiling command, &#96;cargo check&#96; included. A refused command exits non-zero with one line saying CI runs it. Set per run with --knob lanes.local_cargo=check, per graph node with &#96;attempt.local_cargo&#96;, or for the host under [knobs]."` |
 | `reader` | `"tools/front-door/src/build_slot.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"check or none saves the build slot, CPU and about 1 GB of memory per rustc a lane would spend, and leaves tests and lints to CI; a lane cannot confirm its own change passes them before pushing. The shim is a cooperative control: a lane that runs rustc or ~/.cargo/bin/cargo directly bypasses it."` |
