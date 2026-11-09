@@ -3328,6 +3328,8 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             ),
         )?;
         let git = provenant_os::git::git_executable().ok_or("git")?;
+        let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+        assert_eq!(code(&out), 0, "{out:?}");
         let tree = rig.project.join(".worktrees/auto-writer");
         let out = rig.execute(
             &git,
