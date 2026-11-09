@@ -6,6 +6,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent.parent
+INVENTORY = ROOT / 'docs/runbooks/ci.md'
 
 
 def inventory(path):
@@ -24,14 +25,14 @@ def inventory(path):
         if line.startswith('|---'):
             continue
         fields = [field.strip() for field in line.strip('|').split('|')]
-        if (len(fields) != 6 or any(not field for field in fields)
+        if (len(fields) != 5 or any(not field for field in fields)
                 or not fields[0].startswith('`') or not fields[0].endswith('`')
                 or fields[1] != 'macOS'):
             raise ValueError(f'malformed native inventory row: {line}')
         rows.append([field.strip('`') for field in fields])
     if not rows:
         raise ValueError('native inventory is empty')
-    identities = [(row[5], row[0]) for row in rows]
+    identities = [(row[4], row[0]) for row in rows]
     if len(set(identities)) != len(identities):
         raise ValueError('duplicate native inventory test')
     return rows
@@ -46,7 +47,7 @@ def check(rows, listing, results):
             reports[path.stem] = list(ET.parse(path).getroot().iter('testcase'))
         except (OSError, ET.ParseError) as error:
             errors.append(f'{path.name}: invalid JUnit report: {error}')
-    for name, platform, lane, variables, tools, binary in rows:
+    for name, platform, lane, variables, binary in rows:
         if not name or name not in suites.get(binary, {}).get('testcases', {}):
             errors.append(f'{name}: absent from macOS nextest list for {binary}')
         try:
@@ -68,7 +69,7 @@ def main():
     if len(sys.argv) != 3:
         sys.exit('usage: check-native-inventory LIST_JSON RESULTS_DIR')
     try:
-        rows = inventory(ROOT / 'docs/runbooks/ci.md')
+        rows = inventory(INVENTORY)
         errors = check(rows, json.loads(Path(sys.argv[1]).read_text()), Path(sys.argv[2]))
     except (OSError, ValueError, KeyError, TypeError) as error:
         sys.exit(f'Cannot check native inventory: {error}')

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Warn on unresolved inline provenant commands, long flags, repo paths and ADRs.
 
-Reference warnings are advisory; explicit evidence and inventory can fail CI.
+Reference warnings are advisory. Deleted commands, research index omissions and
+projection mismatches fail; strict options enforce inventory, Anchor paths,
+diagram metadata and explicit test citations.
 Fenced examples, runtime absolute paths and templates are
 excluded. Commands scope flags to
 their own help; flags are checked only after a provenant command. Lines that
@@ -312,6 +314,94 @@ def check_research_index(root):
     return errors
 
 
+ANCHOR_PATH = re.compile(r"`([^`\s]+)`|(?<![\w./-])([\w-]+\.(?:md|rs|py|toml|json|ya?ml|sh))(?![\w/-])|(?<![\w./-])((?:\.\./|\.github/|docs/|scripts/|skills/|tools/|config/|crates/|src/|tests/)[\w./-]+)")
+
+
+def anchors(root, document):
+    """Each Anchor: path resolves, and at least one names a file, not a directory."""
+    lines = document.read_text().splitlines()
+    index = next((number for number, line in enumerate(lines) if line.startswith("Anchor:")), None)
+    if index is None:
+        return 0  # inventory() reports the missing header.
+    block = [lines[index][len("Anchor:"):]]
+    # A wrapped value continues after a trailing separator or on a line that opens with a reference.
+    while index + len(block) < len(lines) and (
+            re.match(r"[`\[]", lines[index + len(block)]) or block[-1].rstrip().endswith((",", ";"))):
+        block.append(lines[index + len(block)])
+    display = document.relative_to(root)
+    found = []
+    text = " ".join(block)
+    # A link's target is the evidence; its label is only a name for it.
+    references = re.findall(r"\]\(([^)\s#]+)[^)]*\)", text)
+    text = re.sub(r"\[[^\]]*\]\([^)]*\)", " ", text)
+    references += [match[1] or match[2] or match[3] for match in ANCHOR_PATH.finditer(text)]
+    for reference in references:
+        reference = reference.split("#", 1)[0].split("::", 1)[0].rstrip(".,;:")
+        if not reference or "://" in reference or ("/" not in reference and "." not in reference):
+            continue
+        bases = (document.parent, root, root / "tools/front-door")
+        target = next((base / reference for base in bases if (base / reference).exists()), None)
+        if target is None:
+            print(f"{display}:{index + 1}: error: Anchor path `{reference}` does not resolve")
+            return 1
+        found.append(target)
+    if not any(path.is_file() for path in found):
+        print(f"{display}:{index + 1}: error: Anchor names no source file or test")
+        return 1
+    return 0
+
+
+def table_rows(text, heading):
+    """First-column cells and rows of the first table after a Markdown heading."""
+    section = text.split(heading, 1)[1] if heading in text else ""
+    rows = []
+    for line in section.splitlines():
+        if line.startswith("|---"):
+            continue
+        if line.startswith("|"):
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+        elif rows:
+            break
+    return rows[1:]
+
+
+def check_projections(root):
+    """Compare hand-kept runbook tables with the source they project."""
+    errors = []
+    intake = root / "docs/runbooks/event-intake-configuration.md"
+    source = root / "tools/front-door/src/bin/event-intake.rs"
+    if intake.exists() and source.exists():
+        code = source.read_text()
+        documented = {row[0].strip("`"): row for row in table_rows(intake.read_text(), "## Configure")}
+        read = set(re.findall(r'"(PROVENANT_INTAKE_[A-Z_]+)"', code))
+        for name in sorted(read ^ set(documented)):
+            where = "is read by event-intake but not documented" if name in read else "is documented but not read"
+            errors.append(f"{intake.relative_to(root)}: error: {name} {where}")
+        default = re.search(r'"PROVENANT_INTAKE_SWEEP_SECONDS"\)\s*\.unwrap_or_else\(\|_\| "(\d+)"', code)
+        row = documented.get("PROVENANT_INTAKE_SWEEP_SECONDS")
+        if default and row and f"`{default[1]}`" not in row[1]:
+            errors.append(f"{intake.relative_to(root)}: error: sweep default is {default[1]}")
+    inbox = root / "docs/runbooks/human-inbox.md"
+    specs = root / "tools/front-door/crates/records/src/adapters.rs"
+    hooks = root / "tools/front-door/crates/cli/src/hooks.rs"
+    if inbox.exists() and specs.exists() and hooks.exists():
+        rows = table_rows(inbox.read_text(), "## Delivery service")
+        readers = set(re.findall(r'name: "([\w-]+)",(?:(?!name: ").)*?local_offer_reader: true', specs.read_text(), re.S))
+        injected = {name.lower() for name in re.findall(
+            r"DeliveryCapability \{\s*provider: Harness::(\w+),(?:(?!\}\);).)*?live_injection: true", hooks.read_text(), re.S)}
+        documented_readers = {row[0].strip("`") for row in rows if len(row) == 4 and row[2] == "Library API"}
+        documented_injected = {row[0].strip("`") for row in rows if len(row) == 4 and row[3] not in ("Unavailable", "")}
+        if not rows or rows[-1][0] != "Every other adapter":
+            errors.append(f"{inbox.relative_to(root)}: error: delivery table must end with an 'Every other adapter' row")
+        if documented_readers != readers:
+            errors.append(f"{inbox.relative_to(root)}: error: library offer readers are {sorted(readers)}, documented {sorted(documented_readers)}")
+        if documented_injected != injected:
+            errors.append(f"{inbox.relative_to(root)}: error: live injection providers are {sorted(injected)}, documented {sorted(documented_injected)}")
+    for error in errors:
+        print(error)
+    return len(errors)
+
+
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
@@ -444,11 +534,14 @@ def main():
     missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
     citations = sum(check_test_citations(root, document) for document in evidence
                     if document.parent == root / "docs/specs")
+    missing += sum(anchors(root, document) for document in evidence
+                   if document in documents)
+    projection_errors = check_projections(root)
     if not args.inventory_only:
         agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
         for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
             check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
+    return int(bool(command_errors) or bool(projection_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 
 
 if __name__ == "__main__":

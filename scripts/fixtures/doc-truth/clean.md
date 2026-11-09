@@ -1,6 +1,6 @@
 # Clean references
 Owner: documentation maintainers
-Anchor: tools/front-door#main
+Anchor: `tools/front-door/src/main.rs`
 
 Read `AGENTS.md`, `docs/adr/0001-example.md`, `../adr/0001-example.md`
 and `docs/adr/*.md`. Inspect `ADR 0001` and `docs/adr/0001-example.md#decision`.

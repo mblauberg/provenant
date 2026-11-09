@@ -98,9 +98,26 @@ def main():
             result.add(f"{slug}-{count}" if count else slug)
         return result
 
+    def skill_owner(relative):
+        """The skill directory owning a `references/` file, or None."""
+        parts = relative.parts
+        for index in range(len(parts) - 2):
+            if parts[index] in ("skills", "library") and parts[index + 2] == "references":
+                return Path(*parts[:index + 2])
+        return None
+
+    def reference_link(path, number, named):
+        # Nothing outside a skill names a file under its references/;
+        # a licence notice may name the files it covers.
+        owner = skill_owner(named)
+        if owner and owner not in path.parents and not re.match(r"(LICEN[CS]E|NOTICE|THIRD[-_]PARTY)", path.name, re.I):
+            fail(path, f"line {number}: names {named}; link the owning skill's SKILL.md instead")
+
     def markdown(path, text):
         fenced = None
         for number, line in enumerate(text.splitlines(), 1):
+            for named in re.findall(r"(?<![\w/.-])((?:skills|library)/[\w-]+/references/[\w./-]*)", line):
+                reference_link(path, number, Path(named))
             fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
             if fence:
                 marker = fence.group(1)
@@ -122,6 +139,7 @@ def main():
                     warnings.append(f"{path}:{number}: link escapes the repository: {target}")
                     continue
                 dest = destination.relative_to(root)
+                reference_link(path, number, dest)
                 if dest not in paths and not any(dest in p.parents for p in paths):
                     warnings.append(f"{path}:{number}: unresolved local link: {target}")
                 elif anchor and dest in paths and dest.suffix == ".md" and anchor not in anchors(destination.read_text()):
