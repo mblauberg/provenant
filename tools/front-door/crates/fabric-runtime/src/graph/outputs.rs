@@ -200,32 +200,34 @@ pub(super) fn make_outputs_with_upstream(
         .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
         .and_then(|block| block.get("repair_items").cloned())
         .filter(|items| {
-            items.as_array().is_some_and(|items| {
-                items.len() <= MAX_FINDINGS
-                    && items.iter().all(|item| {
-                        let text = |key| {
-                            item.get(key)
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|value| {
-                                    !value.trim().is_empty() && value.len() <= OUTPUT_FIELD_BYTES
-                                })
-                        };
-                        text("id")
-                            && text("reason")
-                            && item
-                                .get("status")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|status| {
-                                    matches!(
-                                        status,
-                                        "fixed"
-                                            | "removed-the-case"
-                                            | "disputed"
-                                            | "design-cannot-hold"
-                                    ) && (status != "design-cannot-hold" || text("alternative"))
-                                })
-                    })
-            })
+            canonical_len(items) <= FINDINGS_BYTES
+                && items.as_array().is_some_and(|items| {
+                    items.len() <= MAX_FINDINGS
+                        && items.iter().all(|item| {
+                            let text = |key| {
+                                item.get(key)
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|value| {
+                                        !value.trim().is_empty()
+                                            && value.len() <= OUTPUT_FIELD_BYTES
+                                    })
+                            };
+                            text("id")
+                                && text("reason")
+                                && item
+                                    .get("status")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|status| {
+                                        matches!(
+                                            status,
+                                            "fixed"
+                                                | "removed-the-case"
+                                                | "disputed"
+                                                | "design-cannot-hold"
+                                        ) && (status != "design-cannot-hold" || text("alternative"))
+                                    })
+                        })
+                })
         });
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);

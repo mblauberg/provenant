@@ -480,6 +480,7 @@ fn node_bound(
             + excerpt
             + REMAINING_BYTES
             + 2 * provenant_records::handoff::HANDOFF_BYTES
+            + FINDINGS_BYTES // bounded repair_items, also retained on failed loops
             + 256
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
