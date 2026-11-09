@@ -23,8 +23,10 @@ min_monthly_allowance_usd = 60
 # implement a hard boundary of ADR 0035 or an irreversible external effect,
 # where a missed defect cannot be reverted or recovered afterwards. Each floor
 # states which. A broad change reaches deep through its integration head, not
-# through a path name. Match paths, not substrings: a word such as "build" or
-# "object" appears in many files that guard nothing.
+# through a path name. Match whole path segments or file stems, never loose
+# substrings: a word such as "build" or "object" appears in many files that
+# guard nothing. Projects add their own boundaries as further floors in their
+# routing configuration; the `provenant_*` floors below are this repository's.
 [review.floors.routine]
 # Documentation and prose carry no executable behaviour.
 paths = ["docs/**", "**/*.md"]
@@ -36,18 +38,53 @@ paths = []
 tier = "substantial"
 lenses = ["correctness-spec"]
 [review.floors.security]
-# ADR 0035 boundary 2: credentials never cross hosts and never reach prompts,
-# receipts or output. A leak cannot be recalled.
+# Credentials and secrets (ADR 0035 boundary 2): they must never cross hosts or
+# reach prompts, receipts or output, and a leak cannot be recalled.
 paths = [
   "**/credentials/**",
+  "**/credentials.*",
+  "**/secrets/**",
+  "**/secrets.*",
   "**/auth/**",
+  "**/auth.*",
+  "**/.env",
+  "**/.env.*",
+]
+tier = "crucial"
+lenses = ["correctness-spec", "security-privacy"]
+[review.floors.external_effects]
+# Workflows that publish, deploy, release or merge without a person: a
+# published release cannot be unpublished and an auto-merge changes the default
+# branch.
+paths = [
+  "**/.github/workflows/release*.y*ml",
+  "**/.github/workflows/publish*.y*ml",
+  "**/.github/workflows/deploy*.y*ml",
+  "**/.github/workflows/*merge*.y*ml",
+]
+tier = "crucial"
+lenses = ["correctness-spec", "reliability"]
+[review.floors.authority]
+# Who must approve a change (ADR 0035 boundary 4, authority gates): editing
+# code ownership changes who can land to the default branch.
+paths = ["**/CODEOWNERS"]
+tier = "crucial"
+lenses = ["correctness-spec", "adversarial"]
+
+# This repository's own boundaries. They name its modules, so they do nothing
+# in another project; there is no repository-tracked project layer to hold them,
+# which is why they ship here.
+[review.floors.provenant_credentials]
+# ADR 0035 boundary 2: host-only GitHub login lookup, secret-pattern scan and
+# output redaction.
+paths = [
   "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
   "tools/front-door/crates/confinement/src/disclosure.rs",
   "tools/front-door/crates/confinement/src/redact.rs",
 ]
 tier = "crucial"
 lenses = ["correctness-spec", "security-privacy"]
-[review.floors.lane_git]
+[review.floors.provenant_lane_git]
 # ADR 0035 boundary 1: a writer lane reaches shared refs only through
 # host-owned delivery. A lane that escapes can rewrite shared history.
 paths = [
@@ -63,7 +100,7 @@ paths = [
 ]
 tier = "crucial"
 lenses = ["correctness-spec", "adversarial"]
-[review.floors.object_integrity]
+[review.floors.provenant_object_integrity]
 # ADR 0035 boundary 3: lane objects are digest-checked and fsck-verified on
 # receipt. A corrupt or substituted object lands in shared history unnoticed.
 paths = [
@@ -73,7 +110,7 @@ paths = [
 ]
 tier = "crucial"
 lenses = ["correctness-spec", "adversarial"]
-[review.floors.authority]
+[review.floors.provenant_authority]
 # ADR 0035 boundary 4: landing, publishing, handoff acceptance and chair
 # switching need held authority. Merging and publishing are external effects.
 paths = [
@@ -91,12 +128,9 @@ paths = [
 ]
 tier = "crucial"
 lenses = ["correctness-spec", "adversarial"]
-[review.floors.external_effects]
-# Irreversible effects outside the repository: a published release cannot be
-# unpublished, and an unreviewed auto-merge changes the default branch.
+[review.floors.provenant_release]
+# Release packaging and upgrade: a published release cannot be unpublished.
 paths = [
-  ".github/workflows/release.yml",
-  ".github/workflows/dependabot-automerge.yml",
   "tools/front-door/src/bin/package-release.rs",
   "tools/front-door/src/upgrade-release.sh",
 ]

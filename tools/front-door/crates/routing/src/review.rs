@@ -1677,28 +1677,43 @@ mod tests {
         };
         for (path, class) in [
             ("src/auth/session.rs", "security"),
+            ("config/secrets.toml", "security"),
+            ("deploy/.env.production", "security"),
+            (".github/workflows/release.yml", "external_effects"),
+            (".github/workflows/publish-docs.yaml", "external_effects"),
+            (
+                ".github/workflows/dependabot-automerge.yml",
+                "external_effects",
+            ),
+            (".github/CODEOWNERS", "authority"),
             (
                 "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
-                "security",
+                "provenant_credentials",
             ),
             (
                 "tools/front-door/crates/confinement/src/worktrees/refs.rs",
-                "lane_git",
+                "provenant_lane_git",
             ),
             (
                 "tools/front-door/crates/confinement/src/permissions/grants.rs",
-                "lane_git",
+                "provenant_lane_git",
             ),
             (
                 "tools/front-door/crates/run/src/objects/view.rs",
-                "object_integrity",
+                "provenant_object_integrity",
             ),
-            ("tools/front-door/src/pr/landing/publish.rs", "authority"),
+            (
+                "tools/front-door/src/pr/landing/publish.rs",
+                "provenant_authority",
+            ),
             (
                 "tools/front-door/crates/fabric-runtime/src/handoff/session.rs",
-                "authority",
+                "provenant_authority",
             ),
-            (".github/workflows/release.yml", "external_effects"),
+            (
+                "tools/front-door/src/bin/package-release.rs",
+                "provenant_release",
+            ),
             ("src/config/parser.rs", "contract"),
             ("src/cli/run.rs", "contract"),
         ] {
@@ -1715,6 +1730,7 @@ mod tests {
             "src/object_receive.rs",
             "src/build_graph.rs",
             "src/authority_notes.rs",
+            "src/author_list.rs",
             "src/chair_view.rs",
             "src/git/refs.rs",
             "src/security_banner.rs",
