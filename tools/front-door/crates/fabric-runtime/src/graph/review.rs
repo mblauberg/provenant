@@ -216,7 +216,7 @@ pub(super) fn correct_verdict(
 pub(super) fn composite_review(
     spec: &CompositeSpec,
     plan: &PlannedGraph,
-    positions: &BTreeMap<String, usize>,
+    positions: &std::collections::BTreeMap<String, usize>,
 ) -> bool {
     spec.exports.iter().any(|export| {
         let node = &plan.nodes[positions[&export.node]];
