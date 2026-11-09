@@ -1965,7 +1965,7 @@ mod tests {
                 "--wait",
                 "provenant status",
             ),
-            (vec!["land"], "numbers", "provenant land"),
+            (vec!["land", "--head"], "--head", "provenant land"),
             (vec!["output"], "attempt", "provenant output"),
             (vec!["stop"], "id", "provenant stop ID"),
             (vec!["retry"], "id", "provenant retry ID"),
@@ -1993,7 +1993,18 @@ mod tests {
                 repair.starts_with(expected_repair),
                 "{words:?}: expected repair starting with '{expected_repair}', got '{repair}'"
             );
-            let args = shlex::split(repair).expect("repair must be shell-parseable");
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("set -- {repair}; printf '%s\\0' \"$@\""))
+                .output()
+                .expect("shell must run");
+            assert!(output.status.success(), "invalid shell syntax: {repair}");
+            let args: Vec<String> = output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|word| !word.is_empty())
+                .map(|word| String::from_utf8(word.to_vec()).unwrap())
+                .collect();
             assert_eq!(args.first().map(String::as_str), Some("provenant"));
             assert!(
                 matches!(

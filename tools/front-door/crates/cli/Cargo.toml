@@ -36,7 +36,6 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-shlex = "2.0.1"
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 provenant-providers = { workspace = true, features = ["fixture"] }
 provenant-records = { workspace = true, features = ["registry-fixture"] }

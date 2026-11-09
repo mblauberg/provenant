@@ -985,6 +985,7 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
         .as_deref()
         .is_none_or(|value| field(value, 128))
         && (route.model.is_some() || route.alias.is_some() || route.name.is_some())
+        && !(route.name.is_some() && (route.model.is_some() || route.alias.is_some()))
         && route.name.as_deref().is_none_or(|value| field(value, 128))
         && (!matches!(route.selector(), GraphRouteSelector::Adapter(_))
             || (route.effort.is_none() && route.account.is_none()))
