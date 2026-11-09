@@ -417,7 +417,7 @@ fixed PATH plus the install bin directory and resolved provider, Git and GitHub
 CLI locations outside project worktrees. `provenant tick` can also run directly.
 
 On Linux, a default-state install writes
-`~/.config/systemd/user/provenant-tick.service` (a one-shot running
+`systemd/user/provenant-tick.service` under an absolute `XDG_CONFIG_HOME`, else `~/.config`, (a one-shot running
 `provenant tick` with the same PATH, state directory and `<state>/tick/` logs)
 and `provenant-tick.timer` (first tick on activation, then every 60 seconds
 after the previous one), then runs `systemctl --user enable --now` on the

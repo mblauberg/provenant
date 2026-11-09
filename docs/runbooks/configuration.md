@@ -854,7 +854,7 @@ reservations remain protected.
 
 Writer dispatch and resume check available space across the worktree, state
 and lane-cache volumes. Below the floor, admission makes one collection
-attempt, capped at five seconds, and samples all three volumes again. The
+attempt (skipped when `gc.schedule = false`), capped at five seconds, and samples all three volumes again. The
 pressure collection skips worktree deletion and network fetches and shares
 GC's collection lock. If space remains low, the refusal names the limiting
 path, available bytes, floor and bytes reported reclaimed. Interrupted

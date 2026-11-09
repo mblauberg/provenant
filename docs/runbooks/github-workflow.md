@@ -40,8 +40,7 @@ repository; host configurations are independent.
 The sweep gathers hybrid-search candidates with `is:issue` and then judges
 them. Proposal mode permits only marked duplicate comments on the newer issue;
 it never closes issues or applies parent links. Parent suggestions and thin
-bodies appear in run output for the chair. See [steward and
-closing](../../skills/tracker/references/steward.md#scheduled-proposal-sweep)
+bodies appear in run output for the chair. See the [tracker skill](../../skills/tracker/SKILL.md) steward guidance
 for inspection, recovery and disabling steps.
 
 ## Statuses
