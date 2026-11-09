@@ -31,7 +31,12 @@ classifications when judgement is uncertain. Native Codex metadata supplies its
 session identity. Claude uses the recorded session/message identities; lanes use
 the provider transcript or Codex exec JSON events and the attempt identity.
 Duplicate native messages count once. Tool-step usage contributes to the reply
-ending that turn; token counters retain unknown components.
+ending that turn; Claude lane result totals supersede intermediate counters.
+Token counters retain unknown components. Source totals
+(`input_total` and `cache_creation_total`) remain available when missing cache
+splits prevent disjoint token categories from being measured. Their aggregate
+`observed_total` counts only measured replies; do not add overlapping source
+totals to the disjoint categories.
 
 Sources can include `experiment`, `installed_release`, `instruction_version`,
 `context`, and timestamped `exposures`, each with a `timestamp` and changed fields.
@@ -94,7 +99,8 @@ Each pair compares the second level with the first, sorted by its source value.
 The estimator is a session-balanced linear probability comparison: each
 session's turns together have weight one. It adjusts for project, calendar day,
 work mix, context and compaction, plus other observed exposure dimensions.
-Numeric context is linear; other controls are categorical. Missing controls
+Numeric context stays linear when some measurements are missing, with a
+separate missingness indicator. Other controls are categorical. Missing controls
 form explicit unknown levels and are counted. This does not adjust for
 unrecorded causes. Tight daily controls can leave historical comparisons
 unestimable; widen periods only with a stated sensitivity analysis.

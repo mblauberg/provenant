@@ -34,9 +34,11 @@ def _fit(rows, group, metric, adjust, levels):
     columns = [[1.0] * len(rows)]
     for field in adjust:
         values = [r.get(field) for r in rows]
-        if field == 'context' and all(isinstance(v, (int, float)) for v in values):
-            scale = max(1, max(abs(v) for v in values))
-            columns.append([v / scale for v in values])
+        if field == 'context' and all(v is None or isinstance(v, (int, float)) for v in values):
+            scale = max([1] + [abs(v) for v in values if v is not None])
+            columns.append([v / scale if v is not None else 0 for v in values])
+            if any(v is None for v in values):
+                columns.append([float(v is None) for v in values])
         else:
             for level in sorted(set(values), key=str)[1:]:
                 columns.append([float(v == level) for v in values])
@@ -149,7 +151,8 @@ def report(rows, labels=None, iterations=499, seed=7):
         'ci_measured': sum(o['signals'].get('ci_failures') is not None for o in outcomes.values()),
     }
     usages = [r.get('usage') for r in rows]
-    for token in ('uncached_input', 'cache_read', 'cache_write', 'cache_write_1h', 'output', 'reasoning'):
+    for token in ('input_total', 'uncached_input', 'cache_read', 'cache_creation_total',
+                  'cache_write', 'cache_write_1h', 'output', 'reasoning'):
         values = [u[token] for u in usages if u is not None and u.get(token) is not None]
         output['usage'][token] = {'observed_total': sum(values), 'measured_replies': len(values)}
     for group in GROUPS:

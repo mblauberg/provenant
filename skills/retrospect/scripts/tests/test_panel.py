@@ -29,9 +29,9 @@ class PanelAcceptance(unittest.TestCase):
             for field in ("user", "reply", "next_user"):
                 self.assertEqual(item[field], original[field])
             self.assertNotIn("private-row", item["id"])
-        serialized = json.dumps(items)
+        serialised = json.dumps(items)
         for secret in ("EXPOSURE", "RELEASE", "INSTRUCTIONS", "PERIOD", "PROJECT", "ERA", "session-"):
-            self.assertNotIn(secret, serialized)
+            self.assertNotIn(secret, serialised)
         self.assertEqual(panel.blind_items(rows, seed=5), (items, key))
 
     def test_label_validation_requires_one_valid_label_per_blind_item(self):

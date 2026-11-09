@@ -34,6 +34,29 @@ class ComparisonAcceptance(unittest.TestCase):
         self.assertLess(result["confidence_interval"][0], .35)
         self.assertGreater(result["confidence_interval"][1], .35)
 
+    def test_one_unknown_context_keeps_numeric_adjustment_estimable(self):
+        rows = [dict(row(f"s{i}", "B" if i % 2 else "A",
+                         .2 + .3 * (i % 2) + .002 * (i + 1)), context=i + 1)
+                for i in range(24)]
+        rows[7]["context"] = None
+        result = self.compare(rows)
+        self.assertEqual(result["status"], "identifiable")
+        self.assertAlmostEqual(result["adjusted_difference"], .3, places=8)
+        self.assertEqual(result["unknown_adjustment"], 1)
+        self.assertEqual(result["loso"]["non_identifiable"], 0)
+
+    def test_report_retains_observed_source_totals_with_unknown_components(self):
+        rows = [row("s0", "A", 0), row("s1", "B", 0)]
+        rows[0]["usage"] = {"input_total": 10, "cache_creation_total": 4,
+                            "cache_read": None, "cache_write": None}
+        rows[1]["usage"] = {"input_total": None, "cache_creation_total": 8,
+                            "cache_read": None, "cache_write": None}
+        usage = analysis.report(rows)["usage"]
+        self.assertEqual(usage["input_total"], {"observed_total": 10, "measured_replies": 1})
+        self.assertEqual(usage["cache_creation_total"], {"observed_total": 12, "measured_replies": 2})
+        self.assertEqual(usage["cache_read"]["measured_replies"], 0)
+        self.assertEqual(usage["cache_write"]["measured_replies"], 0)
+
     def test_project_adjustment_removes_a_raw_difference(self):
         rows = []
         for group in ("A", "B"):

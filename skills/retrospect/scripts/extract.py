@@ -5,7 +5,8 @@ import re
 from pathlib import Path
 
 EXPOSURES = ('experiment', 'installed_release', 'instruction_version', 'work_mix', 'context')
-USAGE = ('uncached_input', 'cache_read', 'cache_write', 'cache_write_1h', 'output', 'reasoning')
+USAGE = ('uncached_input', 'cache_read', 'cache_write', 'cache_write_1h', 'output', 'reasoning',
+         'input_total', 'cache_creation_total')
 
 
 def _hash(value):
@@ -20,23 +21,29 @@ def _text(content):
 
 
 def _usage(raw, claude=False):
+    # A missing generation counter is unknown, including when other generations
+    # in the same reply recorded that component.
     if raw is None:
-        return None
+        return dict.fromkeys(USAGE)
     if claude:
         split = raw.get('cache_creation', {})
         hour = split.get('ephemeral_1h_input_tokens')
         creation = raw.get('cache_creation_input_tokens')
-        if hour is not None:
-            creation = max(creation or 0, hour)
-        return dict(zip(USAGE, (raw.get('input_tokens'), raw.get('cache_read_input_tokens'),
-                    creation - (hour or 0) if creation is not None else None,
-                    hour, raw.get('output_tokens'), None)))
+        five = split.get('ephemeral_5m_input_tokens')
+        if five is None and creation is not None and hour is not None:
+            five = creation - hour
+        inputs = (raw.get('input_tokens'), raw.get('cache_read_input_tokens'), creation)
+        total = sum(inputs) if all(v is not None for v in inputs) else None
+        return dict(zip(USAGE, (inputs[0], inputs[1], five, hour,
+                    raw.get('output_tokens'), None, total, creation)))
     cached = raw.get('cached_input_tokens')
     written = raw.get('cache_write_input_tokens')
     total = raw.get('input_tokens')
-    return dict(zip(USAGE, (max(0, total - (cached or 0) - (written or 0))
-                if total is not None else None, cached, written, None,
-                raw.get('output_tokens'), raw.get('reasoning_output_tokens'))))
+    # Codex input_tokens includes cache reads. A missing cache counter does not
+    # establish that the whole input was uncached.
+    uncached = total - cached - (written or 0) if total is not None and cached is not None else None
+    return dict(zip(USAGE, (uncached, cached, written, None,
+                raw.get('output_tokens'), raw.get('reasoning_output_tokens'), total, None)))
 
 
 def _sum_usage(a, b):
@@ -44,8 +51,8 @@ def _sum_usage(a, b):
         return b.copy() if b else None
     if b is None:
         return a
-    return {k: None if a.get(k) is None and b.get(k) is None
-            else (a.get(k) or 0) + (b.get(k) or 0) for k in USAGE}
+    return {k: a[k] + b[k] if a.get(k) is not None and b.get(k) is not None
+            else None for k in USAGE}
 
 
 def _merge_raw(a, b):
@@ -99,7 +106,7 @@ def _source(source, releases):
     rows = []
     current = None
     pending_usage = None
-    previous_total = {}
+    previous_total = None
     seen_messages = {}
     seen_users = set()
     era = 0
@@ -131,7 +138,8 @@ def _source(source, releases):
     def finish():
         nonlocal current, pending_usage
         if current is not None:
-            current['usage'] = _sum_usage(current['usage'], pending_usage)
+            usage = _sum_usage(current['usage'], pending_usage)
+            current['usage'] = usage if usage and any(v is not None for v in usage.values()) else None
             rows.append(current)
             current = None
             pending_usage = None
@@ -191,8 +199,6 @@ def _source(source, releases):
             user = text
             continue
         if kind == 'assistant':
-            if current is not None:
-                finish()
             raw = message.get('usage')
             if raw and all(k in raw for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')):
                 measured_context = sum(raw[k] for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
@@ -224,10 +230,24 @@ def _source(source, releases):
                     current['context'] = last['input_tokens']
             total = info.get('total_token_usage')
             if total is not None:
-                delta = {k: v - previous_total.get(k, 0) for k, v in total.items() if isinstance(v, (int, float))}
+                delta = {k: (v if previous_total is None else
+                             v - previous_total[k] if k in previous_total else None)
+                         for k, v in total.items() if isinstance(v, (int, float))}
                 pending_usage = _sum_usage(pending_usage, _usage(delta))
                 previous_total = total
             continue
+        elif kind == 'result' and provider == 'claude':
+            # Claude exec's result usage covers the whole turn and supersedes
+            # assistant-event counters, which may be incomplete.
+            if event.get('usage') is not None:
+                pending_usage = _usage(event['usage'], True)
+            if current is not None:
+                if event.get('result'):
+                    current['reply'] = event['result']
+                finish()
+                continue
+            text = event.get('result', '')
+            identity = event.get('uuid') or f'result:{index}'
         elif kind == 'turn.completed':
             pending_usage = _sum_usage(pending_usage, _usage(event.get('usage')))
             finish()
@@ -239,9 +259,8 @@ def _source(source, releases):
         # Codex emits the same final answer as event_msg and response_item.
         if current is not None and current['reply'] == text:
             continue
-        # Keep the final answer of a provider turn (exec may stream commentary first).
-        if current is not None and kind == 'assistant':
-            finish()
+        # Keep the last text of a human/provider turn; earlier commentary is
+        # not a separate ending. Usage accumulates until that turn finishes.
         captured_hash = _hash(captures) if captures else None
         exposure_key = tuple(state[k] for k in EXPOSURES[:3]) + (captured_hash,)
         if previous_exposure is not None and exposure_key != previous_exposure:
@@ -258,6 +277,8 @@ def _source(source, releases):
                        sample=source.get('sample'), graph=source.get('graph'))
         if measured_context is not None:
             current['context'] = measured_context
+        if kind == 'result':
+            finish()
     finish()
     return rows
 
