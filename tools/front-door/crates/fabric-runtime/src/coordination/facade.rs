@@ -1270,6 +1270,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
             PeerError::Unknown { operation_id } => Self::LaunchUnknown {
                 operation_id: operation_id.clone(),
             },
+            PeerError::Deadline => Self::Timeout,
             PeerError::Cancelled => Self::Cancelled,
             PeerError::Frame => Self::StateCorrupt,
             PeerError::Refused { error } => error.clone(),
