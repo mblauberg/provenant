@@ -1188,10 +1188,9 @@ impl Factory {
                 .ok_or(FacadeError::InvalidInput { detail: None })?;
             let head =
                 provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
-            let facts = provenant_confinement::worktrees::RepoFacts::default();
-            let base = self
-                .resolve_review_base_for_subject(&self.cwd, base, &head, &facts, cancel)?
-                .to_string();
+            let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
+            let base = provenant_run::review_merge_base_between(&git, &self.cwd, &head, &base)
+                .map_err(run_error)?;
             if base == head {
                 return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
             }
@@ -4048,17 +4047,6 @@ mod tests {
             type Error = std::convert::Infallible;
             fn actor(&self) -> String {
                 "template-review-fixture".into()
-            }
-            fn resolve_review_merge_base(
-                &mut self,
-                reference: &str,
-                subject: &str,
-                _: Option<&str>,
-            ) -> std::result::Result<Option<String>, Self::Error> {
-                // This fixture's writer starts at source and produces commit.
-                assert_eq!(reference, self.source);
-                assert_eq!(subject, self.commit);
-                Ok(Some(self.source.clone()))
             }
             fn bind_writer_worktree(
                 &mut self,

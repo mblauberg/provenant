@@ -970,11 +970,6 @@ pub(crate) fn peer_submit_graph(
           "route":route,"attempt":attempt,"context":origin,"require_skill_location":task.require_skill_location,
           "settlement_retries":retry}],
     })).map_err(|_| FacadeError::StateCorrupt)?;
-    // A peer with a pinned subject is a review regardless of route spelling.
-    // Retain that meaning for the runtime's missing/empty-range guards.
-    if task.head.is_some() {
-        document.nodes[0].role = Some("review.peer".into());
-    }
     document.review_base = task.base.clone();
     document.nodes[0].source =
         task.head.as_ref().map(
@@ -985,13 +980,7 @@ pub(crate) fn peer_submit_graph(
     let review_base = task
         .base
         .as_deref()
-        .map(|base| match task.head.as_deref() {
-            Some(subject) => {
-                factory.resolve_review_base_for_subject(&factory.cwd, base, subject, &facts, cancel)
-            }
-            // Without a subject this is a creation input, not a review range.
-            None => factory.resolve_base(&factory.cwd, base, &facts, cancel),
-        })
+        .map(|base| factory.resolve_base(&factory.cwd, base, &facts, cancel))
         .transpose()?;
     if let Some(network) = network {
         document.extra.insert(

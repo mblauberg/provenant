@@ -1547,9 +1547,8 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         } else if progress.land.is_some() {
             return Err(bad("land record requires a land node"));
         }
-        let requests_review_base = node.access == AccessMode::ReadOnly
-            && (node.extra.contains_key("review_base")
-                || (node.source.is_some() && document.review_base.is_some()));
+        let requests_review_base =
+            node.access == AccessMode::ReadOnly && node.extra.contains_key("review_base");
         if progress.review_base_pending
             && (!requests_review_base
                 || progress.review_base.is_some()

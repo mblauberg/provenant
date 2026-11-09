@@ -777,10 +777,6 @@ impl Factory {
             } else {
                 None
             };
-            // Pin the named ref as graph input, not as a review range. Subjects
-            // produced by upstream nodes do not exist yet. Runtime binds each
-            // node's merge base after its source commit is known and journals
-            // that result; replay never re-resolves the moving ref.
             let review_base = if existing {
                 bound_execution
                     .as_ref()

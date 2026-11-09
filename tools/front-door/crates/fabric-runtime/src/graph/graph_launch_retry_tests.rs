@@ -289,10 +289,10 @@ fn review_base_save_failure_prevents_attempt_creation() {
         Err(GraphError::Journal(_))
     ));
     assert!(owner.calls.is_empty());
-    let saved = journal.0.as_ref().expect("unlaunched checkpoint is retained");
-    assert!(saved.nodes[0].attempts.is_empty());
-    assert!(saved.nodes[0].review_base.is_none());
-    assert!(saved.nodes[0].review_base_pending);
+    assert!(
+        journal.0.is_none(),
+        "failed admission must not save a partial graph"
+    );
 }
 
 #[test]

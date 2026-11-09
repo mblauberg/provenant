@@ -549,18 +549,6 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
 }
 
 #[test]
-fn missing_review_base_stops_before_lens_launch() {
-    let mut review = node("review", route("review"));
-    review.role = Some("lens.correctness-spec".into());
-    review.source = Some(SourceBinding::Commit { commit: "1".repeat(40) });
-    let mut owner = FakeOwner::default();
-    let run = advance(&graph(vec![review]), &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert!(owner.calls.is_empty());
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("review_base_unresolved"));
-}
-
-#[test]
 fn empty_review_range_stops_before_lens_launch() {
     let head = "1".repeat(40);
     let mut review = node("review", route("review"));

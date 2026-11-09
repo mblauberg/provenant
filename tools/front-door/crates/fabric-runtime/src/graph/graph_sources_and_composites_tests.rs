@@ -129,11 +129,23 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
         .find(|node| node.id == "reader")
         .unwrap();
     assert!(reader.attempts.is_empty());
-    assert_eq!(reader.review_base, None);
-    assert!(reader.review_base_pending);
-    assert_eq!(owner.review_base_resolutions, 0);
-    let pinned = "4".repeat(40);
-    owner.resolved_review_base = Some(pinned.clone());
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    let mut broken = admitted.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "reader")
+        .unwrap()
+        .review_base = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    owner.resolved_review_base = Some("4".repeat(40));
     let pending = advance(&document, &mut owner, &mut journal).unwrap();
     let reader = pending
         .checkpoint
@@ -142,7 +154,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
         .find(|node| node.id == "reader")
         .unwrap();
     assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
-    assert_eq!(reader.review_base.as_deref(), Some(pinned.as_str()));
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
     assert_eq!(
         reader.attempts[0]
             .input_manifest
@@ -158,22 +170,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
         owner.review_base_worktrees,
         vec![Some("/fixture/lane".into())]
     );
-    let mut broken = pending.checkpoint.clone();
-    broken
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "reader")
-        .unwrap()
-        .review_base = None;
-    assert!(matches!(
-        advance(
-            &document,
-            &mut FakeOwner::default(),
-            &mut MemoryJournal(Some(broken))
-        ),
-        Err(GraphError::BadCheckpoint { .. })
-    ));
-    owner.resolved_review_base = Some("5".repeat(40));
+    owner.resolved_review_base = Some("4".repeat(40));
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
     let reader = replay
         .checkpoint
@@ -182,7 +179,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
         .find(|node| node.id == "reader")
         .unwrap();
     assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
-    assert_eq!(reader.review_base.as_deref(), Some(pinned.as_str()));
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
     assert_eq!(owner.review_base_resolutions, 1);
     let reader_locations: Vec<_> = owner
         .calls
