@@ -988,7 +988,7 @@ mod tests {
                 bytes
             );
         }
-        // Requeueing identical intent after exhaustion starts a fresh budget.
+        // Requeuing identical intent after exhaustion starts a fresh budget.
         publish(&requests, request)?;
         let fresh = Completion::decode(&requests.read_bounded(name.as_ref(), 4096)?)?;
         assert_eq!(fresh.request, request);
