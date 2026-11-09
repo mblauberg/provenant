@@ -151,7 +151,11 @@ pub(super) fn continue_stopped(
 
 /// A restart that patch admission, planning or the owner refuses still settles:
 /// the stop is saved with a chair pause naming the reason, never alone.
-pub(super) fn refused(plan: &PlannedGraph, checkpoint: &GraphCheckpoint, reason: &str) -> GraphCheckpoint {
+pub(super) fn refused(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    reason: &str,
+) -> GraphCheckpoint {
     let mut next = checkpoint.clone();
     if let Some((index, node)) = plan
         .nodes

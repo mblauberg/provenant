@@ -1014,8 +1014,8 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
     let Some(next) = no_work::continue_stopped(document, plan, checkpoint, limits) else {
         return Ok(None);
     };
-    let planned = plans::expand(document, &next.extensions, &next.expansions, limits)
-        .and_then(|expanded| {
+    let planned =
+        plans::expand(document, &next.extensions, &next.expansions, limits).and_then(|expanded| {
             let (plan, positions) =
                 validate_flat_plan(&expanded, limits).map_err(|error| error.to_string())?;
             owner
