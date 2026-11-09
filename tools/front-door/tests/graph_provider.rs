@@ -3357,7 +3357,18 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             }),
             "30s",
         )?;
-        assert_eq!(lane["state"], "succeeded", "{lane}");
+        let attempt_dir = rig
+            .state
+            .join("runs")
+            .join(lane["run_id"].as_str().ok_or("run")?)
+            .join("attempts")
+            .join(lane["attempt_id"].as_str().ok_or("attempt")?);
+        assert_eq!(
+            lane["state"],
+            "succeeded",
+            "{lane}\nprovider stderr: {}",
+            fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
+        );
         assert_eq!(
             fs::read_to_string(tree.join("auto-finished.txt"))?,
             "original brief completed"
