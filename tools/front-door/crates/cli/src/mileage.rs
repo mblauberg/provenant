@@ -517,6 +517,8 @@ mod tests {
             agent_id: None,
             native_config: None,
             native_attempt: None,
+            reasoning_tokens: None,
+            reply: None,
         }
     }
 
