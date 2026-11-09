@@ -827,7 +827,9 @@ impl Template {
         }
         let mut effective = Map::new();
         for (key, parameter) in &self.parameters {
-            let value = supplied.get(key).or(parameter.default.as_ref()).unwrap();
+            let Some(value) = supplied.get(key).or(parameter.default.as_ref()) else {
+                continue;
+            };
             if check_value(parameter, value).is_err() {
                 return Err(refuse(ParameterFault::Shape {
                     key: key.clone(),
