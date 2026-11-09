@@ -187,6 +187,21 @@ fn codex_spent_window_without_spendable_credits_is_exhausted_not_credit_only() {
 }
 
 #[test]
+fn codex_plan_account_without_credits_and_with_headroom_is_available_without_note() {
+    let fixture = include_str!("fixtures/codex-app-server.json");
+    let mut envelope: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    envelope["payload"]["result"]["rateLimits"]["credits"] =
+        serde_json::json!({"hasCredits": false, "unlimited": false, "balance": "0"});
+    envelope["payload"]["result"]["rateLimits"]["primary"]["usedPercent"] = serde_json::json!(10);
+    envelope["payload"]["result"]["rateLimits"]["secondary"]["usedPercent"] = serde_json::json!(10);
+    envelope["payload"]["result"]["rateLimitsByLimitId"]["gpt-5-codex"]["rate_limit"]["primary_window"]
+        ["used_percent"] = serde_json::json!(10);
+    let snapshot = decode_json(&effect_plan("codex"), &envelope.to_string());
+    assert_eq!(snapshot.status, QuotaStatus::Available);
+    assert_eq!(snapshot.details.and_then(|details| details.note), None);
+}
+
+#[test]
 fn agy_keeps_independent_model_pools_and_reports_available_if_any_pool_has_headroom() {
     let snapshot = decode_fixture("agy", include_str!("fixtures/agy.json"));
 

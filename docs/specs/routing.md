@@ -404,9 +404,9 @@ resolution still prevents it. Invalid evidence excludes only the account it
 belongs to (`invalid_account_evidence`) and fails admission; absent evidence is
 not proof of readiness. Cooldown stays a selection preference, never a block.
 A provider's plan usage limit is the one refusal that spans models. When a lane
-ends on it (Codex's `You've hit your usage limit.`, either as the stream error,
-the failed turn or `codex_error_info: usage_limit_exceeded`), the host records a
-refusal on that account whose pool is the account route `*`, with the reset the
+ends on it (Codex's `You've hit your usage limit.`, either as the stream error
+or the failed turn; `codex_error_info: usage_limit_exceeded` without that phrase
+stays model-scoped), the host records a refusal on that account whose pool is the account route `*`, with the reset the
 provider names (`try again at …` in local time, or `try again in …`) or the
 one-hour wait when it names none. `account_block` holds every model on that
 account until the reset, or until a newer reading shows headroom in every window

@@ -528,7 +528,8 @@ fn snapshot_status(
         let provider_credits = provenant_records::AdapterSpec::get(adapter)
             .is_some_and(|spec| spec.quota_credits)
             && details.is_some_and(|details| positive_balance(details.credit_balance.as_deref()));
-        let credit_blocked = adapter == "codex" && codex_credit_blocked(payload);
+        let credit_blocked = adapter == "codex"
+            && (codex_credit_blocked(payload) || codex_credits_unspendable(payload));
         if provider_credits && !credit_blocked {
             QuotaStatus::CreditOnly
         } else {
@@ -559,12 +560,26 @@ fn codex_credit_blocked(payload: &Value) -> bool {
         == Some(&Value::Bool(true))
         || credits.and_then(|credits| credits.get("overage_limit_reached"))
             == Some(&Value::Bool(true))
-        // A balance the provider says it will not spend is not spendable.
-        || credits.and_then(|credits| {
+}
+
+/// Credits the provider says it will not spend are not spendable. Only the
+/// status choice asks: an account without purchased credits is not blocked.
+fn codex_credits_unspendable(payload: &Value) -> bool {
+    let root = payload
+        .get("result")
+        .filter(|result| result.is_object())
+        .unwrap_or(payload);
+    let main = nonempty_object(root.get("rateLimits"))
+        .or_else(|| nonempty_object(root.get("rate_limit")))
+        .unwrap_or(&Value::Null);
+    root.get("credits")
+        .or_else(|| main.get("credits"))
+        .and_then(|credits| {
             credits
                 .get("hasCredits")
                 .or_else(|| credits.get("has_credits"))
-        }) == Some(&Value::Bool(false))
+        })
+        == Some(&Value::Bool(false))
 }
 
 fn details_mut(details: &mut Option<QuotaDetails>) -> &mut QuotaDetails {

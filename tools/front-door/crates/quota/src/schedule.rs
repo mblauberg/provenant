@@ -469,7 +469,7 @@ pub fn report(
                         .unwrap_or(0)
                 })
         });
-        let refusals: Vec<_> = record
+        let live: Vec<_> = record
             .refusals
             .iter()
             .filter(|refusal| {
@@ -478,6 +478,9 @@ pub fn report(
                         .expires_unix_seconds()
                         .is_ok_and(|expires| expires > now)
             })
+            .collect();
+        let refusals: Vec<_> = live
+            .iter()
             .map(|refusal| crate::RefusalRow {
                 model: refusal.model.clone(),
                 pool: refusal.pool.clone(),
@@ -498,10 +501,22 @@ pub fn report(
         let free_refused = refusals.iter().any(|refusal| in_free(&refusal));
         // A free-pool refusal or a spent plan usage limit makes the whole
         // account read exhausted until the latest named reset.
-        let account_refusals: Vec<_> = refusals
-            .iter()
-            .filter(|refusal| in_free(refusal) || refusal.pool.as_deref() == Some(ACCOUNT_ROUTE))
-            .collect();
+        // A newer reading that clears the hold clears it here too: the one
+        // rule is `Admission::refusal_holds`.
+        let admission = crate::Admission {
+            policies,
+            now_unix_seconds: now,
+            records,
+            pools: &[],
+        };
+        let mut account_refusals = Vec::new();
+        for (refusal, row) in live.iter().zip(&refusals) {
+            if (in_free(&row) || row.pool.as_deref() == Some(ACCOUNT_ROUTE))
+                && admission.refusal_holds(&record.account.adapter, Some(record), refusal)?
+            {
+                account_refusals.push(row);
+            }
+        }
         let account_refused = !account_refusals.is_empty();
         let status = match &record.snapshot {
             _ if record.last_error == Some(ProbeFailure::IsolatedKeychainUnavailable) => {
