@@ -1483,6 +1483,11 @@ fn stats_dispatch(command: &provenant_cli::Stats) -> StatsDispatch {
 #[allow(clippy::disallowed_methods)]
 pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     let started = std::time::Instant::now();
+    // Lets attempt context match an installed release without hashing the
+    // executable on the launch path; an unparsable identity stays unknown.
+    if let Ok(identity) = identity() {
+        provenant_run::set_build_identity(identity);
+    }
     let (verb, globals) = match &parsed {
         ParseOutcome::Invocation(inv) => (inv.leaf.as_str(), &inv.globals),
         ParseOutcome::Invalid { globals, .. } => ("parse", globals),

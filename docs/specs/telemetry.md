@@ -174,8 +174,11 @@ the host-wide reply breakdown because it cannot be attributed to that run.
 
 At attempt creation, the host stores observations in the existing trace,
 with source, effective time and scope. It captures the compiled run-package
-version, SHA-256 and size of observed executable bytes, and the release source
-digest when an adjacent release manifest matches that executable's bytes.
+version. When an adjacent installed release manifest matches the binary's
+compiled source, asset, target and toolchain identity and the executable's
+size, it also records that manifest's install-verified executable SHA-256 and
+size and its release source digest. Attempt creation is on the launch path, so
+it never reads or hashes the executable; development builds leave both unknown.
 The instruction observation hashes only the observed source-root `AGENTS.md`,
 not the full effective session instructions. Cloud execution leaves that local
 file observation absent. Harness version, harness experiment, system prompt

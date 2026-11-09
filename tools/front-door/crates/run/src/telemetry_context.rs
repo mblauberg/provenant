@@ -1,7 +1,7 @@
 //! Best-effort local capture. Never substitute the current host for history.
 use provenant_core::WallTime;
 use provenant_records::{
-    ExtraFields,
+    ExtraFields, VersionInfo,
     run::TaskRequest,
     telemetry_context::{HashedBytes, Observation, TelemetryContext},
 };
@@ -32,6 +32,61 @@ fn hash(bytes: &[u8]) -> HashedBytes {
         sha256: provenant_core::hex(&Sha256::digest(bytes)),
         bytes: bytes.len() as u64,
     }
+}
+
+/// Compiled identity of the running binary, supplied by its entry point.
+/// Without it, executable and release observations stay unknown.
+static BUILD_IDENTITY: std::sync::OnceLock<VersionInfo> = std::sync::OnceLock::new();
+
+pub fn set_build_identity(identity: VersionInfo) {
+    let _ = BUILD_IDENTITY.set(identity);
+}
+
+struct InstalledRelease {
+    executable: HashedBytes,
+    source_digest: String,
+}
+
+static INSTALLED_RELEASE: std::sync::OnceLock<Option<InstalledRelease>> =
+    std::sync::OnceLock::new();
+
+/// Run creation sits on the launch path, so it never reads or hashes the
+/// executable: unoptimised hashing of a large binary takes seconds. The
+/// installer verified every manifest file's size and SHA-256. A manifest
+/// whose source, asset, target and toolchain match this binary's compiled
+/// identity, and whose executable size matches, describes these bytes, not an
+/// upgraded selector. Development builds have no such manifest and stay unknown.
+fn installed_release() -> Option<InstalledRelease> {
+    let build = BUILD_IDENTITY.get()?;
+    let path = std::env::current_exe().ok()?;
+    if path.file_name()? != "provenant" || path.parent()?.file_name()? != "bin" {
+        return None;
+    }
+    let size = std::fs::metadata(&path).ok()?.len();
+    let manifest: provenant_records::ReleaseManifest = serde_json::from_slice(&bytes(
+        &path.parent()?.parent()?.join("release.json"),
+        1 << 20,
+    )?)
+    .ok()?;
+    if manifest.schema_version != 1
+        || manifest.source_digest != build.source_digest
+        || manifest.asset_digest != build.asset_digest
+        || manifest.target != build.target
+        || manifest.toolchain != build.toolchain
+    {
+        return None;
+    }
+    let binary = manifest
+        .files
+        .iter()
+        .find(|file| file.path.as_path_text() == Some("bin/provenant"))?;
+    (binary.bytes == size).then(|| InstalledRelease {
+        executable: HashedBytes {
+            sha256: provenant_core::hex(binary.digest.bytes()),
+            bytes: binary.bytes,
+        },
+        source_digest: manifest.source_digest.to_string(),
+    })
 }
 
 pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> ExtraFields {
@@ -66,52 +121,17 @@ pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> ExtraFields {
             .map(|arm| observe(arm, "work_context", "Provenant experiment arm", at)),
         ..TelemetryContext::default()
     };
-    static EXECUTABLE: std::sync::OnceLock<Option<HashedBytes>> = std::sync::OnceLock::new();
-    if let Some(executable) = EXECUTABLE
-        .get_or_init(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| bytes(&path, 256 << 20))
-                .map(|bytes| hash(&bytes))
-        })
-        .clone()
-    {
-        // Bind adjacent release metadata to these executable bytes, rather
-        // than the installation's potentially upgraded current selector.
-        static RELEASE_SOURCE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-        let release_source = RELEASE_SOURCE.get_or_init(|| {
-            let path = std::env::current_exe().ok()?;
-            if path.file_name()? != "provenant" || path.parent()?.file_name()? != "bin" {
-                return None;
-            }
-            let manifest: provenant_records::ReleaseManifest = serde_json::from_slice(&bytes(
-                &path.parent()?.parent()?.join("release.json"),
-                1 << 20,
-            )?)
-            .ok()?;
-            if manifest.schema_version != 1 {
-                return None;
-            }
-            let binary = manifest
-                .files
-                .iter()
-                .find(|file| file.path.as_path_text() == Some("bin/provenant"))?;
-            (provenant_core::hex(binary.digest.bytes()) == executable.sha256
-                && binary.bytes == executable.bytes)
-                .then(|| manifest.source_digest.to_string())
-        });
-        context.release_source_digest = release_source.clone().map(|digest| {
-            observe(
-                digest,
-                "adjacent_release_manifest_matching_executable",
-                "declared release source inventory digest",
-                at,
-            )
-        });
+    if let Some(release) = INSTALLED_RELEASE.get_or_init(installed_release) {
         context.provenant_digest = Some(observe(
-            executable,
-            "current_exe",
-            "complete host executable bytes",
+            release.executable.clone(),
+            "installed_release_manifest",
+            "install-verified release manifest digest of the running executable, matched by compiled build identity and size; bytes are not rehashed at launch",
+            at,
+        ));
+        context.release_source_digest = Some(observe(
+            release.source_digest.clone(),
+            "adjacent_release_manifest_matching_build_identity",
+            "declared release source inventory digest",
             at,
         ));
     }
