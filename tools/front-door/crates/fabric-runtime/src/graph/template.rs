@@ -257,6 +257,10 @@ pub struct ParameterRefusal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ParameterExample(String);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParameterFault {
     /// The `with` table is not a table.
@@ -274,7 +278,7 @@ pub enum ParameterFault {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keys: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        example: Option<String>,
+        example: Option<Box<ParameterExample>>,
     },
     Shape {
         key: String,
@@ -285,7 +289,9 @@ pub enum ParameterFault {
 impl ParameterRefusal {
     pub fn example(&self) -> Option<String> {
         match &self.fault {
-            ParameterFault::Missing { example, .. } => example.clone(),
+            ParameterFault::Missing { example, .. } => {
+                example.as_ref().map(|value| value.0.clone())
+            }
             _ => None,
         }
     }
@@ -309,7 +315,9 @@ impl ParameterRefusal {
                 *suggestion = suggestion.as_deref().map(clean);
             }
             ParameterFault::Missing { key, keys, example } => {
-                *example = example.as_deref().map(clean);
+                *example = example
+                    .as_ref()
+                    .map(|value| Box::new(ParameterExample(clean(&value.0))));
                 *key = clean(key);
                 for name in keys {
                     *name = clean(name);
@@ -416,7 +424,7 @@ impl std::fmt::Display for ParameterRefusal {
                     write!(f, "template {template} requires parameter {}", list[0])?;
                 }
                 if let Some(example) = example {
-                    write!(f, "; example: {example}")?;
+                    write!(f, "; example: {}", example.0)?;
                 }
                 Ok(())
             }
@@ -855,7 +863,7 @@ impl Template {
             return Err(refuse(ParameterFault::Missing {
                 key,
                 keys: missing,
-                example,
+                example: example.map(|value| Box::new(ParameterExample(value))),
             }));
         }
         let mut effective = Map::new();
