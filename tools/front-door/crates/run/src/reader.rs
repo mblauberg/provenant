@@ -280,7 +280,6 @@ pub struct LaneTarget {
     pub attempt: Option<AttemptId>,
 }
 /// Optional lane filters: the submitting actor, and terminal lanes already seen.
-const RECENT_REFUSALS_SQL: &str = "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3";
 const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR run IN (SELECT run FROM operations WHERE project=?1 AND actor=?5)) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
 const UNSEEN_TARGET: &str = " AND (?7 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?7))";
 #[derive(Clone, Debug)]
@@ -311,40 +310,6 @@ pub struct LanePage {
 enum RecordRead {
     Durable,
     Observed,
-}
-/// Keep equality selectors and cursor bounds visible to SQLite. Optional-OR
-/// predicates here prevent an ordered index seek and make a small page scan
-/// retained history before returning any records.
-fn lane_page_sql(query: &LaneQuery, targeted: bool) -> String {
-    let mut sql = "SELECT sequence,id FROM attempts WHERE project=?1".to_owned();
-    if query.newest_first {
-        if query.after != 0 {
-            sql.push_str(" AND sequence<?2");
-        } else {
-            // Retain the cursor parameter even for an unbounded first page.
-            sql.push_str(" AND sequence>=?2");
-        }
-    } else {
-        sql.push_str(" AND sequence>?2");
-    }
-    if targeted {
-        sql.push_str(" AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)");
-        sql.push_str(UNSEEN_TARGET);
-    } else {
-        if !query.all {
-            sql.push_str(" AND terminal=0");
-        }
-        // ?3 keeps the same binding layout for active and history pages.
-        sql.push_str(" AND ?3 IN (0,1)");
-        sql.push_str(UNSEEN_OWNED);
-    }
-    sql.push_str(if query.newest_first {
-        " ORDER BY sequence DESC"
-    } else {
-        " ORDER BY sequence"
-    });
-    sql.push_str(if targeted { " LIMIT ?6" } else { " LIMIT ?4" });
-    sql
 }
 impl RunStore {
     /// Read only the stored prompt or result for a console search. Other
@@ -408,7 +373,9 @@ impl RunStore {
         if !(1..=100).contains(&limit) {
             return Err(RunError::Validation("refusal page limit"));
         }
-        let mut statement = self.db.prepare(RECENT_REFUSALS_SQL)?;
+        let mut statement = self.db.prepare(
+            "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3",
+        )?;
         let rows = statement.query_map(
             params![
                 self.context.project_id.to_string(),
@@ -652,16 +619,10 @@ impl RunStore {
         // Custody has one location: the reader's attempt or the writer's
         // persisted worktree slot. Inventorying every slot here made each
         // terminal row pay for the host's entire retained writer history.
-        let request = self.request(record.run_id, call)?;
-        let writer = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(RunError::Validation("attempt task association"))?
-            .writer
-            .as_ref();
+        let writer =
+            self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?;
         let slot = if let Some(writer) = writer {
-            match Directory::open_anchor(&self.writer_slot(writer, record.project_id)?) {
+            match provenant_os::fs::Directory::open_anchor(&writer) {
                 Ok(slot) => slot,
                 Err(error) if error.is_not_found() => return Ok(true),
                 Err(error) => return Err(error.into()),
@@ -1014,7 +975,11 @@ impl RunStore {
         let mut rows: Vec<(i64, String)> = {
             let mut found = Vec::new();
             if query.targets.is_empty() {
-                let sql = lane_page_sql(query, false);
+                let sql = if query.newest_first {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
+                } else {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
+                };
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
                     params![project, after, query.all, fetch, owner, unseen],
@@ -1025,7 +990,11 @@ impl RunStore {
                 }
             }
             for target in &query.targets {
-                let sql = lane_page_sql(query, true);
+                let sql = if query.newest_first {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
+                } else {
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
+                };
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
                     params![
@@ -1366,4 +1335,3 @@ mod tests {
         assert_eq!(graph_labels(None), (None, None, None));
     }
 }
-

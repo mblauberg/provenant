@@ -607,6 +607,27 @@ pub fn equivalent_writer(
 }
 
 impl crate::RunStore {
+    /// The persisted worktree slot holding one attempt's writer custody, or
+    /// `None` for a reader. Custody has no other location, so callers need
+    /// not inventory the host's slots.
+    pub(crate) fn attempt_writer_slot(
+        &self,
+        run: provenant_core::RunId,
+        task: provenant_core::TaskId,
+        project: ProjectId,
+        call: &crate::Request<'_>,
+    ) -> Result<Option<PathBuf>> {
+        let request = self.request(run, call)?;
+        request
+            .tasks
+            .iter()
+            .find(|candidate| candidate.task_id == task)
+            .ok_or(RunError::Validation("attempt task association"))?
+            .writer
+            .as_ref()
+            .map(|writer| self.writer_slot(writer, project))
+            .transpose()
+    }
     pub(crate) fn writer_slot(
         &self,
         writer: &WriterRequest,

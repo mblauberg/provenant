@@ -512,7 +512,7 @@ impl RunStore {
                     && *stalled_cache.entry(lane.attempt_id).or_insert_with(|| {
                         self.attempt_dir(lane.run_id, lane.attempt_id, false)
                             .is_ok_and(|attempt| {
-                                self.supervisor_stalled(&attempt, Self::scope(lane))
+                                self.supervisor_stalled(&attempt, Self::scope(lane), call)
                             })
                     });
                 let waiting_for = if stalled {
