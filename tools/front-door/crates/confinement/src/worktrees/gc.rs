@@ -48,7 +48,7 @@ impl PreviewWalk {
             });
         }
         let mut newest = directory.metadata()?.modified_ns;
-        for name in entry_names(directory, 20_000)? {
+        for name in entry_names(directory, if self.enabled { 20_000 } else { 100_000 })? {
             self.step()?;
             if name == ".git" {
                 continue;
@@ -836,7 +836,14 @@ fn preview_directory_removed(
     if contains_repository(directory)? {
         return Ok(false);
     }
-    for name in entry_names(directory, 20_000)? {
+    for name in entry_names(
+        directory,
+        if preview_walk.enabled {
+            20_000
+        } else {
+            100_000
+        },
+    )? {
         preview_walk.step()?;
         let child = path.join(&name);
         if planned.contains(&child) {
@@ -873,7 +880,14 @@ fn walk_output(
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
-    for name in entry_names(directory, if policy.dry_run { 20_000 } else { 100_000 })? {
+    for name in entry_names(
+        directory,
+        if preview_walk.enabled {
+            20_000
+        } else {
+            100_000
+        },
+    )? {
         preview_walk.step()?;
         if name == ".git" || name == WORKTREE_ROOT {
             continue;
@@ -1131,6 +1145,7 @@ fn prepare_removal_before(
         foreign_merged_clean: false,
     };
     let mut output = Vec::new();
+    let preview_walk = PreviewWalk::new(preview_only);
     walk_output(
         repo.root_dir(),
         repo.root_path(),
@@ -1139,7 +1154,7 @@ fn prepare_removal_before(
         &protected,
         &mut output,
         0,
-        &PreviewWalk::new(preview_only),
+        &preview_walk,
     )?;
     if !clean_after_preview(
         context,
@@ -1147,7 +1162,7 @@ fn prepare_removal_before(
         repo.root_path(),
         &output,
         cancel,
-        &PreviewWalk::new(preview_only),
+        &preview_walk,
     )? {
         let status = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
         let planned: Vec<_> = output
@@ -1182,7 +1197,7 @@ fn prepare_removal_before(
         &protected,
         &mut output,
         0,
-        &PreviewWalk::new(preview_only),
+        &preview_walk,
     )?;
     Ok(())
 }
