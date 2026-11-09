@@ -4049,6 +4049,17 @@ mod tests {
             fn actor(&self) -> String {
                 "template-review-fixture".into()
             }
+            fn resolve_review_merge_base(
+                &mut self,
+                reference: &str,
+                subject: &str,
+                _: Option<&str>,
+            ) -> std::result::Result<Option<String>, Self::Error> {
+                // This fixture's writer starts at source and produces commit.
+                assert_eq!(reference, self.source);
+                assert_eq!(subject, self.commit);
+                Ok(Some(self.source.clone()))
+            }
             fn bind_writer_worktree(
                 &mut self,
                 worktree: &str,

@@ -1118,6 +1118,16 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
         fn actor(&self) -> String {
             "fixture-actor".into()
         }
+        fn resolve_review_merge_base(
+            &mut self,
+            reference: &str,
+            subject: &str,
+            _: Option<&str>,
+        ) -> Result<Option<String>, Infallible> {
+            assert_eq!(subject, "1".repeat(40));
+            assert_eq!(reference, "2".repeat(40));
+            Ok(Some(reference.to_owned()))
+        }
         fn observe_or_start(
             &mut self,
             key: &AttemptKey,
