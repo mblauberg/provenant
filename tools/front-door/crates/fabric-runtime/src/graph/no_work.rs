@@ -69,15 +69,12 @@ pub(super) fn continue_stopped(
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
 ) -> Option<GraphCheckpoint> {
-    let Some((index, (node, progress))) = plan
+    let (index, (node, progress)) = plan
         .nodes
         .iter()
         .zip(&checkpoint.nodes)
         .enumerate()
-        .find(|(_, (node, progress))| eligible(node, progress, checkpoint))
-    else {
-        return None;
-    };
+        .find(|(_, (node, progress))| eligible(node, progress, checkpoint))?;
     let routes = restart_routes(node, progress);
     let chair_reason = if progress
         .handoff
