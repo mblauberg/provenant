@@ -1756,6 +1756,24 @@ fn upgrade_preflight_warns_and_proceeds_on_pending_work_when_no_break() -> Resul
 #[test]
 fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_overrides() -> Result {
     let mut rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let installed = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &args(&stage, false),
+        None,
+    )?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let receipt_path = rig.state.join("install/receipt.json");
+    let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    receipt
+        .as_object_mut()
+        .ok_or("receipt object")?
+        .remove("state_format_version");
+    let old_receipt: provenant_records::InstallReceipt = serde_json::from_value(receipt.clone())?;
+    assert_eq!(old_receipt.state_format_version, 1);
+    assert_ne!(old_receipt.state_format_version, 2); // A release declaring version 2 sees a break.
+    receipt["state_format_version"] = 0.into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
     let db_path = rig.state.join("run.sqlite3");
     let db = rusqlite::Connection::open(&db_path)?;
     db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('proj-block','run-block','lane-block',X'7b7d',0);")?;
@@ -1769,8 +1787,6 @@ fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_override
     )?;
 
     // Declare a break between installed and target releases.
-    fs::create_dir_all(rig.state.join("fabric"))?;
-    fs::write(rig.state.join("fabric/state-format-version"), "0\n")?;
 
     let result = rig.command(&[
         "install",
@@ -1786,6 +1802,34 @@ fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_override
     );
     assert!(output.contains("Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."), "{output}");
 
+    let source = rig.root.join("source");
+    fs::create_dir_all(source.join("tools/front-door"))?;
+    fs::write(
+        source.join("tools/front-door/rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"fixture\"\n",
+    )?;
+    let fake_bin = rig.root.join("fake-bin");
+    fs::create_dir_all(&fake_bin)?;
+    for (name, content) in [
+        ("rustup", "#!/bin/sh\nexit 0\n".to_owned()),
+        (
+            "cargo",
+            format!(
+                "#!/bin/sh\n[ \"$1\" = run ] || exit 0\nwhile [ \"$1\" != --out ]; do shift; done\ncp -R '{}/.' \"$2\"\n",
+                stage.display()
+            ),
+        ),
+    ] {
+        let path = fake_bin.join(name);
+        fs::write(&path, content)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    for (key, value) in &mut rig.env {
+        if key == "PATH" {
+            *value = format!("{}:/usr/bin:/bin", fake_bin.display()).into();
+        }
+    }
+
     // Rerunning install with --yes overrides preflight stopping.
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
     rig.env
@@ -1798,8 +1842,8 @@ fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_override
             "--yes".into(),
             "--state-dir".into(),
             rig.state.clone().into_os_string(),
-            "--tag".into(),
-            "v9.8.7".into(),
+            "--source".into(),
+            source.into_os_string(),
         ],
         None,
     )?;

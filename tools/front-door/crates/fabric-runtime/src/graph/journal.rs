@@ -1195,6 +1195,7 @@ fn decode_verified_checkpoint(
 }
 
 #[derive(Serialize, Deserialize)]
+// Bump STATE_FORMAT_VERSION for changes an older or newer binary cannot read.
 pub(super) struct StoredCheckpoint {
     /// Envelope extensions sit outside the checkpoint digest.
     #[serde(flatten)]

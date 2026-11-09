@@ -45,7 +45,7 @@ pub mod workflow;
 
 pub use install::{
     AbsolutePath, Harness, InstallReceipt, OwnedEntry, OwnedValue, ReleaseFile, ReleaseManifest,
-    ResolvedHarnessTarget, STATE_FORMAT_VERSION, VersionInfo,
+    ResolvedHarnessTarget, BASELINE_STATE_FORMAT_VERSION, STATE_FORMAT_VERSION, VersionInfo,
 };
 
 mod command_result;

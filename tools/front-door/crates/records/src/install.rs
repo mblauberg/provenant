@@ -98,10 +98,11 @@ pub struct ResolvedHarnessTarget {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hooks_relinquished: bool,
 }
-pub const STATE_FORMAT_VERSION: u64 = 1;
+pub const BASELINE_STATE_FORMAT_VERSION: u64 = 1;
+pub const STATE_FORMAT_VERSION: u64 = BASELINE_STATE_FORMAT_VERSION;
 
 fn default_state_format_version() -> u64 {
-    STATE_FORMAT_VERSION
+    BASELINE_STATE_FORMAT_VERSION
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

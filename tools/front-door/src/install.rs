@@ -1545,16 +1545,6 @@ fn pending_upgrade_findings(
 }
 
 fn installed_state_format_version(targets: &Targets) -> Option<u64> {
-    let state_file = targets
-        .roots
-        .state
-        .as_path()
-        .join("fabric/state-format-version");
-    if let Ok(content) = std::fs::read_to_string(&state_file)
-        && let Ok(version) = content.trim().parse::<u64>()
-    {
-        return Some(version);
-    }
     match read_install_receipt(targets) {
         Ok(Some(receipt)) => Some(receipt.state_format_version),
         _ => None,
@@ -1596,23 +1586,27 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String>
 
     outcome.blocking.extend(classified.unreadable);
 
-    let installed_version =
-        installed_state_format_version(&targets).unwrap_or(provenant_records::STATE_FORMAT_VERSION);
+    // A host without a receipt predates format declarations and gets baseline 1.
+    let installed_version = installed_state_format_version(&targets)
+        .unwrap_or(provenant_records::BASELINE_STATE_FORMAT_VERSION);
+    let legacy = pending_upgrade_findings(&targets.roots.state, true)?;
+    let legacy_graphs: std::collections::BTreeSet<_> = legacy.pending_graphs.into_iter().collect();
     let declared_break = installed_version != provenant_records::STATE_FORMAT_VERSION;
 
-    if declared_break {
-        for (project, id) in classified.pending_graphs {
+    for (project, id) in classified.pending_graphs {
+        if declared_break || legacy_graphs.contains(&(project.clone(), id.clone())) {
             outcome.blocking.push(format!(
                 "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
             ));
-        }
-        outcome.blocking.extend(classified.live_lanes);
-    } else {
-        for (project, id) in classified.pending_graphs {
+        } else {
             outcome
                 .warnings
                 .push(format!("Pending graph {project}/{id} in flight"));
         }
+    }
+    if declared_break {
+        outcome.blocking.extend(classified.live_lanes);
+    } else {
         outcome.warnings.extend(classified.live_lanes);
     }
 

@@ -606,22 +606,16 @@ mod tests {
             super::super::FileJournal::open(
                 &state,
                 project,
-                "readable-pending",
+                "old-pending-fixture",
                 budget,
                 &cancel,
                 &clock,
             )
             .unwrap(),
         );
-        let path = base.join(format!(
-            "fabric/graphs/{project}/graph-readable-pending.json"
-        ));
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&serde_json::json!({"checkpoint": {"cancelled":false,"nodes":[{"state":"running"}]}, "incompatible": true}))
-                .unwrap(),
-        )
-        .unwrap();
+        let path = base.join(format!("fabric/graphs/{project}/graph-old-pending-fixture.json"));
+        std::fs::write(&path, include_bytes!("../../../../tests/fixtures/install/old-pending-checkpoint.json")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         // Also add an unreadable file.
         let unreadable_path = base.join(format!("fabric/graphs/{project}/graph-corrupt.json"));
@@ -633,7 +627,7 @@ mod tests {
         assert_eq!(classified.pending_graphs.len(), 1);
         assert_eq!(
             classified.pending_graphs[0],
-            (project.to_string(), "readable-pending".to_string())
+            (project.to_string(), "old-pending-fixture".to_string())
         );
         assert!(classified.live_lanes.is_empty());
 
