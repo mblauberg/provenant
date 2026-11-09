@@ -774,8 +774,12 @@ impl FacadeError {
                     .next("inspect the graph definition and template fields");
             }
             Self::InvalidInput { detail: Some(InvalidInputDetail::Parameter(refusal)) } => {
-                projected = projected.detail(refusal.redacted().to_string())
-                    .next("pass only the accepted template parameters, each with a value of the shape shown, and retry");
+                let refusal = refusal.redacted();
+                let next = refusal.example().unwrap_or_else(|| {
+                    "pass only the accepted template parameters, each with a value of the shape shown, and retry".into()
+                });
+                projected = projected.detail(refusal.to_string())
+                    .next(next);
             }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
@@ -1656,7 +1660,10 @@ mod diagnostic_tests {
                 accepted: vec!["brief".into(), secret.into()],
                 suggestion: Some(secret.into()),
             },
-            ParameterFault::Missing { key: secret.into() },
+            ParameterFault::Missing {
+                key: secret.into(),
+                keys: vec![secret.into()],
+            },
             ParameterFault::Shape {
                 key: secret.into(),
                 expected: secret.into(),

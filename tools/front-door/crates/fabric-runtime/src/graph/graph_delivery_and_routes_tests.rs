@@ -457,6 +457,20 @@ fn route_requires_adapter_or_alias() {
 }
 
 #[test]
+fn route_with_exact_model_alias_fails_validation_for_dry_run_and_launch() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "g", "nodes": [{
+            "id": "one", "prompt": "work", "access": "read_only", "route": { "alias": "codex/gpt-6-luna" }
+        }]
+    }))
+    .unwrap();
+    assert_eq!(
+        validate_plan(&document).err(),
+        Some("node one: route alias must be an identifier; exact models require an adapter or --model")
+    );
+}
+
+#[test]
 fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     for first in [
         AttemptObservation::Pending { attempt_ref: None },

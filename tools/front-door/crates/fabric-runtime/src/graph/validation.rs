@@ -610,6 +610,16 @@ pub(super) fn validate_flat_plan(
         {
             return Err(node_plan_error(node, "route requires an adapter or alias"));
         }
+        for route in &routes {
+            if let Some(alias) = &route.alias {
+                if provenant_routing::RouteName::parse(alias).is_err() {
+                    return Err(node_plan_error(
+                        node,
+                        "route alias must be an identifier; exact models require an adapter or --model",
+                    ));
+                }
+            }
+        }
         if routes
             .iter()
             .any(|route| (route.model.is_some() || route.name.is_some()) && route.adapter.is_none())

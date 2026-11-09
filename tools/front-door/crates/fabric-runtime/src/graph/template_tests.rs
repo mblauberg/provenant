@@ -1240,3 +1240,22 @@ fn failing_node_inside_a_composite_is_named() {
         "node check: template level parameter level expects a string, one of [\"low\",\"high\"]"
     );
 }
+
+#[test]
+fn template_launch_missing_parameters_names_them() {
+    let bundled = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&bundled);
+    let error = compiler
+        .compile(&serde_json::json!({"id": "d", "use": "deliver", "with": {}}))
+        .unwrap_err();
+    let CompileError::Parameter(refusal) = error else {
+        panic!("expected a parameter refusal: {error}");
+    };
+    let text = refusal.to_string();
+    assert!(text.contains("worktree"), "{text}");
+    assert!(text.contains("write_scope"), "{text}");
+    assert!(text.contains("example:"), "{text}");
+    let example = refusal.example().expect("example");
+    assert!(example.contains("worktree"), "{example}");
+    assert!(example.contains("write_scope"), "{example}");
+}

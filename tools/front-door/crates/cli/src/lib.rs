@@ -38,10 +38,36 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("{0}")]
-    Invalid(String),
+    #[error("{message}")]
+    Invalid {
+        message: String,
+        repair: Option<String>,
+    },
     #[error("{owner} owner is unavailable in this build")]
     OwnerUnavailable { owner: &'static str },
+}
+
+impl CliError {
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid {
+            message: message.into(),
+            repair: None,
+        }
+    }
+
+    pub fn invalid_with_repair(message: impl Into<String>, repair: impl Into<String>) -> Self {
+        Self::Invalid {
+            message: message.into(),
+            repair: Some(repair.into()),
+        }
+    }
+
+    pub fn repair(&self) -> Option<&str> {
+        match self {
+            Self::Invalid { repair, .. } => repair.as_deref(),
+            Self::OwnerUnavailable { .. } => None,
+        }
+    }
 }
 #[derive(Debug)]
 pub enum ParseOutcome {
@@ -115,7 +141,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                         }
                     }
                     None => ParseOutcome::Invalid {
-                        error: CliError::Invalid("unknown help command".into()),
+                        error: CliError::invalid("unknown help command"),
                         globals,
                     },
                 },
@@ -176,7 +202,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 }
                 _ => {
                     return ParseOutcome::Invalid {
-                        error: CliError::Invalid("unknown help command".into()),
+                        error: CliError::invalid("unknown help command"),
                         globals: invocation.globals,
                     };
                 }
@@ -214,6 +240,73 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
+fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static str, String)> {
+    let words: Vec<&str> = argv
+        .iter()
+        .skip(1)
+        .filter_map(|a| a.to_str())
+        .filter(|w| !w.starts_with("--") && !w.starts_with('-'))
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    match words[0] {
+        "dispatch" => Some((
+            "dispatch",
+            "run",
+            "provenant run 'Meet the acceptance criteria' --use task".into(),
+        )),
+        "lanes" => Some(("lanes", "status", "provenant status".into())),
+        "resume" => {
+            let target = words.get(1).copied().unwrap_or("ID");
+            Some(("resume", "retry", format!("provenant retry {target}")))
+        }
+        "cancel" => {
+            let target = words.get(1).copied().unwrap_or("ID");
+            Some(("cancel", "stop", format!("provenant stop {target}")))
+        }
+        "preset" => Some(("preset", "templates", "provenant templates".into())),
+        "review" => Some((
+            "review",
+            "run --use review",
+            "provenant run --use review".into(),
+        )),
+        "continue" => {
+            let target = words.get(1).copied().unwrap_or("ID");
+            Some(("continue", "retry", format!("provenant retry {target}")))
+        }
+        "redo" => {
+            let target = words.get(1).copied().unwrap_or("ID");
+            Some(("redo", "retry", format!("provenant retry {target}")))
+        }
+        "pr" if words.get(1) == Some(&"land") => {
+            let pr = words.get(2).copied().unwrap_or("2199");
+            Some(("pr land", "land", format!("provenant land {pr} --wait")))
+        }
+        "fabric" if words.get(1) == Some(&"graph") => {
+            if words.get(2) == Some(&"status") {
+                let target = words.get(3).map(|id| format!(" {id}")).unwrap_or_default();
+                Some((
+                    "fabric graph status",
+                    "status",
+                    format!("provenant status{target}"),
+                ))
+            } else if words.get(2) == Some(&"cancel") {
+                let target = words.get(3).copied().unwrap_or("ID");
+                Some((
+                    "fabric graph cancel",
+                    "stop",
+                    format!("provenant stop {target}"),
+                ))
+            } else {
+                Some(("fabric graph", "status", "provenant status".into()))
+            }
+        }
+        "fabric_graph" => Some(("fabric_graph", "run", "provenant run".into())),
+        _ => None,
+    }
+}
+
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
     // Clap normally includes the rejected value. Fence tokens are secrets,
     // including malformed tokens, so redact them before either renderer.
@@ -244,6 +337,48 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
             }
         }
     }
+
+    if let Some((verb, replacement, runnable)) = retired_verb_replacement(argv) {
+        return CliError::Invalid {
+            message: format!(
+                "retired verb '{verb}' was replaced by '{replacement}'\nexample: {runnable}"
+            ),
+            repair: Some(runnable),
+        };
+    }
+
+    if error.kind() == clap::error::ErrorKind::MissingSubcommand {
+        let model = expanded_model();
+        let (selected, path) =
+            walk_subcommands(&model, argv, None).unwrap_or((&model, "provenant".into()));
+        let first_sub = selected
+            .get_subcommands()
+            .find(|child| !child.is_hide_set())
+            .map(|child| child.get_name());
+        let correction = match first_sub {
+            Some(sub) => format!("{path} {sub}"),
+            None => path.clone(),
+        };
+        let usage_block = if let Some(idx) = text.find("\nUsage:").or_else(|| text.find("Usage:")) {
+            text[idx..]
+                .split("\nFor more information")
+                .next()
+                .unwrap_or(&text[idx..])
+                .trim()
+        } else {
+            ""
+        };
+        let message = if !usage_block.is_empty() {
+            format!("'{path}' requires a subcommand\n\n{usage_block}\nexample: {correction}")
+        } else {
+            format!("'{path}' requires a subcommand\nexample: {correction}")
+        };
+        return CliError::Invalid {
+            message,
+            repair: Some(correction),
+        };
+    }
+
     let message = text
         .split("\nUsage:")
         .next()
@@ -257,14 +392,17 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         .trim();
     let example = usage_example(argv);
     let message = message.strip_prefix("error: ").unwrap_or(message);
-    let mut message = match example {
+    let mut message = match &example {
         Some(example) => format!("{message}\nexample: {example}"),
         None => message.into(),
     };
     if let Some(suggestion) = suggestion {
         message.push_str(&format!("\ndid you mean `{suggestion}`?"));
     }
-    CliError::Invalid(message)
+    CliError::Invalid {
+        message,
+        repair: example,
+    }
 }
 fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
     use clap::error::ContextKind;
@@ -348,7 +486,7 @@ fn walk_subcommands<'a>(
 /// subcommand path rather than by words anywhere in argv.
 fn usage_example(argv: &[OsString]) -> Option<String> {
     let model = expanded_model();
-    let (_, mut path) = walk_subcommands(&model, argv, None)?;
+    let (selected, mut path) = walk_subcommands(&model, argv, None)?;
     // `pr land` is retired; the walk stops at `pr`, so look at the word after it.
     let retired_pr_land = path == "provenant pr"
         && argv
@@ -378,6 +516,38 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
             return Some(format!("provenant {target} --wait={value}"));
         }
     }
+
+    // Fix invalid duration like --wait=5h or --wait=0
+    if argv
+        .iter()
+        .any(|arg| arg.to_str().is_some_and(|s| s.starts_with("--wait=")))
+    {
+        let mut fixed_args = Vec::new();
+        for arg in argv.iter().skip(1) {
+            let s = arg.to_str().unwrap_or("");
+            if s.starts_with("--wait=") {
+                fixed_args.push("--wait=30m".to_string());
+            } else {
+                fixed_args.push(s.to_string());
+            }
+        }
+        return Some(format!("provenant {}", fixed_args.join(" ")));
+    }
+
+    // Fix invalid span like --until 0d
+    if argv.iter().any(|arg| arg == "0d") {
+        let mut fixed_args = Vec::new();
+        for arg in argv.iter().skip(1) {
+            let s = arg.to_str().unwrap_or("");
+            if s == "0d" {
+                fixed_args.push("30d".to_string());
+            } else {
+                fixed_args.push(s.to_string());
+            }
+        }
+        return Some(format!("provenant {}", fixed_args.join(" ")));
+    }
+
     match path.as_str() {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some(
@@ -385,7 +555,35 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
         ),
         "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
         "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
-        _ => None,
+        _ => {
+            if let Some(core) = selected.get::<metadata::CoreCommand>() {
+                return Some(core.1.to_string());
+            }
+            if let Some(first_child) = selected.get_subcommands().find(|c| !c.is_hide_set()) {
+                return Some(format!("{path} {}", first_child.get_name()));
+            }
+            let mut parts = vec![path.clone()];
+            for arg in selected.get_arguments() {
+                if arg.is_required_set() && !arg.is_hide_set() {
+                    let name = arg.get_id().as_str();
+                    let token = match name {
+                        "number" | "numbers" => "2199",
+                        "id" | "graph" | "task" | "attempt" => "ID",
+                        "brief" | "prompt" => "'Task'",
+                        "branch" => "BRANCH",
+                        "host" => "HOST",
+                        "file" | "path" => "FILE",
+                        _ => name,
+                    };
+                    if let Some(long) = arg.get_long() {
+                        parts.push(format!("--{long} {token}"));
+                    } else {
+                        parts.push(token.to_string());
+                    }
+                }
+            }
+            Some(parts.join(" "))
+        }
     }
 }
 fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<CliError>) {
@@ -417,7 +615,7 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
         || raw.full.len() > 1
         || raw.state_dir.len() > 1
         || raw.project.len() > 1)
-        .then(|| CliError::Invalid("global options may occur only once".into()));
+        .then(|| CliError::invalid("global options may occur only once"));
     fn unique<T>(mut values: Vec<T>) -> Option<T> {
         if values.len() == 1 {
             values.pop()
@@ -626,7 +824,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
     command
 }
 fn invalid(message: &str) -> Result<(), CliError> {
-    Err(CliError::Invalid(message.into()))
+    Err(CliError::invalid(message))
 }
 fn route_valid(route: &RouteRequest) -> Result<(), CliError> {
     if route.fallback.len() > 2
@@ -651,10 +849,11 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
                 && resolve.request.model.is_none()
                 && resolve.request.route.is_none()
             {
-                return invalid(
+                return Err(CliError::invalid_with_repair(
                     "route resolve needs a route or model, such as `route resolve utility`, \
                      `route resolve codex/gpt-6-luna`, `--route utility` or `--model ADAPTER/ID`",
-                );
+                    "provenant route resolve --model ADAPTER/ID",
+                ));
             }
             route_valid(&resolve.request)?
         }
@@ -1716,6 +1915,132 @@ mod tests {
             "{words:?}"
         );
     }
+    #[test]
+    fn invalid_invocations_across_command_groups_name_field_and_correction() {
+        for (words, expected_field, expected_repair) in [
+            (vec!["run", "--set", "bad"], "--set", "provenant run"),
+            (
+                vec!["status", "--wait=5h"],
+                "--wait",
+                "provenant status --wait=30m",
+            ),
+            (vec!["land"], "numbers", "provenant land"),
+            (vec!["output"], "attempt", "provenant output"),
+            (vec!["stop"], "id", "provenant stop ID"),
+            (vec!["retry"], "id", "provenant retry ID"),
+            (vec!["steer"], "id", "provenant steer ID"),
+            (vec!["edit"], "id", "provenant edit ID"),
+            (vec!["route", "resolve"], "route", "provenant route resolve"),
+            (vec!["pr", "watch"], "number", "provenant pr watch"),
+            (vec!["config"], "subcommand", "provenant config show"),
+            (vec!["accounts"], "subcommand", "provenant accounts list"),
+            (vec!["disk"], "subcommand", "provenant disk report"),
+            (vec!["telemetry"], "subcommand", "provenant telemetry stats"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("expected invalid for {words:?}");
+            };
+            let text = error.to_string();
+            assert!(
+                text.to_lowercase().contains(&expected_field.to_lowercase()),
+                "{words:?}: expected to mention '{expected_field}', got: {text}"
+            );
+            let repair = error
+                .repair()
+                .unwrap_or_else(|| panic!("{words:?}: missing repair"));
+            assert!(
+                repair.starts_with(expected_repair),
+                "{words:?}: expected repair starting with '{expected_repair}', got '{repair}'"
+            );
+            assert_ne!(
+                repair, "run provenant help --all",
+                "{words:?}: repair must not be generic help"
+            );
+            assert!(
+                !repair.contains("help --all"),
+                "{words:?}: repair must not be generic help"
+            );
+        }
+    }
+
+    #[test]
+    fn config_without_subcommand_prints_usage_and_retired_verbs_name_replacement() {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["config"]) else {
+            panic!("expected invalid for config without subcommand");
+        };
+        let text = error.to_string();
+        assert!(text.contains("Usage: provenant config <COMMAND>"), "{text}");
+        assert!(text.contains("Commands:"), "{text}");
+        assert_eq!(error.repair(), Some("provenant config show"));
+
+        for (verb, replacement, expected_repair) in [
+            (vec!["dispatch", "Meet acceptance"], "run", "provenant run"),
+            (vec!["lanes"], "status", "provenant status"),
+            (
+                vec!["resume", "attempt-1"],
+                "retry",
+                "provenant retry attempt-1",
+            ),
+            (
+                vec!["cancel", "attempt-1"],
+                "stop",
+                "provenant stop attempt-1",
+            ),
+            (vec!["preset"], "templates", "provenant templates"),
+            (
+                vec!["review"],
+                "run --use review",
+                "provenant run --use review",
+            ),
+            (
+                vec!["continue", "attempt-1"],
+                "retry",
+                "provenant retry attempt-1",
+            ),
+            (
+                vec!["redo", "attempt-1"],
+                "retry",
+                "provenant retry attempt-1",
+            ),
+            (
+                vec!["pr", "land", "2199"],
+                "land",
+                "provenant land 2199 --wait",
+            ),
+            (
+                vec!["fabric", "graph", "status"],
+                "status",
+                "provenant status",
+            ),
+            (
+                vec!["fabric", "graph", "cancel", "attempt-1"],
+                "stop",
+                "provenant stop attempt-1",
+            ),
+            (vec!["fabric_graph"], "run", "provenant run"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&verb) else {
+                panic!("expected invalid for retired verb {verb:?}");
+            };
+            let text = error.to_string();
+            assert!(
+                text.contains("retired verb"),
+                "{verb:?}: expected retired verb message, got: {text}"
+            );
+            assert!(
+                text.contains(replacement),
+                "{verb:?}: expected replacement '{replacement}', got: {text}"
+            );
+            let repair = error
+                .repair()
+                .unwrap_or_else(|| panic!("{verb:?}: missing repair"));
+            assert!(
+                repair.starts_with(expected_repair),
+                "{verb:?}: expected repair starting with '{expected_repair}', got '{repair}'"
+            );
+        }
+    }
+
     #[test]
     fn config_migrate_takes_dry_run() {
         for (words, expected) in [

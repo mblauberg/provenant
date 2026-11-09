@@ -269,7 +269,10 @@ pub enum ParameterFault {
         suggestion: Option<String>,
     },
     Missing {
+        #[serde(default)]
         key: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keys: Vec<String>,
     },
     Shape {
         key: String,
@@ -278,6 +281,20 @@ pub enum ParameterFault {
 }
 
 impl ParameterRefusal {
+    pub fn example(&self) -> Option<String> {
+        match &self.fault {
+            ParameterFault::Missing { key, keys } => {
+                let list = if keys.is_empty() {
+                    std::slice::from_ref(key)
+                } else {
+                    keys.as_slice()
+                };
+                template_example(&self.template, list)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn redacted(&self) -> Self {
         let clean = |text: &str| provenant_confinement::redact::bounded_line(text, 4096);
         let mut safe = self.clone();
@@ -296,7 +313,12 @@ impl ParameterRefusal {
                 }
                 *suggestion = suggestion.as_deref().map(clean);
             }
-            ParameterFault::Missing { key } => *key = clean(key),
+            ParameterFault::Missing { key, keys } => {
+                *key = clean(key);
+                for name in keys {
+                    *name = clean(name);
+                }
+            }
             ParameterFault::Shape { key, expected } => {
                 *key = clean(key);
                 *expected = clean(expected);
@@ -304,6 +326,24 @@ impl ParameterRefusal {
         }
         safe
     }
+}
+
+pub fn template_example(template: &str, missing: &[String]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let mut args = Vec::new();
+    for key in missing {
+        let set = match key.as_str() {
+            "worktree" => "--set 'worktree=\"/path/to/worktree\"'".to_string(),
+            "write_scope" => "--set 'write_scope=[\"src\"]'".to_string(),
+            "brief" => "--set 'brief=\"Task\"'".to_string(),
+            "items" => "--set 'items=[\"item1\"]'".to_string(),
+            other => format!("--set '{other}=\"value\"'"),
+        };
+        args.push(set);
+    }
+    Some(format!("provenant run --use {template} {}", args.join(" ")))
 }
 
 impl std::fmt::Display for ParameterRefusal {
@@ -332,8 +372,25 @@ impl std::fmt::Display for ParameterRefusal {
                     None => Ok(()),
                 }
             }
-            ParameterFault::Missing { key } => {
-                write!(f, "template {template} requires parameter {key}")
+            ParameterFault::Missing { key, keys } => {
+                let list = if keys.is_empty() {
+                    std::slice::from_ref(key)
+                } else {
+                    keys.as_slice()
+                };
+                if list.len() > 1 {
+                    write!(
+                        f,
+                        "template {template} requires parameters {}",
+                        list.join(", ")
+                    )?;
+                } else {
+                    write!(f, "template {template} requires parameter {}", list[0])?;
+                }
+                if let Some(example) = template_example(template, list) {
+                    write!(f, "; example: {example}")?;
+                }
+                Ok(())
             }
             ParameterFault::Shape { key, expected } => {
                 write!(f, "template {template} parameter {key} expects {expected}")
@@ -758,12 +815,19 @@ impl Template {
                 accepted,
             }));
         }
+        let mut missing = Vec::new();
+        for (key, parameter) in &self.parameters {
+            if supplied.get(key).or(parameter.default.as_ref()).is_none() {
+                missing.push(key.clone());
+            }
+        }
+        if !missing.is_empty() {
+            let key = missing[0].clone();
+            return Err(refuse(ParameterFault::Missing { key, keys: missing }));
+        }
         let mut effective = Map::new();
         for (key, parameter) in &self.parameters {
-            let value = supplied
-                .get(key)
-                .or(parameter.default.as_ref())
-                .ok_or_else(|| refuse(ParameterFault::Missing { key: key.clone() }))?;
+            let value = supplied.get(key).or(parameter.default.as_ref()).unwrap();
             if check_value(parameter, value).is_err() {
                 return Err(refuse(ParameterFault::Shape {
                     key: key.clone(),
