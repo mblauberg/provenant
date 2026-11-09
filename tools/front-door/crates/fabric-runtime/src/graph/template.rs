@@ -255,7 +255,7 @@ pub struct ParameterRefusal {
     pub template: String,
     pub fault: ParameterFault,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example: Option<String>,
+    pub example: Option<Box<str>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,7 +284,7 @@ pub enum ParameterFault {
 
 impl ParameterRefusal {
     pub fn example(&self) -> Option<String> {
-        self.example.clone()
+        self.example.as_deref().map(str::to_owned)
     }
 
     pub(crate) fn redacted(&self) -> Self {
@@ -292,7 +292,11 @@ impl ParameterRefusal {
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
         safe.template = clean(&safe.template);
-        safe.example = safe.example.as_deref().map(clean);
+        safe.example = safe
+            .example
+            .as_deref()
+            .map(clean)
+            .map(String::into_boxed_str);
         match &mut safe.fault {
             ParameterFault::NotTable => {}
             ParameterFault::Unknown {
@@ -851,7 +855,7 @@ impl Template {
             let key = missing[0].clone();
             let example = template_example(name, &self.parameters, &supplied, &missing);
             let mut refusal = refuse(ParameterFault::Missing { key, keys: missing });
-            refusal.example = example;
+            refusal.example = example.map(String::into_boxed_str);
             return Err(refusal);
         }
         let mut effective = Map::new();
