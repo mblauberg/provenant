@@ -54,11 +54,15 @@ pub struct RiskFactors {
 #[serde(deny_unknown_fields)]
 pub struct RiskPolicy {
     pub minimum: RiskTier,
+    /// Matched boundary floors, keyed by repository-relative changed path.
+    #[serde(default)]
+    pub boundary_floors: std::collections::BTreeMap<String, RiskTier>,
 }
 impl Default for RiskPolicy {
     fn default() -> Self {
         Self {
             minimum: RiskTier::Routine,
+            boundary_floors: Default::default(),
         }
     }
 }
@@ -82,14 +86,24 @@ pub struct UserApproval {
     pub actor_id: ActorId,
     pub evidence: EvidenceRef,
 }
+/// A chair's recorded judgement; owner acceptance uses UserApproval separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChairDowngrade {
+    pub actor_id: ActorId,
+    pub evidence: EvidenceRef,
+    pub reason: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskRecord {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     factors: RiskFactors,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    changed_paths: Vec<String>,
     derived: RiskTier,
     tier: RiskTier,
-    downgrade_approval: Option<ApprovalRef>,
+    downgrade_approval: Option<ChairDowngrade>,
 }
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RecordError {
@@ -109,11 +123,12 @@ impl RiskRecord {
         factors: RiskFactors,
         derived: RiskTier,
         tier: RiskTier,
-        downgrade_approval: Option<ApprovalRef>,
+        downgrade_approval: Option<ChairDowngrade>,
     ) -> Result<Self, RecordError> {
         let record = Self {
             extra: Default::default(),
             factors,
+            changed_paths: Vec::new(),
             derived,
             tier,
             downgrade_approval,
@@ -125,7 +140,21 @@ impl RiskRecord {
         if (self.tier < self.derived) != self.downgrade_approval.is_some() {
             return Err(RecordError::RiskApproval);
         }
+        if self
+            .downgrade_approval
+            .as_ref()
+            .is_some_and(|d| d.reason.trim().is_empty() || d.reason.len() > 4096)
+        {
+            return Err(RecordError::RiskApproval);
+        }
         Ok(())
+    }
+    pub fn with_changed_paths(mut self, paths: Vec<String>) -> Self {
+        self.changed_paths = paths;
+        self
+    }
+    pub fn changed_paths(&self) -> &[String] {
+        &self.changed_paths
     }
     pub fn factors(&self) -> &RiskFactors {
         &self.factors
@@ -136,7 +165,7 @@ impl RiskRecord {
     pub fn tier(&self) -> RiskTier {
         self.tier
     }
-    pub fn downgrade_approval(&self) -> Option<&ApprovalRef> {
+    pub fn downgrade_approval(&self) -> Option<&ChairDowngrade> {
         self.downgrade_approval.as_ref()
     }
 }
@@ -857,7 +886,11 @@ mod tests {
                 r.risk().factors().clone(),
                 RiskTier::Routine,
                 RiskTier::Routine,
-                Some(ApprovalRef::from(&approval()))
+                Some(ChairDowngrade {
+                    actor_id: approval().actor_id,
+                    evidence: approval().evidence,
+                    reason: "Fixture judgement".into()
+                })
             ),
             Err(RecordError::RiskApproval)
         );

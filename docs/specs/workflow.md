@@ -114,7 +114,24 @@ chair-supplied `LegBlocker` and `user_approval` references.
 
 A receipt records the chair's decision and is not a merge certificate. A
 changed subject resets the decision and needs fresh review. Each save
-rechecks derived risk, and a downgrade needs an originating user approval.
+rechecks derived risk against the effective policy and recorded changed paths.
+A downgrade uses a chair record with actor, evidence and a nonblank reason of
+at most 4096 bytes, stored alongside the path snapshot. Routing compiles the
+matched boundary floors from effective configuration into workflow policy at the edge.
+PR subjects retain their repository ID and bind the head OID. For a PR save
+below terminal, the edge reuses recorded paths when the stored head is unchanged.
+Otherwise it resolves the PR from the checkout, verifies its head, and computes
+paths from the actual base/head merge base, including both names of renames.
+If the diff cannot be read, a downgrade refuses with the reason; an ordinary
+save warns, keeps the chosen tier and records no paths. Terminal saves need no
+diff. Review reports never query GitHub: they validate recorded paths against
+the effective policy. A downgraded receipt without recorded paths must be
+re-saved with `workflow receipt save`. Non-PR
+subjects have no diffable commits, so downgrades are refused without changing
+ordinary tier selection. Any path matching an effective crucial or terminal floor
+refuses the downgrade and names the path; owners may remove or lower bundled
+path floors through configuration. Auth/security and irreversible external-effect floors remain
+binding, including with owner approval. Owner decision approvals remain separate.
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
 - Why: acceptance must track the exact subject reviewed.
 - Test: `crates/workflow/src/store/tests.rs::changing_subject_resets_decision_and_requires_fresh_review`;
@@ -365,8 +382,9 @@ installation, push and destructive action stay gated by current user
 authority.
 - Why: evidence must never be mistaken for permission.
 - Test: none (review gate for external-action authority);
-  `crates/workflow/src/risk.rs::lowering_risk_requires_matching_current_user_authority`
-  covers risk downgrades only.
+  `crates/workflow/src/risk.rs::recorded_chair_downgrade_lowers_nonboundary_risk`
+  and `crates/workflow/src/risk.rs::recorded_chair_downgrade_refuses_boundary_paths`
+  cover risk downgrades only.
 - Owner: the orchestrate and evaluate skills; `crates/workflow/src/`
 
 ## Not provided
