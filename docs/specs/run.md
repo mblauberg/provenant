@@ -33,6 +33,15 @@ blocking the lane. Each attempt reports the seed outcome and reason on a best-ef
 
 ## Cargo target seed
 
+On the host, fetch `origin/main` first and build seeds only from a trusted
+`origin/main`. From the project, run `git fetch origin main` followed by
+`provenant worktree seed-build`. The command pins the local remote-tracking
+commit, checks it out in a disposable host checkout and runs `cargo build
+--locked --all-targets` and `cargo test --locked --no-run` in `tools/front-door`.
+It publishes a successful generation under the state directory's
+`cargo-target-seeds/generations/`. The scheduled host refresh follows the daily
+collection's fetch; when collection is disabled, fetch and build manually.
+
 A writer with seeding enabled (the default) and a fresh target may clone the newest host target
 generation matching the complete `rustc -vV` output and host triple. Preparation
 must never execute a writer-controlled toolchain outside confinement and must
