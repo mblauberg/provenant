@@ -1721,7 +1721,7 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
 
 #[test]
 fn upgrade_preflight_blocks_legacy_live_lane_on_matching_version() -> Result {
-    let mut rig = TestRig::new()?;
+    let rig = TestRig::new()?;
     let stage = staged(&rig)?;
     let installed = rig.execute_os(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
