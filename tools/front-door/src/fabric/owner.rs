@@ -1112,17 +1112,66 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         if request.kind.is_none() {
             request.kind = raw["context"]["task_kind"].as_str().map(str::to_owned);
         }
+        // Replanning may raise coverage, but must retain the original hard
+        // family floors and selected named-lens requirements.
+        let declared_panel = routing
+            .review
+            .resolve_panel(&request, None, &paths, false)?;
         // A growth signal does not carry a new tier. Resolve at the highest
         // tier until the graph carries a measured replacement risk record.
         request.risk_tier = Some("terminal".into());
         request.shape = None;
         request.lenses.clear();
-        let panel = routing
+        let mut panel = routing
             .review
             .resolve_panel(&request, None, &paths, false)
             .map_err(
                 |_| "repair review panel could not resolve; correct review routing settings",
             )?;
+        for (family, count) in declared_panel.minimum_family_counts {
+            let minimum = panel.minimum_family_counts.entry(family).or_default();
+            *minimum = (*minimum).max(count);
+        }
+        for mut declared in declared_panel
+            .slots
+            .into_iter()
+            .filter(|slot| slot.required_family.is_some())
+        {
+            if let Some(slot) = panel
+                .slots
+                .iter_mut()
+                .find(|slot| slot.lens == declared.lens)
+            {
+                slot.required_family = declared.required_family;
+            } else {
+                // The raised shape can use a different lens order. Keep an
+                // explicitly constrained lens rather than dropping its read.
+                declared.distinct_families = false;
+                panel
+                    .omitted
+                    .retain(|omitted| omitted.lens != declared.lens);
+                panel.slots.push(declared);
+            }
+        }
+        panel.resolve_families(|slot, family| {
+            provenant_cli::route::resolve_review_family(
+                &self.factory.context.roots,
+                &slot.tier,
+                family,
+                &document
+                    .extra
+                    .get("exclude")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            )
+        })?;
         let single = panel.slots.len() == 1;
         let frame = !single && panel.frame;
         let verifiers = if single { 0 } else { panel.verifiers };
@@ -1145,10 +1194,23 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .slots
             .into_iter()
             .map(|slot| {
-                let (key, route) = crate::graph_support::tier_route(
+                let (key, mut route) = crate::graph_support::tier_route(
                     &slot.lens, &slot.tier, None, true,
                 )
                 .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
+                if let Some(family) = slot
+                    .satisfied_family
+                    .as_ref()
+                    .or(slot.required_family.as_ref())
+                {
+                    if let Some(routes) = route.as_array_mut() {
+                        for route in routes {
+                            route["required_family"] = serde_json::json!(family);
+                        }
+                    } else {
+                        route["required_family"] = serde_json::json!(family);
+                    }
+                }
                 let mut fields = serde_json::Map::new();
                 fields.insert(key.into(), route);
                 Ok(provenant_fabric_runtime::graph::RepairPanelSlot {
@@ -2944,7 +3006,12 @@ impl BoundGraphOwner<'_> {
                     route: accepted_route.unwrap_or(match &route.model {
                         None if route.name.is_some() => {
                             provenant_records::run::RequestedRoute::Adapter {
-                                extra: Default::default(),
+                                extra: route
+                                    .extra
+                                    .iter()
+                                    .filter(|(key, _)| key.as_str() == "required_family")
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect(),
                                 provider: route.adapter.clone().ok_or_else(|| {
                                     FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                         field: "route.adapter".into(),
@@ -2967,7 +3034,12 @@ impl BoundGraphOwner<'_> {
                                 })
                             })?;
                             provenant_records::run::RequestedRoute::Model {
-                                extra: Default::default(),
+                                extra: route
+                                    .extra
+                                    .iter()
+                                    .filter(|(key, _)| key.as_str() == "required_family")
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect(),
                                 provider: adapter.clone(),
                                 model: exact_model(Some(adapter), model),
                                 effort: route.effort.clone(),
@@ -2975,7 +3047,12 @@ impl BoundGraphOwner<'_> {
                         }
                         None if !avoided_families.is_empty() => {
                             provenant_records::run::RequestedRoute::Review {
-                                extra: Default::default(),
+                                extra: route
+                                    .extra
+                                    .iter()
+                                    .filter(|(key, _)| key.as_str() == "required_family")
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect(),
                                 name: route.alias.clone().ok_or_else(|| {
                                     FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                         field: "route.alias".into(),
@@ -2990,7 +3067,12 @@ impl BoundGraphOwner<'_> {
                             }
                         }
                         None => provenant_records::run::RequestedRoute::Named {
-                            extra: Default::default(),
+                            extra: route
+                                .extra
+                                .iter()
+                                .filter(|(key, _)| key.as_str() == "required_family")
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect(),
                             name: route.alias.clone().ok_or_else(|| {
                                 FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                     field: "route.alias".into(),

@@ -432,6 +432,7 @@ pub(crate) fn resolve_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn resolve_dispatch_rejecting(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
@@ -445,6 +446,39 @@ pub(crate) fn resolve_dispatch_rejecting(
     rules: &[provenant_routing::ExclusionRule],
     rejected: &[ModelId],
     choice_context: Option<(&str, &str)>,
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    resolve_dispatch_rejecting_family(
+        request,
+        roots,
+        registry,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+        rejected,
+        choice_context,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_dispatch_rejecting_family(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+    rejected: &[ModelId],
+    choice_context: Option<(&str, &str)>,
+    required_family: Option<&str>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required, preferred) = match excluded_families {
@@ -473,7 +507,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         .collect();
     let with_rejected =
         |members: &[ModelId]| members.iter().chain(rejected).cloned().collect::<Vec<_>>();
-    let selected = resolve_dispatch_excluding(
+    let selected = resolve_dispatch_excluding_family(
         request,
         roots,
         registry,
@@ -485,6 +519,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         &with_rejected(&combined),
         rules,
         choice_context,
+        required_family,
     );
     // Relax when the unused families have no eligible member, including fresh
     // snapshot exhaustion, or the selected account is blocked by persisted
@@ -502,7 +537,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         Err(_) => false,
     };
     let selected = if exhausted && !preferred_excluded.is_empty() {
-        let relaxed = resolve_dispatch_excluding(
+        let relaxed = resolve_dispatch_excluding_family(
             request,
             roots,
             registry,
@@ -514,6 +549,7 @@ pub(crate) fn resolve_dispatch_rejecting(
             &with_rejected(&excluded),
             rules,
             choice_context,
+            required_family,
         );
         match (relaxed, selected) {
             // Keep the preferred-stage route when relaxing would only trade one
@@ -540,7 +576,7 @@ pub(crate) fn resolve_dispatch_rejecting(
             rules.iter().map(ToString::to_string).collect(),
         ))
     } else if !excluded.is_empty() && exhausted {
-        let relaxed = resolve_dispatch_excluding(
+        let relaxed = resolve_dispatch_excluding_family(
             request,
             roots,
             registry,
@@ -552,6 +588,7 @@ pub(crate) fn resolve_dispatch_rejecting(
             rejected,
             rules,
             choice_context,
+            required_family,
         );
         match (relaxed, selected) {
             // Relaxing must not trade a spent route for another one.
@@ -598,6 +635,7 @@ pub(super) fn review_family_excluded(family: Option<&str>, families: &[String]) 
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn resolve_dispatch_excluding(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
@@ -610,6 +648,37 @@ pub(super) fn resolve_dispatch_excluding(
     initial_exclusions: &[ModelId],
     rules: &[provenant_routing::ExclusionRule],
     choice_context: Option<(&str, &str)>,
+) -> Result<provenant_records::ResolvedRoute, EdgeError> {
+    resolve_dispatch_excluding_family(
+        request,
+        roots,
+        registry,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        initial_exclusions,
+        rules,
+        choice_context,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_dispatch_excluding_family(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    initial_exclusions: &[ModelId],
+    rules: &[provenant_routing::ExclusionRule],
+    choice_context: Option<(&str, &str)>,
+    required_family: Option<&str>,
 ) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -638,7 +707,7 @@ pub(super) fn resolve_dispatch_excluding(
             // narrowing retry now mostly catches admission-only failures (a fresh
             // AuthRequired, an exhausted allowance).
             let mut refused_accounts: Vec<(String, String)> = Vec::new();
-            let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
+            let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding_family(
                 request,
                 context,
                 account,
@@ -646,6 +715,7 @@ pub(super) fn resolve_dispatch_excluding(
                 seed.1,
                 &excluded_members,
                 rules,
+                required_family,
             )?;
             loop {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
@@ -701,7 +771,7 @@ pub(super) fn resolve_dispatch_excluding(
                             ..*context
                         };
                         if let Ok(replacement) =
-                            provenant_routing::resolve_for_account_with_seed_excluding(
+                            provenant_routing::resolve_for_account_with_seed_excluding_family(
                                 request,
                                 &narrowed,
                                 None,
@@ -709,6 +779,7 @@ pub(super) fn resolve_dispatch_excluding(
                                 seed.1,
                                 &excluded_members,
                                 rules,
+                                required_family,
                             )
                             && matches!(&replacement.readiness, RouteReadiness::Ready { .. })
                             && replacement.adapter == resolved.adapter
@@ -733,7 +804,7 @@ pub(super) fn resolve_dispatch_excluding(
                     refusals.push(reason.clone());
                     excluded_members.push(model);
                     let mut replacement = match admission_replacement(
-                        provenant_routing::resolve_for_account_with_seed_excluding(
+                        provenant_routing::resolve_for_account_with_seed_excluding_family(
                             request,
                             context,
                             account,
@@ -741,6 +812,7 @@ pub(super) fn resolve_dispatch_excluding(
                             seed.1,
                             &excluded_members,
                             rules,
+                            required_family,
                         ),
                     )? {
                         Some(route) => route,
@@ -910,4 +982,161 @@ pub(crate) fn check_dispatch_candidate(
     }
     .check_with_partial_headroom(route, allow_unknown)
     .map_err(|e| e.to_string())
+}
+
+/// Check a review slot against the same pool and account policy used by dispatch.
+/// Preview has no launch grants; unknown availability remains unknown until launch.
+pub fn resolve_review_family(
+    roots: &Roots,
+    tier: &serde_json::Value,
+    required_family: Option<&str>,
+    exclude: &[String],
+) -> Result<String, String> {
+    let (_, lowered) = crate::fabric::graph_relay::tier_route("review", tier, None, true)?;
+    let routes: Vec<_> = lowered
+        .as_array()
+        .map_or_else(|| vec![&lowered], |items| items.iter().collect());
+    let mut refusals = Vec::new();
+    for route in routes {
+        let parsed = (|| -> Result<_, String> {
+            let choice = if let Some(name) = route.get("alias").and_then(serde_json::Value::as_str)
+            {
+                RouteChoice::NamedRoute(RouteName::parse(name).map_err(|error| error.to_string())?)
+            } else {
+                let adapter = route
+                    .get("adapter")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("missing route adapter")?;
+                let model = route
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("missing route model")?;
+                RouteChoice::Model(
+                    ModelId::parse(&format!("{adapter}/{model}"))
+                        .map_err(|error| error.to_string())?,
+                )
+            };
+            let request = provenant_routing::RouteRequest {
+                intent: provenant_routing::RouteIntent {
+                    workload: provenant_routing::Workload::Review,
+                    ..Default::default()
+                },
+                choice,
+                effort: route
+                    .get("effort")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                confidential: false,
+                fallback: Fallback::None,
+            };
+            with_context(
+                roots,
+                REGISTRY,
+                &[],
+                &[],
+                "local-preview",
+                &[],
+                false,
+                |context, records, policies, settings| {
+                    let rules = effective_exclusion_rules(exclude, roots)?;
+                    // Preview has no availability probes. Account exclusions
+                    // are evaluated against registered account keys below,
+                    // rather than treating an empty probe set as no alternatives.
+                    let route_rules: Vec<_> = rules.iter().filter(|rule| !matches!(rule.selector, provenant_routing::ExclusionSelector::Account { .. })).cloned().collect();
+                    let mut excluded = Vec::new();
+                    let mut refusals = Vec::new();
+                    loop {
+                        let selected =
+                            provenant_routing::resolve_for_account_with_seed_excluding_family(
+                                &request,
+                                context,
+                                route.get("account").and_then(serde_json::Value::as_str),
+                                "review-family-preview",
+                                0,
+                                &excluded,
+                                &route_rules,
+                                required_family,
+                            )
+                            .map_err(|error| {
+                                if refusals.is_empty() {
+                                    EdgeError::from(error)
+                                } else {
+                                    EdgeError::GoAllowance(format!(
+                                        "{}; {error}",
+                                        refusals.join("; ")
+                                    ))
+                                }
+                            })?;
+                        let model =
+                            ModelId::parse(&format!("{}/{}", selected.adapter, selected.model))?;
+                        if excluded.contains(&model) {
+                            return Err(EdgeError::GoAllowance(refusals.join("; ")));
+                        }
+                        let pools = context.catalogue.admission_pools(&model);
+                        let now = context.now.as_timestamp().as_second();
+                        let admission = provenant_quota::Admission {
+                            policies,
+                            now_unix_seconds: now,
+                            records,
+                            pools: &pools,
+                        };
+                        let selected_account = route.get("account").and_then(serde_json::Value::as_str);
+                        let recorded = recorded_model_readiness(settings, &model, &pools, selected_account, None, |scope| {
+                            context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now))
+                        });
+                        let keys: BTreeSet<_> = recorded.iter().map(|read| read.account_key.as_str())
+                            .chain(records.iter().filter(|record| record.account.adapter == selected.adapter).map(|record| record.account.account_key.as_str()))
+                            .filter(|key| selected_account.is_none_or(|selected| selected == *key))
+                            .collect();
+                        let mut accounts = Vec::new();
+                        for key in keys {
+                            if matches!(request.choice, RouteChoice::NamedRoute(_))
+                                && let Some(rule) = rules.iter().find(|rule| matches!(&rule.selector, provenant_routing::ExclusionSelector::Account { adapter, key: excluded } if adapter == &selected.adapter && excluded == key))
+                            {
+                                accounts.push(rule.to_string());
+                                continue;
+                            }
+                            if let Some(read) = recorded.iter().find(|read| read.account_key == key) {
+                                let observation = &read.observation;
+                                let current = observation.observed_scope.is_some()
+                                    && observation.observed_unix_seconds.is_some_and(|at| at <= now)
+                                    && observation.expires_unix_seconds.is_some_and(|expiry| expiry > now);
+                                if observation.state == provenant_quota::ReadinessState::Unavailable
+                                    || (current && matches!(observation.reason,
+                                        Some(provenant_quota::ReadinessReason::SignedOut | provenant_quota::ReadinessReason::LoginExpired | provenant_quota::ReadinessReason::AccountMismatch)))
+                                {
+                                    accounts.push(format!("account {key}: {:?}", observation.reason));
+                                    continue;
+                                }
+                            }
+                            let mut probe = selected.clone();
+                            probe.account_key = Some(key.to_owned());
+                            probe.readiness = RouteReadiness::Ready {
+                                extra: Default::default(), availability_ref: "preview".into(), expires_unix_seconds: now + 60,
+                            };
+                            let spent = records.iter().any(|record| record.account.adapter == selected.adapter && record.account.account_key == key && super::output::spent(record, now));
+                            match admission.check_with_partial_headroom(&probe, context.config.allow_unknown_partial_headroom) {
+                                Ok(()) if !spent => { accounts.clear(); break; }
+                                Ok(()) => accounts.push(format!("account {key}: allowance exhausted")),
+                                Err(error) => accounts.push(format!("account {key}: {error}")),
+                            }
+                        }
+                        if accounts.is_empty() {
+                            return provenant_records::AdapterSpec::get(&selected.adapter)
+                                .map(|adapter| adapter.family.to_owned())
+                                .ok_or_else(|| RoutingError::UnknownAdapter.into());
+                        }
+                        refusals.push(format!("{}: {}", model.as_str(), accounts.join("; ")));
+                        excluded.push(model);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())
+        })();
+        match parsed {
+            Ok(family) => return Ok(family),
+            Err(reason) => refusals.push(reason),
+        }
+    }
+    Err(refusals.join("; "))
 }

@@ -2160,6 +2160,14 @@ pub(super) fn prepare_candidates(
         .to_string();
     let rules = crate::route::task_exclusion_rules(&task.profile, roots)
         .map_err(|error| error.to_string())?;
+    let required_family = match &task.route {
+        run::RequestedRoute::Adapter { extra, .. }
+        | run::RequestedRoute::Model { extra, .. }
+        | run::RequestedRoute::Named { extra, .. }
+        | run::RequestedRoute::Review { extra, .. } => extra
+            .get("required_family")
+            .and_then(serde_json::Value::as_str),
+    };
     let family_constraints = match &task.route {
         run::RequestedRoute::Review {
             excluded_families,
@@ -2176,7 +2184,7 @@ pub(super) fn prepare_candidates(
     };
     let resolve = |availability: &[provenant_providers::AvailabilityRecord],
                    rejected: &[provenant_routing::ModelId]| {
-        crate::route::resolve_dispatch_rejecting(
+        crate::route::resolve_dispatch_rejecting_family(
             &request,
             roots,
             provider_registry,
@@ -2191,6 +2199,7 @@ pub(super) fn prepare_candidates(
             task.context.as_ref().and_then(|context| {
                 Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
             }),
+            required_family,
         )
         .map(|mut resolved| {
             // The router cannot observe host fences. Preserve the known
@@ -2351,7 +2360,7 @@ pub(super) fn prepare_candidates(
                 exact.effort = route.effort.clone();
                 exact.fallback = provenant_routing::Fallback::None;
                 let revalidate = |records: &[provenant_providers::AvailabilityRecord]| {
-                    crate::route::resolve_dispatch_rejecting(
+                    crate::route::resolve_dispatch_rejecting_family(
                         &exact,
                         roots,
                         provider_registry,
@@ -2366,6 +2375,7 @@ pub(super) fn prepare_candidates(
                         task.context.as_ref().and_then(|context| {
                             Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
                         }),
+                        required_family,
                     )
                     .ok()
                 };

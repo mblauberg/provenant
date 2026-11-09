@@ -1218,3 +1218,20 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn route_normalisation_preserves_required_family() -> TestResult {
+    let invalid: RequestedRoute = serde_json::from_value(
+        serde_json::json!({"kind":"named", "name":"senior", "effort":null, "required_family":42}),
+    )?;
+    assert!(Service::route(invalid).is_err());
+    for value in [
+        serde_json::json!({"kind":"named", "name":"senior", "effort":null, "required_family":"openai"}),
+        serde_json::json!({"kind":"model", "provider":"codex", "model":"codex/gpt-5", "effort":null, "required_family":"openai"}),
+        serde_json::json!({"kind":"review", "name":"senior", "effort":null, "excluded_families":[], "distinct_families":true, "required_family":"openai"}),
+    ] {
+        let route: RequestedRoute = serde_json::from_value(value)?;
+        assert_eq!(Service::route(route.clone())?, route);
+    }
+    Ok(())
+}
