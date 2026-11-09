@@ -730,8 +730,13 @@ pub fn prepare_writer_with_facts(
         .map_err(|error| anchor_filesystem(error, state))?;
     let project_state = crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
         .map_err(|error| anchor_filesystem(error, state))?;
-    let (directory, binding) =
-        worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
+    let (directory, binding) = worktrees::writer_custody(
+        &project_state,
+        &worktree,
+        &request.worktree,
+        &branch,
+        base,
+        || {
             facts.writer_inventory(
                 &repo,
                 &executor,
@@ -739,13 +744,14 @@ pub fn prepare_writer_with_facts(
                 budget().map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
                 &CancelToken::new(),
             )
-        })
-        .map_err(|error| match error {
-            worktrees::WorktreeError::NotFound => {
-                RunError::WorktreeUnregistered(request.worktree.clone())
-            }
-            other => other.into(),
-        })?;
+        },
+    )
+    .map_err(|error| match error {
+        worktrees::WorktreeError::NotFound => {
+            RunError::WorktreeUnregistered(request.worktree.clone())
+        }
+        other => other.into(),
+    })?;
     Ok(WriterLaunch {
         worktree,
         branch,

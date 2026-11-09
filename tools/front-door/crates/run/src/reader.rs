@@ -621,22 +621,23 @@ impl RunStore {
         // terminal row pay for the host's entire retained writer history.
         let writer =
             self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?;
+        // An inaccessible own slot or reservation cannot prove release, so it
+        // remains a fence rather than failing the caller. The supervisor owns
+        // the layout; predecessor and sibling slots are not evidence about
+        // this attempt's custody.
         let slot = if let Some(writer) = writer {
             match provenant_os::fs::Directory::open_anchor(&writer) {
                 Ok(slot) => slot,
                 Err(error) if error.is_not_found() => return Ok(true),
-                Err(error) => return Err(error.into()),
+                Err(_) => return Ok(false),
             }
         } else {
             directory
         };
-        // An unreadable or malformed own reservation remains a fence. The
-        // supervisor owns its layout; predecessor and sibling slots are not
-        // evidence about this attempt's custody.
-        Ok(!provenant_supervisor::custody::reservation_present(
-            &slot,
-            Self::scope(record),
-        )?)
+        Ok(matches!(
+            provenant_supervisor::custody::reservation_present(&slot, Self::scope(record)),
+            Ok(false)
+        ))
     }
     fn record_with_run(
         &self,

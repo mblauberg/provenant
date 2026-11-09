@@ -890,6 +890,7 @@ fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<
     let _custody = writer_custody(
         context.project_state,
         &tree,
+        tree.path(),
         &branch,
         fixture.head()?,
         || {

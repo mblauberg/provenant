@@ -251,15 +251,24 @@ pub(super) fn verify_probed_worktree(
 
 /// Git's inventory and linked-worktree verification establish membership.
 /// Supervisor keeps per-attempt process evidence in the exclusion slot.
+///
+/// `requested` is the persisted path the slot is later located from, without
+/// inventorying slots. Custody is refused unless it is still the canonical
+/// path: a component moved behind a symlink since the request was stored
+/// would otherwise put the reservation where no reader looks.
 pub fn writer_custody(
     project_state: &Directory,
     worktree: &VerifiedWorktree,
+    requested: &Path,
     branch: &GitRefName,
     base: GitOid,
     worktree_list: impl FnOnce() -> Result<Vec<u8>, WorktreeError>,
 ) -> Result<(Directory, WriterBinding), WorktreeError> {
     worktree.repo().revalidate()?;
     let canonical = canonicalize(worktree.path())?;
+    if canonical != requested {
+        return Err(WorktreeError::IdentityChanged);
+    }
     let entries = parse_worktree_list(&worktree_list()?)?;
     let entry = entries
         .iter()
