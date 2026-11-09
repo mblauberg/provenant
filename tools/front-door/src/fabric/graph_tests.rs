@@ -698,7 +698,7 @@ mod graph_writer_admission_tests {
 #[cfg(test)]
 mod graph_review_tests {
     #[test]
-    fn review_identity_requires_read_only_and_recognizes_behaviour()
+    fn review_identity_requires_read_only_and_recognises_behaviour()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{GraphNode, is_review_node};
         for role in [None, Some("lens"), Some("lens.correctness"), Some("review.verify"), Some("plan.review")] {
