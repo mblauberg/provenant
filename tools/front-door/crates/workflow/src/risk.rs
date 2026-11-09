@@ -315,7 +315,7 @@ mod approval_tests {
                 assess(
                     factors.clone(),
                     RiskTier::Routine,
-                    &policy,
+                    &RiskPolicy::default(),
                     Some(&approval),
                     &paths
                 ),

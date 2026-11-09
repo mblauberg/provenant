@@ -116,9 +116,11 @@ A receipt records the chair's decision and is not a merge certificate. A
 changed subject resets the decision and needs fresh review. Each save
 rechecks derived risk and the complete changed paths (both sides of renames).
 A downgrade uses a chair record with actor, evidence and a nonblank reason of
-at most 4096 bytes, stored alongside the path snapshot. Routing compiles the matched boundary floors into workflow policy at the edge.
-The edge supplies current paths again on save; a changed snapshot invalidates the prior assessment.
-Any path matching a bundled or configured crucial or terminal floor refuses the downgrade and
+at most 4096 bytes, stored alongside the path snapshot. Routing compiles the
+matched boundary floors into workflow policy at the edge. The edge supplies
+current paths again on save; a changed snapshot invalidates the prior assessment.
+Any path matching a bundled or configured crucial or terminal floor refuses the
+downgrade and
 names the path. Auth/security and irreversible external-effect floors remain
 binding, including with owner approval. Owner decision approvals remain separate.
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
