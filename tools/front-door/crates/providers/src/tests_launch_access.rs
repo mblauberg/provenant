@@ -485,8 +485,8 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "RUSTUP_AUTO_INSTALL",
                 "CARGO_TARGET_DIR",
                 "CARGO_BUILD_BUILD_DIR",
-                "CARGO_NET_OFFLINE",
                 "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
+                "CARGO_NET_OFFLINE",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
                 "CODEX_HOME",
@@ -526,7 +526,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         {
             let index = expected
                 .iter()
-                .position(|key| *key == "CARGO_CACHE_AUTO_CLEAN_FREQUENCY")
+                .position(|key| *key == "CARGO_NET_OFFLINE")
                 .expect("cargo env")
                 + 1;
             expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);

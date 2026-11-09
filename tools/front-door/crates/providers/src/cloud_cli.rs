@@ -14,6 +14,12 @@ const REFUSAL: &str = "\u{1e}cloud-refusal:";
 
 pub trait CloudCli {
     fn run(&mut self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>;
+    /// Only a completed merge-base exit 1 proves non-ancestry. Transport
+    /// failures leave the remote job unresolved for a later observation.
+    fn is_ancestor(&mut self, commit: &str, head: &str) -> Result<bool, String> {
+        self.run("git", &["merge-base", "--is-ancestor", commit, head], None)
+            .map(|_| true)
+    }
     /// Submit errors are uncertain unless the transport proves a refusal.
     fn submit(
         &mut self,
@@ -99,6 +105,21 @@ impl CloudCli for InstalledCloudCli<'_> {
             stdin,
         )
     }
+    fn is_ancestor(&mut self, commit: &str, head: &str) -> Result<bool, String> {
+        let argv = ["git", "merge-base", "--is-ancestor", commit, head]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let output = self.capture("git", argv, None)?;
+        match output.outcome.termination {
+            Termination::Exit(0) => Ok(true),
+            Termination::Exit(1) => Ok(false),
+            other => Err(format!(
+                "git merge-base failed ({other:?}): {}",
+                failure_excerpt(&output.stderr)
+            )),
+        }
+    }
     fn submit(
         &mut self,
         program: &str,
@@ -137,13 +158,12 @@ impl InstalledCloudCli<'_> {
     ) -> Result<String, String> {
         self.exec_inner(program, argv, stdin, false)
     }
-    fn exec_inner(
+    fn capture(
         &self,
         program: &str,
         argv: Vec<OsString>,
         stdin: Option<&str>,
-        submission: bool,
-    ) -> Result<String, String> {
+    ) -> Result<provenant_os::exec::TextOutcome, String> {
         let mut options = ExecOptions::new(&argv, &self.cwd, self.timeout);
         options.process_group = true;
         options.stdin = stdin.map(str::as_bytes);
@@ -159,6 +179,16 @@ impl InstalledCloudCli<'_> {
         {
             return Err(format!("{program} returned incomplete output or timed out"));
         }
+        Ok(output)
+    }
+    fn exec_inner(
+        &self,
+        program: &str,
+        argv: Vec<OsString>,
+        stdin: Option<&str>,
+        submission: bool,
+    ) -> Result<String, String> {
+        let output = self.capture(program, argv, stdin)?;
         if output.outcome.termination != Termination::Exit(0) {
             let text = if output.stderr.trim().is_empty() {
                 &output.stdout
@@ -319,36 +349,207 @@ enum ResultChannel {
     CodexThread,
 }
 
+/// The commit-message line that carries a Claude job's result. Claude has no
+/// status command, so this pushed marker is the job's completion signal.
+pub const RESULT_TRAILER: &str = "Provenant-Cloud-Result:";
+
 fn result_prompt(request: crate::cloud::CloudSubmission<'_>, channel: ResultChannel) -> String {
     let job = request.job;
-    let instruction = match channel {
-        ResultChannel::ClaudeBranch => {
-            "Commit only the result file as a single commit on top of the tested commit and push your claude working branch to origin."
-        }
-        ResultChannel::CodexDiff => "Include the result file as a new file in your cloud diff.",
-        ResultChannel::CodexThread => {
-            "This transport has no file diff channel. Include the complete contents of .provenant-cloud-result.json as JSON in your final agent message. Report tracked_files_changed truthfully; do not change tracked files. Verify the requested full commit before running any tests."
-        }
+    let claude = matches!(channel, ResultChannel::ClaudeBranch);
+    let work = match &job.work_branch {
+        Some(work) => format!(
+            "You are a writer. Use repository {:?}. Fetch origin. If origin has branch {work:?}, check it out and confirm it contains commit {}; otherwise create {work:?} at commit {}. You may merge origin/{} into it. Commit your changes and push them to {work:?} without force (git push origin HEAD:refs/heads/{work}); never force-push, rewrite published history or push to another branch.{} Run the proof the task asks for on that branch; heavy builds and tests are allowed.",
+            job.repository,
+            job.commit,
+            job.commit,
+            job.branch,
+            if claude {
+                " If the platform refuses that branch name, push to the working branch it allows (for example your claude/ branch) and use that branch throughout."
+            } else {
+                ""
+            }
+        ),
+        None => format!(
+            "Use repository {:?}, start from commit {} on branch {:?} and run the requested verification there.",
+            job.repository, job.commit, job.branch
+        ),
     };
-    let model = if matches!(channel, ResultChannel::ClaudeBranch) {
-        format!(
-            " Requested model: {:?}; requested effort: {:?}.",
-            job.requested_model, job.requested_effort
-        )
+    let fields = format!(
+        "job_id {:?}, nonce {:?}, commit {:?} (the full commit you started from), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string) and observed_model (the model you are running as, or null if you cannot tell)",
+        job.job_id, job.nonce, job.commit
+    );
+    let pushed = if job.work_branch.is_some() && !claude {
+        ", plus branch (the branch you pushed) and head (the full commit ID of its pushed head)"
     } else {
-        String::new()
+        ""
+    };
+    let report = match channel {
+        ResultChannel::ClaudeBranch => format!(
+            "When you have finished, push one more commit to the branch you used, which may be empty (git commit --allow-empty), whose message ends with the single line `{RESULT_TRAILER} ` followed by the result as one-line JSON with {fields}. {}",
+            if job.work_branch.is_some() {
+                "The owner reads the branch and head from the remote."
+            } else {
+                "Push it to your claude/ working branch on top of the commit; the owner deletes that branch after reading it."
+            }
+        ),
+        ResultChannel::CodexDiff => format!(
+            "Write the result to .provenant-cloud-result.json as JSON with {fields}{pushed}. Leave that file uncommitted so it appears in your cloud diff."
+        ),
+        ResultChannel::CodexThread => format!(
+            "End with a final message that contains the result as JSON with {fields}{pushed}."
+        ),
     };
     format!(
-        "{}\n\nUse repository source {:?} and branch {:?}, and test commit {}. Record your result in .provenant-cloud-result.json as JSON with job_id {:?}, nonce {:?}, commit (the full tested commit), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string), tracked_files_changed (boolean, excluding the result file), and observed_model (string or null). Do not include credentials in the result. {instruction}{model}",
-        request.task, job.repository, job.branch, job.commit, job.job_id, job.nonce
+        "{}\n\n{work} {report} Do not include credentials in the result, commits or messages. Requested model: {:?}; requested effort: {:?}. Report the model you actually run as observed_model; never copy the requested model.",
+        request.task, job.requested_model, job.requested_effort
     )
 }
 
-/// Claude's cloud command does not expose status or cancellation operations.
+fn full_oid(oid: &str) -> bool {
+    crate::cloud::full_oid(oid)
+}
+
+/// Parse one `git ls-remote` line, refusing anything but a full ID and branch ref.
+fn remote_ref(line: &str) -> Result<(&str, &str), String> {
+    match line.split_once('\t') {
+        Some((oid, reference))
+            if full_oid(oid)
+                && reference
+                    .strip_prefix("refs/heads/")
+                    .is_some_and(crate::cloud::valid_branch) =>
+        {
+            Ok((oid, reference))
+        }
+        _ => Err(format!("unrecognised git ls-remote output: {line}")),
+    }
+}
+
+fn fetch<C: CloudCli>(cli: &mut C, reference: &str) -> Result<(), String> {
+    cli.run(
+        "git",
+        &[
+            "-c",
+            "fetch.fsckObjects=true",
+            "fetch",
+            "--no-tags",
+            "origin",
+            reference,
+        ],
+        None,
+    )
+    .map(|_| ())
+}
+
+/// Distinguish proven non-ancestry from an incomplete ancestry observation.
+fn descends<C: CloudCli>(cli: &mut C, commit: &str, head: &str) -> Result<bool, String> {
+    cli.is_ancestor(commit, head)
+}
+
+/// Confirm a writer's reported push on the remote: the named branch exists,
+/// its head is the reported head, and that head descends from the job's
+/// starting commit. `Ok(Some(reason))` refuses the evidence; `Err` is a
+/// transport failure that settles nothing and is observed again later.
+pub fn verify_push<C: CloudCli>(
+    cli: &mut C,
+    job: &crate::cloud::RemoteJob,
+    result: &crate::cloud::CloudResult,
+) -> Result<Option<String>, String> {
+    let (Some(branch), Some(head)) = (result.branch.as_deref(), result.head.as_deref()) else {
+        return Ok(Some(
+            "the writer did not report its pushed branch and head".into(),
+        ));
+    };
+    if job.work_branch.as_deref() != Some(branch) {
+        return Ok(Some(format!(
+            "the writer reported branch {branch:?}, not the named branch {:?}",
+            job.work_branch.as_deref().unwrap_or_default()
+        )));
+    }
+    if !crate::cloud::valid_branch(branch) || !full_oid(head) {
+        return Ok(Some("the writer reported an invalid branch or head".into()));
+    }
+    let reference = format!("refs/heads/{branch}");
+    let listed = cli.run("git", &["ls-remote", "origin", &reference], None)?;
+    let mut remote = None;
+    for line in listed.lines().filter(|line| !line.trim().is_empty()) {
+        let (oid, name) = remote_ref(line)?;
+        if name == reference {
+            remote = Some(oid.to_owned());
+        }
+    }
+    match remote {
+        Some(oid) if oid.eq_ignore_ascii_case(head) => {}
+        Some(oid) => {
+            return Ok(Some(format!(
+                "origin {branch} is at {oid}, not the reported head {head}"
+            )));
+        }
+        None => return Ok(Some(format!("origin has no branch {branch}"))),
+    }
+    fetch(cli, &reference)?;
+    if !descends(cli, &job.commit, head)? {
+        return Ok(Some(format!(
+            "pushed head {head} does not descend from commit {}",
+            job.commit
+        )));
+    }
+    Ok(None)
+}
+
+/// Settle a finished writer only on a verified push; otherwise fail with why.
+fn settle_writer<C: CloudCli>(
+    cli: &mut C,
+    job: &crate::cloud::RemoteJob,
+    result: crate::cloud::CloudResult,
+) -> Result<crate::cloud::RemoteState, String> {
+    if job.work_branch.is_none() {
+        return Ok(crate::cloud::RemoteState::Finished { result });
+    }
+    Ok(match verify_push(cli, job, &result)? {
+        None => crate::cloud::RemoteState::Finished { result },
+        Some(detail) => crate::cloud::RemoteState::Failed {
+            detail: format!("cloud writer push not verified: {detail}"),
+        },
+    })
+}
+
+/// The result JSON on a commit message's trailer line, if any.
+fn trailer_result(message: &str) -> Option<crate::cloud::CloudResult> {
+    message
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(RESULT_TRAILER))
+        .and_then(|json| serde_json::from_str(json.trim()).ok())
+}
+
+/// The claude.ai page for a session ID, or the URL the CLI printed.
+pub fn claude_session_url(remote_id: &str) -> Option<String> {
+    let id = remote_id.trim();
+    if id.starts_with("https://") {
+        Some(id.to_owned())
+    } else if !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        Some(format!("https://claude.ai/code/{id}"))
+    } else {
+        None
+    }
+}
+
+fn now_unix() -> Result<u64, String> {
+    let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
+        .map_err(|error| error.to_string())?
+        .unix_seconds();
+    u64::try_from(now).map_err(|error| error.to_string())
+}
+
+/// Claude's cloud command has no status or cancellation operation. A job's
+/// completion signal is the result trailer it pushes to its branch.
 pub struct ClaudeCloud<C> {
     pub cli: C,
     pub pending_cleanup: Option<(String, String)>,
 }
+
+/// Branches a Claude cloud session may push when it cannot use the named one.
+const CLAUDE_BRANCHES: &str = "refs/heads/claude/*";
 
 impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
     type Error = String;
@@ -363,6 +564,21 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
         if !environment.is_empty() {
             args.extend(["--environment", environment]);
         }
+        // Ask the platform for the model and effort; the record still compares
+        // the requested model with the one the job reports.
+        let model = request.job.requested_model.trim();
+        if !model.is_empty() {
+            args.extend(["--model", model]);
+        }
+        if let Some(effort) = request
+            .job
+            .requested_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        {
+            args.extend(["--effort", effort]);
+        }
         // `claude --cloud` refuses a non-terminal, so only this call needs a PTY.
         let out = self.cli.submit("claude", &args, None, true)?;
         parse_identity(&out).map_err(|_| {
@@ -371,6 +587,9 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
                 failure_excerpt(&out)
             )
         })
+    }
+    fn session_url(&self, remote_id: &str) -> Option<String> {
+        claude_session_url(remote_id)
     }
     fn failure_detail(&self, error: &String) -> Option<String> {
         Some(failure_excerpt(
@@ -385,63 +604,55 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
         job: &crate::cloud::RemoteJob,
     ) -> Result<crate::cloud::RemoteState, String> {
         self.pending_cleanup = None;
-        let refs = self
-            .cli
-            .run("git", &["ls-remote", "origin", "refs/heads/claude/*"], None)?;
-        for line in refs.lines() {
-            let Some((oid, reference)) = line.split_once('\t') else {
-                return Err(format!("unrecognised git ls-remote output: {line}"));
-            };
-            if !reference.starts_with("refs/heads/claude/")
-                || !matches!(oid.len(), 40 | 64)
-                || !oid.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                return Err(format!("unrecognised git ls-remote output: {line}"));
-            }
-            self.cli.run(
-                "git",
-                &[
-                    "-c",
-                    "fetch.fsckObjects=true",
-                    "fetch",
-                    "--no-tags",
-                    "origin",
-                    reference,
-                ],
-                None,
-            )?;
-            let parents = self
+        let mut patterns = vec![CLAUDE_BRANCHES.to_owned()];
+        if let Some(work) = &job.work_branch {
+            patterns.push(format!("refs/heads/{work}"));
+        }
+        let mut args = vec!["ls-remote", "origin"];
+        args.extend(patterns.iter().map(String::as_str));
+        let refs = self.cli.run("git", &args, None)?;
+        for line in refs.lines().filter(|line| !line.trim().is_empty()) {
+            let (oid, reference) = remote_ref(line)?;
+            let branch = &reference["refs/heads/".len()..];
+            if self
                 .cli
-                .run("git", &["rev-list", "--parents", "-n", "1", oid], None)?;
-            let parts: Vec<_> = parents.split_whitespace().collect();
-            if parts.as_slice() != [oid, job.commit.as_str()] {
-                continue;
-            }
-            let diff = self.cli.run(
-                "git",
-                &["diff", "--no-ext-diff", "--no-renames", &job.commit, oid],
-                None,
-            )?;
-            let Ok(result) = crate::cloud_result::result_from_diff(&diff) else {
-                continue;
-            };
-            if result
-                .clone()
-                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
+                .run(
+                    "git",
+                    &["cat-file", "-e", &format!("{oid}^{{commit}}")],
+                    None,
+                )
                 .is_err()
             {
+                fetch(&mut self.cli, reference)?;
+            }
+            let message = self
+                .cli
+                .run("git", &["log", "-1", "--format=%B", oid], None)?;
+            let Some(mut result) = trailer_result(&message) else {
+                continue;
+            };
+            // The remote ref, not the job's report, names the branch and head.
+            result.branch = Some(branch.to_owned());
+            result.head = Some(oid.to_owned());
+            if job.check(&result).is_err() || !descends(&mut self.cli, &job.commit, oid)? {
                 continue;
             }
-            self.pending_cleanup = Some((reference.to_owned(), oid.to_owned()));
+            if job.work_branch.is_none() {
+                // A verification job's result-only branch is not a deliverable.
+                self.pending_cleanup = Some((reference.to_owned(), oid.to_owned()));
+            }
             return Ok(crate::cloud::RemoteState::Finished { result });
         }
-        let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
-            .map_err(|error| error.to_string())?
-            .unix_seconds();
-        let now = u64::try_from(now).map_err(|error| error.to_string())?;
-        if now >= job.deadline_unix_seconds {
+        if now_unix()? >= job.deadline_unix_seconds {
+            let session = job
+                .session_url
+                .clone()
+                .or_else(|| claude_session_url(&job.remote_id))
+                .unwrap_or_else(|| job.remote_id.clone());
             return Ok(crate::cloud::RemoteState::Unknown {
-                detail: "Cloud result did not arrive before the deadline".into(),
+                detail: format!(
+                    "Cloud result did not arrive before the deadline; open {session} to read the session"
+                ),
             });
         }
         Ok(crate::cloud::RemoteState::Running)
@@ -562,16 +773,11 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
         if self.settings.transport == CodexCloudTransport::Thread {
             let prompt = result_prompt(request, ResultChannel::CodexThread);
-            // Cloud placement accepts verification jobs only; writers are
-            // rejected by the graph's placement contract before dispatch.
+            // No read-only sandbox: writers push, and heavy proof writes
+            // build output even in a verification job.
             let out = self.cli.submit(
                 &self.program(),
-                &[
-                    "submit",
-                    "--env",
-                    request.job.environment.trim(),
-                    "--read-only",
-                ],
+                &["submit", "--env", request.job.environment.trim()],
                 Some(&prompt),
                 false,
             )?;
@@ -618,7 +824,12 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
             let out = self
                 .cli
                 .run(&self.program(), &["status", &job.remote_id], None)?;
-            return thread::observe(&out, job);
+            return Ok(match thread::observe(&out, job)? {
+                crate::cloud::RemoteState::Finished { result } => {
+                    settle_writer(&mut self.cli, job, result)?
+                }
+                state => state,
+            });
         }
         let out = self
             .cli
@@ -647,11 +858,8 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
             let mut result = crate::cloud_result::result_from_diff(&diff)?;
             // Codex cannot honour a requested model; do not infer one from the request.
             result.observed_model = None;
-            result
-                .clone()
-                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-                .map_err(|e| e.to_string())?;
-            Ok(crate::cloud::RemoteState::Finished { result })
+            job.check(&result).map_err(|e| e.to_string())?;
+            settle_writer(&mut self.cli, job, result)
         } else {
             Err(format!("unrecognised codex cloud status: {out}"))
         }
@@ -695,7 +903,9 @@ mod adapter_tests {
             environment: "env".into(),
             repository: "repo".into(),
             branch: "main".into(),
+            work_branch: None,
             remote_id: "remote".into(),
+            session_url: None,
             commit: "a".repeat(40),
             requested_model: "model".into(),
             requested_effort: None,
@@ -706,57 +916,193 @@ mod adapter_tests {
             cloud_command: None,
         }
     }
+    /// Replies keyed by the first matching argument prefix; records every call.
+    struct Routes {
+        routes: Vec<(&'static str, Result<String, String>)>,
+        calls: Vec<String>,
+    }
+    impl CloudCli for Routes {
+        fn run(&mut self, program: &str, args: &[&str], _: Option<&str>) -> Result<String, String> {
+            let call = format!("{program} {}", args.join(" "));
+            self.calls.push(call.clone());
+            self.routes
+                .iter()
+                .find(|(prefix, _)| call.starts_with(prefix))
+                .map(|(_, reply)| reply.clone())
+                .unwrap_or_else(|| Err(format!("unexpected command {call}")))
+        }
+    }
+    fn trailer(commit: &str) -> String {
+        format!(
+            "Finish the work\n\n{RESULT_TRAILER} {{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"{commit}\",\"exit_status\":0,\"tests_run\":[\"tier\"],\"tests_failed\":[],\"log_location\":\"log\",\"observed_model\":\"claude-opus-5-5\"}}\n"
+        )
+    }
     #[test]
-    fn cloud_claude_reads_matching_result_and_deletes_after_save() {
-        use std::collections::VecDeque;
-        struct Script {
-            replies: VecDeque<String>,
-            calls: Vec<String>,
-        }
-        impl CloudCli for Script {
-            fn run(
-                &mut self,
-                program: &str,
-                args: &[&str],
-                _: Option<&str>,
-            ) -> Result<String, String> {
-                self.calls.push(format!("{program} {}", args.join(" ")));
-                self.replies
-                    .pop_front()
-                    .ok_or_else(|| "missing response".into())
-            }
-        }
+    fn cloud_claude_verification_reads_trailer_and_deletes_after_save() {
         let oid = "b".repeat(40);
         let commit = "a".repeat(40);
-        let diff = format!(
-            "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"{commit}\",\"exit_status\":0,\"tests_run\":[],\"tests_failed\":[],\"log_location\":\"log\",\"tracked_files_changed\":false,\"observed_model\":null}}\n"
-        );
-        let script = Script {
-            replies: [
-                format!("{oid}\trefs/heads/claude/result\n"),
-                String::new(),
-                format!("{oid} {commit}"),
-                diff,
-                String::new(),
-            ]
-            .into(),
-            calls: Vec::new(),
-        };
         let mut adapter = ClaudeCloud {
-            cli: script,
+            cli: Routes {
+                routes: vec![
+                    (
+                        "git ls-remote origin refs/heads/claude/*",
+                        Ok(format!("{oid}\trefs/heads/claude/result\n")),
+                    ),
+                    ("git cat-file", Err("missing".into())),
+                    ("git -c fetch.fsckObjects=true fetch", Ok(String::new())),
+                    ("git log -1", Ok(trailer(&commit))),
+                    ("git merge-base --is-ancestor", Ok(String::new())),
+                    ("git push", Ok(String::new())),
+                ],
+                calls: Vec::new(),
+            },
             pending_cleanup: None,
         };
         let job = job();
-        assert!(matches!(
-            adapter.observe(&job).unwrap(),
-            RemoteState::Finished { .. }
-        ));
-        assert_eq!(adapter.cli.calls.len(), 4);
-        assert!(adapter.cli.calls[1].contains("fetch.fsckObjects=true"));
-        assert!(adapter.cli.calls[2].contains(&oid));
-        assert!(adapter.cli.calls[3].contains(&oid));
+        let RemoteState::Finished { result } = adapter.observe(&job).unwrap() else {
+            panic!("expected a result")
+        };
+        assert_eq!(result.branch.as_deref(), Some("claude/result"));
+        assert_eq!(result.head.as_deref(), Some(oid.as_str()));
+        assert_eq!(result.observed_model.as_deref(), Some("claude-opus-5-5"));
+        assert!(
+            adapter
+                .cli
+                .calls
+                .iter()
+                .any(|c| c.contains("fetch.fsckObjects=true"))
+        );
         adapter.after_save(&job);
-        assert!(adapter.cli.calls[4].contains("--delete"));
+        assert!(adapter.cli.calls.last().unwrap().contains("--delete"));
+    }
+    #[test]
+    fn cloud_claude_writer_settles_on_the_real_branch_and_keeps_it() {
+        let oid = "c".repeat(40);
+        let commit = "a".repeat(40);
+        let mut job = job();
+        job.work_branch = Some("lane/cloud".into());
+        let mut adapter = ClaudeCloud {
+            cli: Routes {
+                routes: vec![
+                    (
+                        "git ls-remote origin refs/heads/claude/* refs/heads/lane/cloud",
+                        Ok(format!(
+                            "{}\trefs/heads/claude/other\n{oid}\trefs/heads/claude/lane-cloud-x1\n",
+                            "d".repeat(40)
+                        )),
+                    ),
+                    ("git cat-file", Ok(String::new())),
+                    (
+                        Box::leak(
+                            format!("git log -1 --format=%B {}", "d".repeat(40)).into_boxed_str(),
+                        ),
+                        Ok("unrelated\n".into()),
+                    ),
+                    ("git log -1", Ok(trailer(&commit))),
+                    ("git merge-base --is-ancestor", Ok(String::new())),
+                ],
+                calls: Vec::new(),
+            },
+            pending_cleanup: None,
+        };
+        let RemoteState::Finished { result } = adapter.observe(&job).unwrap() else {
+            panic!("expected a result")
+        };
+        // The platform's branch is reported as it is, never as the named one.
+        assert_eq!(result.branch.as_deref(), Some("claude/lane-cloud-x1"));
+        assert_eq!(result.head.as_deref(), Some(oid.as_str()));
+        assert!(job.check(&result).unwrap().passed);
+        assert!(adapter.pending_cleanup.is_none());
+        adapter.after_save(&job);
+        assert!(!adapter.cli.calls.iter().any(|c| c.contains("--delete")));
+    }
+    #[test]
+    fn cloud_claude_unfinished_past_deadline_names_the_session() {
+        let mut job = job();
+        job.deadline_unix_seconds = 0;
+        job.remote_id = "session_01ABC".into();
+        let mut adapter = ClaudeCloud {
+            cli: Routes {
+                routes: vec![("git ls-remote", Ok(String::new()))],
+                calls: Vec::new(),
+            },
+            pending_cleanup: None,
+        };
+        let RemoteState::Unknown { detail } = adapter.observe(&job).unwrap() else {
+            panic!("expected unknown")
+        };
+        assert!(
+            detail.contains("https://claude.ai/code/session_01ABC"),
+            "{detail}"
+        );
+    }
+    #[test]
+    fn cloud_writer_push_is_verified_on_the_remote() {
+        let head = "e".repeat(40);
+        let mut job = job();
+        job.work_branch = Some("lane/cloud".into());
+        let mut result = crate::cloud::CloudResult {
+            job_id: "job".into(),
+            nonce: "nonce".into(),
+            commit: job.commit.clone(),
+            exit_status: 0,
+            tests_run: vec!["tier".into()],
+            tests_failed: vec![],
+            log_location: "log".into(),
+            observed_model: None,
+            branch: Some("lane/cloud".into()),
+            head: Some(head.clone()),
+        };
+        let routes = |listed: String| Routes {
+            routes: vec![
+                ("git ls-remote origin refs/heads/lane/cloud", Ok(listed)),
+                ("git -c fetch.fsckObjects=true fetch", Ok(String::new())),
+                ("git merge-base --is-ancestor", Ok(String::new())),
+            ],
+            calls: Vec::new(),
+        };
+        let mut cli = routes(format!("{head}\trefs/heads/lane/cloud\n"));
+        assert_eq!(verify_push(&mut cli, &job, &result), Ok(None));
+        let refused = |cli: &mut Routes, result: &crate::cloud::CloudResult| {
+            verify_push(cli, &job, result).unwrap().unwrap()
+        };
+        let mut moved = routes(format!("{}\trefs/heads/lane/cloud\n", "f".repeat(40)));
+        assert!(refused(&mut moved, &result).contains("not the reported head"));
+        let mut absent = routes(String::new());
+        assert!(refused(&mut absent, &result).contains("no branch"));
+        let mut lost = Routes {
+            routes: vec![("git ls-remote", Err("network down".into()))],
+            calls: Vec::new(),
+        };
+        assert!(verify_push(&mut lost, &job, &result).is_err());
+        result.branch = Some("main".into());
+        assert!(refused(&mut cli, &result).contains("not the named branch"));
+        let mut unrelated = Routes {
+            routes: vec![
+                (
+                    "git ls-remote",
+                    Ok(format!("{head}\trefs/heads/lane/cloud\n")),
+                ),
+                ("git -c", Ok(String::new())),
+                ("git merge-base", Err("git failed: ".into())),
+            ],
+            calls: Vec::new(),
+        };
+        result.branch = Some("lane/cloud".into());
+        assert_eq!(
+            verify_push(&mut unrelated, &job, &result),
+            Err("git failed: ".into())
+        );
+        assert_eq!(
+            settle_writer(&mut unrelated, &job, result.clone()),
+            Err("git failed: ".into())
+        );
+        assert_eq!(job.state, RemoteState::Running);
+        unrelated.routes[2].1 = Ok(String::new());
+        assert!(matches!(
+            settle_writer(&mut unrelated, &job, result),
+            Ok(RemoteState::Finished { .. })
+        ));
     }
     #[test]
     fn cloud_codex_recovers_lost_submit_response_without_retry() {
@@ -808,7 +1154,7 @@ mod adapter_tests {
     }
 
     #[test]
-    fn cloud_codex_finished_result_is_checked_and_reports_changed_files() {
+    fn cloud_codex_finished_result_is_checked_and_accepts_changed_files() {
         use std::collections::VecDeque;
         struct Script(VecDeque<String>);
         impl CloudCli for Script {
@@ -818,7 +1164,7 @@ mod adapter_tests {
         }
         let job = job();
         let diff = format!(
-            "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"{}\",\"exit_status\":0,\"tests_run\":[\"test\"],\"tests_failed\":[],\"log_location\":\"log\",\"tracked_files_changed\":true,\"observed_model\":\"claimed\"}}\n",
+            "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"{}\",\"exit_status\":0,\"tests_run\":[\"test\"],\"tests_failed\":[],\"log_location\":\"log\",\"observed_model\":\"claimed\"}}\ndiff --git a/src/lib.rs b/src/lib.rs\nindex 1234567..7654321 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
             job.commit
         );
         let mut adapter = CodexCloud {
@@ -828,10 +1174,8 @@ mod adapter_tests {
         let RemoteState::Finished { result } = adapter.observe(&job).unwrap() else {
             panic!("expected result")
         };
-        let checked = result
-            .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-            .unwrap();
-        assert!(!checked.passed);
+        let checked = job.check(&result).unwrap();
+        assert!(checked.passed);
         assert_eq!(checked.model, crate::cloud::ModelObservation::Unknown);
         let mut wrong = job;
         wrong.nonce = "other".into();
@@ -842,6 +1186,65 @@ mod adapter_tests {
         assert!(adapter.observe(&wrong).is_err());
     }
     const CAPTURED: &str = "\u{1b}[>4m\u{1b}]0;claude\u{7}\u{1b}[?25lCreated cloud session: Fix the thing\r\nView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\nResume with: claude --teleport session_01ABC\r\n\u{1b}[?25h";
+    #[test]
+    fn ancestry_requires_complete_exit_zero_or_one() {
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
+        struct FakeExec(Result<ExecOutcome, &'static str>);
+        impl Executor for FakeExec {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                self.0.clone().map_err(|operation| ExecError::Io {
+                    operation,
+                    source: std::io::ErrorKind::Other.into(),
+                })
+            }
+        }
+        let complete = |termination| ExecOutcome {
+            termination,
+            stdout: CapturedStream::default(),
+            stderr: CapturedStream::default(),
+            timed_out: false,
+            cancelled: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            elapsed_micros: 0,
+        };
+        let mut cases = vec![
+            (Ok(complete(Termination::Exit(0))), Some(true)),
+            (Ok(complete(Termination::Exit(1))), Some(false)),
+            (Ok(complete(Termination::Exit(128))), None),
+            (Ok(complete(Termination::Signal(9))), None),
+            (Err("spawn"), None),
+            (Err("read"), None),
+        ];
+        for flag in 0..8 {
+            let mut output = complete(Termination::Exit(1));
+            match flag {
+                0 => output.timed_out = true,
+                1 => output.cancelled = true,
+                2 => output.drain_truncated = true,
+                3 => output.overflow_stopped = true,
+                4 => output.stdout.truncated = true,
+                5 => output.stderr.truncated = true,
+                6 => output.stdout.read_failed = true,
+                _ => output.stderr.read_failed = true,
+            }
+            cases.push((Ok(output), None));
+        }
+        for (output, expected) in cases {
+            let executor = FakeExec(output);
+            let mut cli = InstalledCloudCli {
+                executor: &executor,
+                cwd: ".".into(),
+                timeout: Duration::from_secs(1),
+            };
+            let observed = descends(&mut cli, &"a".repeat(40), &"b".repeat(40));
+            match expected {
+                Some(value) => assert_eq!(observed, Ok(value)),
+                None => assert!(observed.is_err(), "{observed:?}"),
+            }
+        }
+    }
+
     #[test]
     fn cloud_submission_classifies_only_complete_nonzero_refusals() {
         use provenant_os::exec::{
@@ -1064,7 +1467,11 @@ mod adapter_tests {
         assert_eq!(claude.cli.calls[0].1[0], "--cloud");
         assert!(claude.cli.calls[0].1[1].contains("test task"));
         assert!(claude.cli.calls[0].1[1].contains(&job.nonce));
-        assert_eq!(&claude.cli.calls[0].1[2..], ["--environment", "env"]);
+        assert_eq!(
+            &claude.cli.calls[0].1[2..],
+            ["--environment", "env", "--model", "model"]
+        );
+        assert!(claude.cli.calls[0].1[1].contains("Requested model: \"model\""));
         let mut hosted = job.clone();
         hosted.environment.clear();
         claude
@@ -1073,8 +1480,29 @@ mod adapter_tests {
                 task: "test task",
             })
             .unwrap();
-        assert_eq!(claude.cli.calls[1].1.len(), 2);
+        assert_eq!(&claude.cli.calls[1].1[2..], ["--model", "model"]);
         assert!(!claude.cli.calls[1].1.iter().any(|a| a == "--environment"));
+        let mut writer = hosted.clone();
+        writer.work_branch = Some("lane/cloud".into());
+        writer.requested_effort = Some("high".into());
+        claude
+            .submit(CloudSubmission {
+                job: &writer,
+                task: "test task",
+            })
+            .unwrap();
+        assert_eq!(
+            &claude.cli.calls[2].1[2..],
+            ["--model", "model", "--effort", "high"]
+        );
+        let prompt = &claude.cli.calls[2].1[1];
+        assert!(prompt.contains("without force"), "{prompt}");
+        assert!(prompt.contains("lane/cloud"), "{prompt}");
+        assert!(prompt.contains(RESULT_TRAILER), "{prompt}");
+        assert_eq!(
+            claude.session_url("session_01ABC").as_deref(),
+            Some("https://claude.ai/code/session_01ABC")
+        );
         let mut codex_without = CodexCloud {
             settings: ProviderCloudSettings::default(),
             cli: FakeCli::default(),

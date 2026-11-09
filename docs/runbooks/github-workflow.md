@@ -207,8 +207,8 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
-A Fabric writer has no Git credentials unless `lanes.publish` is on (see
-[lane lifecycle](lane-lifecycle.md)). Otherwise use
+A Fabric writer with open network can push its own branch and run `gh` unless
+`lanes.publish=false` (see [lane lifecycle](lane-lifecycle.md)). Without that, use
 `provenant run --use deliver --file delivery.toml --explain` and check that the composite
 binds the intended branch and host delivery before submitting. The host pushes
 the verified commit and opens the pull request within the approved authority.

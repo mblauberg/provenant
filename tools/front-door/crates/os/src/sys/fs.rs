@@ -404,6 +404,30 @@ pub fn clone_file(source: &File, dir: &File, name: &OsStr) -> io::Result<()> {
     retry(|| unsafe { libc::fclonefileat(source.as_raw_fd(), dir.as_raw_fd(), name.as_ptr(), 0) })
         .map(|_| ())
 }
+/// Copy-on-write clone of a regular file into a new entry, by the `FICLONE`
+/// ioctl (btrfs, XFS with reflink, and similar). It never copies bytes: on a
+/// filesystem without reflink the ioctl fails and so does this, leaving no
+/// entry behind. The new file keeps the source's permission bits.
+#[cfg(target_os = "linux")]
+pub fn clone_file(source: &File, dir: &File, name: &OsStr) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    /// `_IOW(0x94, 9, int)`, the request that makes `libc::ioctl` share extents.
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+    let mode = source.metadata()?.permissions().mode() & 0o7777;
+    let created = create_new(dir, name)?;
+    // SAFETY: both descriptors are live for the call; FICLONE takes the source
+    // descriptor by value and retains nothing.
+    let cloned =
+        retry(|| unsafe { libc::ioctl(created.as_raw_fd(), FICLONE as _, source.as_raw_fd()) })
+            .map(|_| ())
+            .and_then(|()| created.set_permissions(std::fs::Permissions::from_mode(mode)));
+    if let Err(error) = cloned {
+        drop(created);
+        let _ = unlink(dir, name, false);
+        return Err(error);
+    }
+    Ok(())
+}
 pub fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: live borrowed fd/name; unlinkat acts on the directory entry, never

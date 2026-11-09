@@ -146,11 +146,13 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
     assert!(composite.nodes.iter().all(|node| node.require_findings));
     let error = Compiler::new(&library)
         .compile(&json!({"id": "panel", "use": "review", "over": "@missing"}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("resolver @missing"), "{error}");
     let error = Compiler::new(&library)
         .compile(&json!({"id": "loose", "use": "task", "brief": "Do ${item}"}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("only inside `over`"), "{error}");
 }
 
@@ -401,7 +403,8 @@ nodes = [
         .unwrap();
     let error = Compiler::new(&library)
         .compile(&json!({"id": "r", "use": "loop-a"}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("uses itself"), "{error}");
 }
 
@@ -620,14 +623,15 @@ fn review_cycle_limit_is_configurable_but_never_above_three() {
     let bundled = library();
     for cycles in [0, 4] {
         let error = Compiler::new(&bundled).compile(&json!({"id":"repair", "use":"review-repair",
-            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":cycles}})).unwrap_err();
+            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":cycles}})).unwrap_err().to_string();
         assert!(error.contains("1 to 3"), "{error}");
     }
     let error = Compiler::new(&bundled)
         .compile(&json!({"id":"repair", "use":"repair",
         "with":{"worktree":"/fixture/writer", "write_scope":["src"]},
         "repeat":{"until":"accepted", "max_rounds":4}}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("between 1 and 3"), "{error}");
 }
 
@@ -698,7 +702,8 @@ fn template_node_fields_are_checked_and_extensions_are_explicit() {
         .unwrap();
     let error = Compiler::new(&library)
         .compile(&json!({"id":"stage", "use":"typo"}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("stage") && error.contains("misspelt_field"),
         "{error}"
@@ -843,7 +848,8 @@ nodes = [{ id = "first", use = "task" }]
         .unwrap();
     let error = Compiler::new(&library)
         .compile(&json!({"id":"stage", "use":"broken"}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("review_repair behaviour"), "{error}");
 }
 
@@ -852,7 +858,8 @@ fn node_overrides_reject_unknown_fields() {
     let library = library();
     let error = Compiler::new(&library)
         .compile(&json!({"id":"stage", "use":"task", "deadine_seconds":30}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("stage") && error.contains("deadine_seconds"),
         "{error}"
@@ -890,7 +897,8 @@ fn composite_members_reject_unknown_fields() {
             .unwrap();
         let error = Compiler::new(&library)
             .compile(&json!({"id":"stage", "use":"local"}))
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("work") && error.contains("deadine_seconds"),
             "{error}"
@@ -962,7 +970,8 @@ fn extensions_cannot_supply_compiled_node_fields() {
             .unwrap();
         let error = Compiler::new(&library)
             .compile(&json!({"id":"stage", "use":"local", "with":{"root":"/any/root"}}))
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains(field) && error.contains("extensions"),
             "{error}"
@@ -999,7 +1008,8 @@ fn leaf_node_tables_reject_instance_only_syntax() {
             .unwrap();
         let error = Compiler::new(&library)
             .compile(&json!({"id":"stage", "use":"invalid"}))
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("stage") && error.contains(field), "{error}");
     }
 }
@@ -1022,7 +1032,8 @@ fn parameterised_composite_members_reject_unknown_fields() {
         .compile(&json!({"id":"stage", "use":"local", "with":{"members":[
             {"id":"work", "access":"read_only", "deadine_seconds":30}
         ]}}))
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("work") && error.contains("deadine_seconds"),
         "{error}"
@@ -1041,6 +1052,7 @@ fn shorthand_document_controls_are_not_node_overrides() {
         compiler
             .compile(&node)
             .unwrap_err()
+            .to_string()
             .contains("unknown field unknown_node_field")
     );
 }
@@ -1094,4 +1106,137 @@ fn steward_compiles_with_junior_route_and_proposal_limits() {
             "missing proposal limit: {limit}"
         );
     }
+}
+
+fn parameter_library() -> TemplateLibrary {
+    let mut library = library();
+    library
+        .insert_toml(
+            Layer::Inline,
+            "gate",
+            r#"
+brief = "Gate ${subject} at ${retries} tries"
+tier = "junior"
+[parameters.subject]
+type = "string"
+[parameters.review_base]
+type = "string"
+default = "main"
+[parameters.retries]
+type = "integer"
+min = 1
+max = 5
+default = 2
+"#,
+        )
+        .unwrap();
+    library
+        .insert_toml(
+            Layer::Inline,
+            "gate-pair",
+            r#"
+nodes = [
+  { id = "check", use = "level", with = { level = "${mode}" } },
+]
+[parameters.mode]
+type = "string"
+"#,
+        )
+        .unwrap();
+    library
+        .insert_toml(
+            Layer::Inline,
+            "level",
+            r#"
+brief = "Check at ${level}"
+tier = "junior"
+[parameters.level]
+type = "string"
+enum = ["low", "high"]
+"#,
+        )
+        .unwrap();
+    library
+}
+
+#[test]
+fn unknown_parameter_names_the_key_and_suggests_the_nearest_declared_name() {
+    let library = parameter_library();
+    let compiler = Compiler::new(&library);
+    let refusal = compiler
+        .compile(&json!({"id":"gate", "use":"gate", "with":{"subject.commit":"abc"}}))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.starts_with("node gate: template gate has no parameter subject.commit"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.contains("accepted parameters: retries, review_base, subject"),
+        "{refusal}"
+    );
+    assert!(refusal.ends_with("did you mean subject?"), "{refusal}");
+
+    let refusal = compiler
+        .compile(&json!({"id":"gate", "use":"gate", "with":{"nonsense_key":"x"}}))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("has no parameter nonsense_key"),
+        "{refusal}"
+    );
+    assert!(!refusal.contains("did you mean"), "{refusal}");
+
+    // A key that is not an identifier is not echoed, so a pasted secret stays out.
+    let refusal = compiler
+        .compile(&json!({"id":"gate", "use":"gate", "with":{"sk ant secret":"x"}}))
+        .unwrap_err()
+        .to_string();
+    assert!(!refusal.contains("sk ant secret"), "{refusal}");
+    assert!(refusal.contains("has no such parameter"), "{refusal}");
+}
+
+#[test]
+fn wrong_shape_names_the_key_and_the_declared_shape_without_the_value() {
+    let library = parameter_library();
+    let compiler = Compiler::new(&library);
+    let refusal = compiler
+        .compile(&json!({"id":"gate", "use":"gate", "with":{"subject":"x", "retries":9}}))
+        .unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        "node gate: template gate parameter retries expects an integer from 1 to 5"
+    );
+    let refusal = compiler
+        .compile(&json!({
+            "id":"gate", "use":"gate",
+            "with":{"subject":"x", "retries":"SECRET-VALUE-7"}
+        }))
+        .unwrap_err()
+        .to_string();
+    assert!(refusal.contains("retries expects an integer"), "{refusal}");
+    assert!(!refusal.contains("SECRET-VALUE-7"), "{refusal}");
+}
+
+#[test]
+fn failing_node_inside_a_composite_is_named() {
+    let library = parameter_library();
+    let refusal = Compiler::new(&library)
+        .compile(&json!({"id":"pair", "use":"gate-pair", "with":{"mode":"medium"}}))
+        .unwrap_err();
+    let CompileError::Parameter(ParameterRefusal {
+        node,
+        template,
+        fault,
+    }) = &refusal
+    else {
+        panic!("expected a parameter refusal, got {refusal}");
+    };
+    assert_eq!(node.as_deref(), Some("check"));
+    assert_eq!(template, "level");
+    assert!(matches!(fault, ParameterFault::Shape { key, .. } if key == "level"));
+    assert_eq!(
+        refusal.to_string(),
+        "node check: template level parameter level expects a string, one of [\"low\",\"high\"]"
+    );
 }

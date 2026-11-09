@@ -130,12 +130,20 @@ escalate an invalid successful result after custody release; task failures and
 uncertain outcomes cannot trigger that escalation. Unsupported effort fails; where clamping is permitted, the requested,
 applied and observed values are recorded. `route list` and `resolve` start no
 process and mutate nothing.
+`route resolve` displays fresh account quota snapshots for the requested model,
+alongside scoped readiness failures. A quota-derived ready observation identifies
+its source and is not an executable or login probe. Its admission preview checks
+the eligible accounts' quota using the launch admission rules; an unprobed
+provider alone is not an admission refusal. A launch still probes availability
+and rechecks current evidence before starting.
 - Why: the fallback plan is decided once and visible.
 - Test: `crates/routing/src/tests.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
   `crates/routing/src/fallback.rs::tests::switching_requires_safe_outcome_and_every_guard`;
   `crates/routing/src/tests/availability.rs::availability_access_and_scoped_quota_are_independent_gates`;
   `crates/cli/src/run/provider/tests_writer_scratch.rs::provider_fence_preparation_reports_causes_and_selects_available_candidate`;
-  `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
+  `crates/cli/src/route/tests_1.rs::resolve_after_quota_tick_uses_the_published_snapshot`;
+  `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`;
+  `tests/route.rs::resolve_uses_fresh_account_quota_and_reports_only_real_quota_refusals`
 - Owner: `crates/routing/src/`
 
 ### Model policy
@@ -383,7 +391,10 @@ authority reference.
 Unknown or stale quota never causes a refusal. Refusals are model- and
 account-scoped unless wire evidence proves a wider pool, and independent
 pools never exhaust each other. A newer comparable observation or the reset
-clears only that refusal. An account whose latest reading is exhausted is
+clears only that refusal. For adapters that group quota into pools, a legacy
+refusal without a stored pool is compared against the model family's pool,
+derived from the model prefix; other adapters keep the bounded refusal wait.
+An account whose latest reading is exhausted is
 skipped for an available account whatever its pacing policy: hard when the reading
 is fresh, by rank when it is stale. Only a quota-limited outcome cools an account;
 auth failures never switch accounts. Provider capacity errors settle as

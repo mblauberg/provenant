@@ -1485,6 +1485,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         let env: Vec<_> = std::env::vars_os().collect();
         return u8::try_from(build_slot::run(build_slot::Gate {
             settings: build_slot::Settings::from_env(&env),
+            local: build_slot::Local::from_env(&env),
             command,
         }))
         .unwrap_or(1);

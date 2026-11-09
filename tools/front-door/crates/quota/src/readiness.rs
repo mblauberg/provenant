@@ -910,4 +910,63 @@ mod tests {
         // The file refuses another account's records.
         assert!(ReadinessFile::decode(&bytes, "claude", "other").is_err());
     }
+
+    #[test]
+    fn poolless_grouped_refusal_clears_from_newer_family_snapshot() {
+        let account = crate::AccountScope {
+            adapter: "agy".into(),
+            account_key: "key".into(),
+            label: "label".into(),
+        };
+        let mut record = crate::AccountRecord::empty(account.clone());
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "gemini-3.8-flash".into(),
+            pool: None,
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(500),
+        });
+        record.snapshot = Some(crate::QuotaSnapshot {
+            schema_version: 1,
+            account: account.clone(),
+            revision: 0,
+            status: crate::QuotaStatus::Available,
+            observed_unix_seconds: 190,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![crate::QuotaWindow {
+                window_seconds: Some(604800),
+                pool: "gemini.weekly".into(),
+                used_basis_points: 1000,
+                resets_unix_seconds: Some(900),
+            }],
+        });
+        let admission = crate::Admission {
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 200,
+            records: std::slice::from_ref(&record),
+            pools: &[],
+        };
+        let mut file = ReadinessFile::default();
+        file.sync_refusals(&record, LOCAL_HOST, &admission).unwrap();
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "agy".into(),
+            account_key: "key".into(),
+            route: "agy/gemini-3.8-flash".into(),
+        };
+        assert_eq!(file.get(&scope, 200).state, ReadinessState::Unknown);
+
+        record.snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
+        let admission = crate::Admission {
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 200,
+            records: std::slice::from_ref(&record),
+            pools: &[],
+        };
+        file.sync_refusals(&record, LOCAL_HOST, &admission).unwrap();
+        assert_eq!(file.get(&scope, 200).state, ReadinessState::Unavailable);
+    }
 }

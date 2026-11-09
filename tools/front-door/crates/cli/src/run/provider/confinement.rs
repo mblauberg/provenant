@@ -233,7 +233,7 @@ pub(super) fn confinement_request(
         // The host materialises a commit source beside candidate scratch under
         // state. Its ordinary read root cannot override the state denial, and
         // every adapter starts in this cwd; keep the view immutable.
-        mandatory.add_state_read(grant(roots.cwd))?;
+        mandatory.add_state_read_exec(grant(roots.cwd))?;
     }
     for path in roots
         .prompt_file
@@ -930,19 +930,19 @@ fn commits_behind_default(
         .filter(|count| *count > 0)
 }
 
-/// Publishing hands the lane the GitHub credential, so it needs the explicit
-/// `lanes.publish=true` opt-in as well as a networked writer.
+/// Publishing hands the lane the GitHub credential. It is on by default for
+/// every lane on open network, read-only lanes included; `lanes.publish=false`
+/// withholds it. A missing or
+/// non-boolean value takes the registry default.
 pub(super) fn publishing_requested(
-    writer: bool,
     open_network: bool,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> bool {
-    writer
-        && open_network
+    open_network
         && knobs
             .get("lanes.publish")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+            .unwrap_or(true)
 }
 
 pub(super) fn publishing_executable(

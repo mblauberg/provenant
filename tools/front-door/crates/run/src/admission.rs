@@ -28,10 +28,10 @@ pub(crate) struct AppliedWriteGrants {
     pub git_grants_digest: Option<provenant_core::Digest>,
 }
 
-/// Fixed ceilings on live lanes of any class, independent of batch
-/// concurrency. The writer caps are configurable below these
-/// (`domains.fabric.lanes.max_writer_lanes`, default 40, and
-/// `max_project_writer_lanes`, default 30).
+/// Upper bounds for explicit lane-count settings, independent of batch
+/// concurrency. Writer caps are configurable below these
+/// (`domains.fabric.lanes.max_writer_lanes` and
+/// `max_project_writer_lanes`, both disabled by default).
 pub const HOST_ACTIVE: u64 = provenant_config::WRITER_LANES_CEILING;
 pub const PROJECT_ACTIVE: u64 = provenant_config::PROJECT_WRITER_LANES_CEILING;
 pub const HOST_QUEUED: u64 = 256;
@@ -231,6 +231,19 @@ impl RunStore {
         resources: &dyn Resources,
     ) -> Result<bool> {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
+        let owner = if waiting {
+            None
+        } else {
+            Some(crate::ledger::prepare_lease(
+                &ledger,
+                self.context.state_root.as_path(),
+                &self.ticket(&self.db, id)?,
+                self.lane_caps(),
+                call.clock,
+                resources,
+            )?)
+        };
+
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             let AttemptState::Running { .. } = &old.state else {
@@ -262,7 +275,7 @@ impl RunStore {
                         self.lane_caps(),
                         call.clock,
                         call,
-                        resources,
+                        owner.as_ref().ok_or(RunError::Conflict)?,
                     )?
                     .is_some();
                 ticket.active = reclaimed;
@@ -1200,6 +1213,14 @@ impl RunStore {
         }
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
         let caps = self.lane_caps();
+        let owner = crate::ledger::prepare_lease(
+            &ledger,
+            self.context.state_root.as_path(),
+            &self.ticket(&self.db, id)?,
+            caps,
+            clock,
+            resources,
+        )?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if !matches!(old.state, AttemptState::Starting { .. }) {
@@ -1225,7 +1246,7 @@ impl RunStore {
                 caps,
                 clock,
                 call,
-                resources,
+                &owner,
             )?
             else {
                 return Ok(None);

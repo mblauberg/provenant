@@ -206,6 +206,95 @@
     }
 
     #[test]
+    fn resolve_after_quota_tick_uses_the_published_snapshot() -> Result<(), Box<dyn Error>> {
+        use provenant_core::Clock;
+        use provenant_quota::{
+            AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaEffects, QuotaError,
+            QuotaProbePlan,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        struct Effects;
+        impl QuotaEffects for Effects {
+            fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+                Ok(vec![AccountScope {
+                    adapter: "codex".into(),
+                    account_key: "key".into(),
+                    label: "work".into(),
+                }])
+            }
+            fn capture(
+                &self,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                Ok(ProbeCapture {
+                    stdout: br#"{"payload":{"result":{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300}}}}}"#.to_vec(),
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                })
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            format!(
+                "schema_version=1\n[domains.accounts.entries.work]\nadapter='codex'\nlabel='work'\nkey='key'\ndirectory={:?}\n",
+                temp.path().to_string_lossy()
+            ),
+        )?;
+        let report = crate::quota::execute(
+            &crate::quota::Quota::Tick {
+                adapter: crate::quota::Filter {
+                    adapter: Some("codex".into()),
+                },
+                trigger: crate::quota::Trigger::Manual,
+                power: crate::quota::Power::Ac,
+            },
+            &roots,
+            provenant_providers::REGISTRY,
+            &Effects,
+        )?;
+        assert_eq!(
+            report.accounts[0].status,
+            provenant_quota::QuotaStatus::Available
+        );
+        let command = super::Route::Resolve(super::RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: Some(super::Model("codex/gpt-6-luna".into())),
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        });
+        let super::Data::Resolved(preview) = super::execute(
+            &command,
+            &roots,
+            provenant_os::clock::SystemClock::new().wall_now()?,
+        )?
+        else {
+            return Err("expected resolved route".into());
+        };
+        assert_eq!(
+            preview.recorded_readiness[0].observation.state,
+            provenant_quota::ReadinessState::Ready
+        );
+        assert!(preview.admission_refusal.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn route_resolve_human_output_excludes_policy_prompt() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let roots = exclusion_roots(&temp)?;

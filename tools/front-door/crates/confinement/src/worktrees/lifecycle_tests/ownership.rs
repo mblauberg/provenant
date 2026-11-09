@@ -484,7 +484,9 @@ fn stale_owner_update_cannot_overwrite_a_successor_claim() -> Result<(), Box<dyn
     assert_eq!(load_owner(&tree)?, Some(successor.clone()));
     drop(held);
     update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel())?;
-    // A replay that already reached the exact target remains idempotent.
+    // A replay that already reached the exact target remains idempotent,
+    // including after the guardian has acquired writer custody.
+    let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
     update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel())?;
     assert_eq!(load_owner(&tree)?, Some(current_update));
     Ok(())
@@ -1065,5 +1067,152 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
         Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
     ));
     assert!(persistent.calls.load(Ordering::SeqCst) >= 1);
+    Ok(())
+}
+
+#[test]
+fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let mut claims = Vec::new();
+    for index in 0..12 {
+        let branch = format!("parallel-writer-{index}");
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: branch.clone(),
+                base: Some(fixture.head()?.to_string()),
+            },
+            &cancel(),
+        )?;
+        claims.push((
+            verify_worktree(&fixture.repo, &info.path)?,
+            WorktreeOwner {
+                attempt_id: None,
+                operation_id: Some(format!("parallel-writer-{index}").parse()?),
+                branch,
+                base: info.head.to_string(),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: context.clock.wall_now()?,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+            },
+            info.head,
+        ));
+    }
+    // A repository mutation on another tree must not delay these claims.
+    let _registry = context
+        .project_state
+        .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)?;
+    let barrier = std::sync::Barrier::new(claims.len());
+    std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+        let handles: Vec<_> = claims
+            .iter()
+            .map(|(tree, owner, head)| {
+                let context = &context;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let executor = provenant_os::exec::SystemExecutor::new(1).unwrap();
+                    let facts = RepoFacts::default();
+                    let local = WorktreeContext {
+                        executor: &executor,
+                        facts: &facts,
+                        ..*context
+                    };
+                    barrier.wait();
+                    save_lane_owner_when_free(&local, tree, owner, *head, None, false, &cancel())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().map_err(|_| "writer claim panicked")??;
+        }
+        Ok(())
+    })?;
+    for (tree, owner, _) in claims {
+        assert_eq!(load_owner(&tree)?, Some(owner));
+    }
+    Ok(())
+}
+
+#[test]
+fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dyn Error>> {
+    struct Probe<'a> {
+        inner: &'a dyn Executor,
+        registry: &'a Directory,
+        calls: std::sync::atomic::AtomicUsize,
+        slot: Directory,
+        claiming: std::sync::atomic::AtomicBool,
+    }
+    impl Executor for Probe<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            drop(
+                self.registry
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                    .expect("writer Git must leave the shared registry free"),
+            );
+            if self.claiming.load(std::sync::atomic::Ordering::SeqCst) {
+                assert!(
+                    matches!(
+                        self.slot
+                            .try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                        Err(FsError::LockTimeout { .. })
+                    ),
+                    "ownership HEAD checks must hold writer custody"
+                );
+            }
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "writer-git-lock".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let probe = Probe {
+        inner: context.executor,
+        registry: context.project_state,
+        calls: Default::default(),
+        slot: context
+            .project_state
+            .open_verified_directory(&state_dir_name(&info.path))?,
+        claiming: std::sync::atomic::AtomicBool::new(true),
+    };
+    context.executor = &probe;
+    let owner = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("writer-git-lock".parse()?),
+        branch: "writer-git-lock".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
+    let updated = WorktreeOwner {
+        label: Some("updated".into()),
+        ..owner.clone()
+    };
+    update_owner_when_unchanged(&context, &tree, &owner, &updated, &cancel())?;
+    probe
+        .claiming
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    fixture.run(&["commit", "--allow-empty", "-m", "source"])?;
+    fast_forward(&context, &info.path, fixture.head()?, &cancel())?;
+    assert!(probe.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
     Ok(())
 }

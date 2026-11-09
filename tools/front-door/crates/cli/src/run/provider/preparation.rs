@@ -870,6 +870,16 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
     }
 }
 
+impl From<super::source_tree::SourceViewError> for PrepareError {
+    fn from(error: super::source_tree::SourceViewError) -> Self {
+        // The step and cause are fixed-form text, never Git output or contents.
+        Self::Refusal {
+            message: error.to_string(),
+            cause: provenant_records::run::TerminalCause::SourceViewRefused,
+            note: Some(error.to_string()),
+        }
+    }
+}
 impl From<String> for PrepareError {
     fn from(message: String) -> Self {
         Self::Other(message)
@@ -1757,11 +1767,10 @@ pub(super) fn prepare_candidates(
         .map(|writer| writer_source_context(writer, task, &git))
         .transpose()?
         .flatten();
-    // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
-    // credential. Missing gh tools, or both configuration and a host token, leave the
-    // writer able to do local work without publishing credential access.
+    // Publishing is on by default for every networked lane and `lanes.publish=false`
+    // withholds it: it hands the lane the GitHub credential. Missing gh tools, or both
+    // configuration and a host token, leave the lane able to work without it.
     let publishing_gh = publishing_requested(
-        writer.is_some(),
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
     )
@@ -2225,6 +2234,8 @@ pub(super) fn prepare_candidates(
     let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
     let mut reprobed_accounts = std::collections::BTreeSet::new();
     let mut candidate = 0usize;
+    // A login resolved for one route serves every later route and the reader path.
+    let mut gh_login: Option<std::ffi::OsString> = None;
     loop {
         if queue.is_empty() {
             let next = if named_pool {
@@ -2983,6 +2994,7 @@ pub(super) fn prepare_candidates(
             scratch,
             &provenant_executable,
             roots.state.as_path(),
+            &task.profile.knobs,
         );
         if let Some(policy) = plan.policy_mut() {
             for root in std::iter::once(process_tree_read).chain(coordination_reads) {
@@ -3024,20 +3036,25 @@ pub(super) fn prepare_candidates(
         if let Some(adapter_spec) = adapter_spec {
             spec.configure_shell(scratch, adapter_spec);
         }
+        let mut gh_attempted = false;
         if let Some(gh) = publishing_gh
             .as_ref()
             .filter(|_| github_auth_permitted(&plan, &spec.profile.spec))
         {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
-            super::gh_auth::inject(
+            gh_attempted = true;
+            if let Some(warning) = super::gh_auth::inject(
                 &executor,
                 gh,
                 &home,
                 &|key| host_provider_var(registry, key),
                 cancel,
+                &mut gh_login,
                 &mut spec.env,
-            );
+            ) {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+            }
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
@@ -3234,15 +3251,19 @@ pub(super) fn prepare_candidates(
             .clone()
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
-            if reader_gh {
-                super::gh_auth::inject(
+            if reader_gh
+                && !gh_attempted
+                && let Some(warning) = super::gh_auth::inject(
                     &executor,
                     &gh,
                     &home,
                     &|key| host_provider_var(registry, key),
                     cancel,
+                    &mut gh_login,
                     &mut spec.env,
-                );
+                )
+            {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
             }
             if adapter_spec.is_some_and(|spec| {
                 spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)

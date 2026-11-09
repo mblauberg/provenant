@@ -57,6 +57,7 @@ fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
         model: "model".into(),
         effort: None,
         deadline_seconds: 3600,
+        work_branch: None,
     });
     store.create(&input, &call)?;
     let fake = Fake {
@@ -291,9 +292,50 @@ fn nested_lane_depth_stops_at_the_configured_maximum() {
     ));
 }
 #[test]
-fn lane_continuation_respects_sealed_parent_or_provider_fallback() -> TestResult {
+fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
+    for bound in [
+        None,
+        Some(NetworkAccess::Provider),
+        Some(NetworkAccess::Local),
+        Some(NetworkAccess::Open),
+    ] {
+        for child_store in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let mut store = RunStore::open(&context(temp.path())?, &call)?;
+            if child_store {
+                store = store.with_writer_registry(&temp.path().join("host"));
+            }
+            if let Some(network) = bound {
+                store = store.with_sealed_parent_network(network);
+            }
+            let mut proposal = input();
+            if !child_store {
+                proposal.request.parent = Some(AttemptId::from_bytes([37; 16]));
+                proposal.request.parent_attempt = Some(AttemptId::from_bytes([38; 16]));
+            }
+            let task = &proposal.request.tasks[0];
+            assert_eq!(
+                store
+                    .effective_launch_task(&proposal.request, task)
+                    .access
+                    .network(false),
+                bound.unwrap_or(NetworkAccess::Open)
+            );
+            let mut narrow = task.clone();
+            narrow.access.network = Some(NetworkAccess::Provider);
+            assert_eq!(
+                store
+                    .effective_launch_task(&proposal.request, &narrow)
+                    .access
+                    .network(false),
+                NetworkAccess::Provider
+            );
+        }
+    }
     {
-        let expected = NetworkAccess::Provider;
+        let expected = NetworkAccess::Open;
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -899,12 +941,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        store.set_admission_policy(AdmissionPolicy {
-            startup_spacing_ms: 0,
-            admission_seconds: 1,
-            ..AdmissionPolicy::default()
-        });
+        let store = RunStore::open(&context(temp.path())?, &call)?;
         if let Some(limit) = limit {
             std::fs::write(
                 store.writer_registry.join("config.toml"),
@@ -913,7 +950,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
                 ),
             )?;
         }
-        for seed in 60..65 {
+        for seed in 1..=70 {
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
             let dir = store.attempt_dir(run.run_id, id, false)?;
@@ -1127,5 +1164,151 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
         reason.as_deref(),
         Some("runtime deadline exceeded: provider stopped after 3600s")
     );
+    Ok(())
+}
+
+#[test]
+fn dozen_writers_share_admission_without_default_limits_or_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut attempts = Vec::new();
+    for seed in 1..=12 {
+        attempts.push(starting(&store, &lane(seed, true), &call)?);
+    }
+    let barrier = std::sync::Barrier::new(attempts.len());
+    std::thread::scope(|scope| -> TestResult {
+        let handles: Vec<_> = attempts
+            .iter()
+            .map(|id| {
+                let context = &context;
+                let barrier = &barrier;
+                scope.spawn(move || -> std::result::Result<(), String> {
+                    let (clock, cancel) = (crate::tests::clock(), CancelToken::new());
+                    let call = crate::tests::call(&clock, &cancel);
+                    let store = RunStore::open(context, &call).map_err(|error| error.to_string());
+                    barrier.wait();
+                    let store = store?;
+                    let record = store
+                        .claim_observed(*id, &clock, &call, &HostFacts::new(100))
+                        .map_err(|error| error.to_string())?
+                        .ok_or(
+                            "writer admission waited despite free worktree and default policy",
+                        )?;
+                    assert!(matches!(record.state, AttemptState::Running { .. }));
+                    Ok(())
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "writer admission panicked")?
+                .map_err(|error| format!("writer admission: {error}"))?;
+        }
+        Ok(())
+    })?;
+    for id in attempts {
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Running { .. }
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn ledger_observes_without_locking_and_reclaims_without_a_new_guardian() -> TestResult {
+    struct Probe {
+        ledger: std::path::PathBuf,
+        run_store: std::path::PathBuf,
+        facts: HostFacts,
+        guardian: Cell<bool>,
+    }
+    impl Probe {
+        fn require_free_ledger(&self) {
+            for path in [&self.ledger, &self.run_store] {
+                let db = rusqlite::Connection::open(path).unwrap();
+                db.busy_timeout(std::time::Duration::ZERO).unwrap();
+                db.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+                    .expect("resource observation must leave admission unlocked");
+            }
+        }
+    }
+    impl Resources for Probe {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            self.facts.memory()
+        }
+        fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
+            self.facts.disk(attempt)
+        }
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            self.require_free_ledger();
+            self.guardian
+                .get()
+                .then(|| self.facts.guardian_identity())
+                .flatten()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            self.require_free_ledger();
+            self.facts.observe_process(pid)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(88, true), &call)?;
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM admission WHERE attempt=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    let ticket: AdmissionTicket = crate::db::decode(&raw)?;
+    let ledger = crate::ledger::open(&store.writer_registry, &call)?;
+    let probe = Probe {
+        ledger: store.writer_registry.join("admission.sqlite3"),
+        run_store: store.context.state_root.as_path().join("run.sqlite3"),
+        facts: HostFacts::new(100),
+        guardian: Cell::new(true),
+    };
+    let caps = crate::ledger::LaneCaps::of(&Default::default());
+    let claim = || {
+        let owner = crate::ledger::prepare_lease(
+            &ledger,
+            store.context.state_root.as_path(),
+            &ticket,
+            caps,
+            &clock,
+            &probe,
+        )?;
+        crate::ledger::lease(
+            &ledger,
+            store.context.state_root.as_path(),
+            &ticket,
+            caps,
+            &clock,
+            &call,
+            &owner,
+        )
+    };
+    assert!(claim()?.is_some());
+    // Retry and relay reclaim preserve the original guardian identity.
+    probe.guardian.set(false);
+    assert!(claim()?.is_some());
+    crate::ledger::yield_lease(&ledger, store.context.state_root.as_path(), id, &call)?;
+    assert!(claim()?.is_some());
+    probe.guardian.set(true);
+    let other = starting(&store, &lane(89, true), &call)?;
+    assert!(
+        store
+            .claim_observed(other, &clock, &call, &probe)?
+            .is_some()
+    );
+    assert!(store.set_child_wait_observed(other, true, &call, &probe)?);
+    probe.guardian.set(false);
+    assert!(store.set_child_wait_observed(other, false, &call, &probe)?);
     Ok(())
 }

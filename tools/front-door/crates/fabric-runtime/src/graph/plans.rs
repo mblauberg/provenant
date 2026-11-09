@@ -1321,7 +1321,9 @@ pub(super) fn add_floor_uses(
         while local.iter().any(|child| child.id == id) {
             id.push('x');
         }
-        let mut node = compiler.compile(&serde_json::json!({"id": id, "use": name}))?;
+        let mut node = compiler
+            .compile(&serde_json::json!({"id": id, "use": name}))
+            .map_err(|error| error.to_string())?;
         prepare(&mut node, planner, spec, document, true)?;
         local.push(node);
         uses.push(TemplateUse {

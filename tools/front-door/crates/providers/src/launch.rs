@@ -1117,7 +1117,7 @@ fn rust_toolchain(
     }
     let cargo_home = cache.join("cargo-home");
     if access == Access::ReadOnly {
-        // Offline builds from the already-extracted shared sources. The
+        // Builds can use the already-extracted shared sources. The
         // links point at stores the lane cannot write, so it cannot alter
         // them; Cargo's lock files and downloads need writes, so it cannot
         // fetch either.
@@ -1148,12 +1148,13 @@ fn rust_toolchain(
         ));
     }
     if access == Access::ReadOnly {
-        // The lane cannot fetch, so Cargo fails fast offline, and its cache
-        // clean-up never touches the shared stores behind the links.
-        env.extend([
-            ("CARGO_NET_OFFLINE".into(), "true".into()),
-            ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()),
-        ]);
+        // Cache clean-up must not touch shared stores behind the links.
+        env.push(("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()));
+        if input.confined.permissions().network
+            != provenant_confinement::permissions::NetworkAccess::Open
+        {
+            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+        }
         setup.push(SetupStep::CreateDir(target));
     }
 }

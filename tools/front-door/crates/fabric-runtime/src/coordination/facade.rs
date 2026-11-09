@@ -298,6 +298,8 @@ pub enum InvalidInputDetail {
     CloudPlacement(CloudPlacementIssue),
     GraphReason(String),
     GraphRelayCause(GraphRelayCause),
+    /// A `--set` or `with` parameter a template refuses; names are disclosable.
+    Parameter(Box<crate::graph::template::ParameterRefusal>),
     TemplateInvalid,
     UpgradeDrainRequired,
     CutoverFindings(String),
@@ -305,8 +307,14 @@ pub enum InvalidInputDetail {
     LandingLock,
     UnresolvableBase(String),
     Field(String),
-    FieldDecode { field: String, missing: bool },
-    FieldTooLarge { field: String, limit: usize },
+    FieldDecode {
+        field: String,
+        missing: bool,
+    },
+    FieldTooLarge {
+        field: String,
+        limit: usize,
+    },
     FieldTitle(String),
     InputUnreadable,
     InputTooLarge,
@@ -318,7 +326,6 @@ pub enum InvalidInputDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudPlacementIssue {
-    Access,
     Target,
     Provider,
     Environment,
@@ -347,6 +354,7 @@ impl InvalidInputDetail {
                 limit: *limit,
             },
             Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
+            Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.redacted())),
             other => other.clone(),
         }
     }
@@ -354,7 +362,6 @@ impl InvalidInputDetail {
     fn safe_text(&self) -> Option<String> {
         match self {
             Self::CloudPlacement(issue) => Some(match issue {
-                CloudPlacementIssue::Access => "invalid input field `attempt.cloud`: cloud placement requires read-only access",
                 CloudPlacementIssue::Target => "invalid input field `attempt.cloud.target`: must not be empty",
                 CloudPlacementIssue::Provider => "invalid input field `attempt.cloud.provider`: must name a supported cloud provider",
                 CloudPlacementIssue::Environment => "invalid input field `attempt.cloud.environment`: Codex requires an environment",
@@ -367,6 +374,7 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::GraphReason(_) => Some("graph input could not be processed".into()),
+            Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
@@ -765,6 +773,10 @@ impl FacadeError {
                 projected = projected.detail("graph input could not be processed")
                     .next("inspect the graph definition and template fields");
             }
+            Self::InvalidInput { detail: Some(InvalidInputDetail::Parameter(refusal)) } => {
+                projected = projected.detail(refusal.redacted().to_string())
+                    .next("pass only the accepted template parameters, each with a value of the shape shown, and retry");
+            }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
@@ -1100,6 +1112,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "confidential",
         "capabilities",
         "build_heavy",
+        "local_cargo",
         "write_roots",
         "digest",
         "encoding",
@@ -1629,6 +1642,40 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn parameter_refusal_redacts_every_string_before_disclosure() {
+        use crate::graph::template::{ParameterFault, ParameterRefusal};
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        for fault in [
+            ParameterFault::NotTable,
+            ParameterFault::Unknown {
+                key: Some(secret.into()),
+                accepted: vec!["brief".into(), secret.into()],
+                suggestion: Some(secret.into()),
+            },
+            ParameterFault::Missing { key: secret.into() },
+            ParameterFault::Shape {
+                key: secret.into(),
+                expected: secret.into(),
+            },
+        ] {
+            let error = FacadeError::invalid(super::InvalidInputDetail::Parameter(Box::new(
+                ParameterRefusal {
+                    node: Some(secret.into()),
+                    template: secret.into(),
+                    fault,
+                },
+            )));
+            let diagnostic = error.diagnostic();
+            assert!(!error.to_string().contains(secret));
+            assert!(!serde_json::to_string(&diagnostic).unwrap().contains(secret));
+            let wire = serde_json::to_string(&error).unwrap();
+            assert!(!wire.contains(secret), "{wire}");
+            let restored: FacadeError = serde_json::from_str(&wire).unwrap();
+            assert_eq!(restored.diagnostic(), diagnostic);
+        }
+    }
+
+    #[test]
     fn dispatch_refusal_reason_is_redacted_and_survives_transport() {
         let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let error = FacadeError::DispatchRefused {
@@ -1834,7 +1881,6 @@ mod diagnostic_tests {
     fn cloud_placement_diagnostics_survive_transport_without_values() {
         use super::{CloudPlacementIssue as Issue, InvalidInputDetail};
         for (issue, field, reason) in [
-            (Issue::Access, "attempt.cloud", "read-only"),
             (Issue::Target, "attempt.cloud.target", "empty"),
             (Issue::Provider, "attempt.cloud.provider", "supported"),
             (Issue::Environment, "attempt.cloud.environment", "requires"),

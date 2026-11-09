@@ -1,4 +1,6 @@
 //! Cloud transport driven by a graph attempt, including recovery and cancellation.
+//! A writer's verified pushed branch and head become the node's outputs, so
+//! the graph's pull request and land flow works on the remote branch.
 //! The graph owns scheduling and completion; the attempt store only retains the
 //! sealed placement and remote identity. No plain CLI run or wait is started.
 use crate::run::cloud_owner;
@@ -66,6 +68,7 @@ where
             if provenant_records::CanonicalV1::file_digest(brief.as_bytes()) != task.prompt_digest {
                 return Err("cloud brief does not match the durable attempt".into());
             }
+            let work_branch = placement.work_branch.clone();
             let target = crate::domains::CloudTarget {
                 provider: placement.provider,
                 environment: placement.environment,
@@ -75,7 +78,7 @@ where
                 effort: placement.effort,
                 deadline_seconds: placement.deadline_seconds,
             };
-            let job = cloud_owner::prepare_job(
+            let mut job = cloud_owner::prepare_job(
                 id,
                 &placement.target,
                 &target,
@@ -84,6 +87,7 @@ where
                     .ok_or("cloud node requires a pinned source commit")?,
                 call.clock,
             )?;
+            job.work_branch = work_branch;
             cloud_owner::submit(provider, store, id, job, brief, call)?
         }
     };
@@ -108,6 +112,17 @@ fn terminal(
     }
 }
 
+/// A writer's pushed branch and head, which the provider verified on the
+/// remote before it returned a finished state.
+fn pushed(job: &RemoteJob) -> (Option<String>, Option<String>) {
+    match &job.state {
+        RemoteState::Finished { result } if job.work_branch.is_some() => {
+            (result.branch.clone(), result.head.clone())
+        }
+        _ => (None, None),
+    }
+}
+
 fn observation(job: &RemoteJob, reference: &str) -> Result<AttemptObservation, String> {
     Ok(match &job.state {
         RemoteState::Submitting
@@ -119,16 +134,13 @@ fn observation(job: &RemoteJob, reference: &str) -> Result<AttemptObservation, S
             attempt_ref: Some(reference.into()),
         },
         RemoteState::Finished { result } => {
-            let checked = result
-                .clone()
-                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-                .map_err(|error| error.to_string())?;
+            let checked = job.check(result).map_err(|error| error.to_string())?;
             let mut capture = provenant_records::result_capture::ResultCapture::new(None);
             let encoded = serde_json::to_vec(result).map_err(|error| error.to_string())?;
             let safe = provenant_confinement::redact::known_shapes(&encoded)
                 .map_err(|error| error.to_string())?;
             capture.push(&safe);
-            terminal(
+            let mut observed = terminal(
                 reference,
                 if checked.passed {
                     AttemptOutcome::Succeeded
@@ -137,7 +149,11 @@ fn observation(job: &RemoteJob, reference: &str) -> Result<AttemptObservation, S
                 },
                 true,
                 Some(Box::new(capture.finish())),
-            )
+            );
+            if let AttemptObservation::Terminal { branch, commit, .. } = &mut observed {
+                (*branch, *commit) = pushed(job);
+            }
+            observed
         }
         RemoteState::SetupFailed { .. } => {
             terminal(reference, AttemptOutcome::OtherFailure, false, None)

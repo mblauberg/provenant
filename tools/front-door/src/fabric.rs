@@ -79,6 +79,7 @@ fn graph_writer_initialisation_error(
     match error {
         WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy,
         WorktreeError::LockBusy => FacadeError::WriterBusy { holder: None },
+        WorktreeError::WriterBusy { holder } => FacadeError::WriterBusy { holder },
         WorktreeError::UnknownWriter => FacadeError::WriterUnknown,
         error @ WorktreeError::Dirty(_) => run_error(error.into()),
         error => FacadeError::DispatchRefused {

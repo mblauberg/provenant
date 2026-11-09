@@ -177,6 +177,15 @@ impl Admission<'_> {
     ) -> Result<bool, QuotaError> {
         let expires = refusal.expires_unix_seconds()?;
         let snapshot = self.fresh_snapshot(adapter, record);
+        // Older pool-less refusals predate grouped quota observations. For
+        // grouped adapters, recover their comparison scope from the model
+        // family, as Catalogue::quota_pool does for uncatalogued models.
+        let pool = refusal.pool.as_deref().or_else(|| {
+            provenant_records::AdapterSpec::get(adapter)
+                .filter(|spec| spec.grouped_quota_pools)
+                .and_then(|_| refusal.model.split('-').next())
+                .filter(|family| !family.is_empty())
+        });
         let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
             && snapshot.is_some_and(|s| {
                 s.observed_unix_seconds > refusal.observed_unix_seconds
@@ -184,7 +193,7 @@ impl Admission<'_> {
                         s.status,
                         QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
                     )
-                    && refusal.pool.as_ref().is_some_and(|pool| {
+                    && pool.is_some_and(|pool| {
                         let mut windows = s
                             .windows
                             .iter()
@@ -1285,6 +1294,79 @@ mod refusal_scope_tests {
                 .is_ok(),
                 allowed
             );
+        }
+
+        // Old Agy refusals have no stored pool. A fresh family reading with
+        // headroom clears them, while a full or older reading cannot.
+        let account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let refusal = Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "gemini-3.8-flash".into(),
+            pool: None,
+            observed_unix_seconds: 950,
+            resets_unix_seconds: Some(1100),
+        };
+        for (observed, used, holds) in [(960, 170, false), (960, 10000, true), (940, 170, true)] {
+            let mut record = AccountRecord::empty(account.clone());
+            record.refusals.push(refusal.clone());
+            record.snapshot = Some(QuotaSnapshot {
+                schema_version: 1,
+                account: account.clone(),
+                revision: 0,
+                status: QuotaStatus::Available,
+                observed_unix_seconds: observed,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                details: None,
+                windows: vec![
+                    QuotaWindow {
+                        window_seconds: Some(604800),
+                        pool: "gemini.weekly".into(),
+                        used_basis_points: used,
+                        resets_unix_seconds: Some(3000),
+                    },
+                    QuotaWindow {
+                        window_seconds: Some(18000),
+                        pool: "claude.5h".into(),
+                        used_basis_points: 10000,
+                        resets_unix_seconds: Some(2000),
+                    },
+                ],
+            });
+            let admission = Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 1000,
+                records: std::slice::from_ref(&record),
+                pools: &[],
+            };
+            assert_eq!(
+                admission
+                    .refusal_holds("agy", Some(&record), &refusal)
+                    .unwrap(),
+                holds
+            );
+            if holds {
+                for (now, expected) in [(1099, true), (1100, false)] {
+                    let admission = Admission {
+                        policies: crate::source::TEST_POLICIES,
+                        now_unix_seconds: now,
+                        records: std::slice::from_ref(&record),
+                        pools: &[],
+                    };
+                    assert_eq!(
+                        admission
+                            .refusal_holds("agy", Some(&record), &refusal)
+                            .unwrap(),
+                        expected,
+                        "observed={observed} used={used} now={now}"
+                    );
+                }
+            }
         }
     }
     #[test]

@@ -1151,6 +1151,7 @@ printf 'agy 1.0.0\n'
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
         &state,
+        &std::collections::BTreeMap::new(),
     );
     assert!(
         coordination_reads
@@ -1173,6 +1174,7 @@ printf 'agy 1.0.0\n'
         &confinement.plan.permissions().scratch.path,
         Path::new("relative-runtime"),
         &state,
+        &std::collections::BTreeMap::new(),
     );
     assert!(refused_coordination_reads.is_empty());
     assert_eq!(codex.env, env_before);

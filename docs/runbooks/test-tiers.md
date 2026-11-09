@@ -3,6 +3,16 @@
 Owner: repository maintainers
 Anchor: scripts/verify-tier
 
+The tiers describe what each place runs; they are not a checklist for a lane.
+Where the repository has CI, a lane runs one cheap compile check (`cargo check`
+on the package it changed), pushes, and leaves T0 to T3 to CI. Provenant says so
+in every writer lane's prompt, and `lanes.local_cargo = "check"` (or `none`)
+makes the lane's `cargo` shim refuse anything heavier with a one-line message.
+The setting is a knob: set it under `[knobs]` for the host, with
+`--knob lanes.local_cargo=check` for a run, or with `attempt.local_cargo` on a
+graph node. Run `scripts/verify-tier` yourself, or on a host with spare
+capacity, for the tiers.
+
 Run `scripts/verify-tier` for T0 and `scripts/verify-tier --tier 1` for T1.
 It prints the selected crates, integration targets and matching paths. Selection
 compares committed and working-tree changes against `origin/main`. Configure the

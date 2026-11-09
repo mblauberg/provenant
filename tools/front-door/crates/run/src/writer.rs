@@ -893,7 +893,7 @@ impl LaunchConfinement {
         }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
-                if cfg!(target_os = "macos")
+                if cfg!(unix)
                     && self.cargo_registry_seed
                     && let Err(detail) = verified_cargo_config(
                         worktree.path(),
@@ -927,6 +927,10 @@ impl LaunchConfinement {
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
+        if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
         if let Err(error) =
             record_cargo_setup_file(attempt_dir, "cargo-target-setup.json", &target_outcome)
         {
@@ -2119,31 +2123,19 @@ impl crate::RunStore {
         let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
-            let metadata = slot.metadata()?;
-            let listing = self.writer_fence_listing_for_admission(true)?;
-            for issue in listing.issues {
-                for parent in issue.reservation.ancestors().skip(1).take(2) {
-                    if let Ok(directory) = Directory::open_anchor(parent) {
-                        let other = directory.metadata()?;
-                        if metadata.device == other.device && metadata.inode == other.inode {
-                            return Err(RunError::Validation(
-                                "predecessor writer fence is unreadable",
-                            ));
-                        }
-                    }
-                }
+            let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
+                .map_err(error("list predecessor writer reservations", None))?;
+            if !listing.issues.is_empty() {
+                return Err(RunError::Validation(
+                    "predecessor writer fence is unreadable",
+                ));
             }
-            for fence in listing.reservations {
+            let slot_path = slot.current_path()?;
+            for mut fence in listing.reservations {
                 if fence.scope == scope {
                     continue;
                 }
-                let Some(path) = fence.custody_directory() else {
-                    return Err(RunError::Validation("writer fence slot missing"));
-                };
-                let other = Directory::open_anchor(path)?.metadata()?;
-                if metadata.device != other.device || metadata.inode != other.inode {
-                    continue;
-                }
+                fence.reservation = slot_path.join(fence.reservation);
                 let parent = fence
                     .reservation
                     .parent()
@@ -2876,6 +2868,13 @@ mod custody_admission_tests {
                 .iter()
                 .any(|fence| fence.scope == predecessor)
         );
+        // An unrelated, malformed project reference must never be scanned
+        // while admitting this worktree. Its own retained import still fences it.
+        std::fs::create_dir(
+            root.join("writer-projects")
+                .join(context.project_id.to_string())
+                .join("unrelated-invalid-project"),
+        )?;
         let next = Scope {
             run: RunId::from_bytes([83; 16]),
             attempt: AttemptId::from_bytes([84; 16]),

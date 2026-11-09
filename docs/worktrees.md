@@ -179,8 +179,17 @@ directory, so setting only the target directory still queues behind test and
 build runs. Worktree removal and `provenant gc` remove this directory with the
 cache. Read-only lanes have no lane cache and get no variable.
 
-On macOS, writer lanes clone the host Cargo registry, Git store and target seed
-into a fresh private Cargo home and target by default. Other platforms skip it.
+Writer lanes clone the host Cargo registry, Git store and target seed
+into a fresh private Cargo home and target by default, so a new worktree reuses
+the compiled third-party dependencies of earlier builds with the same lockfile
+and toolchain instead of recompiling them. macOS clones with `fclonefileat` on
+APFS; Linux clones each file with the `FICLONE` ioctl on btrfs or XFS with
+reflink. Both share blocks until written, so the seed costs almost no disk, and
+a lane's writes go to its own copy: it cannot alter the host's seed or another
+lane's target. A filesystem without clone support (ext4, tmpfs, a
+cross-device store) falls back to an empty target with a warning on the host's
+stderr and a `fallback` record in `cargo-target-setup.json`; the lane builds
+from scratch rather than copying bytes.
 A host turns it off, or tunes retention, by hand-editing its state `config.toml`
 (this setting is not supported by `provenant config set`):
 
@@ -191,7 +200,7 @@ max_generations = 3
 max_bytes = 21474836480
 ```
 
-The default is true on macOS. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
+The default is true. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
 existing lane stores are retained. Cloning
 requires filesystem support for copy-on-write clones and falls back to an
 empty registry when unavailable or a source entry cannot be cloned. A symlink
@@ -199,7 +208,7 @@ or other unsupported entry anywhere in a host store causes that whole store
 to fall back on every fresh lane until the entry is removed or the store is
 recreated. Inspect the host store and the `registry_contains_unsupported_entry`
 or `git_contains_unsupported_entry` reason in the attempt record to diagnose this.
-Other platforms skip this setting. Each attempt's `cargo-setup.json` (registry)
+Each attempt's `cargo-setup.json` (registry)
 and `cargo-git-setup.json` (Git) record a `status` (`seeded`,
 `skipped`, or `fallback`) and a `reason`. If the record cannot be written, the
 host emits a warning and the lane still runs. A `durability_unconfirmed` reason

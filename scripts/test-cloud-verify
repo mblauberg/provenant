@@ -51,7 +51,8 @@ class CloudVerify(unittest.TestCase):
         self.assertEqual(result["commit"], self.commit)
         self.assertEqual(result["tests_run"], ["tier 1"])
         self.assertEqual(result["tests_failed"], [])
-        self.assertFalse(result["tracked_files_changed"])
+        self.assertNotIn("tracked_files_changed", result)
+        self.assertEqual(result["head"], self.commit)
         self.assertIsNone(result["observed_model"])
         self.assertEqual((self.root / "log").read_text(), "hello\n")
         failed = self.run_helper([sys.executable, "-c", "raise SystemExit(3)"])
@@ -68,10 +69,10 @@ class CloudVerify(unittest.TestCase):
         self.assertEqual(result["tests_failed"], ["tier 1"])
         self.assertIn("Unable to start verification command", (self.root / "log").read_text())
 
-    def test_changed_checkout_and_wrong_head(self):
+    def test_changed_checkout_passes_and_wrong_head_is_refused(self):
         changed = self.run_helper([sys.executable, "-c", "open('tracked','w').write('changed')"])
         self.assertEqual(changed.returncode, 0, changed.stderr)
-        self.assertTrue(json.loads(changed.stdout)["tracked_files_changed"])
+        self.assertEqual(json.loads(changed.stdout)["exit_status"], 0)
         marker = self.root / "ran"
         wrong = self.run_helper([sys.executable, "-c", f"open({str(marker)!r},'w').close()"], "a" * 40)
         self.assertNotEqual(wrong.returncode, 0)
@@ -98,17 +99,26 @@ class CloudVerify(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(result_path.read_text(), "retain\n")
 
-    def test_dirty_start_and_changed_commit_are_reported(self):
+    def test_writer_branch_reports_start_commit_head_and_trailer(self):
+        self.git("checkout", "-qb", "lane/cloud")
         (self.repo / "tracked").write_text("dirty\n")
-        result = self.run_helper([sys.executable, "-c", "pass"])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(json.loads(result.stdout)["tracked_files_changed"])
         self.git("add", "tracked")
-        commit = self.run_helper(["git", "commit", "-qm", "changed"])
-        self.assertEqual(commit.returncode, 0, commit.stderr)
-        result = json.loads(commit.stdout)
-        self.assertNotEqual(result["commit"], self.commit)
-        self.assertTrue(result["tracked_files_changed"])
+        self.git("commit", "-qm", "work")
+        advanced = self.git("rev-parse", "HEAD").strip()
+        completed = subprocess.run(
+            [sys.executable, str(HELPER), "--job-id", "test-job", "--nonce", "test-nonce", "--commit", self.commit,
+             "--trailer", "--test", "tier 1", "--log", str(self.root / "log"),
+             "--log-location", "https://example.invalid/log", "--", "git", "commit", "--allow-empty", "-qm", "proof"],
+            cwd=self.repo, capture_output=True, text=True, env=os.environ.copy(),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = completed.stdout.splitlines()
+        result = json.loads(lines[0])
+        self.assertEqual(result["commit"], self.commit)
+        self.assertEqual(result["branch"], "lane/cloud")
+        self.assertNotEqual(result["head"], advanced)
+        self.assertEqual(result["head"], self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(lines[1], "Provenant-Cloud-Result: " + lines[0])
 
 
 if __name__ == "__main__":

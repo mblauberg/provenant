@@ -76,10 +76,7 @@ impl<'a> AttemptCloudStore<'a> {
 
 fn validate_result(job: &RemoteJob) -> Result<(), Error> {
     if let RemoteState::Finished { result } = &job.state {
-        result
-            .clone()
-            .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-            .map_err(|_| Error::Identity)?;
+        job.check(result).map_err(|_| Error::Identity)?;
     }
     Ok(())
 }
@@ -135,6 +132,7 @@ impl CloudJobStore for AttemptCloudStore<'_> {
                 &old.environment,
                 &old.repository,
                 &old.branch,
+                &old.work_branch,
                 &old.commit,
                 &old.requested_model,
                 &old.requested_effort,
@@ -147,6 +145,7 @@ impl CloudJobStore for AttemptCloudStore<'_> {
                 &job.environment,
                 &job.repository,
                 &job.branch,
+                &job.work_branch,
                 &job.commit,
                 &job.requested_model,
                 &job.requested_effort,
@@ -221,7 +220,9 @@ mod tests {
             environment: "env".into(),
             repository: "owner/repo".into(),
             branch: "main".into(),
+            work_branch: None,
             remote_id: "remote-1".into(),
+            session_url: None,
             commit: "a".repeat(40),
             requested_model: "model".into(),
             requested_effort: Some("low".into()),
@@ -266,8 +267,9 @@ mod tests {
                 tests_run: vec![],
                 tests_failed: vec![],
                 log_location: "log".into(),
-                tracked_files_changed: false,
                 observed_model: None,
+                branch: None,
+                head: None,
             },
         };
         assert!(matches!(reopened.save(&wrong_result), Err(Error::Identity)));
@@ -314,8 +316,9 @@ mod tests {
                         tests_run: vec!["test".into()],
                         tests_failed: vec![],
                         log_location: "log".into(),
-                        tracked_files_changed: false,
                         observed_model: Some("model".into()),
+                        branch: None,
+                        head: None,
                     },
                 })
             }

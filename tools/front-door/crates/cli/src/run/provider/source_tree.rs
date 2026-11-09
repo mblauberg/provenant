@@ -8,8 +8,142 @@ use std::{
     path::PathBuf,
 };
 
-const MAX_ENTRIES: usize = 100_000;
-const MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// One file's ceiling. It leaves room for the batch header under the 64 MiB
+/// capture ceiling of a single utility read.
+const MAX_OBJECT_BYTES: u64 = 60 * 1024 * 1024;
+/// Bytes of blob content requested by one `cat-file --batch` process.
+const BATCH_BYTES: u64 = 32 * 1024 * 1024;
+const BATCH_OBJECTS: usize = 4096;
+const BATCH_HEADER_ALLOWANCE: u64 = 160;
+
+/// Host limits for one view, from `domains.run.source_view_*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SourceLimits {
+    pub seconds: u64,
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+impl SourceLimits {
+    pub(super) fn from_config(config: &provenant_confinement::run_config::RunConfig) -> Self {
+        Self {
+            seconds: config.source_view_seconds,
+            entries: usize::try_from(config.source_view_entries).unwrap_or(usize::MAX),
+            bytes: config.source_view_bytes,
+        }
+    }
+}
+
+impl Default for SourceLimits {
+    fn default() -> Self {
+        Self::from_config(&provenant_confinement::run_config::RunConfig::default())
+    }
+}
+
+/// The step of building the view that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SourceStep {
+    Repository,
+    TreeListing,
+    TreeValidation,
+    ObjectRead,
+    TemporaryDirectory,
+    IndexBuild,
+}
+
+impl SourceStep {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Repository => "repository check",
+            Self::TreeListing => "tree listing",
+            Self::TreeValidation => "tree validation",
+            Self::ObjectRead => "object read",
+            Self::TemporaryDirectory => "temporary directory",
+            Self::IndexBuild => "index build",
+        }
+    }
+}
+
+/// A fixed-form cause: never Git output, file contents or credential values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SourceCause {
+    TimedOut,
+    OutputLimit(&'static str),
+    GitExit(i64),
+    Signalled(i64),
+    Cancelled,
+    Refused(&'static str),
+    Failed(&'static str),
+}
+
+impl std::fmt::Display for SourceCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => f.write_str(
+                "timed out (raise domains.run.source_view_seconds if the host is slow or loaded)",
+            ),
+            Self::OutputLimit(stream) => write!(f, "{stream} exceeded its output limit"),
+            Self::GitExit(status) => write!(f, "Git exited with status {status}"),
+            Self::Signalled(signal) => write!(f, "Git was ended by signal {signal}"),
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::Refused(reason) | Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("pinned source view failed at {}: {cause}", step.label())]
+pub(super) struct SourceViewError {
+    pub step: SourceStep,
+    pub cause: SourceCause,
+}
+
+impl SourceViewError {
+    fn new(step: SourceStep, cause: SourceCause) -> Self {
+        Self { step, cause }
+    }
+    fn failed(step: SourceStep, reason: &'static str) -> Self {
+        Self::new(step, SourceCause::Failed(reason))
+    }
+    fn refused(step: SourceStep, reason: &'static str) -> Self {
+        Self::new(step, SourceCause::Refused(reason))
+    }
+    fn filesystem(_: impl std::fmt::Display) -> Self {
+        Self::failed(
+            SourceStep::TemporaryDirectory,
+            "filesystem operation failed",
+        )
+    }
+    fn utility(step: SourceStep) -> impl Fn(provenant_confinement::utility::UtilityError) -> Self {
+        move |error| Self::new(step, utility_cause(&error))
+    }
+}
+
+fn utility_cause(error: &provenant_confinement::utility::UtilityError) -> SourceCause {
+    use provenant_confinement::utility::UtilityError as E;
+    match error {
+        E::TimedOut => SourceCause::TimedOut,
+        E::Truncated { stream } => SourceCause::OutputLimit(stream),
+        E::Signalled { signal } => SourceCause::Signalled(*signal),
+        E::Cancelled => SourceCause::Cancelled,
+        E::Incomplete => SourceCause::Failed("Git output was incomplete"),
+        E::LaneConfiguration { .. } => {
+            SourceCause::Refused("a lane-writable Git configuration cannot be neutralised")
+        }
+        E::Repo(_) => SourceCause::Failed("repository could not be verified"),
+        E::Execution(_) => SourceCause::Failed("Git could not be run"),
+        _ => SourceCause::Failed("Git utility refused the read"),
+    }
+}
+
+fn exit_cause(termination: provenant_os::exec::Termination) -> Option<SourceCause> {
+    use provenant_os::exec::Termination;
+    match termination {
+        Termination::Exit(0) => None,
+        Termination::Exit(status) => Some(SourceCause::GitExit(status)),
+        Termination::Signal(signal) => Some(SourceCause::Signalled(signal)),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SourceKind {
@@ -28,7 +162,10 @@ pub(super) struct SourceEntry {
 
 /// `git ls-tree -r -l -z` is byte-oriented: paths need not be UTF-8.
 /// Refuse unsupported objects rather than quietly presenting a partial tree.
-pub(super) fn parse_source_tree(bytes: &[u8]) -> Result<Vec<SourceEntry>, &'static str> {
+pub(super) fn parse_source_tree(
+    bytes: &[u8],
+    limits: &SourceLimits,
+) -> Result<Vec<SourceEntry>, &'static str> {
     if !bytes.is_empty() && !bytes.ends_with(&[0]) {
         return Err("source tree listing is incomplete");
     }
@@ -82,12 +219,14 @@ pub(super) fn parse_source_tree(bytes: &[u8]) -> Result<Vec<SourceEntry>, &'stat
         if !paths.insert(path.as_path().to_owned()) {
             return Err("duplicate source path");
         }
-        if size > 64 * 1024 * 1024 {
-            return Err("source object is too large");
+        if size > MAX_OBJECT_BYTES {
+            return Err("a source file exceeds the 60 MiB per-file limit");
         }
-        total = total.checked_add(size).ok_or("source tree is too large")?;
-        if total > MAX_BYTES || entries.len() >= MAX_ENTRIES {
-            return Err("source tree is too large");
+        total = total
+            .checked_add(size)
+            .ok_or("source tree exceeds domains.run.source_view_bytes")?;
+        if total > limits.bytes || entries.len() >= limits.entries {
+            return Err("source tree exceeds domains.run.source_view_entries or source_view_bytes");
         }
         entries.push(SourceEntry {
             path,
@@ -100,34 +239,43 @@ pub(super) fn parse_source_tree(bytes: &[u8]) -> Result<Vec<SourceEntry>, &'stat
 }
 
 /// Publish a verified tree below a host-owned empty directory without following
-/// any tree-provided symlink. The caller supplies bounded Git object reads.
+/// any tree-provided symlink. The caller supplies bounded, batched Git object
+/// reads: `read_blobs` returns the content of each requested object, in order.
 pub(super) fn materialise_source_tree(
     root: &provenant_os::fs::Directory,
     entries: &[SourceEntry],
-    mut read_blob: impl FnMut(GitOid) -> Result<Vec<u8>, String>,
-) -> Result<(), String> {
+    mut read_blobs: impl FnMut(&[GitOid], u64) -> Result<Vec<Vec<u8>>, SourceViewError>,
+) -> Result<(), SourceViewError> {
     use std::io::Write;
     use std::path::{Component, Path};
 
+    let unsafe_link =
+        || SourceViewError::refused(SourceStep::TreeValidation, "unsafe source symlink");
+    let size_changed =
+        || SourceViewError::refused(SourceStep::ObjectRead, "source object size changed");
     // Resolve against the complete, immutable Git tree, not the host filesystem.
     // A later symlink may change the meaning of an earlier link's target.
     let mut links = HashMap::new();
-    for entry in entries
+    let symlinks: Vec<&SourceEntry> = entries
         .iter()
         .filter(|entry| entry.kind == SourceKind::Symlink)
-    {
-        let bytes = read_blob(entry.oid)?;
-        if u64::try_from(bytes.len()).ok() != Some(entry.size) {
-            return Err("source object size changed".into());
+        .collect();
+    for group in batches(&symlinks) {
+        let oids: Vec<GitOid> = group.iter().map(|entry| entry.oid).collect();
+        let bytes = read_blobs(&oids, group.iter().map(|entry| entry.size).sum())?;
+        for (entry, bytes) in group.iter().zip(bytes) {
+            if u64::try_from(bytes.len()).ok() != Some(entry.size) {
+                return Err(size_changed());
+            }
+            let target = PathBuf::from(OsString::from_vec(bytes));
+            if target.as_os_str().is_empty()
+                || target.as_os_str().as_encoded_bytes().contains(&0)
+                || target.is_absolute()
+            {
+                return Err(unsafe_link());
+            }
+            links.insert(entry.path.as_path().to_owned(), target);
         }
-        let target = PathBuf::from(OsString::from_vec(bytes));
-        if target.as_os_str().is_empty()
-            || target.as_os_str().as_encoded_bytes().contains(&0)
-            || target.is_absolute()
-        {
-            return Err("unsafe source symlink".into());
-        }
-        links.insert(entry.path.as_path().to_owned(), target);
     }
     // On macOS the source volume can match ASCII names without regard to
     // case. Non-ASCII filesystem equivalence is volume-dependent; fail closed
@@ -142,7 +290,7 @@ pub(super) fn materialise_source_tree(
             for component in target.components() {
                 match component {
                     Component::Normal(_) => named = true,
-                    Component::ParentDir if named => return Err("unsafe source symlink".into()),
+                    Component::ParentDir if named => return Err(unsafe_link()),
                     _ => {}
                 }
             }
@@ -169,7 +317,7 @@ pub(super) fn materialise_source_tree(
                 Some(Component::CurDir) => {}
                 Some(Component::ParentDir) => {
                     if !resolved.pop() {
-                        return Err("unsafe source symlink".into());
+                        return Err(unsafe_link());
                     }
                 }
                 Some(Component::Normal(name)) => {
@@ -184,7 +332,7 @@ pub(super) fn materialise_source_tree(
                     if let Some(target) = target {
                         expansions += 1;
                         if expansions > 40 {
-                            return Err("unsafe source symlink".into());
+                            return Err(unsafe_link());
                         }
                         resolved.pop();
                         for part in target.components().rev() {
@@ -192,57 +340,158 @@ pub(super) fn materialise_source_tree(
                         }
                     }
                 }
-                _ => return Err("unsafe source symlink".into()),
+                _ => return Err(unsafe_link()),
             }
         }
     }
-    for entry in entries {
-        let bytes = if let Some(target) = links.get(entry.path.as_path()) {
-            target.as_os_str().as_encoded_bytes().to_vec()
-        } else {
-            read_blob(entry.oid)?
-        };
+    let place = |entry: &SourceEntry, bytes: &[u8]| -> Result<(), SourceViewError> {
         if u64::try_from(bytes.len()).ok() != Some(entry.size) {
-            return Err("source object size changed".into());
+            return Err(size_changed());
         }
-        let mut parent = root.try_clone().map_err(|error| error.to_string())?;
+        let invalid =
+            || SourceViewError::refused(SourceStep::TreeValidation, "invalid source path");
+        let mut parent = root.try_clone().map_err(SourceViewError::filesystem)?;
         let path = entry.path.as_path();
-        let name = path.file_name().ok_or("invalid source path")?;
+        let name = path.file_name().ok_or_else(invalid)?;
         if let Some(ancestors) = path.parent() {
             for component in ancestors.components() {
                 let Component::Normal(name) = component else {
-                    return Err("invalid source path".into());
+                    return Err(invalid());
                 };
                 match parent.mkdir(name, 0o700) {
                     Ok(()) => {}
                     Err(error) if error.is_exists() => {}
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(SourceViewError::filesystem(error)),
                 }
                 parent = parent
                     .open_verified_directory(name)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(SourceViewError::filesystem)?;
             }
         }
         match entry.kind {
             SourceKind::File | SourceKind::Executable => {
                 // The attempt-owned tree is private until it is complete.
                 // Exclusive creation also permits tracked names such as Cargo.lock.
-                let mut file = parent.create_new(name).map_err(|error| error.to_string())?;
-                file.write_all(&bytes).map_err(|error| error.to_string())?;
+                let mut file = parent
+                    .create_new(name)
+                    .map_err(SourceViewError::filesystem)?;
+                file.write_all(bytes).map_err(SourceViewError::filesystem)?;
                 if entry.kind == SourceKind::Executable {
                     file.make_owner_executable()
-                        .map_err(|error| error.to_string())?;
+                        .map_err(SourceViewError::filesystem)?;
                 }
             }
             SourceKind::Symlink => {
-                let target = PathBuf::from(OsString::from_vec(bytes));
+                let target = PathBuf::from(OsString::from_vec(bytes.to_vec()));
                 parent
                     .symlink(Path::new(&target), name)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(SourceViewError::filesystem)?;
+            }
+        }
+        Ok(())
+    };
+    let files: Vec<&SourceEntry> = entries
+        .iter()
+        .filter(|entry| entry.kind != SourceKind::Symlink)
+        .collect();
+    for group in batches(&files) {
+        // Identical blobs are read once per batch.
+        let mut unique: Vec<GitOid> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut expected = 0u64;
+        for entry in &group {
+            if seen.insert(entry.oid) {
+                unique.push(entry.oid);
+                expected = expected.saturating_add(entry.size);
+            }
+        }
+        let contents = read_blobs(&unique, expected)?;
+        let by_oid: HashMap<GitOid, Vec<u8>> = unique.into_iter().zip(contents).collect();
+        for entry in group {
+            place(entry, by_oid.get(&entry.oid).ok_or_else(size_changed)?)?;
+        }
+    }
+    for entry in symlinks {
+        let target = links
+            .get(entry.path.as_path())
+            .ok_or_else(unsafe_link)?
+            .as_os_str()
+            .as_encoded_bytes();
+        place(entry, target)?;
+    }
+    Ok(())
+}
+
+/// Consecutive entries grouped so one batched read stays inside its capture
+/// budget: at most `BATCH_BYTES` of content and `BATCH_OBJECTS` objects.
+fn batches<'a>(entries: &[&'a SourceEntry]) -> Vec<Vec<&'a SourceEntry>> {
+    let mut groups: Vec<Vec<&SourceEntry>> = Vec::new();
+    let mut bytes = 0u64;
+    for entry in entries {
+        match groups.last_mut() {
+            Some(group)
+                if group.len() < BATCH_OBJECTS
+                    && bytes.saturating_add(entry.size) <= BATCH_BYTES =>
+            {
+                group.push(entry);
+                bytes += entry.size;
+            }
+            _ => {
+                groups.push(vec![entry]);
+                bytes = entry.size;
             }
         }
     }
-    Ok(())
+    groups
+}
+
+/// Decode `git cat-file --batch` output for exactly `oids`, in order.
+pub(super) fn parse_blob_batch(
+    oids: &[GitOid],
+    bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, SourceViewError> {
+    let malformed = || {
+        SourceViewError::failed(
+            SourceStep::ObjectRead,
+            "Git returned a malformed object stream",
+        )
+    };
+    let mut rest = bytes;
+    let mut out = Vec::with_capacity(oids.len());
+    for oid in oids {
+        let newline = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(malformed)?;
+        let header = std::str::from_utf8(&rest[..newline]).map_err(|_| malformed())?;
+        rest = &rest[newline + 1..];
+        let mut fields = header.split(' ');
+        if fields.next() != Some(oid.to_string().as_str()) {
+            return Err(malformed());
+        }
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("missing"), None, None) => {
+                return Err(SourceViewError::refused(
+                    SourceStep::ObjectRead,
+                    "pinned source object is unavailable",
+                ));
+            }
+            (Some("blob"), Some(size), None) => {
+                let size = size.parse::<usize>().map_err(|_| malformed())?;
+                if rest.len() <= size || rest[size] != b'\n' {
+                    return Err(malformed());
+                }
+                out.push(rest[..size].to_vec());
+                rest = &rest[size + 1..];
+            }
+            _ => return Err(malformed()),
+        }
+    }
+    if rest.is_empty() {
+        Ok(out)
+    } else {
+        Err(malformed())
+    }
 }
 
 fn overlaps_source(
@@ -363,130 +612,136 @@ pub(super) fn ensure_view_read_only(
 
 /// Materialise a pinned Git commit into an attempt-private, read-only view.
 /// The Git object reader is host-owned and applies the same bounded repository
-/// checks as the ordinary read-only preparation path.
+/// checks as the ordinary read-only preparation path. A failure names the step
+/// and a fixed-form cause; it never carries Git output or file contents.
 pub(super) fn snapshot_source(
     registry: &super::Registry<'_>,
     task: &super::run::TaskRequest,
     paths: &super::run::LaunchPaths,
     source: &std::path::Path,
     git: &std::path::Path,
-) -> Result<PathBuf, String> {
-    snapshot_source_inner(registry, task, paths, source, git).map_err(|error| {
-        match error.as_str() {
-            "pinned source tree is unavailable"
-            | "pinned source object is unavailable"
-            | "pinned source preparation timed out"
-            | "source tree is too large"
-            | "source object is too large"
-            | "source tree contains an unsupported entry"
-            | "source tree contains an unsupported object"
-            | "unsafe source symlink"
-            | "source tree contains a reserved Git path" => error,
-            _ => "pinned source view could not be constructed".into(),
-        }
-    })
-}
-
-fn snapshot_source_inner(
-    registry: &super::Registry<'_>,
-    task: &super::run::TaskRequest,
-    paths: &super::run::LaunchPaths,
-    source: &std::path::Path,
-    git: &std::path::Path,
-) -> Result<PathBuf, String> {
-    use provenant_confinement::utility::GitObjectKind;
+) -> Result<PathBuf, SourceViewError> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_utility};
     use provenant_core::{Clock, WaitBudget};
-    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
     use provenant_os::fs::{Directory, PublishMode};
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt, time::Duration};
 
-    let roots = registry.roots.ok_or("routing context is unavailable")?;
+    use SourceStep as Step;
+    let repository = |reason| SourceViewError::refused(Step::Repository, reason);
+    let roots = registry
+        .roots
+        .ok_or_else(|| repository("routing context is unavailable"))?;
     let project = registry
         .project_id
-        .ok_or("selected project identity is unavailable")?;
+        .ok_or_else(|| repository("selected project identity is unavailable"))?;
     let head = task
         .head
         .as_deref()
-        .ok_or("graph source head missing")?
+        .ok_or_else(|| repository("graph source head missing"))?
         .parse::<GitOid>()
-        .map_err(|_| "invalid graph source head")?;
-    let host_home = super::host_git_home(roots.state.as_path())?;
-    let utility = UtilityRuntime::new(git, host_home.path()).map_err(|error| error.to_string())?;
-    let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+        .map_err(|_| repository("invalid graph source head"))?;
+    let limits = provenant_confinement::run_config::RunConfig::read(roots.state.as_path())
+        .map(|config| SourceLimits::from_config(&config))
+        .unwrap_or_default();
+    let host_home = super::host_git_home(roots.state.as_path()).map_err(|_| {
+        SourceViewError::failed(Step::TemporaryDirectory, "host Git home unavailable")
+    })?;
+    let utility = UtilityRuntime::new(git, host_home.path())
+        .map_err(SourceViewError::utility(Step::Repository))?;
+    let executor = SystemExecutor::new(1)
+        .map_err(|_| SourceViewError::failed(Step::Repository, "executor unavailable"))?;
     let clock = provenant_os::clock::SystemClock::new();
-    let deadline = WaitBudget::cli(clock.mono_now(), 120).map_err(|error| error.to_string())?;
-    let remaining = || -> Result<Duration, String> {
+    let deadline = WaitBudget::cli(clock.mono_now(), limits.seconds)
+        .map_err(|_| SourceViewError::failed(Step::Repository, "invalid time limit"))?;
+    let remaining = |step: SourceStep| -> Result<Duration, SourceViewError> {
         let duration = Duration::from_micros(deadline.remaining(clock.mono_now()).as_micros());
         if duration.is_zero() {
-            Err("pinned source preparation timed out".into())
+            Err(SourceViewError::new(step, SourceCause::TimedOut))
         } else {
             Ok(duration)
         }
     };
-    let budget = || -> Result<UtilityBudget, String> {
-        let remaining = remaining()?;
+    // One shared deadline bounds the whole view; no process gets a smaller
+    // fixed share, so a slow disk costs time rather than a refusal.
+    let budget = |step: SourceStep, stdout: usize| -> Result<UtilityBudget, SourceViewError> {
         UtilityBudget::new(
-            remaining.min(Duration::from_secs(30)),
+            remaining(step)?,
             Duration::from_secs(2),
             Duration::from_secs(2),
-            64 * 1024 * 1024,
+            stdout,
             1024 * 1024,
         )
-        .map_err(|error| error.to_string())
+        .map_err(SourceViewError::utility(step))
     };
+    const LISTING_LIMIT: usize = 64 * 1024 * 1024;
     let local_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&local_cancel);
     let repo = utility
-        .open_repo(&executor, source, budget()?, cancel)
-        .map_err(|error| error.to_string())?;
+        .open_repo(
+            &executor,
+            source,
+            budget(Step::Repository, 64 * 1024 * 1024)?,
+            cancel,
+        )
+        .map_err(SourceViewError::utility(Step::Repository))?;
     let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| SourceViewError::failed(Step::Repository, "project location invalid"))?;
     let binding = provenant_config::lookup_project(roots, &location)
-        .map_err(|error| error.to_string())?
-        .ok_or("dispatch project binding missing")?;
+        .map_err(|_| SourceViewError::failed(Step::Repository, "project binding unreadable"))?
+        .ok_or_else(|| repository("dispatch project binding missing"))?;
     if binding.project_id() != project {
-        return Err("source repository does not match dispatch project".into());
+        return Err(repository(
+            "source repository does not match dispatch project",
+        ));
     }
     let tree = run_utility(
         &executor,
         GitRead::AllTreeEntries { oid: head },
         &repo,
         &utility,
-        budget()?,
+        budget(Step::TreeListing, LISTING_LIMIT)?,
         cancel,
     )
-    .map_err(|error| error.to_string())?;
-    if tree.termination != Termination::Exit(0) {
-        return Err("pinned source tree is unavailable".into());
+    .map_err(SourceViewError::utility(Step::TreeListing))?;
+    if let Some(cause) = exit_cause(tree.termination) {
+        return Err(SourceViewError::new(Step::TreeListing, cause));
     }
-    let entries = parse_source_tree(&tree.stdout.bytes).map_err(str::to_owned)?;
-    let temporary = Directory::open_anchor(&paths.temporary).map_err(|error| error.to_string())?;
-    let nonce = provenant_os::fs::entropy_128().map_err(|error| error.to_string())?;
+    let entries = parse_source_tree(&tree.stdout.bytes, &limits)
+        .map_err(|reason| SourceViewError::refused(Step::TreeValidation, reason))?;
+    let temporary =
+        Directory::open_anchor(&paths.temporary).map_err(SourceViewError::filesystem)?;
+    let nonce = provenant_os::fs::entropy_128().map_err(SourceViewError::filesystem)?;
     let name = format!("source-{}", provenant_core::hex(&nonce));
     temporary
         .mkdir(OsStr::new(&name), 0o700)
-        .map_err(|error| error.to_string())?;
+        .map_err(SourceViewError::filesystem)?;
     let root = temporary
         .open_verified_directory(OsStr::new(&name))
-        .map_err(|error| error.to_string())?;
-    materialise_source_tree(&root, &entries, |oid| {
+        .map_err(SourceViewError::filesystem)?;
+    materialise_source_tree(&root, &entries, |oids, content| {
+        let stdout = content
+            .saturating_add(BATCH_HEADER_ALLOWANCE * oids.len() as u64)
+            .saturating_add(1024)
+            .min(LISTING_LIMIT as u64);
         let object = run_utility(
             &executor,
-            GitRead::RawObject {
-                kind: GitObjectKind::Blob,
-                oid,
+            GitRead::BlobBatch {
+                oids: oids.to_vec(),
             },
             &repo,
             &utility,
-            budget()?,
+            budget(
+                Step::ObjectRead,
+                usize::try_from(stdout).unwrap_or(LISTING_LIMIT),
+            )?,
             cancel,
         )
-        .map_err(|error| error.to_string())?;
-        if object.termination != Termination::Exit(0) {
-            return Err("pinned source object is unavailable".into());
+        .map_err(SourceViewError::utility(Step::ObjectRead))?;
+        if let Some(cause) = exit_cause(object.termination) {
+            return Err(SourceViewError::new(Step::ObjectRead, cause));
         }
-        Ok(object.stdout.bytes)
+        parse_blob_batch(oids, &object.stdout.bytes)
     })?;
     // Give Git-aware tools an isolated detached HEAD and access to the same
     // verified object store. No branch or mutable checkout index is copied.
@@ -494,58 +749,65 @@ fn snapshot_source_inner(
     if objects.as_os_str().as_bytes().contains(&b'\n')
         || objects.as_os_str().as_bytes().contains(&b'\r')
     {
-        return Err("source object location cannot be represented safely".into());
+        return Err(SourceViewError::refused(
+            Step::TemporaryDirectory,
+            "source object location cannot be represented safely",
+        ));
     }
-    root.mkdir(OsStr::new(".git"), 0o700)
-        .map_err(|error| error.to_string())?;
-    let git_dir = root
-        .open_verified_directory(OsStr::new(".git"))
-        .map_err(|error| error.to_string())?;
-    git_dir
-        .mkdir(OsStr::new("objects"), 0o700)
-        .map_err(|error| error.to_string())?;
-    git_dir
-        .mkdir(OsStr::new("refs"), 0o700)
-        .map_err(|error| error.to_string())?;
-    let objects_dir = git_dir
-        .open_verified_directory(OsStr::new("objects"))
-        .map_err(|error| error.to_string())?;
-    objects_dir
-        .mkdir(OsStr::new("info"), 0o700)
-        .map_err(|error| error.to_string())?;
-    let info = objects_dir
-        .open_verified_directory(OsStr::new("info"))
-        .map_err(|error| error.to_string())?;
-    let mut alternate = objects.as_os_str().as_bytes().to_vec();
-    alternate.push(b'\n');
-    info.atomic_write(
-        OsStr::new("alternates"),
-        ".source-",
-        &alternate,
-        PublishMode::NoReplace,
-    )
-    .map_err(|error| error.to_string())?;
-    git_dir
-        .atomic_write(
-            OsStr::new("HEAD"),
+    let layout = || -> Result<(), SourceViewError> {
+        root.mkdir(OsStr::new(".git"), 0o700)
+            .map_err(SourceViewError::filesystem)?;
+        let git_dir = root
+            .open_verified_directory(OsStr::new(".git"))
+            .map_err(SourceViewError::filesystem)?;
+        git_dir
+            .mkdir(OsStr::new("objects"), 0o700)
+            .map_err(SourceViewError::filesystem)?;
+        git_dir
+            .mkdir(OsStr::new("refs"), 0o700)
+            .map_err(SourceViewError::filesystem)?;
+        let objects_dir = git_dir
+            .open_verified_directory(OsStr::new("objects"))
+            .map_err(SourceViewError::filesystem)?;
+        objects_dir
+            .mkdir(OsStr::new("info"), 0o700)
+            .map_err(SourceViewError::filesystem)?;
+        let info = objects_dir
+            .open_verified_directory(OsStr::new("info"))
+            .map_err(SourceViewError::filesystem)?;
+        let mut alternate = objects.as_os_str().as_bytes().to_vec();
+        alternate.push(b'\n');
+        info.atomic_write(
+            OsStr::new("alternates"),
             ".source-",
-            format!("{head}\n").as_bytes(),
+            &alternate,
             PublishMode::NoReplace,
         )
-        .map_err(|error| error.to_string())?;
-    let config = if matches!(head, GitOid::Sha256(_)) {
-        "[core]\n\trepositoryformatversion = 1\n\tbare = false\n[extensions]\n\tobjectFormat = sha256\n"
-    } else {
-        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
+        .map_err(SourceViewError::filesystem)?;
+        git_dir
+            .atomic_write(
+                OsStr::new("HEAD"),
+                ".source-",
+                format!("{head}\n").as_bytes(),
+                PublishMode::NoReplace,
+            )
+            .map_err(SourceViewError::filesystem)?;
+        let config = if matches!(head, GitOid::Sha256(_)) {
+            "[core]\n\trepositoryformatversion = 1\n\tbare = false\n[extensions]\n\tobjectFormat = sha256\n"
+        } else {
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
+        };
+        git_dir
+            .atomic_write(
+                OsStr::new("config"),
+                ".source-",
+                config.as_bytes(),
+                PublishMode::NoReplace,
+            )
+            .map_err(SourceViewError::filesystem)?;
+        Ok(())
     };
-    git_dir
-        .atomic_write(
-            OsStr::new("config"),
-            ".source-",
-            config.as_bytes(),
-            PublishMode::NoReplace,
-        )
-        .map_err(|error| error.to_string())?;
+    layout()?;
     // Populate only the synthetic index. The synthetic Git configuration is
     // host-written, and this process receives no user configuration or env.
     let snapshot = paths.temporary.join(name);
@@ -576,20 +838,26 @@ fn snapshot_source_inner(
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_ATTR_NOSYSTEM".into(), "1".into()),
     ];
-    let mut options = ExecOptions::new(
-        &argv,
-        host_home.path(),
-        remaining()?.min(Duration::from_secs(30)),
-    );
+    let mut options = ExecOptions::new(&argv, host_home.path(), remaining(Step::IndexBuild)?);
     options.env = Some(&env);
     options.cancel = Some(cancel);
-    repo.revalidate().map_err(|error| error.to_string())?;
+    let index = SourceViewError::utility(Step::IndexBuild);
+    repo.revalidate().map_err(|error| index(error.into()))?;
     let indexed = executor
         .execute(options)
-        .map_err(|error| error.to_string())?;
-    repo.revalidate().map_err(|error| error.to_string())?;
-    if indexed.termination != Termination::Exit(0) || indexed.timed_out || indexed.drain_truncated {
-        return Err("pinned source index could not be constructed".into());
+        .map_err(|error| index(error.into()))?;
+    repo.revalidate().map_err(|error| index(error.into()))?;
+    let cause = if indexed.timed_out {
+        Some(SourceCause::TimedOut)
+    } else if indexed.cancelled {
+        Some(SourceCause::Cancelled)
+    } else if indexed.drain_truncated {
+        Some(SourceCause::OutputLimit("output"))
+    } else {
+        exit_cause(indexed.termination)
+    };
+    if let Some(cause) = cause {
+        return Err(SourceViewError::new(Step::IndexBuild, cause));
     }
     Ok(snapshot)
 }
@@ -611,16 +879,23 @@ mod tests {
         std::fs::write(checkout.join("subject"), "later checkout")?;
         let oid = "1".repeat(40);
         let listing = format!("100644 blob {oid} 14\tsubject\0100644 blob {oid} 14\tCargo.lock\0");
-        let entries = parse_source_tree(listing.as_bytes())?;
+        let entries = parse_source_tree(listing.as_bytes(), &SourceLimits::default())?;
         let root = provenant_os::fs::Directory::open_anchor(&snapshot)?;
-        materialise_source_tree(&root, &entries, |_| Ok(b"pinned subject".to_vec()))?;
+        materialise_source_tree(&root, &entries, |oids, _| {
+            Ok(oids.iter().map(|_| b"pinned subject".to_vec()).collect())
+        })?;
         std::fs::rename(&checkout, temp.path().join("moved"))?;
         std::fs::create_dir(&checkout)?;
         std::fs::write(checkout.join("subject"), "replacement")?;
         assert_eq!(std::fs::read(snapshot.join("subject"))?, b"pinned subject");
         let unsafe_link = format!("120000 blob {oid} 9\tlink\0");
-        let entries = parse_source_tree(unsafe_link.as_bytes())?;
-        assert!(materialise_source_tree(&root, &entries, |_| Ok(b"../escape".to_vec())).is_err());
+        let entries = parse_source_tree(unsafe_link.as_bytes(), &SourceLimits::default())?;
+        assert!(
+            materialise_source_tree(&root, &entries, |oids, _| {
+                Ok(oids.iter().map(|_| b"../escape".to_vec()).collect())
+            })
+            .is_err()
+        );
         Ok(())
     }
 
@@ -658,12 +933,15 @@ mod tests {
                 listing.push_str(&format!("120000 blob {oid} {}\t{path}\0", target.len()));
                 blobs.insert(oid.parse::<GitOid>()?, target.as_bytes().to_vec());
             }
-            let entries = parse_source_tree(listing.as_bytes())?;
-            let result = materialise_source_tree(&root, &entries, |oid| {
-                blobs
-                    .get(&oid)
-                    .cloned()
-                    .ok_or_else(|| "missing blob".into())
+            let entries = parse_source_tree(listing.as_bytes(), &SourceLimits::default())?;
+            let result = materialise_source_tree(&root, &entries, |oids, _| {
+                oids.iter()
+                    .map(|oid| {
+                        blobs.get(oid).cloned().ok_or_else(|| {
+                            SourceViewError::refused(SourceStep::ObjectRead, "missing blob")
+                        })
+                    })
+                    .collect()
             });
             assert_eq!(result.is_ok(), safe, "{links:?}: {result:?}");
             if safe {
@@ -688,13 +966,18 @@ mod tests {
         let first = "1".repeat(40);
         let second = "2".repeat(40);
         let listing = format!("120000 blob {first} 1\tdir\0120000 blob {second} 14\tlink\0");
-        let entries = parse_source_tree(listing.as_bytes())?;
-        let result = materialise_source_tree(&root, &entries, |oid| {
-            if oid.to_string() == first {
-                Ok(b".".to_vec())
-            } else {
-                Ok(b"DIR/../outside".to_vec())
-            }
+        let entries = parse_source_tree(listing.as_bytes(), &SourceLimits::default())?;
+        let result = materialise_source_tree(&root, &entries, |oids, _| {
+            Ok(oids
+                .iter()
+                .map(|oid| {
+                    if oid.to_string() == first {
+                        b".".to_vec()
+                    } else {
+                        b"DIR/../outside".to_vec()
+                    }
+                })
+                .collect())
         });
         assert!(result.is_err());
         Ok(())
@@ -748,7 +1031,7 @@ mod tests {
             record("100644", "blob", "src/a"),
             record("100755", "blob", "run")
         );
-        let parsed = parse_source_tree(valid.as_bytes()).unwrap();
+        let parsed = parse_source_tree(valid.as_bytes(), &SourceLimits::default()).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].path.as_path(), std::path::Path::new("src/a"));
         assert_eq!(parsed[0].size, 3);
@@ -764,8 +1047,17 @@ mod tests {
                 record("100644", "blob", "same")
             ),
         ] {
-            assert!(parse_source_tree(bad.as_bytes()).is_err(), "{bad:?}");
+            assert!(
+                parse_source_tree(bad.as_bytes(), &SourceLimits::default()).is_err(),
+                "{bad:?}"
+            );
         }
-        assert!(parse_source_tree(&valid.as_bytes()[..valid.len() - 1]).is_err());
+        assert!(
+            parse_source_tree(
+                &valid.as_bytes()[..valid.len() - 1],
+                &SourceLimits::default()
+            )
+            .is_err()
+        );
     }
 }

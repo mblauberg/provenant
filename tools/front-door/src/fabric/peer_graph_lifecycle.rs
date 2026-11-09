@@ -665,7 +665,7 @@ esac
         assert_eq!(job.commit, head);
         let result = serde_json::json!({"job_id":job.job_id, "nonce":job.nonce, "commit":head,
             "exit_status":0, "tests_run":["targeted"], "tests_failed":[], "log_location":"log",
-            "tracked_files_changed":false, "observed_model":null});
+            "observed_model":null});
         let scratch = std::path::PathBuf::from(std::env::var_os("GRAPH_CLOUD_FIXTURE").ok_or("fixture")?);
         std::fs::write(scratch.join("result.diff"), format!(
             "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{result}\n"))?;

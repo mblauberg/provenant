@@ -62,8 +62,9 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
                             vec!["targeted".into()]
                         },
                         log_location: "log".into(),
-                        tracked_files_changed: false,
                         observed_model: Some(job.requested_model.clone()),
+                        branch: None,
+                        head: None,
                     },
                 },
             })
@@ -97,6 +98,7 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
             model: "small".into(),
             effort: None,
             deadline_seconds: 3600,
+            work_branch: None,
         });
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
@@ -671,6 +673,7 @@ fn cloud_retained_submission_repair_preserves_reason() -> Result<(), Box<dyn std
             model: "small".into(),
             effort: None,
             deadline_seconds: 3600,
+            work_branch: None,
         });
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
@@ -719,6 +722,7 @@ fn cloud_abandonment_preserves_submission_evidence() -> Result<(), Box<dyn std::
             model: "small".into(),
             effort: None,
             deadline_seconds: 3600,
+            work_branch: None,
         });
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
@@ -781,6 +785,7 @@ fn abandon_fixture(
         model: "small".into(),
         effort: None,
         deadline_seconds: 3600,
+        work_branch: None,
     });
     store.create(&input, call)?;
     Ok((store, input.attempts[0].attempt_id))

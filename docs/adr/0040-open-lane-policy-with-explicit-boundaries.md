@@ -177,7 +177,16 @@ Exceptions are host-derived typed grants, never optional configuration:
    on it. These stores stay immutable. The token this exposes can also write to
    GitHub, so a read-only lane is read-only on this host, not on GitHub; the owner
    accepts that. A profile's explicit credential denial still wins, and a lane
-   without open network gets no access.
+   without open network gets no access. Every lane with open network, read-only
+   lanes included, also receives the host login as a launch token and a credential
+   helper by default (`lanes.publish`, on unless set `false`), so it can read
+   issues, comment, and a writer can push its own branch; the knob stays strict, so
+   a malformed value refuses configuration instead of recovering to the default.
+   `gh_auth.rs` keeps its host-only lookup and token bounds. A transient lookup
+   failure (timeout, signal, spawn error) is retried, a resolved token is reused
+   across candidate routes, and a failure that survives prints a launch warning
+   naming the cause, never the credential. Provider credential files and
+   keychains stay denied.
 3. **Attempt-private state.** Grant read/write only to this attempt's disposable
    scratch and retained provider state, normally
    `S/runs/<run>/attempts/<attempt>/tmp/candidate-<n>` and
@@ -216,7 +225,8 @@ Exceptions are host-derived typed grants, never optional configuration:
    existing read/exec-only Codex standalone package exception at
    `H/.codex/packages/standalone/releases/<release>/...` where its existing
    validator accepts it. No sibling credential/config/session root is opened.
-5. **Source and Git.** The source checkout is readable. Read-only attempts deny
+5. **Source and Git.** The source checkout is readable. A commit-pinned source
+   view in the state root is also executable; its siblings remain denied. Read-only attempts deny
    every source mutation explicitly. Existing host-owned `ReadOnlyPolicy`
    exceptions apply only to their declared paths in the ordinary read-only
    view; live sources allow none, and isolated source views carry none into

@@ -237,6 +237,7 @@ fn request_key(
     .map_err(|error| PatchError {
         cause: None,
         admission: None,
+        parameter: None,
         code: "invalid",
         message: error.to_string(),
     })
@@ -255,6 +256,7 @@ pub fn replay_child(
     let invalid = |message: String| PatchError {
         cause: None,
         admission: None,
+        parameter: None,
         code: "invalid",
         message,
     };
@@ -280,6 +282,7 @@ pub fn replay_child(
         return Err(PatchError {
             cause: None,
             admission: None,
+            parameter: None,
             code: "idempotency_conflict",
             message: "child idempotency key was used for a different request or parent".into(),
         });
@@ -379,6 +382,7 @@ pub fn admit_child_bound(
     let invalid = |message: String| PatchError {
         cause: None,
         admission: None,
+        parameter: None,
         code: "invalid",
         message,
     };
@@ -444,6 +448,7 @@ pub fn admit_child_bound(
             return Err(PatchError {
                 cause: None,
                 admission: None,
+                parameter: None,
                 code: "parent_settled",
                 message: format!("parent node {parent} is not running"),
             });
@@ -453,6 +458,7 @@ pub fn admit_child_bound(
             return Err(PatchError {
                 cause: None,
                 admission: None,
+                parameter: None,
                 code: "child_depth",
                 message: format!(
                     "child {node} is {} levels deep; limits.child_depth={limit}",
@@ -518,12 +524,7 @@ fn child_patch(
         let library = context
             .library
             .with(template::Layer::Inline, &launch.templates)
-            .map_err(|message| PatchError {
-                cause: None,
-                admission: None,
-                code: "invalid",
-                message,
-            })?;
+            .map_err(PatchError::from)?;
         let mut node = launch.node.clone();
         node["id"] = request.id.clone().into();
         if let Some(path) = worktree {
@@ -538,12 +539,7 @@ fn child_patch(
             resolvers: context.resolvers,
         }
         .lower(&node)
-        .map_err(|message| PatchError {
-            cause: None,
-            admission: None,
-            code: "invalid",
-            message,
-        })?;
+        .map_err(PatchError::from)?;
         inherit_child_controls(&mut compiled, request);
         if request.detached {
             compiled[DETACHED] = true.into();
@@ -577,6 +573,7 @@ fn child_patch(
         return Err(PatchError {
             cause: None,
             admission: None,
+            parameter: None,
             code: "invalid",
             message: "write_scope requires a writer child".into(),
         });
@@ -591,6 +588,7 @@ fn child_patch(
             return Err(PatchError {
                 cause: None,
                 admission: None,
+                parameter: None,
                 code: "invalid",
                 message: "writer composite children require explicit per-node work bindings".into(),
             });
@@ -606,22 +604,12 @@ fn child_patch(
         };
         let mut compiled = compiler
             .lower(&Value::Object(node.clone()))
-            .map_err(|message| PatchError {
-                cause: None,
-                admission: None,
-                code: "invalid",
-                message,
-            })?;
+            .map_err(PatchError::from)?;
         inherit_child_controls(&mut compiled, request);
         if !template.parameters.contains_key("brief") && !request.brief.is_empty() {
             append_child_brief(&mut compiled, &request.brief);
         }
-        template::preserve_compiled_metadata(&mut compiled).map_err(|message| PatchError {
-            cause: None,
-            admission: None,
-            code: "invalid",
-            message,
-        })?;
+        template::preserve_compiled_metadata(&mut compiled).map_err(PatchError::from)?;
         // Keep `use` and its effective parameters for admission evidence. The
         // compiled members override the template's default members on admission.
         if let Some(composite) = compiled.get("composite") {

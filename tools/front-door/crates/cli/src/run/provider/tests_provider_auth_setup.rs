@@ -389,13 +389,14 @@ fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn s
 use super::*;
 
 #[test]
-fn default_writer_launch_does_not_request_publishing() {
+fn default_launch_requests_publishing_unless_switched_off() {
     let mut knobs = std::collections::BTreeMap::new();
-    assert!(!publishing_requested(true, true, &knobs));
+    assert!(publishing_requested(true, &knobs));
+    knobs.insert("lanes.publish".into(), serde_json::json!(false));
+    assert!(!publishing_requested(true, &knobs));
     knobs.insert("lanes.publish".into(), serde_json::json!(true));
-    assert!(publishing_requested(true, true, &knobs));
-    assert!(!publishing_requested(false, true, &knobs));
-    assert!(!publishing_requested(true, false, &knobs));
+    assert!(publishing_requested(true, &knobs));
+    assert!(!publishing_requested(false, &knobs));
 }
 
 #[test]

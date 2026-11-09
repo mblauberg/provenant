@@ -271,8 +271,11 @@ impl HolderContext {
             .map_or(context.roots.state_root.as_path(), |host| {
                 host.configuration_root.as_path()
             });
-        let store = RunStore::open(&execution, &call(clock, &CancelToken::new())?)?
+        let mut store = RunStore::open(&execution, &call(clock, &CancelToken::new())?)?
             .with_writer_registry(registry);
+        if let Some(sealed) = &context.sealed {
+            store = store.with_sealed_parent_network(sealed.effective_network);
+        }
         Ok((context, store))
     }
 }

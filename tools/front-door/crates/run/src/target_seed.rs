@@ -1,5 +1,5 @@
 //! Host-owned Cargo target seed store, shared by publication, cloning and GC.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 use crate::cargo_seed::codes;
 use provenant_os::fs::{Directory, LockGuard, LockMode};
 use std::{
@@ -95,7 +95,7 @@ pub(crate) fn lane_rustc_metadata(
     lane_rustc_metadata_cancellable(worktree, home, environment, None)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 pub(crate) fn lane_rustc_metadata_cancellable(
     worktree: &Path,
     home: &Path,
@@ -194,7 +194,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
     Ok((version, host))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str> {
     fn read(path: &Path, unreadable: &'static str) -> Result<String, &'static str> {
         use std::io::Read;

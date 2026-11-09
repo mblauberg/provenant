@@ -19,6 +19,7 @@ fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
         model: "model".into(),
         effort: None,
         deadline_seconds: 3600,
+        work_branch: None,
     };
     for (name, roots) in [
         ("read", vec![]),

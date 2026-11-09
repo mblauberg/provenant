@@ -11,6 +11,11 @@ def describe(repo: Path) -> str:
     lines = [
         "Create a provider environment for this repository and select its source.",
         "Keep credentials out of setup scripts, prompts and result artifacts.",
+        "Writers: let the environment's GitHub access fetch every branch and push",
+        "  without force to the lane's named branch; never grant force-push or main.",
+        "  Hosted Claude may allow only claude/* branches; the result names the one used.",
+        "Push the commit the job starts from before submitting; the VM clones the remote.",
+        "Allow network access for the dependencies the proof downloads.",
     ]
     manifests = []
     toolchains = []

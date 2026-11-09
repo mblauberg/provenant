@@ -417,6 +417,33 @@
     }
 
     #[test]
+    fn review_contract_accepts_verdict_followed_only_by_handoff() {
+        let mut node = review("review.tests", "review");
+        node.required_verdict = None;
+        let response = format!(
+            "{}\nReview completed.\nVERDICT: FAIL\n```handoff\n{{\"schema_version\":2,\"status\":\"done\",\"note\":\"Reviewed\",\"remaining\":[],\"decisions\":[],\"verify\":[]}}\n```\n",
+            answer(json!([]), "").trim_end()
+        );
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![node]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Succeeded);
+        assert_eq!(
+            progress.outputs.as_ref().unwrap().verdict.as_deref(),
+            Some("VERDICT: FAIL")
+        );
+        assert_eq!(progress.advance_error_code, None);
+    }
+
+    #[test]
     fn verifier_requires_a_reasoned_assessment_of_every_finding() {
         for entries in [
             json!([]),

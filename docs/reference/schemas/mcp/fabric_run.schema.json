@@ -814,6 +814,7 @@
             "terminal_cause": {
               "enum": [
                 "preparation_refused",
+                "source_view_refused",
                 "account_login_required",
                 "route_resolution_refused",
                 "access_policy_refused",
@@ -1790,6 +1791,7 @@
               "terminal_cause": {
                 "enum": [
                   "preparation_refused",
+                  "source_view_refused",
                   "account_login_required",
                   "route_resolution_refused",
                   "access_policy_refused",
@@ -2777,6 +2779,7 @@
             "terminal_cause": {
               "enum": [
                 "preparation_refused",
+                "source_view_refused",
                 "account_login_required",
                 "route_resolution_refused",
                 "access_policy_refused",
@@ -3752,6 +3755,7 @@
             "terminal_cause": {
               "enum": [
                 "preparation_refused",
+                "source_view_refused",
                 "account_login_required",
                 "route_resolution_refused",
                 "access_policy_refused",

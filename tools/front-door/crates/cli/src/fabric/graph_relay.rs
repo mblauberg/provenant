@@ -354,12 +354,21 @@ pub fn serve_with_read(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 journal.save(&checkpoint).map_err(journal_error)?;
+                // Reserve journal persistence and response delivery within the
+                // confirmed caller deadline, as the edit path does.
+                let now = clock.mono_now();
+                let remaining = budget.remaining(now).as_micros();
+                let reserve = 1_000_000.min(remaining / 2);
+                let provisioning_budget = WaitBudget::up_to(
+                    now,
+                    provenant_core::DurationMicros::from_micros(remaining - reserve),
+                );
                 if let Some(error) = recover_provisioning(
                     context,
                     &mut journal,
                     &mut checkpoint,
                     std::slice::from_ref(&receipt.node),
-                    budget,
+                    provisioning_budget,
                     cancel,
                 )? {
                     return Err(error);
@@ -622,6 +631,28 @@ fn recover_provisioning(
             .and_then(|progress| progress.launch_retry.as_ref())
             .and_then(|retry| retry.deadline);
         let recovering = !fresh.contains(&node);
+        let active = checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == node)
+            .is_some_and(|progress| {
+                matches!(
+                    progress.state,
+                    provenant_fabric_runtime::graph::NodeState::Pending
+                        | provenant_fabric_runtime::graph::NodeState::Running
+                ) && progress.cancelled_from.is_none()
+            });
+        if active
+            && checkpoint
+                .nodes
+                .iter()
+                .find(|progress| progress.id == node)
+                .and_then(|progress| progress.launch_retry.as_ref())
+                .and_then(|retry| retry.wake_at)
+                .is_some_and(|wake| wall < wake)
+        {
+            continue;
+        }
         // Reconciliation is a new bounded operation, not another share of an
         // expired launch. Keep the original launch deadline for diagnostics.
         let launch = match prior {
@@ -635,7 +666,8 @@ fn recover_provisioning(
             .cap_at(budget.deadline().as_mono_time()),
             None => budget,
         };
-        if prior.is_none()
+        if active
+            && prior.is_none()
             && let Some(progress) = checkpoint
                 .nodes
                 .iter_mut()
@@ -661,19 +693,65 @@ fn recover_provisioning(
             None => Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest),
         };
         if let Err(error) = result {
+            if !active {
+                // Cancellation and settlement end launch admission, but a
+                // prior Git effect still needs reconciliation under its fence.
+                continue;
+            }
+            use provenant_confinement::worktrees::WorktreeError;
+            let failed_at = clock
+                .wall_now()
+                .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?;
+            let contention = matches!(
+                &error,
+                WorktreeError::RegistryLockTimeout
+                    | WorktreeError::WriterBusy { .. }
+                    | WorktreeError::LockBusy
+            );
+            // Fresh contention proves this call did not mutate Git. An older
+            // fence may still hold uncertain effects, so retain it even when
+            // its original launch expires and reconciliation must continue.
+            if contention && (!recovering || prior.is_some_and(|end| failed_at < end)) {
+                let error = provisioning_refusal(error);
+                let ServiceError::Facade(facade) = &error else {
+                    return Err(error);
+                };
+                let index = checkpoint
+                    .nodes
+                    .iter()
+                    .position(|progress| progress.id == node)
+                    .ok_or(ServiceError::Facade(FacadeError::StateCorrupt))?;
+                let deferred = provenant_fabric_runtime::graph::defer_launch_contention(
+                    checkpoint,
+                    index,
+                    facade,
+                    Some(failed_at),
+                    context.config.graph.writer_launch_seconds,
+                    Default::default(),
+                )
+                .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?;
+                if !deferred {
+                    continue;
+                }
+                if !recovering
+                    && checkpoint.nodes[index].state
+                        == provenant_fabric_runtime::graph::NodeState::Blocked
+                {
+                    relay::clear_provisioning(checkpoint, &node);
+                }
+                refusal.get_or_insert(error);
+                continue;
+            }
             if recovering {
                 // This call did not resolve the effects left by the earlier
                 // call. Keep the fence and let other relay work proceed.
                 continue;
             }
-            use provenant_confinement::worktrees::WorktreeError;
             // These failures precede any Git mutation, or prove its rollback.
             // Uncertain effects keep the fence for exact-path/source recovery.
             let definitive = matches!(
                 &error,
-                WorktreeError::RegistryLockTimeout
-                    | WorktreeError::WriterBusy { .. }
-                    | WorktreeError::Dirty(_)
+                WorktreeError::Dirty(_)
                     | WorktreeError::DetachedPrimary
                     | WorktreeError::DetachedWorktree { .. }
                     | WorktreeError::CheckedOut
@@ -914,6 +992,9 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
         }
         WorktreeError::WriterBusy { holder } => {
             return ServiceError::Facade(FacadeError::WriterBusy { holder: *holder });
+        }
+        WorktreeError::LockBusy => {
+            return ServiceError::Facade(FacadeError::WriterBusy { holder: None });
         }
         _ => None,
     };
@@ -1425,6 +1506,145 @@ mod child_wait_tests {
 #[cfg(test)]
 mod provisioning_tests {
     use super::*;
+
+    #[test]
+    fn writer_provisioning_contention_keeps_its_fence_until_the_same_checkout_is_free()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphCheckpoint, GraphDocument, GraphExecution, LaunchRetry, LaunchRetryPolicy,
+            NodeState,
+        };
+        use provenant_os::fs::{Directory, LockMode};
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
+        let source = git(&["rev-parse", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let clock = provenant_os::clock::SystemClock;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        let path = ".worktrees/waiting-writer";
+        provision_writer(&context, path, "waiting-writer", &source, budget, &cancel)?;
+        let slot = context
+            .roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(context.identity.project.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &project.join(path),
+            ));
+        let slot = Directory::open_anchor(&slot)?;
+        let held =
+            slot.try_lock_existing(std::ffi::OsStr::new("writer.lock"), LockMode::Exclusive)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"provision-contention","nodes":[{
+                "id":"writer","access":"worktree_write","worktree":path,"prompt":"Write","route":{"alias":"junior"}
+            }]
+        }))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"provision-contention","plan_digest":"fixture","nodes":[{
+                "id":"writer","state":"pending","worktree":path,"attempts":[]
+            }]
+        }))?;
+        let deadline = clock
+            .wall_now()?
+            .checked_add(provenant_core::DurationMicros::from_seconds(60)?)?;
+        checkpoint.nodes[0].launch_retry = Some(LaunchRetry {
+            extra: Default::default(),
+            policy: LaunchRetryPolicy {
+                limit: 0,
+                first_seconds: 0,
+                max_seconds: 0,
+                ..Default::default()
+            },
+            failures: 0,
+            deadline: Some(deadline),
+            wake_at: None,
+            reason: None,
+        });
+        relay::fence_provisioning(&mut checkpoint, "writer", path, &source);
+        let mut journal = FileJournal::open(
+            &context.roots.state,
+            context.identity.project,
+            "provision-contention",
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        journal.bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: project.clone(),
+            document,
+        })?;
+        journal.save(&checkpoint)?;
+        let error = recover_provisioning(
+            &context,
+            &mut journal,
+            &mut checkpoint,
+            &["writer".into()],
+            budget,
+            &cancel,
+        )?
+        .ok_or("contention diagnostic")?;
+        assert_eq!(error.code(), "writer_busy");
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+        assert!(checkpoint.nodes[0].attempts.is_empty());
+        assert_eq!(
+            checkpoint.nodes[0]
+                .launch_retry
+                .as_ref()
+                .and_then(|retry| retry.deadline),
+            Some(deadline)
+        );
+        assert_eq!(
+            relay::pending_provisioning(&checkpoint),
+            vec![("writer".into(), path.into(), source.clone())]
+        );
+        assert_eq!(
+            journal.load("provision-contention")?,
+            Some(checkpoint.clone())
+        );
+        drop(held);
+        assert!(
+            recover_provisioning(
+                &context,
+                &mut journal,
+                &mut checkpoint,
+                &[],
+                WaitBudget::cli(clock.mono_now(), 5)?,
+                &cancel
+            )?
+            .is_none()
+        );
+        assert!(relay::pending_provisioning(&checkpoint).is_empty());
+        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+        Ok(())
+    }
 
     #[test]
     fn relay_refusal_cause_reaches_the_lane_without_raw_source_text()

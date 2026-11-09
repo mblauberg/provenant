@@ -67,6 +67,47 @@ use transitions::{apply_gate_result, dependency_state};
 use transitions::{apply_pending_observation, apply_unknown_observation};
 pub(crate) use validation::*;
 pub use wait_view::{GraphNodeWait, graph_waits};
+
+/// Persist a writer's contention wait independently of the transport retry
+/// limit. Provisioning callers retain their own effect fence until resolution.
+/// Returns false for a settled or cancelled node, or a non-contention error.
+/// The caller saves the result.
+pub fn defer_launch_contention(
+    checkpoint: &mut GraphCheckpoint,
+    index: usize,
+    error: &(dyn Error + 'static),
+    clock: Option<provenant_core::WallTime>,
+    admission_seconds: u64,
+    policy: LaunchRetryPolicy,
+) -> Result<bool, String> {
+    if !next_attempt::launch_contention(error) {
+        return Ok(false);
+    }
+    let progress = checkpoint
+        .nodes
+        .get_mut(index)
+        .ok_or("launch contention node is unavailable")?;
+    if !matches!(progress.state, NodeState::Pending | NodeState::Running)
+        || progress.cancelled_from.is_some()
+    {
+        return Ok(false);
+    }
+    if clock.is_none() {
+        return Err("wall clock unavailable; cannot record a launch retry wake".into());
+    }
+    // Binding and provisioning precede the first attempt record. Running marks
+    // the persisted launch wait as eligible for the scheduler's next wake.
+    progress.state = NodeState::Running;
+    next_attempt::apply_launch_disposition(
+        checkpoint,
+        index,
+        error,
+        clock,
+        admission_seconds,
+        policy,
+    )?;
+    Ok(true)
+}
 #[cfg(test)]
 #[path = "graph/journal_tests.rs"]
 mod file_tests;
@@ -1203,6 +1244,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     // A loop round's worktree is advanced by earlier rounds;
                     // its starting head becomes known only at that round.
                     if plans::writer(node)
+                        && node
+                            .extra
+                            .get("provision_worktree")
+                            .and_then(serde_json::Value::as_bool)
+                            != Some(true)
                         && node.round.is_none()
                         && node
                             .attempt
@@ -1216,6 +1262,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
                         let binding = match owner.bind_writer_worktree(worktree) {
                             Ok(binding) => binding,
+                            // Contention waits in the launch loop, which owns the
+                            // persisted deadline; only a refusal fails the node here.
+                            Err(error) if next_attempt::launch_contention(&error) => continue,
                             Err(error) => {
                                 transitions::writer_binding_failed(
                                     progress,
@@ -2097,13 +2146,29 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             source
                         };
-                        if !owner
-                            .provision_child_worktree(path, &source)
-                            .map_err(GraphError::Run)?
-                        {
-                            return Err(GraphError::Refused(
-                                "host cannot provision writer worktrees".into(),
-                            ));
+                        match owner.provision_child_worktree(path, &source) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Err(GraphError::Refused(
+                                    "host cannot provision writer worktrees".into(),
+                                ));
+                            }
+                            Err(error) => {
+                                if defer_launch_contention(
+                                    &mut checkpoint,
+                                    node_index,
+                                    &error,
+                                    owner.wall_now(),
+                                    owner.admission_timeout_seconds().unwrap_or(3600),
+                                    owner.launch_retry_policy(),
+                                )
+                                .map_err(GraphError::Refused)?
+                                {
+                                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                    break;
+                                }
+                                return Err(GraphError::Run(error));
+                            }
                         }
                     }
                     let binding_result = if let Some(spec) = node
@@ -2152,6 +2217,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     let binding = match binding_result {
                         Ok(binding) => binding,
                         Err(error) => {
+                            if defer_launch_contention(
+                                &mut checkpoint,
+                                node_index,
+                                &error,
+                                owner.wall_now(),
+                                owner.admission_timeout_seconds().unwrap_or(3600),
+                                owner.launch_retry_policy(),
+                            )
+                            .map_err(GraphError::Refused)?
+                            {
+                                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                break;
+                            }
                             transitions::writer_binding_failed(
                                 &mut checkpoint.nodes[node_index],
                                 &node.id,

@@ -187,7 +187,17 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         route.adapter,
         route.model,
         route.effort.as_deref().unwrap_or("unspecified"),
-        readiness_text(&route.readiness),
+        if matches!(
+            route.readiness,
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::UnknownAvailability,
+                ..
+            }
+        ) {
+            "provider availability checked at launch".to_owned()
+        } else {
+            readiness_text(&route.readiness)
+        },
         route
             .pool_selection
             .as_ref()

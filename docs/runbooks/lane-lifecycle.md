@@ -191,18 +191,18 @@ that retain the lane environment; the wrapper also restores this precedence when
 `GH_TOKEN` survives an otherwise cleared environment. Explicit Git command-line
 configuration can override it.
 
-Publishing from a writer lane is opt-in and off by default: enabling it gives the
+Publishing from a writer lane is on by default: it gives a networked writer
 lane your GitHub credential, so a malicious lane can extract the token and act
-outside the wrapper. By default the chair publishes through host-side delivery.
-When enabled, writer lanes with open network can push and open pull requests using the host's
+outside the wrapper. Set `lanes.publish=false` to withhold it, after which the
+chair publishes through host-side delivery. Writer lanes with open network can push and open pull requests using the host's
 read-only gh configuration and the pinned `gh auth git-credential` helper for
 HTTPS remotes; SSH remotes keep their own authentication. Custom gh configuration
 paths and keychain-only logins are not mirrored. Hosts without gh or
 `~/.config/gh` continue local work without publishing setup. Merge through `provenant land N --wait`, or hand the merge to the chair. Landing
 verifies green CI at the PR's current head; add `--head SHA` to pin a reviewed
-head. Enable publishing with
-Fabric `knobs: ["lanes.publish=true"]` or host configuration `[knobs] "lanes.publish" = true`. Read-only lanes retain their
-existing open-network gh read access.
+head. Disable publishing with
+Fabric `knobs: ["lanes.publish=false"]` or host configuration `[knobs] "lanes.publish" = false`. Read-only lanes retain their
+existing open-network gh read access and never receive publishing setup.
 
 For a project, the host can configure an advisory GitHub CLI deny list in
 `projects/<ProjectId>/github.json` under its state root. The project ID is

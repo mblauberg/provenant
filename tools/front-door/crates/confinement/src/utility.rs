@@ -285,6 +285,12 @@ pub enum GitRead {
         kind: GitObjectKind,
         oid: GitOid,
     },
+    /// Read many blobs through one `cat-file --batch` process. Standard output
+    /// is `<oid> blob <size>\n<bytes>\n` per object, in request order, or
+    /// `<oid> missing\n`. The caller bounds the batch to its stdout budget.
+    BlobBatch {
+        oids: Vec<GitOid>,
+    },
     /// All selected commits, including merge side branches, excluding base.
     /// The caller separately verifies ancestry and a nonempty result.
     AncestorRange {
@@ -694,7 +700,17 @@ pub fn run_utility(
         budget,
         cancel,
         false,
-        |attribute_source| Ok((git_args(operation, repo, attribute_source)?, None)),
+        |attribute_source| {
+            let stdin = match &operation {
+                GitRead::BlobBatch { oids } => Some(
+                    oids.iter()
+                        .flat_map(|oid| format!("{oid}\n").into_bytes())
+                        .collect(),
+                ),
+                _ => None,
+            };
+            Ok((git_args(operation, repo, attribute_source)?, stdin))
+        },
     )
 }
 
@@ -1437,6 +1453,7 @@ fn git_args(
             oid.to_string().into(),
             "--".into(),
         ],
+        GitRead::BlobBatch { .. } => vec!["cat-file".into(), "--batch".into()],
         GitRead::RawObject { kind, oid } => vec![
             "cat-file".into(),
             match kind {

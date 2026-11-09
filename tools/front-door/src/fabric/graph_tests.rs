@@ -8,7 +8,7 @@ mod graph_writer_admission_tests {
     use std::{path::PathBuf, time::Duration};
 
     #[test]
-    fn registry_lock_timeout_is_retryable_but_writer_refusals_are_not() {
+    fn writer_contention_is_typed_separately_from_permanent_refusals() {
         let lock = |path: &str| {
             WorktreeError::Filesystem(FsError::LockTimeout {
                 path: PathBuf::from(path),
@@ -27,6 +27,8 @@ mod graph_writer_admission_tests {
             graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),
             FacadeError::WriterUnknown
         ));
+        let holder = provenant_core::AttemptId::from_bytes([7; 16]);
+        assert!(matches!(graph_writer_initialisation_error("head", WorktreeError::WriterBusy { holder: Some(holder) }), FacadeError::WriterBusy { holder: Some(actual) } if actual == holder));
         let error = graph_writer_initialisation_error(
             "head",
             WorktreeError::UnknownOccupancy {
@@ -40,9 +42,6 @@ mod graph_writer_admission_tests {
         for error in [
             lock("writer.lock"),
             WorktreeError::LiveWriter,
-            WorktreeError::WriterBusy {
-                holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
-            },
             WorktreeError::Dirty(String::new()),
         ] {
             assert!(matches!(
@@ -361,36 +360,26 @@ mod graph_writer_admission_tests {
             tick: false,
         };
         let mut journal = MemoryJournal::default();
-        let directory = Directory::open_anchor(&registry)?;
+        let directory = Directory::open_anchor(&registry.join(worktrees::state_dir_name(&info.path)))?;
         let guard = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new("writer.lock"),
             LockMode::Exclusive,
             budget,
             &cancel,
             &factory.clock,
         )?;
-        let release_at = factory.clock.mono_now().checked_add(
-            provenant_core::DurationMicros::from_micros(2_000_000),
-        )?;
-        let clock = &factory.clock;
-        // The shared launch allowance now waits through registry contention
-        // instead of returning after the old per-acquisition timeout. Release
-        // the lock independently, after the settlement observation expires.
-        let submitted = std::thread::scope(|scope| {
-            scope.spawn(move || {
-                clock.wait_until(release_at).unwrap();
-                drop(guard);
-            });
-            // Native provider preparation is exercised by the provider fixtures.
-            provenant_cli::run::with_deferred_provider_launch(|| {
-                advance(&document, &mut owner, &mut journal)
-            })
-        })?;
-        assert_eq!(budget.remaining(factory.clock.mono_now()).as_micros(), 0);
+        let waiting = provenant_cli::run::with_deferred_provider_launch(|| advance(&document, &mut owner, &mut journal))?;
+        assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+        assert!(waiting.checkpoint.nodes[0].launch_retry.is_some());
+        assert_eq!(waiting.checkpoint.nodes[0].advance_owner_code.as_deref(), Some("writer_busy"));
+        drop(guard);
+        // Re-observe the same operation once its persisted wake is due.
+        factory.clock.wait_until(factory.clock.mono_now().checked_add(provenant_core::DurationMicros::from_micros(5_000_000))?)?;
+        let submitted = provenant_cli::run::with_deferred_provider_launch(|| advance(&document, &mut owner, &mut journal))?;
         assert_eq!(submitted.checkpoint.nodes[0].state, NodeState::Running);
         assert!(
             submitted.checkpoint.nodes[0].attempts[0].attempt_ref.is_some(),
-            "graph must submit the writer after the registry lock is released"
+            "graph must submit the same writer after custody is released"
         );
         Ok(())
     }
@@ -418,9 +407,6 @@ mod graph_writer_admission_tests {
         for non_transient in [
             WorktreeError::LiveWriter,
             WorktreeError::Dirty("file.txt".into()),
-            WorktreeError::WriterBusy {
-                holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
-            },
         ] {
             let mut owner = MockWriterOwner {
                 errors: std::collections::VecDeque::from([non_transient]),

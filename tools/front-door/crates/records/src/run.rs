@@ -286,10 +286,16 @@ pub struct CloudPlacement {
     #[serde(default)]
     pub environment: String,
     pub repository: String,
+    /// Base branch the job starts from and may merge.
     pub branch: String,
     pub model: String,
     pub effort: Option<String>,
     pub deadline_seconds: u64,
+    /// Named branch a writer job commits to and pushes without force. Dispatch
+    /// fills it from the delivery branch or the writer's branch; a platform
+    /// that restricts names may push elsewhere, and the result says where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_branch: Option<String>,
 }
 
 /// Network reach for a lane's provider and the tools it runs.
@@ -822,6 +828,8 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
     PreparationRefused,
+    /// The pinned source view of an isolated lane could not be built.
+    SourceViewRefused,
     AccountLoginRequired,
     RouteResolutionRefused,
     AccessPolicyRefused,
@@ -856,6 +864,7 @@ impl TerminalCause {
     pub fn reason(self) -> &'static str {
         match self {
             Self::PreparationRefused => "preparation refused; provenant output ID",
+            Self::SourceViewRefused => "source view refused; provenant output ID",
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
@@ -894,6 +903,9 @@ impl TerminalCause {
             }
             Self::PreparationRefused => {
                 "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
+            }
+            Self::SourceViewRefused => {
+                "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"

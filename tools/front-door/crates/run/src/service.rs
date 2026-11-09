@@ -219,6 +219,7 @@ impl<'a> Service<'a> {
             {
                 writer = Some(saved.clone());
             }
+            let mut writer_branch = None;
             if input.parent_attempt.is_none() {
                 let branch = match &writer {
                     Some(writer) => Some(
@@ -241,6 +242,11 @@ impl<'a> Service<'a> {
                         self.store.repo_facts(),
                     )?,
                 };
+                if writer.is_some() {
+                    writer_branch = branch
+                        .as_ref()
+                        .map(|branch| branch.as_str().trim_start_matches("refs/heads/").to_owned());
+                }
                 if let Some(branch) = branch {
                     contribution_branches.insert(
                         task.task_id,
@@ -359,8 +365,44 @@ impl<'a> Service<'a> {
             )
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
+            // A cloud writer pushes to a named branch: an explicit one, else the
+            // delivery branch, else the writer's own branch. Only a writer has one.
+            let cloud = task
+                .cloud
+                .map(|mut cloud| {
+                    if writer.is_none() {
+                        if cloud.work_branch.is_some() {
+                            return Err(input_error(
+                                ErrorKind::Invalid,
+                                "attempt.cloud.work_branch requires a writer",
+                            ));
+                        }
+                    } else if cloud.work_branch.is_none() {
+                        cloud.work_branch = task
+                            .deliver
+                            .as_ref()
+                            .map(|deliver| deliver.branch.clone())
+                            .or_else(|| writer_branch.clone());
+                    }
+                    if let Some(work) = &cloud.work_branch
+                        && (work.trim().is_empty() || *work == cloud.branch)
+                    {
+                        return Err(input_error(
+                            ErrorKind::Invalid,
+                            "a cloud writer needs a named branch other than its base branch",
+                        ));
+                    }
+                    if writer.is_some() && cloud.work_branch.is_none() {
+                        return Err(input_error(
+                            ErrorKind::Invalid,
+                            "a cloud writer needs a named branch",
+                        ));
+                    }
+                    Ok(cloud)
+                })
+                .transpose()?;
             requests.push(TaskRequest {
-                cloud: task.cloud,
+                cloud,
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,

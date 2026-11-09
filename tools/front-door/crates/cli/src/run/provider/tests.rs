@@ -4,3 +4,4 @@ include!("tests_writer_scratch.rs");
 include!("tests_continuation_and_checkout.rs");
 include!("tests_retained_state_and_workspace.rs");
 include!("tests_commit_source_preparation.rs");
+include!("tests_source_view.rs");

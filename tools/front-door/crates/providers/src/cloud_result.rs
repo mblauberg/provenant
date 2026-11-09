@@ -3,12 +3,12 @@ use crate::cloud::CloudResult;
 
 pub const RESULT_FILE: &str = ".provenant-cloud-result.json";
 
-/// Extract a newly added result file and flag any other changed files.
-/// Reject unsupported diff forms rather than accepting incomplete evidence.
+/// Extract a newly added result file. Other changed files are the job's
+/// ordinary work and are ignored here. Reject unsupported diff forms of the
+/// result file rather than accepting incomplete evidence.
 pub fn result_from_diff(diff: &str) -> Result<CloudResult, String> {
     let mut files = 0;
     let mut in_result = false;
-    let mut other_files = false;
     let mut added_header = false;
     let mut hunk = false;
     let mut contents = String::new();
@@ -20,8 +20,6 @@ pub fn result_from_diff(diff: &str) -> Result<CloudResult, String> {
             in_result = line == format!("diff --git a/{RESULT_FILE} b/{RESULT_FILE}");
             if in_result {
                 files += 1;
-            } else {
-                other_files = true;
             }
             continue;
         }
@@ -72,17 +70,14 @@ pub fn result_from_diff(diff: &str) -> Result<CloudResult, String> {
     {
         return Err("cloud diff has no complete result file".into());
     }
-    let mut result: CloudResult = serde_json::from_str(&contents)
-        .map_err(|error| format!("invalid cloud result JSON: {error}"))?;
-    result.tracked_files_changed |= other_files;
-    Ok(result)
+    serde_json::from_str(&contents).map_err(|error| format!("invalid cloud result JSON: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn real_diff_with_tracked_change_cannot_pass() {
+    fn real_diff_with_tracked_change_still_reads_result() {
         let temp = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let output = provenant_os::fixture::git_command()
@@ -99,32 +94,25 @@ mod tests {
         git(&["add", "tracked"]);
         git(&["commit", "-qm", "tracked"]);
         std::fs::write(temp.path().join("tracked"), "after\n").unwrap();
-        std::fs::write(temp.path().join(RESULT_FILE), format!(r#"{{"job_id":"job","nonce":"nonce","commit":"{}","exit_status":0,"tests_run":["test"],"tests_failed":[],"log_location":"log","tracked_files_changed":false,"observed_model":null}}"#, "a".repeat(40))).unwrap();
+        std::fs::write(temp.path().join(RESULT_FILE), format!(r#"{{"job_id":"job","nonce":"nonce","commit":"{}","exit_status":0,"tests_run":["test"],"tests_failed":[],"log_location":"log","observed_model":null}}"#, "a".repeat(40))).unwrap();
         git(&["add", "-N", RESULT_FILE]);
         let diff = git(&["diff"]);
         let result = result_from_diff(std::str::from_utf8(&diff).unwrap()).unwrap();
-        assert!(result.tracked_files_changed);
-        assert!(
-            !result
-                .check("job", "nonce", &"a".repeat(40), "model")
-                .unwrap()
-                .passed
-        );
-    }
-    #[test]
-    fn cloud_diff_accepts_only_result_file() {
-        let diff = "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exit_status\":0,\"tests_run\":[\"test\"],\"tests_failed\":[],\"log_location\":\"log\",\"tracked_files_changed\":false,\"observed_model\":null}\n";
-        let result = result_from_diff(diff).unwrap();
         assert!(
             result
                 .check("job", "nonce", &"a".repeat(40), "model")
                 .unwrap()
                 .passed
         );
+    }
+    #[test]
+    fn cloud_diff_reads_result_file_beside_other_changes() {
+        let diff = "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exit_status\":0,\"tests_run\":[\"test\"],\"tests_failed\":[],\"log_location\":\"log\",\"observed_model\":null}\n";
+        let result = result_from_diff(diff).unwrap();
         let changed = result_from_diff(&(diff.to_owned() + "diff --git a/other b/other\nindex 1234567..7654321 100644\n--- a/other\n+++ b/other\n@@ -1 +1 @@\n-old\n+new\n")).unwrap();
-        assert!(changed.tracked_files_changed);
+        assert_eq!(changed, result);
         assert!(
-            !changed
+            result
                 .check("job", "nonce", &"a".repeat(40), "model")
                 .unwrap()
                 .passed

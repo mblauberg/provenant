@@ -55,6 +55,9 @@ Set these in `[domains.run]` in the host configuration. Omit a key for its defau
 | `continuation_copy_limit_bytes` | 4294967296 | Maximum retained provider state bytes copied into a continuation. Available disk space may lower the effective copy budget. Refusals report the setting and source; raise it or reduce state before retrying. (1 or more bytes). |
 | `continuation_copy_entries` | 100000 | Maximum entries searched or copied from retained provider state for a continuation. Refusals report the setting and source; raise it or reduce state before retrying. (1 to 4294967295 entries). |
 | `continuation_copy_depth` | 32 | Maximum directory depth searched or copied from retained provider state for a continuation. Raising it does not relax credential, hard-link, filesystem or worktree-overlap guards. (1 to 4294967295 directories). |
+| `source_view_seconds` | 300 | Total time allowed to build the pinned source view of a `--use review` lane. The view is built with one batched object read, so a healthy large repository needs far less. Raise it on a slow disk or a heavily loaded host. (1 or more seconds). |
+| `source_view_entries` | 100000 | Maximum files in a pinned source view. A larger tree is refused, naming this limit. (1 to 4294967295 files). |
+| `source_view_bytes` | 536870912 | Maximum total file bytes in a pinned source view. A larger tree is refused, naming this limit. (1 or more bytes). |
 | `projects.{project}.writer_writes` | host writer_writes | Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]. (up to 16 absolute, safe directory paths outside credential roots). |
 
 ## Host land settings
@@ -463,6 +466,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"A longer cap reduces repeated load but slows recovery."` |
 | `type` | `"int"` |
 
+## `lanes.local_cargo`
+
+| Field | Value |
+|---|---|
+| `default` | `"all"` |
+| `effect` | `"Which cargo subcommands a lane may run locally, enforced in the lane's cargo shim for every provider. all runs everything; check allows only &#96;cargo check&#96; (and subcommands that do not compile, such as fmt and metadata); none refuses every compiling command, &#96;cargo check&#96; included. A refused command exits non-zero with one line saying CI runs it. Set per run with --knob lanes.local_cargo=check, per graph node with &#96;attempt.local_cargo&#96;, or for the host under [knobs]."` |
+| `reader` | `"tools/front-door/src/build_slot.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"check or none saves the build slot, CPU and about 1 GB of memory per rustc a lane would spend, and leaves tests and lints to CI; a lane cannot confirm its own change passes them before pushing. The shim is a cooperative control: a lane that runs rustc or ~/.cargo/bin/cargo directly bypasses it."` |
+| `type` | `"enum"` |
+| `values` | `["all", "check", "none"]` |
+
 ## `lanes.max_concurrency`
 
 | Field | Value |
@@ -516,12 +531,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 
 | Field | Value |
 |---|---|
-| `default` | `false` |
-| `effect` | `"Opt-in. Let worktree-write lanes with open network read gh configuration, use a git credential helper, push branches and open pull requests."` |
+| `default` | `true` |
+| `effect` | `"Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests."` |
 | `reader` | `"tools/front-door/crates/cli/src/run/provider/confinement.rs"` |
 | `status` | `"wired"` |
 | `strict` | `true` |
-| `trade_off` | `"Off (default) keeps publishing with the chair through host-side delivery. On gives every networked writer lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper."` |
+| `trade_off` | `"On (default) gives every networked lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper. false keeps publishing with the chair through host-side delivery."` |
 | `type` | `"bool"` |
 
 ## `lanes.silence_seconds`

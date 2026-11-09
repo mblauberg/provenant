@@ -54,11 +54,17 @@ pub struct RunStore {
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
     pub(crate) policy: crate::admission::AdmissionPolicy,
+    pub(crate) sealed_parent_network: Option<NetworkAccess>,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    /// Bound child launches by the network sealed for their parent.
+    pub fn with_sealed_parent_network(mut self, network: NetworkAccess) -> Self {
+        self.sealed_parent_network = Some(network);
+        self
+    }
     /// Stamp new attempts and their events with this host. Supplied by the host
     /// composition edge; absent, the host stays unknown in the trace.
     pub fn with_host(mut self, host: provenant_core::HostId) -> Self {
@@ -156,6 +162,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             repo_facts: Default::default(),
             policy: Default::default(),
+            sealed_parent_network: None,
             host: None,
             _owner: PhantomData,
         }))
@@ -173,6 +180,7 @@ impl RunStore {
             writer_registry: context.state_root.as_path().to_owned(),
             repo_facts: Default::default(),
             policy: Default::default(),
+            sealed_parent_network: None,
             host: None,
             _owner: PhantomData,
         };

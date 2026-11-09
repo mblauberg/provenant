@@ -3,28 +3,58 @@
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
 
+/// Attempts for one lookup. Heavy host load can stall `gh` past a single
+/// bound; a stall is retried rather than dropping access for the lane.
+const ATTEMPTS: usize = 3;
+const ATTEMPT_LIMIT: Duration = Duration::from_secs(20);
+
+/// Why a lookup produced no token. Never carries credential bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum Failure {
+    /// Worth another attempt: spawn failure, timeout, signal or read failure.
+    Transient(String),
+    /// Retrying cannot help: no stored login, unusable output or cancellation.
+    Final(String),
+}
+
+/// Inject the host login into `environment`. A token found earlier in this
+/// preparation is reused through `cache`; a failed lookup is not cached, so a
+/// later route retries it. Returns a warning naming the cause when no token
+/// could be resolved.
 pub(super) fn inject(
     executor: &dyn Executor,
     gh: &Path,
     home: &Path,
     host_paths: &impl Fn(&str) -> Option<OsString>,
     cancel: &provenant_core::CancelToken,
+    cache: &mut Option<OsString>,
     environment: &mut Vec<(OsString, OsString)>,
-) {
+) -> Option<String> {
     let config = config_directory(home, host_paths);
     if !environment.iter().any(|(key, _)| key == "GH_CONFIG_DIR") {
         environment.push(("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()));
     }
-    if let Some(token) = token(
-        executor,
-        gh,
-        home,
-        &config,
-        cancel,
-        std::env::var_os("GH_TOKEN"),
-    ) {
-        environment.retain(|(key, _)| key != "GH_TOKEN");
-        environment.push(("GH_TOKEN".into(), token));
+    let resolved = match cache.clone() {
+        Some(token) => Ok(token),
+        None => token(
+            executor,
+            gh,
+            home,
+            &config,
+            cancel,
+            std::env::var_os("GH_TOKEN"),
+        ),
+    };
+    match resolved {
+        Ok(token) => {
+            *cache = Some(token.clone());
+            environment.retain(|(key, _)| key != "GH_TOKEN");
+            environment.push(("GH_TOKEN".into(), token));
+            None
+        }
+        Err(cause) => Some(format!(
+            "GitHub login lookup failed ({cause}); this lane starts without a GitHub token, so git push and gh may be unauthenticated"
+        )),
     }
 }
 
@@ -84,16 +114,36 @@ fn token(
     config: &Path,
     cancel: &provenant_core::CancelToken,
     host_token: Option<OsString>,
-) -> Option<OsString> {
+) -> Result<OsString, String> {
     // `gh auth token` reads the persisted login and does not return GH_TOKEN.
     // Honour the host token first, with the same bounds as captured output.
     if let Some(value) = host_token
         && valid_host_token(&value)
     {
-        return Some(value);
+        return Ok(value);
     }
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match attempt_token(executor, gh, home, config, cancel) {
+            Ok(token) => return Ok(token),
+            Err(Failure::Final(cause)) => return Err(cause),
+            Err(Failure::Transient(cause)) => {
+                last = format!("{cause}; attempt {attempt} of {ATTEMPTS}")
+            }
+        }
+    }
+    Err(last)
+}
+
+fn attempt_token(
+    executor: &dyn Executor,
+    gh: &Path,
+    home: &Path,
+    config: &Path,
+    cancel: &provenant_core::CancelToken,
+) -> Result<OsString, Failure> {
     let argv = [gh.as_os_str().to_owned(), "auth".into(), "token".into()];
-    let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
+    let mut options = ExecOptions::new(&argv, home, ATTEMPT_LIMIT);
     let host_environment = [
         ("HOME".into(), home.as_os_str().to_owned()),
         ("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()),
@@ -108,17 +158,46 @@ fn token(
     options.stderr = StreamPolicy::Discard;
     // The selected store and host home survive a cleared guardian environment.
     // A missing login does not prevent other ordinary lane work.
-    let result = executor.execute(options).ok()?;
-    if result.termination != Termination::Exit(0)
-        || result.cancelled
-        || result.timed_out
-        || result.stdout.truncated
-        || result.stdout.read_failed
-    {
-        return None;
+    let result = executor
+        .execute(options)
+        .map_err(|error| Failure::Transient(format!("could not run gh: {error}")))?;
+    if result.cancelled {
+        return Err(Failure::Final("lookup cancelled".into()));
     }
-    let text = std::str::from_utf8(&result.stdout.bytes).ok()?.trim();
-    (!text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic())).then(|| text.into())
+    if result.timed_out {
+        return Err(Failure::Transient(format!(
+            "gh auth token timed out after {}s",
+            ATTEMPT_LIMIT.as_secs()
+        )));
+    }
+    match result.termination {
+        Termination::Exit(0) => {}
+        Termination::Exit(code) => {
+            return Err(Failure::Final(format!(
+                "gh auth token exited with status {code}; no stored login for the selected configuration"
+            )));
+        }
+        Termination::Signal(signal) => {
+            return Err(Failure::Transient(format!(
+                "gh auth token was killed by signal {signal}"
+            )));
+        }
+    }
+    if result.stdout.truncated || result.stdout.read_failed {
+        return Err(Failure::Transient(
+            "gh auth token output was unreadable".into(),
+        ));
+    }
+    let text = std::str::from_utf8(&result.stdout.bytes)
+        .map_err(|_| Failure::Final("gh auth token output was not text".into()))?
+        .trim();
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic()) {
+        Ok(text.into())
+    } else {
+        Err(Failure::Final(
+            "gh auth token returned no usable token".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -220,9 +299,9 @@ mod tests {
                 &cancel,
                 None
             ),
-            Some("fixture-secret".into())
+            Ok("fixture-secret".into())
         );
-        assert_eq!(
+        assert!(
             token(
                 &Login(false),
                 Path::new("/fixture/gh"),
@@ -230,8 +309,71 @@ mod tests {
                 Path::new("/fixture/relocated-gh"),
                 &cancel,
                 None
-            ),
-            None
+            )
+            .unwrap_err()
+            .contains("status 1")
         );
+    }
+
+    #[test]
+    fn transient_failures_are_retried_and_warn_without_the_credential() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Flaky(AtomicUsize, usize);
+        impl Executor for Flaky {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let call = self.0.fetch_add(1, Ordering::SeqCst);
+                let ok = call >= self.1;
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: CapturedStream {
+                        bytes: if ok {
+                            b"fixture-secret\n".to_vec()
+                        } else {
+                            Vec::new()
+                        },
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: !ok,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 1,
+                })
+            }
+        }
+        let cancel = provenant_core::CancelToken::new();
+        let lookup = |executor: &Flaky| {
+            token(
+                executor,
+                Path::new("/fixture/gh"),
+                Path::new("/fixture/home"),
+                Path::new("/fixture/config"),
+                &cancel,
+                None,
+            )
+        };
+        let executor = Flaky(AtomicUsize::new(0), 2);
+        assert_eq!(lookup(&executor), Ok("fixture-secret".into()));
+        assert_eq!(executor.0.load(Ordering::SeqCst), 3);
+        let executor = Flaky(AtomicUsize::new(0), 99);
+        let cause = lookup(&executor).unwrap_err();
+        assert!(cause.contains("timed out") && cause.contains("attempt 3 of 3"));
+        assert!(!cause.contains("fixture-secret"));
+        // A cached token needs no lookup and a failure leaves the cache empty.
+        let mut env = Vec::new();
+        let mut cache = Some(OsString::from("cached"));
+        let warning = inject(
+            &executor,
+            Path::new("/fixture/gh"),
+            Path::new("/fixture/home"),
+            &|_| None,
+            &cancel,
+            &mut cache,
+            &mut env,
+        );
+        assert_eq!(warning, None);
+        assert_eq!(executor.0.load(Ordering::SeqCst), 3);
+        assert!(env.iter().any(|(k, v)| k == "GH_TOKEN" && v == "cached"));
     }
 }

@@ -80,6 +80,35 @@ fn result_text(text: &str) -> Result<CloudResult, String> {
     Err(unexpected("final agentMessage result JSON", text))
 }
 
+fn thread_model(thread: &Value) -> Option<String> {
+    thread
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// The text of the newest agentMessage whose phase is a final answer, as the
+/// service marks it (`MESSAGE_PHASE_STRING2_FINAL_ANSWER` on 9 November 2026).
+fn final_answer(turn: &Value) -> Option<String> {
+    turn.pointer("/itemsPage/data/values")?
+        .as_array()?
+        .iter()
+        .rev()
+        .filter_map(|row| row.pointer("/item/agentMessage"))
+        .find(|message| {
+            message
+                .get("phase")
+                .and_then(Value::as_object)
+                .is_some_and(|phase| {
+                    phase
+                        .values()
+                        .any(|value| value.as_str().is_some_and(|p| p.contains("FINAL")))
+                })
+        })
+        .and_then(|message| message_text(message, 0))
+}
+
 pub(super) fn observe(output: &str, job: &RemoteJob) -> Result<RemoteState, String> {
     let value: Value =
         serde_json::from_str(output).map_err(|_| unexpected("status JSON", output))?;
@@ -114,8 +143,22 @@ pub(super) fn observe(output: &str, job: &RemoteJob) -> Result<RemoteState, Stri
         .unwrap_or(status)
         .to_ascii_uppercase();
     match status.as_str() {
-        "IN_PROGRESS" | "QUEUED" | "PENDING" => Ok(RemoteState::Running),
-        "FAILED" | "CANCELLED" | "CANCELED" => Ok(RemoteState::Failed {
+        "IN_PROGRESS" | "QUEUED" | "PENDING" => {
+            // A turn can post its final answer and still report in progress.
+            // Settle on that answer only when it carries this job's result.
+            match final_answer(turn).and_then(|text| result_text(&text).ok()) {
+                Some(mut result) => {
+                    result.observed_model = thread_model(thread);
+                    if job.check(&result).is_ok() {
+                        Ok(RemoteState::Finished { result })
+                    } else {
+                        Ok(RemoteState::Running)
+                    }
+                }
+                None => Ok(RemoteState::Running),
+            }
+        }
+        "FAILED" | "CANCELLED" | "CANCELED" | "INTERRUPTED" => Ok(RemoteState::Failed {
             detail: format!("Codex thread turn {status}: {}", seen(&turn.to_string())),
         }),
         "COMPLETED" => {
@@ -133,15 +176,8 @@ pub(super) fn observe(output: &str, job: &RemoteJob) -> Result<RemoteState, Stri
             let mut result = result_text(&text)?;
             // A thread model is provider observation; the requested model is
             // never substituted when the service does not expose one.
-            result.observed_model = thread
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|model| !model.trim().is_empty())
-                .map(str::to_owned);
-            result
-                .clone()
-                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-                .map_err(|error| error.to_string())?;
+            result.observed_model = thread_model(thread);
+            job.check(&result).map_err(|error| error.to_string())?;
             Ok(RemoteState::Finished { result })
         }
         _ => Err(unexpected("turn status", output)),

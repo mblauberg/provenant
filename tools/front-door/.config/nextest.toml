@@ -10,6 +10,13 @@ fail-fast = false
 leak-timeout = { period = "500ms", result = "fail" }
 slow-timeout = { period = "10s", terminate-after = 3 }
 
+# One test drives sixteen delivery restarts through real Git fixtures; it already
+# ran past ten seconds before the writer-admission change and reaches the
+# default limit on a loaded runner.
+[[profile.ci.overrides]]
+filter = 'package(=provenant-run) & test(=delivery_tests::restart::delivery_restart_drives_pending_retryable_and_uncertain_receipts)'
+slow-timeout = { period = "10s", terminate-after = 9 }
+
 [profile.ci.junit]
 path = "junit.xml"
 
@@ -73,6 +80,16 @@ not (
 
 [test-groups]
 serial-process = { max-threads = 1 }
+
+# This fixture runs two provider commands, each with its own 30-second wait.
+# Keep the outer limit above their combined budgets so failures reach assertions.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 # Two data-home variants each launch four real graph providers against an open
 # WAL. Allow for shared-host contention without dropping session-read cases.

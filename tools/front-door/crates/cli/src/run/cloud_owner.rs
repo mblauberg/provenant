@@ -1,4 +1,4 @@
-//! Preparation of cloud verification identity at the run-owner boundary.
+//! Preparation of cloud job identity at the run-owner boundary.
 use crate::domains::CloudTarget;
 use provenant_core::{AttemptId, Clock};
 use provenant_providers::cloud::{RemoteJob, RemoteState};
@@ -31,7 +31,10 @@ pub fn prepare_job(
         environment: target.environment.clone(),
         repository: target.repository.clone(),
         branch: target.branch.clone(),
+        // The caller sets a writer's named branch from the sealed placement.
+        work_branch: None,
         remote_id: String::new(),
+        session_url: None,
         commit: commit.to_owned(),
         requested_model: target.model.clone(),
         requested_effort: target.effort.clone(),
@@ -70,6 +73,7 @@ fn validate_intent(
         || placement.environment != job.environment
         || placement.repository != job.repository
         || placement.branch != job.branch
+        || placement.work_branch != job.work_branch
         || placement.model != job.requested_model
         || placement.effort != job.requested_effort
     {
@@ -123,8 +127,16 @@ where
     ] {
         provenant_run::Service::scan(text).map_err(|error| error.to_string())?;
     }
-    if let Some(effort) = job.requested_effort.as_deref() {
-        provenant_run::Service::scan(effort).map_err(|error| error.to_string())?;
+    for text in [job.requested_effort.as_deref(), job.work_branch.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        provenant_run::Service::scan(text).map_err(|error| error.to_string())?;
+    }
+    if let Some(work) = &job.work_branch
+        && (!provenant_providers::cloud::valid_branch(work) || *work == job.branch)
+    {
+        return Err("a cloud writer needs a valid named branch other than its base branch".into());
     }
     if job.repository.split_once("://").is_some_and(|(_, rest)| {
         rest.split('/')
@@ -147,6 +159,7 @@ where
                     || existing.environment != job.environment
                     || existing.repository != job.repository
                     || existing.branch != job.branch
+                    || existing.work_branch != job.work_branch
                     || existing.requested_model != job.requested_model
                     || existing.requested_effort != job.requested_effort
                 {
@@ -214,7 +227,7 @@ pub(super) fn abandon(
                     effort: placement.effort,
                     deadline_seconds: placement.deadline_seconds,
                 };
-                let job = prepare_job(
+                let mut job = prepare_job(
                     id,
                     &placement.target,
                     &target,
@@ -223,6 +236,7 @@ pub(super) fn abandon(
                     task.head.as_deref().unwrap_or_default(),
                     call.clock,
                 )?;
+                job.work_branch = placement.work_branch;
                 cloud.begin(&job).map_err(|e| e.to_string())?;
                 job
             }
@@ -539,10 +553,7 @@ fn observe_for_view(
             state = RemoteState::CancellationUnconfirmed;
         }
         if let RemoteState::Finished { result } = &state {
-            result
-                .clone()
-                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-                .map_err(|error| error.to_string())?;
+            job.check(result).map_err(|error| error.to_string())?;
         }
         job.state = state;
         Ok(job)
@@ -573,13 +584,20 @@ fn observe_for_view(
     }
 }
 
-/// User-facing advisory result and model comparison for a durable job.
+/// User-facing result, branch and model comparison for a durable job. The
+/// requested and observed model are both shown, so a difference is visible.
 pub fn view(job: &RemoteJob) -> serde_json::Value {
     let mut value = serde_json::json!({
         "target": job.target, "environment": job.environment, "provider": job.provider,
-        "remote_id": job.remote_id, "commit": job.commit,
+        "remote_id": job.remote_id, "commit": job.commit, "base_branch": job.branch,
         "requested_model": job.requested_model, "requested_effort": job.requested_effort, "state": job.state,
     });
+    if let Some(work) = &job.work_branch {
+        value["work_branch"] = serde_json::json!(work);
+    }
+    if let Some(url) = &job.session_url {
+        value["session_url"] = serde_json::json!(url);
+    }
     if let Some(error) = &job.submit_error {
         value["submit_error"] = serde_json::json!(error);
     }
@@ -587,17 +605,23 @@ pub fn view(job: &RemoteJob) -> serde_json::Value {
         value["remedy"] = serde_json::json!(diagnostic.remedy);
     }
     if let RemoteState::Finished { result } = &job.state
-        && let Ok(checked) =
-            result
-                .clone()
-                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
+        && let Ok(checked) = job.check(result)
     {
         value["passed"] = serde_json::json!(checked.passed);
+        value["observed_model"] = serde_json::json!(result.observed_model);
         value["observed_model_status"] = serde_json::json!(match checked.model {
             provenant_providers::cloud::ModelObservation::Matches => "matches",
             provenant_providers::cloud::ModelObservation::Differs => "differs",
             provenant_providers::cloud::ModelObservation::Unknown => "unknown",
         });
+        // The branch the platform actually pushed, which can differ from the
+        // named one where the platform restricts branch names.
+        if let Some(branch) = &result.branch {
+            value["result_branch"] = serde_json::json!(branch);
+        }
+        if let Some(head) = &result.head {
+            value["result_head"] = serde_json::json!(head);
+        }
     }
     // Cloud output is untrusted; redact known credential shapes before any view.
     serde_json::to_vec(&value).ok()
@@ -606,7 +630,7 @@ pub fn view(job: &RemoteJob) -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({"state": {"state": "unknown"}, "error": "cloud output could not be redacted"}))
 }
 
-/// Decorate read-only lane projections with their saved cloud observation.
+/// Decorate lane projections with their saved cloud observation.
 // One status or lanes view spends a fixed total on provider calls, however many
 // jobs are unfinished. A job past the budget shows its saved state, marked stale.
 #[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
@@ -677,10 +701,7 @@ pub(super) fn hydrate_within(
                 RemoteState::Abandoned { .. } => State::Abandoned,
                 RemoteState::CancellationUnconfirmed => State::CancellationUnconfirmed,
                 RemoteState::Finished { result } => {
-                    let checked = result
-                        .clone()
-                        .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-                        .map_err(|error| error.to_string())?;
+                    let checked = job.check(result).map_err(|error| error.to_string())?;
                     if checked.passed {
                         State::Passed
                     } else {

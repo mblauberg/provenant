@@ -515,11 +515,16 @@ fn total_lane_caps_report_setting_and_source_for_read_only_lanes() -> TestResult
     Ok(())
 }
 #[test]
-fn project_cap_allows_up_to_32_active_lanes() -> TestResult {
+fn configured_project_cap_allows_up_to_32_active_lanes() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
+    // Project limits are optional; the 32-lane ceiling applies once configured.
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "schema_version=1\n[domains.fabric.lanes]\nmax_project_lanes = 32\n",
+    )?;
     // Four runs of eight keep each run under its own batch concurrency.
     let mut index = 0_i64;
     for seed in 60..64 {

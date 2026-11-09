@@ -44,7 +44,9 @@ fn job() -> RemoteJob {
         environment: "environment-uuid~asenvcfg_1234".into(),
         repository: "example/repository".into(),
         branch: "main".into(),
+        work_branch: None,
         remote_id: "thread-1".into(),
+        session_url: None,
         commit: "a".repeat(40),
         requested_model: "requested-model".into(),
         requested_effort: Some("high".into()),
@@ -65,7 +67,6 @@ fn report() -> Value {
         "tests_run": ["targeted tests"],
         "tests_failed": [],
         "log_location": "https://example.invalid/log",
-        "tracked_files_changed": false,
         "observed_model": "untrusted-self-report"
     })
 }
@@ -97,7 +98,7 @@ fn finished(adapter: &mut CodexCloud<FixtureCli>, job: &RemoteJob) -> CloudResul
 }
 
 #[test]
-fn cloud_thread_submit_uses_stdin_environment_and_read_only_with_json_identity() {
+fn cloud_thread_submit_uses_stdin_environment_without_read_only_and_json_identity() {
     let job = job();
     let mut adapter = adapter(format!(
         "Created cloud thread fallback-id\nSubmitting message message-1 ...\n{}\n",
@@ -122,12 +123,13 @@ fn cloud_thread_submit_uses_stdin_environment_and_read_only_with_json_identity()
     );
     let (program, args, stdin) = &adapter.cli.calls[0];
     assert_eq!(program, "codex-cloud-task");
-    assert_eq!(args, &["submit", "--env", &job.environment, "--read-only"]);
+    assert_eq!(args, &["submit", "--env", &job.environment]);
     let prompt = stdin.as_deref().unwrap();
     for expected in ["run targeted tests", &job.commit, &job.job_id, &job.nonce] {
         assert!(prompt.contains(expected));
     }
-    assert!(prompt.contains(".provenant-cloud-result.json"));
+    assert!(prompt.contains("final message"));
+    assert!(prompt.contains("requested-model"));
 }
 
 #[test]
@@ -249,7 +251,6 @@ fn cloud_thread_result_checks_identity_and_preserves_reported_failures() {
         );
     }
     for (key, wrong) in [
-        ("tracked_files_changed", json!(true)),
         ("exit_status", json!(1)),
         ("tests_failed", json!(["failed test"])),
     ] {
@@ -266,7 +267,11 @@ fn cloud_thread_result_checks_identity_and_preserves_reported_failures() {
 
 #[test]
 fn cloud_thread_failed_and_cancelled_turns_are_terminal_with_detail() {
-    for state in ["TURN_STATUS_FAILED", "TURN_STATUS_CANCELLED"] {
+    for state in [
+        "TURN_STATUS_FAILED",
+        "TURN_STATUS_CANCELLED",
+        "TURN_STATUS_INTERRUPTED",
+    ] {
         let mut value = status(state, vec![agent("running earlier".into())]);
         value["turns"]["data"]["values"][0]["error"] = json!({"detail":"fixture failure detail"});
         let mut adapter = adapter(value.to_string());
@@ -322,4 +327,72 @@ fn cloud_thread_environment_list_cannot_recover_a_lost_submission() {
         "environment list is not a thread lookup"
     );
     assert!(!adapter.cancel(&job()).unwrap());
+}
+
+fn final_answer(text: String) -> Value {
+    json!({"item": {"agentMessage": {
+        "text": text,
+        "phase": {"string2": "MESSAGE_PHASE_STRING2_FINAL_ANSWER"}
+    }}})
+}
+
+#[test]
+fn cloud_thread_in_progress_turn_settles_on_its_final_answer() {
+    // Captured shape: the service can keep a turn in progress after it posts
+    // the final answer. A commentary message is not a final answer.
+    let commentary = json!({"item": {"agentMessage": {
+        "text": report().to_string(),
+        "phase": {"string": "MESSAGE_PHASE_STRING_COMMENTARY"}
+    }}});
+    let mut cloud = adapter(status("TURN_STATUS_IN_PROGRESS", vec![commentary]).to_string());
+    assert_eq!(cloud.observe(&job()).unwrap(), RemoteState::Running);
+    let mut cloud = adapter(
+        status(
+            "TURN_STATUS_IN_PROGRESS",
+            vec![final_answer(format!("Done.\n```json\n{}\n```", report()))],
+        )
+        .to_string(),
+    );
+    let result = finished(&mut cloud, &job());
+    assert_eq!(result.observed_model.as_deref(), Some("observed-model"));
+    let mut stale = report();
+    stale["nonce"] = json!("old-nonce");
+    let mut cloud = adapter(
+        status(
+            "TURN_STATUS_IN_PROGRESS",
+            vec![final_answer(stale.to_string())],
+        )
+        .to_string(),
+    );
+    assert_eq!(cloud.observe(&job()).unwrap(), RemoteState::Running);
+}
+
+#[test]
+fn cloud_thread_writer_settles_only_on_a_verified_push() {
+    let head = "c".repeat(40);
+    let mut writer = job();
+    writer.work_branch = Some("lane/cloud".into());
+    let mut pushed = report();
+    pushed["branch"] = json!("lane/cloud");
+    pushed["head"] = json!(head);
+    // The fixture answers every command with the status, so ls-remote output
+    // is unreadable: that is an observation error, never a settlement.
+    let mut cloud =
+        adapter(status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string());
+    assert!(cloud.observe(&writer).is_err());
+    pushed["branch"] = json!("main");
+    let mut cloud =
+        adapter(status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string());
+    let RemoteState::Failed { detail } = cloud.observe(&writer).unwrap() else {
+        panic!("a push to another branch must not settle as finished")
+    };
+    assert!(detail.contains("push not verified"), "{detail}");
+    let mut missing = report();
+    missing["branch"] = json!("lane/cloud");
+    let mut cloud =
+        adapter(status("TURN_STATUS_COMPLETED", vec![agent(missing.to_string())]).to_string());
+    let RemoteState::Finished { result } = cloud.observe(&job()).unwrap() else {
+        panic!("a verification job needs no push")
+    };
+    assert!(!writer.check(&result).unwrap().passed);
 }

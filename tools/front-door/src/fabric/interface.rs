@@ -74,13 +74,28 @@ fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause))
 }
 
+/// A refused template parameter keeps its typed refusal; any other compile
+/// failure stays a redacted graph-input reason.
+fn compile_error(error: provenant_fabric_runtime::graph::template::CompileError) -> FacadeError {
+    use provenant_fabric_runtime::graph::template::CompileError;
+    match error {
+        CompileError::Parameter(refusal) => {
+            FacadeError::invalid(InvalidInputDetail::Parameter(Box::new(refusal)))
+        }
+        other => graph_input_reason(other),
+    }
+}
+
 /// A compile failure that reached graph admission keeps its typed refusal, so
 /// a template launch reads the same message as the raw document it compiles to.
 /// Failures before admission stay a redacted graph-input reason.
 fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     match error.admission.clone() {
         Some(admission) => FacadeError::graph_admission(admission),
-        None => graph_input_reason(error),
+        None => match error.parameter.clone() {
+            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(refusal)),
+            None => graph_input_reason(error),
+        },
     }
 }
 
@@ -717,7 +732,7 @@ impl Factory {
             resolvers: &resolvers,
         }
         .lower(&node)
-        .map_err(graph_input_reason)?;
+        .map_err(compile_error)?;
         if let Some(tier) = input.get("tier").filter(|value| !value.is_null()) {
             let tier = tier.as_str().ok_or_else(invalid)?;
             let route = serde_json::from_value(json!({"alias":tier})).map_err(|_| invalid())?;
@@ -2156,18 +2171,26 @@ mod tests {
             }))
             .expect_err("task has no bogus parameter");
         let FacadeError::InvalidInput {
-            detail: Some(InvalidInputDetail::GraphReason(reason)),
+            detail: Some(InvalidInputDetail::Parameter(refusal)),
         } = &error
         else {
-            return Err("missing compiler reason".into());
+            return Err("missing parameter refusal".into());
         };
-        assert!(reason.contains("task"), "{reason}");
-        assert!(reason.contains("bogus"), "{reason}");
-        assert!(reason.contains("parameter"), "{reason}");
+        assert_eq!(refusal.template, "task");
+        assert!(
+            matches!(&refusal.fault, provenant_fabric_runtime::graph::template::ParameterFault::Unknown { key: Some(key), .. } if key == "bogus"),
+            "{refusal:?}"
+        );
         let diagnostic = error.diagnostic();
-        assert_eq!(
-            diagnostic.detail.as_deref(),
-            Some("graph input could not be processed")
+        assert_eq!(diagnostic.code, "invalid_input");
+        let detail = diagnostic.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("template task has no parameter bogus"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("template task takes no parameters"),
+            "{detail}"
         );
         let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
         assert_eq!(restored.diagnostic(), diagnostic);

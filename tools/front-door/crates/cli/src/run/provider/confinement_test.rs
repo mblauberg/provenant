@@ -122,7 +122,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                 vec![]
             };
             assert_eq!(mandatory.state_reads(), expected, "{adapter}/{kind}");
-            assert!(mandatory.state_exec().is_empty(), "{adapter}/{kind}");
+            assert_eq!(mandatory.state_exec(), expected, "{adapter}/{kind}");
             assert_eq!(permissions.private_state, Some(grant(&private_state)));
             assert_eq!(permissions.scratch, grant(&scratch));
 
@@ -161,10 +161,20 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                     "(deny file-write* (subpath \"{}\"))",
                     view.display()
                 )));
-                for line in rendered.lines().filter(|line| {
-                    line.starts_with("(deny file-write* (require-all")
-                        || line.starts_with("(deny process-exec (require-all")
-                }) {
+                let exec_deny = rendered
+                    .lines()
+                    .find(|line| {
+                        line.starts_with("(deny process-exec (require-all")
+                            && line.contains(state.to_str().unwrap())
+                    })
+                    .ok_or("state exec denial")?;
+                assert!(
+                    exec_deny.contains(&format!("(require-not (subpath \"{}\"))", view.display()))
+                );
+                for line in rendered
+                    .lines()
+                    .filter(|line| line.starts_with("(deny file-write* (require-all"))
+                {
                     assert!(!line.contains(view.to_str().unwrap()), "{line}");
                 }
                 assert!(rendered.contains(&format!(
