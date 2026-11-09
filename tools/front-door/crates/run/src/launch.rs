@@ -189,6 +189,17 @@ pub struct Decoded {
     pub reason: Option<String>,
     /// Partial-finish signals the provider decode found; run adds its own.
     pub partial_signals: Vec<PartialSignal>,
+    /// Where the provider ended each turn in `result`; empty when it does not
+    /// say. Settlement reads the handoff through these boundaries.
+    pub turns: Vec<provenant_records::handoff::TurnEnd>,
+}
+impl Decoded {
+    /// The lane's final handoff: the one rule for every provider.
+    pub fn handoff(
+        &self,
+    ) -> std::result::Result<Option<provenant_records::handoff::Handoff>, &'static str> {
+        provenant_records::handoff::Handoff::from_turns(&self.result, &self.turns)
+    }
 }
 /// A task-local preparation refusal, retaining candidate classifications.
 #[derive(Debug, thiserror::Error)]

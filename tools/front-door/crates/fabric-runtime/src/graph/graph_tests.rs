@@ -447,6 +447,15 @@ fn route(adapter: &str) -> GraphRoute {
     }
 }
 
+fn pool_route(alias: &str) -> GraphRoute {
+    GraphRoute {
+        alias: Some(alias.into()),
+        adapter: None,
+        model: None,
+        ..route("fixture")
+    }
+}
+
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
         auto_continue_no_work: None,

@@ -135,16 +135,6 @@ impl ReviewExempt {
     }
 }
 
-/// Paths excluded from the small-delta review shortcut, including instruction
-/// files and execution controls. This does not restrict writer settlement.
-pub fn is_review_protected_path(path: &[u8]) -> bool {
-    (path.len() > 8 && path[..8].eq_ignore_ascii_case(b".agents/"))
-        || is_hard_control(Path::new(OsStr::from_bytes(path)))
-        || Path::new(OsStr::from_bytes(path)).components().any(|component| {
-            matches!(component, Component::Normal(name) if [b"AGENTS.md".as_slice(), b"HARNESS.md", b"CLAUDE.md", b"GEMINI.md"].iter().any(|doc| name.as_bytes().eq_ignore_ascii_case(doc)))
-        })
-}
-
 pub(crate) fn is_hard_control(path: &Path) -> bool {
     path.components().any(|component| {
         let Component::Normal(name) = component else {
@@ -245,20 +235,6 @@ mod tests {
         assert!(exempt.covers(b"docs/AGENTS.md"));
         assert!(exempt.covers(b".agents/notes/a.md"));
         assert!(exempt.covers(b"AGENTS.md"));
-    }
-
-    #[test]
-    fn review_shortcut_still_excludes_instruction_and_control_paths() {
-        for path in [
-            "AGENTS.md",
-            "docs/CLAUDE.md",
-            ".agents/a.md",
-            ".git/config",
-            ".github/ci.yml",
-        ] {
-            assert!(is_review_protected_path(path.as_bytes()), "{path}");
-        }
-        assert!(!is_review_protected_path(b"src/lib.rs"));
     }
 
     #[test]

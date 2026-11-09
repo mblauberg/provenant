@@ -29,9 +29,7 @@ worktree, named by replacing `/` with `-`.
 One `Closes #n` per issue in the PR body only when merge leaves no user or external
 gate; otherwise `References #n` and leave the issue open. Never use a closing keyword
 in a commit message. A new commit needs green checks on the new head. Review
-the delta of a later commit; a clean base merge needs only CI. Apply the
-HARNESS head-move classes in shadow until tooling enforces them, retaining
-current exact-head landing gates.
+the delta of a later commit; a clean base merge needs only CI.
 
 ## Merge authority
 

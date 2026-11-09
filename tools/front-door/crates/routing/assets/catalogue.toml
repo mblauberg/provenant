@@ -170,7 +170,7 @@ senior = [
     # on read-only work did well. A hash-assigned pool makes that a fair comparison.
     # Terra stays here at low or medium effort; its weight moved to codex sol, which
     # the codex provider paces to spend, since Claude quota is the scarcer one.
-    # An exact `codex/gpt-6.1-terra@high` route still works for read-only work.
+    # Exact routes and user-configured pools can still select terra at high effort.
     { model = "codex/gpt-6.1-sol", weight = 6, effort = "medium", efforts = ["low", "medium", "high"] },
     { model = "codex/gpt-6.1-terra", weight = 2, effort = "medium", efforts = ["low", "medium"] },
     { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
