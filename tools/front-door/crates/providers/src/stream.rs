@@ -443,14 +443,18 @@ impl StreamState {
     }
 }
 pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ProviderError> {
-    // Providers may repeat a member inside an event they otherwise ignore (Codex
-    // `web_search` items carry two `id`s). Only that case falls back to plain
-    // serde_json, which keeps the last value; the line is already length-bounded.
+    // Frames echo foreign content inside events the adapter otherwise ignores:
+    // Codex `web_search` items repeat an `id`, and a tool result can carry a JSON
+    // Schema whose bound is u64::MAX printed as a float (18446744073709552000).
+    // Only those two cases fall back to plain serde_json, which keeps the last
+    // member and reads a wide integer as f64; the line is already length-bounded,
+    // and a typed field such as a usage count still refuses a value it cannot hold.
     match provenant_records::decode(bytes, provenant_records::Limits::CONFIG) {
         Ok(value) => Ok(value),
-        Err(provenant_records::DecodeError::DuplicateMember { .. }) => {
-            serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed)
-        }
+        Err(
+            provenant_records::DecodeError::DuplicateMember { .. }
+            | provenant_records::DecodeError::IntegerOutOfRange { .. },
+        ) => serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed),
         Err(_) => Err(ProviderError::Malformed),
     }
 }

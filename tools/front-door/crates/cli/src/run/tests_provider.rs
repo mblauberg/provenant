@@ -528,6 +528,54 @@ fn claude_usage_records_cache_read_and_cache_write() {
     assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
 }
 #[test]
+fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
+    // Shape of #3111: a sub-agent stream whose tool result echoes a JSON Schema
+    // bound of u64::MAX printed as a float, then a complete successful result.
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        model: Some("claude/claude-sonnet-5".into()),
+        ..Default::default()
+    };
+    let decode = |stream: &str| {
+        Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap()
+    };
+    let head = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"system\",\"subtype\":\"task_started\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"assistant\",\"session_id\":\"s\",\"parent_tool_use_id\":null,\"message\":{\"model\":\"claude-sonnet-5\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"ToolSearch\",\"input\":{}}]}}\n",
+        "{\"type\":\"user\",\"parent_tool_use_id\":null,\"session_id\":\"s\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"t\",\"type\":\"tool_result\",\"content\":\"listed\"}]},\"tool_use_result\":{\"tools\":[{\"inputSchema\":{\"properties\":{\"generation\":{\"maximum\":18446744073709552000,\"minimum\":0,\"type\":\"integer\"}}}}]}}\n",
+    );
+    let decoded = decode(&format!(
+        "{head}{}",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"stop_reason\":\"end_turn\",\"terminal_reason\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}\n",
+    ));
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert_eq!(decoded.result, "answer");
+    assert_eq!(decoded.reason, None);
+    assert_eq!(decoded.usage.uncached_input, Some(10));
+    assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
+    assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    // A final frame that is genuinely malformed still settles as malformed.
+    let decoded = decode(&format!(
+        "{head}{}",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"ans\n",
+    ));
+    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    assert!(!decoded.complete);
+    assert!(decoded.result.is_empty());
+    assert_eq!(
+        decoded.reason.as_deref(),
+        Some("provider protocol is malformed")
+    );
+}
+#[test]
 fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
