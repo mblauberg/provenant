@@ -1911,7 +1911,7 @@ mod gc_preview_tests {
     fn read_only_context_accepts_absent_repository_lock_without_creating_it()
     -> Result<(), Box<dyn std::error::Error>> {
         let rig = crate::worktree_tests::repository()?;
-        let roots = crate::roots::child(&rig.home, &rig.root, rig.state.clone())?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         let facts = worktrees::RepoFacts::default();
         let workers = worktrees::SystemWorkerObserver;
         // Establish the pre-existing project binding and state directories,

@@ -2150,15 +2150,14 @@ mod tests {
             assert!(matches!(
                 &error,
                 FacadeError::GraphRelayRefused {
-                    detail: Some(InvalidInputDetail::GraphReason(reason)), ..
-                } if reason.contains(detail)
+                    detail: Some(InvalidInputDetail::OperationFailed),
+                    ..
+                }
             ));
             let diagnostic = error.diagnostic();
             assert_eq!(diagnostic.code, code);
-            assert_eq!(
-                diagnostic.detail.as_deref(),
-                Some("graph input could not be processed")
-            );
+            assert_eq!(diagnostic.detail.as_deref(), Some("graph operation failed"));
+            assert!(!serde_json::to_string(&error)?.contains(detail));
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);

@@ -1196,7 +1196,10 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     for (attempt, account) in attempts.iter().zip(["work", "pro"]) {
         assert_eq!(attempt["state"], "terminal");
         assert_eq!(attempt["launched"], false);
-        assert_eq!(attempt["outcome"], "adapter_unavailable");
+        assert_eq!(
+            attempt["outcome"],
+            json!({"preparation_refused":"unregistered_account"})
+        );
         assert!(attempt["attempt_ref"].as_str().is_some());
         let (_, id) = attempt["attempt_ref"]
             .as_str()

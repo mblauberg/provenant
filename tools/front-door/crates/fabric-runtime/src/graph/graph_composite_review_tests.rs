@@ -456,7 +456,17 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
         excerpt
             .contains("lens-b: findings block missing or invalid: field findings: block missing")
     );
-    assert!(excerpt.contains("lens-c: adapter unavailable"));
+    let unavailable = node("lens-c");
+    assert_eq!(unavailable.state, NodeState::Failed);
+    assert_eq!(
+        unavailable.advance_error_code.as_deref(),
+        Some("adapter_unavailable")
+    );
+    assert!(excerpt.contains(&format!(
+        "{}: {}",
+        unavailable.id,
+        unavailable.advance_error.as_deref().unwrap()
+    )));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
     let verify_input = &owner.prompts[3];
