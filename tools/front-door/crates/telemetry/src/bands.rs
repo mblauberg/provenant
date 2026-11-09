@@ -41,7 +41,10 @@ fn floor(context: u64) -> u64 {
 
 /// Replies grouped by source and context band, in source then band order.
 /// Only bands with replies are listed.
-pub fn context_bands(rows: &[Row], prices: &PriceTable) -> Result<Vec<ContextBand>, TelemetryError> {
+pub fn context_bands(
+    rows: &[Row],
+    prices: &PriceTable,
+) -> Result<Vec<ContextBand>, TelemetryError> {
     let mut groups = BTreeMap::<(Source, u64), Accumulator>::new();
     for row in rows {
         let reasoning = row.reasoning_tokens;
@@ -50,9 +53,7 @@ pub fn context_bands(rows: &[Row], prices: &PriceTable) -> Result<Vec<ContextBan
             cache_read: Some(row.cache_read),
             cache_write: Some(row.cache_write.saturating_add(row.cache_write_1h)),
             cache_write_1h: Some(row.cache_write_1h),
-            output_excluding_reasoning: Some(
-                row.output.saturating_sub(reasoning.unwrap_or(0)),
-            ),
+            output_excluding_reasoning: Some(row.output.saturating_sub(reasoning.unwrap_or(0))),
             reasoning,
         };
         let model = if row.model.contains('/') {

@@ -33,14 +33,13 @@ impl provenant_os::capture::FrameDecoder for LiveUsage {
     ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
         use provenant_os::capture::FrameEvent;
         Ok(
-            live_usage(frame).map_or(
-                FrameEvent::Progress,
-                |(key, tokens, context)| FrameEvent::Usage {
+            live_usage(frame).map_or(FrameEvent::Progress, |(key, tokens, context)| {
+                FrameEvent::Usage {
                     key,
                     tokens,
                     context: Some(context),
-                },
-            ),
+                }
+            }),
         )
     }
     fn reports_usage(&self) -> bool {

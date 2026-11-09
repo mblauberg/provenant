@@ -1537,9 +1537,7 @@ impl RunStore {
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
                 Some(
-                    StopReason::WallDeadline
-                    | StopReason::TokenBudget
-                    | StopReason::ContextHandoff,
+                    StopReason::WallDeadline | StopReason::TokenBudget | StopReason::ContextHandoff,
                 ) => decoded.outcome = Outcome::TimedOut,
                 Some(StopReason::ExplicitCancellation) if cancelled => {
                     decoded.outcome = Outcome::Cancelled
@@ -3848,12 +3846,14 @@ mod writer_recovery_tests {
             Some(&serde_json::json!(TerminalCause::ContextHandoff))
         );
         // Only a declared stop: the owner maps this to the graph's restart.
-        assert_eq!(finished.partial_signals, vec![provenant_records::run::PartialSignal::DeclaredStop]);
-        let result = String::from_utf8(
-            read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?,
-        )?;
-        let handoff = provenant_records::handoff::Handoff::from_result(&result)?
-            .ok_or("result handoff")?;
+        assert_eq!(
+            finished.partial_signals,
+            vec![provenant_records::run::PartialSignal::DeclaredStop]
+        );
+        let result =
+            String::from_utf8(read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?)?;
+        let handoff =
+            provenant_records::handoff::Handoff::from_result(&result)?.ok_or("result handoff")?;
         assert_eq!(handoff.note, "Parser done; renderer next");
         assert_eq!(handoff.remaining, vec!["Finish renderer".to_owned()]);
         assert!(handoff.unfinished());
