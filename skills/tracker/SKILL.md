@@ -31,7 +31,8 @@ questions go through `provenant ask`.
 ## Issue body
 
 Outcome; Evidence (required for agent-filed defects); Scope and Out of scope;
-Acceptance, each item with how it is verified; Must not change; Verify; Durable home
+Acceptance, each item with how it is verified; optional Boundaries, each citing a
+recorded hard boundary or giving its reason; Verify; Durable home
 (the doc that absorbs any settled rule in the same PR, or "none"). Cite
 `path#Symbol`, never line numbers or scratch paths. The spec dies with the PR.
 These headings are a default shape, not a form.

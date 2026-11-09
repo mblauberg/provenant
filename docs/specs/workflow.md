@@ -21,7 +21,7 @@ requires exactly one disposition and reason. An unknown identity without the
 descriptive fields is skipped with a warning when another valid entry remains;
 if none remains, the findings block is invalid.
 
-- Why: reviewers can reconcile findings by identity without repeating their descriptions.
+- Why (default): reviewers can reconcile findings by identity without repeating their descriptions.
 - Test: `crates/fabric-runtime/src/graph/outputs.rs::unknown_identity_warns_when_another_disposition_is_valid`;
   `crates/fabric-runtime/src/graph/graph_synthesis_findings_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
   `crates/fabric-runtime/src/graph/graph_synthesis_findings_tests.rs::identity_only_dispositions_inherit_selected_findings`
@@ -37,7 +37,7 @@ has one slot. Additions sit outside the slot count and are deduplicated when
 `tests` already occupies a slot. A diff with neither signal keeps its normal
 panel. Repository routing config can replace or extend
 `review.lenses.by_paths`; an empty table disables the bundled path rules.
-- Why: small test changes need test-design review as well as the shape's base lens.
+- Why (default): small test changes need test-design review as well as the shape's base lens.
 - Test: `crates/routing/src/review.rs::selected_panels_keep_change_driven_lenses`
 - Owner: `crates/routing/src/review.rs`
 
@@ -55,7 +55,7 @@ findings; it emits an `inconclusive_review` diagnostic asking for a fresh review
 Insufficient passing coverage still leaves acceptance incomplete.
 Counted reviewers must be at least the highest author tier, and family separation is
 measured against all authors.
-- Why: self-review or a stale subject proves nothing.
+- Why (default): self-review or a stale subject proves nothing.
 - Test: `crates/workflow/src/coverage.rs::authors_decision_makers_repeats_and_low_tiers_do_not_count`;
   `crates/workflow/src/coverage.rs::a_review_of_another_subject_never_counts`
 - Owner: `crates/workflow/src/coverage.rs`
@@ -75,7 +75,7 @@ for routine, substantial and terminal work:
 
 A blocker needs source references and an expiry; a reason string alone never
 waives a leg.
-- Why: higher-risk changes need diverse, independent eyes.
+- Why (default): higher-risk changes need diverse, independent eyes.
 - Test: `crates/workflow/src/coverage.rs::crucial_needs_two_distinct_lenses_and_terminal_an_adversarial_one`;
   `crates/workflow/src/coverage.rs::duplicate_blocker_evidence_waives_only_one_cross_family_leg`
 - Owner: `crates/workflow/src/coverage.rs`, `crates/workflow/src/risk.rs`
@@ -90,7 +90,7 @@ waives a leg.
 
 Attestation never promotes itself to observation, and an unknown author
 family leaves separation unproven.
-- Why: only observed evidence proves a different family reviewed.
+- Why (default): only observed evidence proves a different family reviewed.
 - Test: `crates/workflow/src/coverage.rs::attested_reviewer_never_fills_a_cross_family_leg_without_a_blocker`;
   `crates/workflow/src/bind.rs::observed_reviewer_family_is_verified_and_attested_is_not`
 - Owner: `crates/workflow/src/review.rs`, `crates/workflow/src/bind.rs`
@@ -103,7 +103,7 @@ the observed model (unknown if absent). A PR review's attempt head must equal
 the subject head; a read-only lane's head is the HEAD the host read at
 dispatch, never lane output. The CLI records, but does not verify, the
 chair-supplied `LegBlocker` and `user_approval` references.
-- Why: a reviewer's output must not assert its own identity.
+- Why (default): a reviewer's output must not assert its own identity.
 - Test: `crates/workflow/src/bind.rs::failed_headless_wrong_head_and_foreign_delivery_attempts_are_refused`;
   `crates/cli/src/workflow.rs::family_comes_from_the_catalogue_and_is_unknown_otherwise`
 - Owner: `crates/workflow/src/bind.rs`
@@ -116,7 +116,7 @@ A receipt records the chair's decision and is not a merge certificate. A
 changed subject resets the decision and needs fresh review. Each save
 rechecks derived risk, and a downgrade needs an originating user approval.
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
-- Why: acceptance must track the exact subject reviewed.
+- Why (default): acceptance must track the exact subject reviewed.
 - Test: `crates/workflow/src/store/tests.rs::changing_subject_resets_decision_and_requires_fresh_review`;
   `tests/workflow.rs::substantial_acceptance_is_refused_until_reviews_cover_it`
 - Owner: `crates/workflow/src/receipt.rs`
@@ -128,7 +128,7 @@ lock inode, never unlinked: recheck, validate, write and sync a temporary file,
 rename it, sync the directory. Two saves at one revision give one winner, a
 crash leaves a complete file, and a corrupt receipt fails closed. No lock is
 held during probes, provider waits or GitHub reads.
-- Why: concurrent chairs must not lose or interleave decisions.
+- Why (default): concurrent chairs must not lose or interleave decisions.
 - Test: `crates/workflow/src/store/concurrency.rs::concurrent_process_writers_on_one_revision_have_one_winner`;
   `crates/workflow/src/store/tests.rs::atomic_write_failures_through_save_preserve_complete_bytes_and_redact_errors`
 - Owner: `crates/workflow/src/store/`
@@ -148,7 +148,7 @@ match, including across linked worktrees. Without an explicit flag, a session
 already registered on this host in another project refuses with that project's
 identity and the `--project` recovery command. Explicit selection permits an
 intentional session ID reuse. Successful saves name the selected project ID.
-- Why: restoring the wrong checkpoint misdirects an agent.
+- Why (default): restoring the wrong checkpoint misdirects an agent.
 - Test: `crates/workflow/src/session.rs::refuses_traversal_and_command_injection_in_host_keys`;
   `crates/workflow/src/session.rs::refuses_symlinked_directories_checkpoints_and_locks`;
   `tests/workflow.rs::session_save_outside_checkout_requires_project`;
@@ -173,7 +173,7 @@ a retained revision, or its unified line diff against the current one, as plain
 text. Lines compare with their terminators, so text that differs only in its final
 newline shows a difference, marked `\ No newline at end of file` as `diff -u`
 marks it. A revision whose text fails its hash is refused with `HISTORY`.
-- Why: a bad save or a compaction must not destroy the only copy of earlier
+- Why (default): a bad save or a compaction must not destroy the only copy of earlier
   state, and the history must stay bounded.
 - Test: `crates/workflow/src/session.rs::each_save_keeps_the_replaced_checkpoint_as_a_linked_hashed_revision`;
   `crates/workflow/src/session.rs::only_the_newest_revisions_are_kept_and_older_files_are_deleted`;
@@ -194,7 +194,7 @@ Viewer comparisons use the viewer's rendered revision as their baseline.
 The CLI validates the session and revision through Workflow before writing to
 Fabric; the two owners do not share a transaction. The caller acknowledges the
 revision it rendered, and missing retained history remains unavailable.
-- Why: concurrent saves and incomplete or differently scoped observations must
+- Why (default): concurrent saves and incomplete or differently scoped observations must
   not overwrite chair work or represent a live request as resolved.
 - Test: `crates/workflow/src/session.rs::retained_summary_diff_compares_fields_and_reports_missing`;
   `crates/cli/src/console/overview.rs::compares_only_matching_host_project_and_chair_and_respects_partial_coverage`;
@@ -232,7 +232,7 @@ owns the record schema and consistency states; the
 [CLI owner](../../tools/front-door/crates/cli/src/workflow.rs) owns recovery commands
 and error mapping.
 
-- Why: later delivery and catalogue readers need durable exact identities without guessing ownership.
+- Why (default): later delivery and catalogue readers need durable exact identities without guessing ownership.
 - Test: `crates/workflow/src/session.rs::session_save_discovery_restart`;
   `crates/workflow/src/session.rs::discovery_reports_interrupted_publication_without_read_repair`;
   `crates/workflow/src/session.rs::discovery_publication_failure_warns_after_manifest_commit_and_next_save_repairs`;
@@ -245,7 +245,7 @@ and error mapping.
 diagnostic naming a cause kind, never a path. SessionStart emits only the
 checkpoint for its own key, or a missing or stale status. It never emits the
 latest file, withholds stale content and caps output at 8 KiB.
-- Why: a hook must never block the user or inject another session.
+- Why (default): a hook must never block the user or inject another session.
 - Test: `crates/workflow/src/session.rs::malformed_missing_wrong_event_and_oversize_hooks_are_advisory_without_fallback`;
   `crates/workflow/src/session.rs::native_host_fixtures_select_only_their_key_and_emit_native_json`
 - Owner: `crates/workflow/src/session.rs`
@@ -261,7 +261,7 @@ first. Lane, PR and worktree facts come from the read commands (`status`,
 missing, slow or failing marks its section unavailable and never reads as
 empty. Record fields are stripped of markers, backticks and control
 characters before they are shown.
-- Why: a restarted chair must see real lane state quickly, and absence of
+- Why (default): a restarted chair must see real lane state quickly, and absence of
   evidence must not read as an empty queue.
 - Test: `crates/workflow/src/session/state.rs::output_is_bounded_and_says_when_it_was`;
   `crates/workflow/src/session/state.rs::unreadable_sections_are_named_not_shown_empty`;
@@ -289,7 +289,7 @@ otherwise a plain note names the cursor. Every other command a hook prints
 (the digest heading, the bounded-output marker, the `pr status` hint, the `Save:` line, the `session show`
 pointer) repeats the hook's non-default `--state-dir` on the same terms, so
 following it reaches the store the hook used; one that cannot is not printed.
-- Why: automatic state must not erase the authority references the chair wrote
+- Why (default): automatic state must not erase the authority references the chair wrote
   or hide that the chair has not saved notes; separate files remove the
   ownership question a shared file raises.
 - Test: `tests/hooks_session.rs::autosave_never_writes_the_chair_file_and_output_shows_both_parts`;
@@ -319,7 +319,7 @@ full GC applies them to idle sessions. A correction is a new entry referencing a
 pruned. Lanes must not append chair updates. Listing must not create state or
 require write access. The cost of append and list must depend on retained data
 and the replay horizon, not the session's lifetime history.
-- Why: retries must not duplicate updates, and inactive or long-lived sessions
+- Why (default): retries must not duplicate updates, and inactive or long-lived sessions
   must remain bounded without preventing read-only use.
 - Test: `crates/workflow/src/log.rs::log_operation_replay_pagination_correction_pruning_and_restart`;
   `crates/workflow/src/log.rs::replay_horizon_expires_receipts_and_survives_clock_and_config_changes`;
@@ -337,7 +337,7 @@ worktrees must be clean and pushed unless `--wip` (which commits and pushes trac
 registrations and recreate branches through its own worktree owner. The owner
 lease moves
 only after the peer accepts, and a repeated operation never launches again.
-- Why: a handoff must not lose work, launch twice or use an unregistered
+- Why (default): a handoff must not lose work, launch twice or use an unregistered
   account.
 - Test: `crates/fabric-runtime/src/handoff/session/tests.rs::receive_refuses_until_the_host_opts_in`;
   `crates/fabric-runtime/src/handoff/session/tests.rs::the_peer_takes_the_lease_only_for_a_launch_or_no_launch`
@@ -348,7 +348,7 @@ only after the peer accepts, and a repeated operation never launches again.
 `check writing` compiles bounded JSON rules once, excludes code fences,
 inline code and declared LaTeX spans, and reports deterministic rule IDs with
 Unicode positions; unsupported patterns and oversized rule sets are refused.
-- Why: a prose lint must not report inside code or crash on hostile rules.
+- Why (default): a prose lint must not report inside code or crash on hostile rules.
 - Test: `crates/workflow/src/writing/tests.rs::inline_code_cannot_hide_following_lines_or_open_a_fence`;
   `tests/checks.rs::writing_checks_use_typed_findings_and_input_exits`
 - Owner: `crates/workflow/src/writing/`
@@ -363,7 +363,7 @@ automatic promotion. An issue or receipt records scope or evidence. It is
 not approval: release, promotion, activation, sharing, provider login, live
 installation, push and destructive action stay gated by current user
 authority.
-- Why: evidence must never be mistaken for permission.
+- Why (default): evidence must never be mistaken for permission.
 - Test: none (review gate for external-action authority);
   `crates/workflow/src/risk.rs::lowering_risk_requires_matching_current_user_authority`
   covers risk downgrades only.

@@ -30,16 +30,16 @@ body:
     attributes:
       label: Acceptance
       description: >-
-        One observable statement per line, each tagged with how it is verified: [test], [command], [capture] or [review]. Implementers cannot weaken these.
+        One observable statement per line, each tagged with how it is verified: [test], [command], [capture] or [review].
     validations:
       required: true
 
   - type: textarea
-    id: must-not-change
+    id: boundaries
     attributes:
-      label: Must not change
+      label: Boundaries
       description: >-
-        Behaviour that has to survive.
+        Optional. Each line cites a recorded hard boundary or says why it holds.
     validations:
       required: false
 

@@ -159,3 +159,5 @@ host-owned. More ambient capability means the renderer can no longer rely on
 omitting allows: every confidentiality and integrity requirement needs an
 explicit denial and a tested exception. The shared inventory and native enforcement checks must evolve together so
 incomplete roots cannot silently weaken enforcement.
+
+Overturn when: lanes run work for anyone other than the host's owner.

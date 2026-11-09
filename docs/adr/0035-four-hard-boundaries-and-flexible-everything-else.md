@@ -48,3 +48,6 @@ a lane or launch refusal outside them, or any guard that blocks ordinary work,
 as a defect to loosen, not a safety gain. See
 [Simple first](../specs/rust-workspace.md#simple-first) and the
 [supervisor spec](../specs/supervisor.md).
+
+Overturn when: data loss, credential exposure or unauthorised change is traced
+to a guard this decision loosened.

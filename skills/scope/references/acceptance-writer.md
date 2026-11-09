@@ -8,7 +8,8 @@ an epic. Each criterion:
 - names its evidence type: `[test]`, `[command]`, `[capture]` or `[review]`;
 - names the check that proves it, runnable locally and fast where possible.
 
-Add must-not-change behaviour, non-goals and the verify command. Do not restate the
+Add non-goals, the verify command and any Boundaries, each citing a recorded hard
+boundary or its reason. Do not restate the
 design. If a criterion cannot be checked, rewrite it until it can, or park it as a
 decision. A verification step beyond the stated outcome names the failure it
 prevents and how likely that failure is; otherwise leave it out. The criteria are

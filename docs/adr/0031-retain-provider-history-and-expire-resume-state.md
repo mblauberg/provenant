@@ -51,3 +51,5 @@ attempts. Dry runs preview removals. Settlement failures are retried by GC.
   may retain more history until their transcript layout is established.
 - There is no schema migration or general deletion framework.
 - Results and telemetry remain available independently of provider state.
+
+Overturn when: a reader other than continuation needs resumable provider state.
