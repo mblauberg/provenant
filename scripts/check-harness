@@ -136,7 +136,7 @@ def main():
                 targets.append(definition.group(1))
             for target in targets:
                 target = target.strip("<>")
-                if ":" in target or target.startswith("//"):
+                if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target) or target.startswith("//"):
                     continue
                 relative, _, anchor = target.partition("#")
                 destination = (root / path.parent / urllib.parse.unquote(relative)).resolve() if relative else root / path

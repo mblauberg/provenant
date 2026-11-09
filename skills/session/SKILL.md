@@ -71,7 +71,7 @@ Report changed work, criterion evidence, omissions and remaining gates using
 `deliver`'s outcome report.
 
 Inspect checkpoint commands with `provenant workflow session --help` and
-inbox commands with `provenant ask --help`. Follow the repository's runbook
-for hook setup. Cross-host
+inbox commands with `provenant ask --help`. Inspect `provenant install --help`
+for hook setup and `provenant hook --help` for handlers. Cross-host
 `provenant workflow session handoff` can transfer content and launch a peer
 session; inspect its dry run and existing disclosure authority first.

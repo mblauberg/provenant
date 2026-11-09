@@ -154,6 +154,7 @@ class HarnessChecks(unittest.TestCase):
                 subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
                 for link in (
                     f"[target](../../../{directory}/target.md#target)",
+                    f"[target](../../../{directory}/target.md#topic:details)",
                     f"[target](../../../{directory}/%74arget.md)",
                     f"[target][dest]\n[dest]: ../../../{directory}/target.md",
                     f"[target](/{directory}/target.md)",
