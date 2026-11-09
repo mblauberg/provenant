@@ -32,9 +32,8 @@ work does not need it.
   needs the user's authority.
 - **Checks.** Locally, run only fast targeted checks: lint, type checks and the
   tests you touched. Full suites and release scans run in CI: push the branch,
-  open the pull request, run the lens review its risk requires
-  (`provenant run --use review --over @review-panel`) and gate the merge on its
-  CI run.
+  open the pull request, run the lens review its risk requires (`code-review`)
+  and gate the merge on its CI run.
 - **Waiting.** Do not poll with `sleep` or repeated status or `gh` reads. Block
   on `provenant status --wait --target ...` or `provenant pr watch`, in the
   background where the harness allows, and carry on with other work until it
