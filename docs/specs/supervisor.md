@@ -313,7 +313,7 @@ device number refuses recovery.
 - Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
   `::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
   `::worktree_settlement_retains_flock_until_recovery_is_dropped`;
-  `::admission_ignores_predecessor_evidence_but_shares_writer_exclusion`;
+  `::admission_uses_flock_and_retains_predecessor_evidence`;
   `::reservation_listing_isolates_an_inaccessible_slot`;
   `crates/run/src/dispatch_recovery_tests.rs::reconcile_recovers_writer_when_device_numbers_change_after_reboot`;
   `::changed_device_numbers_on_same_boot_keep_writer_custody`
@@ -387,7 +387,7 @@ in force. Read-only lanes retain their requested tool restrictions.
   authorised by the confinement plan.
 - Test: `crates/confinement/src/permissions/tests/render.rs::writer_programs_keep_filesystem_and_credential_boundaries`;
   `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`;
-  `crates/providers/src/tests.rs::claude_writer_uses_confinement_instead_of_native_tool_permissions`
+  `crates/providers/src/tests_launch_access.rs::claude_writer_uses_confinement_instead_of_native_tool_permissions`
 - Owner: `crates/confinement/src/permissions/render.rs`, `crates/providers/src/claude.rs`,
   `crates/providers/src/opencode.rs`
 
@@ -421,78 +421,48 @@ access; it does not make a networked lane hermetic.
 
 ### Database IPC shares the host namespace
 
-Database IPC is denied by default in both writer and read-only profiles.
-A project writer default (`domains.lanes.projects.<project>.capabilities`), a
-graph node capability, or an explicit `provenant run --capability postgres` grants
-`ipc-sysv-shm` and `ipc-sysv-sem`. The CLI preserves this in the sealed
-`LaneAccess.database_ipc` field; both provider and configured-command launchers
-copy it to `ProviderProfileSpec.allow_database_ipc` before compilation. Network
-access, writer mode, provider identity and loopback-server support never imply
-database authority. With no capability declaration, MCP and preset lanes stay
-off; read-only nodes do not inherit writer defaults. Host child validation refuses database authority beyond the parent, and
-unvalidated sealed requests cannot add it. The separate backend availability
-probe keeps its minimal launch-only profile.
+Lane profiles start from `(allow default)` ([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)),
+so SysV shared memory and semaphores are available to every lane, with or
+without a database capability. `ProviderProfileSpec.allow_database_ipc` still
+adds explicit `ipc-sysv-shm` and `ipc-sysv-sem` allows in
+`crates/confinement/src/permissions/render.rs#render_profile`; it no longer gates
+the operations. Capability sources are in the
+[configuration runbook](../runbooks/configuration.md).
 
-PostgreSQL 18 always uses a small SysV shared-memory interlock, including with
-`shared_memory_type=mmap`. Its [Darwin configuration](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/template/darwin)
-selects SysV semaphores on supported macOS versions, so POSIX semaphores remain
-denied. Configure dynamic shared memory to use files in the confined database
-directory, including during initialisation:
+macOS SysV IPC is host-global and Seatbelt cannot restrict it to a lane's own
+segments or semaphore sets. A lane can discover keys and access another
+process's objects when ordinary Unix IPC permissions allow it, including
+mutation and `IPC_RMID` removal for objects owned by the same user. Use a
+separate OS user or a VM when isolation from same-user IPC is required.
+A lane can exhaust host-global limits such as `kern.sysv.shmmni`, and a failed
+database start can leave objects behind. Settlement does not sweep them.
+
+PostgreSQL 18 always takes a small SysV shared-memory interlock, even with
+`shared_memory_type=mmap`. Configure dynamic shared memory to use files in the
+confined database directory, including during initialisation:
 
 ```sh
 initdb -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
 postgres -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
 ```
 
-This avoids PostgreSQL's host-global POSIX shared-memory namespace entirely.
-No PostgreSQL POSIX shared-memory, POSIX semaphore or SysV message-queue grant
-is added, even for a database-enabled lane.
-
-This is a security-relevant confinement trade-off: macOS SysV IPC is
-host-global and Seatbelt cannot restrict these operations to a lane's own
-segments or semaphore sets. A lane may discover keys and access another
-process's objects when ordinary Unix IPC permissions allow it, including
-objects owned by the same user, including mutation and `IPC_RMID` removal.
-The explicit database capability accepts that exposure; it does not create a
-lane-private SysV namespace. Other users' objects remain protected under normal
-restrictive permissions. Profiles without the capability cannot mutate or
-remove the host's objects, including those owned by the same user.
-macOS can allocate SysV objects before checking access to existing objects.
-A lane can still exhaust host-global IPC limits such as
-`kern.sysv.shmmni` with its own objects, and a failed database start can leave
-them behind. Such objects are not swept at settlement.
-
 Every SysV-touching native test records host `ipcs -m -s -q` inventories before
 and after. Trusted test code journals exact newly created IDs; a host-side
-guard removes only those IDs and asserts that none remain. PostgreSQL tests
-audit allocations across initdb's subprocesses, including failed starts.
-Cleanup never deletes an unowned inventory difference or a pre-existing object.
-A forced kill between allocation and journal append can still leave an
-unrecorded test object.
-File confinement still restricts database files to existing writable roots,
-and executable, Mach and network rules retain their existing limits. Database
-clients need the existing local or open network policy for loopback access.
-Use a separate OS user or a VM when isolation from same-user IPC is required.
+guard removes only those IDs and asserts that none remain. Cleanup never
+deletes an unowned inventory difference or a pre-existing object. A forced kill
+between allocation and journal append can still leave an unrecorded test object.
 
-Both lane modes allow `(allow signal (target same-sandbox))`. PostgreSQL
-backends need to notify their postmaster parent and sibling processes; the
-former writer-only `children` target denied child-to-parent signals and left
-client queries and clean shutdown hanging. The same-sandbox rule replaces that
-target and permits communication only among processes in the same Seatbelt
-sandbox. Signals to the outside supervisor, host processes and independently
-launched sandboxes with byte-identical profiles
-remain denied. It grants no additional execution, file, Mach, network or IPC
-authority.
+`(allow signal (target same-sandbox))` lets PostgreSQL backends signal their
+postmaster parent and siblings. Signals to the outside supervisor, host
+processes and independently launched sandboxes stay denied.
 
-- Why: PostgreSQL startup and database checks need kernel IPC without broader
-  file, executable or network authority, and intra-sandbox signals for queries
-  and clean shutdown.
-- Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
-  `::native_sandbox_blocks_path_escape_probes`;
-  `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
-  `::postgres_without_database_ipc_refuses_initdb`;
-  `::database_off_cannot_mutate_or_remove_foreign_sysv_objects`;
-  `::database_on_creates_and_removes_own_sysv_segments_and_semaphores`;
+- Why: PostgreSQL startup and database checks need kernel IPC and
+  intra-sandbox signals for queries and clean shutdown.
+- Test: `crates/confinement/src/permissions/tests/ipc.rs::postgres_lifecycle_is_ambient_with_and_without_database_grants`;
+  `::ambient_database_creates_and_removes_own_sysv_segments_and_semaphores`;
+  `::ambient_database_can_use_same_uid_sysv_objects_outside_mandatory_state`;
+  `crates/confinement/src/permissions/tests/grants.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
+  `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`;
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
 
@@ -530,9 +500,8 @@ libproc, checks each process against the existing attempt sandbox marker, and
 rechecks parent links, start times and child lists before publishing. Host
 processes and independent peer lanes are excluded even when a peer has the
 same profile text or process group. No global process list is published.
-`proc_listchildpids` itself returns `EPERM` inside the production lane, so this
-walk runs on the host. The `kern.proc.` and `kern.procargs` denies and the
-same-sandbox process-info scope remain unchanged.
+The walk runs on the host, so the lane needs no process-listing authority
+beyond the ambient baseline in the process-information section below.
 
 One worker per live provider refreshes `<attempt>/process-tree.json` about
 once a second without blocking the guardian's control loop. Publication uses
@@ -566,9 +535,8 @@ by an unconfined host guardian. Submissions inside a lane are queued for the
 parent guardian's host-side child-launch service; the lane does not launch its
 child supervisor locally (`crates/cli/src/run.rs::submit_with_host_and_wait`,
 `::launch_prepared_with_wait`, `crates/cli/src/run/children.rs::serve`). A supervisor
-started directly inside a parent sandbox cannot use `proc_listchildpids`:
-`EPERM` leaves sampling unavailable and the reader returns exit 4. That is not
-the supported nested-lane launch path.
+started directly inside a parent sandbox is not the supported nested-lane launch
+path; if sampling is unavailable there, the reader returns exit 4.
 
 - Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
   `crates/supervisor/src/process_tree.rs::tests`;
@@ -577,55 +545,33 @@ the supported nested-lane launch path.
 - Owner: `crates/supervisor/src/process_tree.rs`, `crates/cli/src/run/provider.rs`,
   `src/process_tree.rs`
 
-### Process information stays inside the sandbox
+### Process information is ambient; arguments are denied
 
-Every lane profile explicitly denies the process-info family before allowing
-`(allow process-info* (target same-sandbox))`, so a lane can read process
-information, including resident memory, for a PID it already knows inside its
-own sandbox. The `kern.proc.` sysctl deny stops a lane from enumerating
-processes, its own descendants included, so an in-lane memory guard cannot
-discover its process tree. The supervisor samples that tree on the host and
-serves an attempt-local snapshot through `provenant process-tree` above.
-An allow-only clause is
-not assumed to restrict APIs that the platform permits by default. The native
-test records the unscoped baseline and compares an explicit deny,
-`process-info-pidinfo` scoped to the sandbox, and the final scoped wildcard.
-The lane's own processes must have nonzero RSS. An outside same-user host PID
-must remain denied or invisible to libproc.
+The runtime baseline (`crates/confinement/src/permissions/render.rs#RUNTIME_BASELINE_RULES`)
+allows `process-info*` and `sysctl-read`, so a lane can read resident memory and
+list processes, host processes included. It denies
+`(sysctl-name-prefix "kern.procargs")`, so another process's arguments are not
+readable, and it denies the task-port and `process-info-setcontrol` and
+`process-info-dirtycontrol` operations except for the same sandbox.
+`provenant process-tree` remains the supported interface for a lane's
+descendants; see the process-tree section above.
 
-Every profile also denies process-list and argument sysctls with
-`(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))`.
-Native controls require self PID/argument and CPU queries to keep working,
-while outside-host PID/argument and process-enumeration queries fail with
-`EPERM`. The tool compatibility probe also runs under this restriction.
-
-The native A/B probe confirms that unscoped libproc RSS queries succeed, the
-explicit deny returns `EPERM`, and the scoped PIDINFO and wildcard rules permit
-own-process queries while refusing the outside host. The identical-profile
-peer fixture also requires `proc_pidinfo` of a separately launched live sandbox
-to fail with `EPERM`, while its own RSS query succeeds.
-
-Stock `ps` remains a separate unresolved restriction: `execve("/bin/ps", ... )`
-returns `EPERM` before any process-info lookup, in both access modes. On Darwin
-27, the binary is setuid and libsandbox's diagnostic `sandbox_check` reports
-`forbidden-exec-sugid` denied; an unknown-operation control returns `EINVAL`.
-This is a queried policy denial, rather than a captured kernel log for the
-exec. `forbidden-exec-sugid` is not a grantable SBPL symbol on that host.
-The process-info rule therefore does not fix consumers that invoke stock `ps`.
-`provenant process-tree` supplies the supported RSS interface for consumers'
-memory guards. No privileged execution, sandbox escape or Mach authority is added.
+Stock `ps` is a separate restriction: `execve("/bin/ps", ... )` returns `EPERM`
+before any process-info lookup. On Darwin 27 the binary is setuid and
+libsandbox's diagnostic `sandbox_check` reports `forbidden-exec-sugid` denied.
+This is a queried policy denial, not a captured kernel log. The process-info
+rule does not fix consumers that invoke stock `ps`.
 
 The native production-profile shell probe also runs an offline Cargo test with
 two jobs. Its build script acquires and returns an inherited jobserver token,
 and its compiled Rust test checks the success marker. The same probe commits
 with Git and runs Node child-process spawn/fork IPC directly and through a pnpm
-script. macOS CI requires Node and pnpm availability. PostgreSQL's separate
-database-enabled lifecycle smoke covers both access modes.
+script. macOS CI requires Node and pnpm availability.
 
-- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_reports_own_rss`;
-  `crates/confinement/src/permissions/tests/sysctl.rs::sysctl_blocks_host_process_queries_but_preserves_self`;
-  `src/worktree_tests.rs::lane_prepare_isolates_nested_state` (`verify_lane_profile` shell probe);
-  `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`
+- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_includes_host_and_reports_own_rss`;
+  `crates/confinement/src/permissions/tests/sysctl.rs::sysctl_allows_host_process_queries`;
+  `src/worktree_tests/lane_cases.rs::lane_prepare_isolates_nested_state` (`verify_lane_profile` shell probe);
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_lifecycle_is_ambient_with_and_without_database_grants`
 - Owner: `crates/confinement/src/permissions.rs`
 
 ### Plans refuse unsafe roots
@@ -645,9 +591,9 @@ Literal discovery grants accept absent entries or real directories through
   discovery and held-directory revalidation name the path and failure stage.
 - Why: one broad grant silently voids the boundary; directory discovery must
   not pass through regular-file validation or expand configuration access.
-- Test: `crates/confinement/src/permissions.rs::broad_home_tmp_and_credential_roots_are_refused`;
-  `::network_levels_shared_writes_and_hard_denies_render_in_order`;
-  `::directory_discovery_keeps_literal_scope_and_refuses_symlinks`;
+- Test: `crates/confinement/src/permissions/tests/validation.rs::broad_home_tmp_and_credential_roots_are_refused`;
+  `crates/confinement/src/permissions/tests/render.rs::network_levels_shared_writes_and_hard_denies_render_in_order`;
+  `crates/confinement/src/permissions/tests/validation.rs::directory_discovery_keeps_literal_scope_and_refuses_symlinks`;
   `::anchored_directory_detects_replacement_at_its_sbpl_path`;
   `crates/providers/src/opencode.rs::homebrew_launch_plan_anchors_with_default_xdg_homes`;
   `::homebrew_writer_launch_plan_anchors_with_discovery_directories`
@@ -682,9 +628,9 @@ is never executed as host configuration. Read-only lanes likewise cannot write
 the common Git directory.
 - Why: private Git supports ordinary commands while the shared metadata and
   object store retain one host-controlled write boundary.
-- Test: `crates/confinement/src/permissions.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
+- Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
   `crates/confinement/tests/lane_git_conformance.rs`;
-  `src/worktree_tests.rs::writer_production_plan_denies_outside_writes`
+  `src/worktree_tests/writer_cases.rs::writer_production_plan_denies_outside_writes`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
   `crates/run/src/objects.rs`
 
@@ -710,8 +656,8 @@ link shared stores read-only and build offline. Only writers may execute
 fixtures, and only in their own `tmp/candidate-N`. Only a profile declaring
 `allow_pseudo_tty` (Agy's) may open a PTY.
 - Why: a poisoned `build.rs` or package would run on the host's next build.
-- Test: `crates/providers/src/tests.rs::no_lane_can_write_shared_toolchain_stores`;
-  `crates/confinement/src/permissions.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
+- Test: `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
+  `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/`
 
 ### Swift toolchain grants
@@ -754,7 +700,7 @@ naming the writable roots and the overrides in force. Read-only lanes (#2542)
 reuse the same toolchain resolution and shim with scratch-only roots; they
 do not receive it yet.
 - Why: a writer that cannot build or test commits untested Swift.
-- Test: `src/worktree_tests.rs::lane_builds_and_tests_swift_in_a_registered_worktree`
+- Test: `src/worktree_tests/lane_cases.rs::lane_builds_and_tests_swift_in_a_registered_worktree`
   (one writer case: builds and tests a SwiftPM package in the worktree
   through the production profile when a Swift toolchain is selected; it has
   its own nextest timeout in `.config/nextest.toml`);
@@ -775,8 +721,8 @@ refused, and credentials travel only on the guardian pipe. A sealed start
 marker stops the push repeating.
 - Why: delivery is the one external effect a lane causes; it must be exactly
   once and never leak credentials.
-- Test: `crates/run/src/delivery_tests.rs::host_delivery_fetches_commits_pushes_and_records_upstream`;
-  `::prepare_refuses_remote_urls_with_embedded_credentials`
+- Test: `crates/run/src/delivery_tests/prepare.rs::host_delivery_fetches_commits_pushes_and_records_upstream`;
+  `crates/run/src/delivery_tests/settlement.rs::prepare_refuses_remote_urls_with_embedded_credentials`
 - Owner: `crates/run/src/delivery.rs`
 
 ### Disclosure and redaction
@@ -788,7 +734,7 @@ known-shape filters before stdout or stderr reaches disk; a
 redactor failure discards that output. The inherited environment is never
 persisted.
 - Why: lane output is stored and shared with other models.
-- Test: `crates/confinement/src/redact.rs::known_secret_split_across_chunks_is_never_emitted`;
+- Test: `crates/confinement/src/redact.rs::shell_output_secrets_split_across_chunks_are_never_emitted`;
   `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`
 - Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/disclosure.rs`
@@ -831,7 +777,7 @@ scoped by URL and multi-valued.
 - Test: `crates/confinement/src/utility.rs::onbranch_include_of_a_lane_writable_file_is_neutralised_for_its_worktree`;
   `crates/confinement/src/utility.rs::host_transport_is_hardened_and_refuses_lane_writable_programs`;
   `crates/confinement/src/transport.rs::include_targets_in_lane_areas_are_refused_even_when_unread`;
-  `crates/run/src/delivery_tests.rs::origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist`;
+  `crates/run/src/delivery_tests/integration.rs::origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist`;
   `crates/confinement/src/utility.rs::filters_are_disabled_not_refused_and_empty_tree_source_suppresses_worktree_attributes`;
   `crates/confinement/src/repo.rs::git_revision_accepts_frozen_base_refs_and_refuses_option_injection`
 - Owner: `crates/confinement/src/utility.rs`, `crates/confinement/src/transport.rs`
@@ -859,9 +805,9 @@ An unmerged detached HEAD refuses unless `--discard` is explicit, naming the
 commit and a command to preserve it. Removal rechecks the exact HEAD and
 optional branch by canonical path under writer custody.
 - Why: removing a tree under a live writer destroys its work.
-- Test: `src/worktree_tests.rs::second_writer_is_refused_while_first_holds_the_worktree`;
-  `crates/confinement/src/worktrees.rs::writer_lock_busy_is_distinct_from_observed_live_process`;
-  `::remove_registered_detached_worktree`;
+- Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
+  `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::writer_lock_busy_is_distinct_from_observed_live_process`;
+  `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::remove_registered_detached_worktree`;
   `::detached_removal_keeps_dirty_unmerged_and_live_work`
 - Owner: `crates/confinement/src/worktrees.rs`
 
@@ -1067,7 +1013,7 @@ full-census cleanup. Native OS negatives reject the test process and `/bin/sleep
 an observable off-sealed platform process is also rejected, or its optional
 absence is logged. CI exposes these native markers and optional-case diagnostics.
 
-- Test: `crates/confinement/src/worktrees.rs::denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence`;
+- Test: `crates/confinement/src/worktrees/census_tests.rs::denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence`;
   `::cwd_query_errors_never_consult_the_daemon_policy`;
   `::unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns`;
   `::native_worker_census_places_both_data_firmlink_spellings`;
@@ -1087,8 +1033,8 @@ against their expected old OID, and there is no remote deletion. A failed
 `worktree create` removes only what it made, and refuses `PrimaryMoved` if
 the primary checkout's HEAD changed during the add.
 - Why: pruning or rollback on a guess deletes the user's work.
-- Test: `crates/confinement/src/worktrees.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
-  `::timed_out_add_keeps_a_branch_it_did_not_create`. `PrimaryMoved` has
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
+  `crates/confinement/src/worktrees/lifecycle_tests/gc_pruning.rs::timed_out_add_keeps_a_branch_it_did_not_create`. `PrimaryMoved` has
   no test (gap).
 - Owner: `crates/confinement/src/worktrees.rs`
 
@@ -1104,8 +1050,8 @@ Merged worktrees go only when clean, registered and with terminal lanes;
 output pruning skips tracked and keep paths, dirty trees, symlinks and
 writes within 24 hours. Deletion detaches and re-verifies identity first.
 - Why: GC runs unattended at load and hourly; any doubt keeps data.
-- Test: `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_live_or_unobservable`;
-  `src/worktree_tests.rs::gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links`
+- Test: `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`;
+  `src/worktree_tests/gc_cases.rs::gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links`
 - Owner: `crates/confinement/src/cache.rs`, `crates/confinement/src/worktrees.rs`
 
 ## Records

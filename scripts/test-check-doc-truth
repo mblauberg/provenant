@@ -106,17 +106,18 @@ class DocTruthTests(unittest.TestCase):
                                 "accTitle: Example\naccDescr {\nA points to B.\n}\nA --> B\n```\n")
         self.assertEqual(self.check("--inventory-only", "--strict-inventory", source=False).returncode, 0)
 
-    def test_reserved_exclusion_does_not_hide_other_specs(self):
+    def test_strict_citations_check_every_spec(self):
         for name in ("disk", "supervisor", "routing"):
             (self.root / f"docs/specs/{name}.md").write_text(
                 "# Spec\nOwner: maintainers\nAnchor: tools/front-door\n\n"
                 "Test: `tests/missing.rs::missing`\n")
-        result = self.check("--inventory-only", "--strict-citations", "--exclude-reserved", source=False)
+        result = self.check("--inventory-only", "--strict-citations", source=False)
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 1, result.stdout)
-        self.assertIn("docs/specs/routing.md", result.stdout)
-        (self.root / "docs/specs/routing.md").unlink()
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", "--exclude-reserved", source=False).returncode, 0)
+        self.assertEqual(result.stdout.count("unresolved test citation"), 3, result.stdout)
+        for name in ("disk", "supervisor", "routing"):
+            self.assertIn(f"docs/specs/{name}.md", result.stdout)
+            (self.root / f"docs/specs/{name}.md").unlink()
+        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
 
     def test_deleted_commands_check_every_spec(self):
         (self.root / "docs/specs/new-area.md").write_text(

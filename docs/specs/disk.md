@@ -95,7 +95,7 @@ Every nested `.git` entry, file or directory, protects its repository and any
 declared output containing it, including beneath ignored parents.
 - Why: rebuildable output should not require ending a long-lived worktree,
   while ignored secrets and tracked directories remain protected.
-- Test: `crates/confinement/src/worktrees.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;
   `::remove_declared_ignored_output_but_names_undeclared_env`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `src/worktrees.rs`
 
@@ -159,7 +159,7 @@ Exclusion slots remain after collection or refusal. Reusing a canonical path
 uses the same flock inode and never requires a retired identity record. Legacy
 identity and registry reservation files are ignored by worktree collection.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
-- Test: `crates/confinement/src/worktrees/lifecycle_tests.rs::gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census`
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
 
 ## Registration hygiene
@@ -246,10 +246,9 @@ Settlement already prunes provider caches and temporary state; removal prunes
 the removed worktree's cache. Settlement lane-cache and delivery-integration
 event wiring remains with those callers.
 - Why: free reclaimable space before sending the chair a manual remedy.
-- Test: `crates/cli/src/run.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`;
+- Test: `crates/cli/src/run/tests/writer_disk.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`;
   `src/tick_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
-  `src/disk_guard.rs::settlement_collects_below_the_shared_floor_only`;
-  `::lane_pause_rereads_the_floor_each_observation`;
+  `src/disk_guard.rs::lane_pause_rereads_the_floor_each_observation`;
   `crates/run/src/dispatch_writer_tests.rs::admission_rereads_gc_floor_after_submission_and_while_waiting`;
   `crates/confinement/src/disk.rs::lane_sample_uses_each_output_volume_and_propagates_errors`
 - Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/tick_agent.rs`

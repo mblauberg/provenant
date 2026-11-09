@@ -486,18 +486,12 @@ def check_deleted_commands(root):
     return count
 
 
-# Reserved parallel batches; remove entries when their spec repairs land.
-RESERVED_SPECS = ("docs/specs/supervisor.md", "docs/specs/disk.md")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
-    parser.add_argument("--exclude-reserved", action="store_true",
-                        help="exclude the reserved parallel-batch specs from evidence checks")
     parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved Rust Test citations")
     parser.add_argument("--inventory-only", action="store_true", help="check documentation evidence without loading the CLI catalogue")
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers, Anchor paths, spec index entries or diagram metadata")
@@ -524,8 +518,7 @@ def main():
     documents = sorted((root / "docs/runbooks").glob("*.md")) + sorted((root / "docs/specs").glob("*.md"))
     maintained = [root / "docs/worktrees.md", root / "docs/ARCHITECTURE.md", root / "docs/glossary.md"]
     maintained = [path for path in maintained if path.exists()]
-    evidence = [document for document in documents + maintained
-                if str(document.relative_to(root)) not in (RESERVED_SPECS if args.exclude_reserved else ())]
+    evidence = documents + maintained
     missing = sum(inventory(root, document) for document in evidence
                   if document in documents or document.name == "worktrees.md")
     missing += sum(check_anchors(root, document) for document in evidence)
