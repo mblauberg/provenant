@@ -954,6 +954,50 @@ impl Finding {
         serde_json::from_value(self.extra.get("triage")?.clone()).ok()
     }
 
+    pub fn boundary_or_data_loss(&self) -> bool {
+        self.triage().is_some_and(|triage| {
+            matches!(triage.blocking_class.as_str(), "boundary" | "data_loss")
+        }) || self
+            .extra
+            .get("class")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|class| matches!(class, "boundary" | "data_loss"))
+    }
+
+    pub fn default_path(&self) -> bool {
+        self.trigger().is_some_and(|trigger| {
+            trigger.reach == FindingReach::DefaultPath && !trigger.sequence.trim().is_empty()
+        })
+    }
+
+    pub fn effective_severity(&self) -> &str {
+        if self.boundary_or_data_loss() || self.default_path() {
+            &self.severity
+        } else {
+            "note"
+        }
+    }
+
+    pub fn falsified_with_evidence(&self) -> bool {
+        self.extra
+            .get("verification")
+            .and_then(serde_json::Value::as_str)
+            == Some("falsified")
+            && self
+                .extra
+                .get("evidence")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|evidence| !evidence.trim().is_empty())
+    }
+
+    pub fn rejected_boundary(&self) -> bool {
+        self.boundary_or_data_loss()
+            && (self.disposition.as_deref() == Some("rejected")
+                || self
+                    .triage()
+                    .is_some_and(|triage| triage.decision == "rejected"))
+    }
+
     pub fn spec_defect(&self) -> bool {
         self.extra.get("kind").and_then(serde_json::Value::as_str) == Some("spec_defect")
     }

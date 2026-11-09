@@ -25,6 +25,8 @@ pub struct GraphNodeWait {
     pub output_path: Option<String>,
     pub spec_concerns: Vec<provenant_records::handoff::SpecConcern>,
     pub spec_concern_count: usize,
+    pub rejected_boundaries: Vec<super::Finding>,
+    pub rejected_boundary_count: usize,
     pub spec_defect_count: usize,
     pub spec_defects: Vec<super::Finding>,
 }
@@ -157,6 +159,25 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                     .and_then(|output| output.extra.get("spec_concern_count"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as usize,
+                rejected_boundaries: node
+                    .outputs
+                    .as_ref()
+                    .map(|output| {
+                        output
+                            .findings
+                            .iter()
+                            .filter(|finding| finding.rejected_boundary())
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                rejected_boundary_count: node.outputs.as_ref().map_or(0, |output| {
+                    output
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.rejected_boundary())
+                        .count()
+                }),
                 spec_defects: node
                     .outputs
                     .as_ref()

@@ -628,24 +628,6 @@ fn parse_findings(
             if canonical_len(&extensions) > FINDINGS_BYTES {
                 return Err(fail("findings", "additional fields exceed byte cap"));
             }
-            // Missing trigger is valid input from older prompts. It describes a note.
-            let boundary = entry
-                .get("triage")
-                .and_then(|t| t.get("blocking_class"))
-                .or_else(|| entry.get("class"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|class| matches!(class, "boundary" | "data_loss"));
-            let trigger = entry
-                .get("trigger")
-                .cloned()
-                .and_then(|value| serde_json::from_value::<FindingTrigger>(value).ok());
-            if !boundary
-                && trigger.as_ref().is_none_or(|trigger| {
-                    trigger.sequence.trim().is_empty() || trigger.reach != FindingReach::DefaultPath
-                })
-            {
-                entry.insert("severity".into(), "note".into());
-            }
             findings.push(
                 serde_json::from_value::<Finding>(entry.into())
                     .map_err(|_| fail("findings", "invalid entry"))?,
@@ -1832,8 +1814,12 @@ mod alias_tests {
         .to_string();
         let (findings, warnings, _) = parse_findings(&block, &[]).unwrap();
         assert!(warnings.is_empty());
-        assert_eq!(findings[0].severity, "note");
+        assert_eq!(findings[0].severity, "high");
+        assert_eq!(findings[0].effective_severity(), "note");
         assert!(!repair::blocking(&findings[0]));
+        let mut restored = findings[0].clone();
+        restored.extra.insert("trigger".into(), serde_json::json!({"sequence":"default invocation", "reach":"default_path", "observed":true}));
+        assert_eq!(restored.effective_severity(), "high");
     }
 
     #[test]
@@ -2029,7 +2015,8 @@ mod alias_tests {
         );
         for finding in outputs.findings {
             assert_eq!(finding.id, "F1");
-            assert_eq!(finding.severity, "note");
+            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.effective_severity(), "note");
             assert_eq!(finding.file, "src/lib.rs");
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));

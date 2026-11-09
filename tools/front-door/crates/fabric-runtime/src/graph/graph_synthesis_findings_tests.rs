@@ -55,7 +55,7 @@ fn identity_only_dispositions_inherit_selected_findings() {
             let finding = &progress.outputs.as_ref().unwrap().findings[0];
             assert_eq!(finding.summary, "s");
             assert_eq!(finding.file, "a.rs");
-            assert_eq!(finding.severity, "note");
+            assert_eq!(finding.effective_severity(), "note");
             assert_eq!(finding.status, "open");
             assert_eq!(finding.reason.as_deref(), Some("falsified"));
         } else {
@@ -396,7 +396,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     assert_eq!(outputs.findings.len(), 8 * MAX_FINDINGS);
     assert!(
         outputs.findings.iter().all(|finding| finding.id == "F1"
-            && finding.severity == "note"
+            && finding.effective_severity() == "note"
             && finding.file == "a.rs")
     );
     assert_eq!(
@@ -548,7 +548,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         }
         assert!(reconstructed.iter().all(|finding| {
             (finding.id == "F1" || finding.id == "F2")
-                && finding.severity == "note"
+                && finding.effective_severity() == "note"
                 && finding.file == long_file
                 && finding
                     .extra
@@ -704,7 +704,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     assert!(canonical_len(&run.checkpoint) <= bound);
     assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
     assert!(reconstructed.iter().all(|finding| finding.id == "F1"
-        && finding.severity == "note"
+        && finding.effective_severity() == "note"
         && finding.file == long_file));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,

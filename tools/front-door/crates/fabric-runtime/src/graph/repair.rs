@@ -113,6 +113,9 @@ fn no_repair_work(
 }
 
 pub(super) fn blocking(finding: &Finding) -> bool {
+    if finding.boundary_or_data_loss() {
+        return !finding.falsified_with_evidence();
+    }
     if finding.spec_defect()
         || matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
         || matches!(
@@ -128,23 +131,31 @@ pub(super) fn blocking(finding: &Finding) -> bool {
     if triage.decision != "confirmed" {
         return false;
     }
-    if matches!(triage.blocking_class.as_str(), "boundary" | "data_loss") {
-        return true;
-    }
     if !triage.worth_fixing {
         return false;
     }
-    if !finding.trigger().is_some_and(|trigger| {
-        trigger.reach == FindingReach::DefaultPath && !trigger.sequence.trim().is_empty()
-    }) {
+    if !finding.default_path() {
         return false;
     }
     matches!(
         triage.blocking_class.as_str(),
         "acceptance" | "default_path_defect"
-    ) || matches!(
-        finding.severity.to_ascii_lowercase().as_str(),
-        "medium" | "moderate" | "should-fix"
+    ) || blocking_severity(finding)
+}
+
+pub(super) fn blocking_severity(finding: &Finding) -> bool {
+    matches!(
+        finding.effective_severity().to_ascii_lowercase().as_str(),
+        "critical"
+            | "blocker"
+            | "blocking"
+            | "p0"
+            | "high"
+            | "error"
+            | "p1"
+            | "medium"
+            | "moderate"
+            | "should-fix"
     )
 }
 
@@ -742,8 +753,18 @@ mod tests {
     fn repair_eligibility_uses_checked_reach_and_preserves_boundaries() {
         let mut item = finding("F1", "correctness");
         item.extra.get_mut("triage").unwrap()["blocking_class"] = "none".into();
-        item.severity = "should-fix".into();
-        assert!(blocking(&item));
+        for severity in [
+            "critical",
+            "BLOCKER",
+            "p0",
+            "HIGH",
+            "error",
+            "p1",
+            "should-fix",
+        ] {
+            item.severity = severity.into();
+            assert!(blocking(&item), "{severity}");
+        }
         item.severity = "MEDIUM".into();
         assert!(blocking(&item));
         item.severity = "p2".into();
@@ -756,10 +777,35 @@ mod tests {
             assert!(blocking(&item));
         }
         item.extra.insert("kind".into(), "spec_defect".into());
-        assert!(!blocking(&item));
+        assert!(blocking(&item));
         item.extra.remove("kind");
         item.extra.get_mut("triage").unwrap()["decision"] = "rejected".into();
+        item.disposition = Some("rejected".into());
+        assert!(blocking(&item));
+        item.extra.insert("verification".into(), "falsified".into());
+        item.extra.remove("evidence");
+        assert!(blocking(&item));
+        item.extra
+            .insert("evidence".into(), "test disproves trigger".into());
         assert!(!blocking(&item));
+    }
+
+    #[test]
+    fn rejected_boundaries_require_falsification_with_evidence() {
+        for class in ["boundary", "data_loss"] {
+            let mut item = finding("F1", "security");
+            item.extra.get_mut("triage").unwrap()["blocking_class"] = class.into();
+            item.extra.get_mut("triage").unwrap()["decision"] = "rejected".into();
+            item.extra.get_mut("triage").unwrap()["worth_fixing"] = false.into();
+            item.disposition = Some("rejected".into());
+            assert!(blocking(&item));
+            item.extra.insert("verification".into(), "falsified".into());
+            item.extra.remove("evidence");
+            assert!(blocking(&item));
+            item.extra
+                .insert("evidence".into(), "test disproves trigger".into());
+            assert!(!blocking(&item));
+        }
     }
 
     #[test]

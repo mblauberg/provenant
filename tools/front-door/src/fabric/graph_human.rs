@@ -168,6 +168,45 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                 .pointer("/outputs/findings")
                 .and_then(serde_json::Value::as_array)
             {
+                let rejected: Vec<provenant_fabric_runtime::graph::Finding> = findings
+                    .iter()
+                    .filter_map(|finding| serde_json::from_value(finding.clone()).ok())
+                    .filter(|finding: &provenant_fabric_runtime::graph::Finding| {
+                        finding.rejected_boundary()
+                    })
+                    .collect();
+                if !rejected.is_empty() {
+                    rows.push(format!(
+                        "{}: {} rejected boundary or data-loss findings for chair judgement",
+                        bounded_reason(node_id),
+                        rejected.len()
+                    ));
+                    for finding in rejected {
+                        rows.push(format!(
+                            "rejected boundary {}: {}; reason: {}; evidence: {}",
+                            bounded_reason(&finding.id),
+                            bounded_reason(&finding.summary),
+                            bounded_reason(
+                                finding
+                                    .reason
+                                    .as_deref()
+                                    .or_else(|| finding
+                                        .extra
+                                        .get("triage")
+                                        .and_then(|triage| triage.get("reason"))
+                                        .and_then(serde_json::Value::as_str))
+                                    .unwrap_or("unavailable")
+                            ),
+                            bounded_reason(
+                                finding
+                                    .extra
+                                    .get("evidence")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("unavailable")
+                            )
+                        ));
+                    }
+                }
                 let defects: Vec<_> = findings
                     .iter()
                     .filter(|finding| {
@@ -461,6 +500,24 @@ mod test_presentation {
 
 #[cfg(test)]
 mod spec_chair_tests {
+    #[test]
+    fn rejected_boundary_findings_reach_chair_summary() {
+        let summary = super::graph_summary(&serde_json::json!({
+            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                {"id":"review", "state":"succeeded", "outputs":{"findings":[{
+                    "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
+                    "summary":"boundary violation", "class":"boundary", "disposition":"rejected",
+                    "reason":"synthesis disagrees", "evidence":"reachable credential write"
+                }]}}
+            ]}
+        }));
+        let summary = summary.lines.join("\n");
+        assert!(summary.contains("1 rejected boundary or data-loss findings for chair judgement"));
+        assert!(summary.contains(
+            "boundary violation; reason: synthesis disagrees; evidence: reachable credential write"
+        ));
+    }
+
     #[test]
     fn completed_writer_spec_concerns_and_review_spec_defects_reach_chair_summary() {
         let summary = super::graph_summary(&serde_json::json!({

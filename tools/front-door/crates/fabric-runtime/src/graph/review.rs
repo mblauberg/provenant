@@ -71,6 +71,20 @@ pub(super) fn mark_partial(outputs: &mut NodeOutputs) {
     }
 }
 
+fn contradicts_pass(finding: &Finding) -> bool {
+    if finding.boundary_or_data_loss() {
+        return !finding.falsified_with_evidence();
+    }
+    !finding.spec_defect()
+        && !matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
+        && !matches!(
+            finding.disposition.as_deref(),
+            Some("rejected" | "resolved" | "fixed" | "disputed" | "removed-the-case")
+        )
+        && finding.default_path()
+        && repair::blocking_severity(finding)
+}
+
 pub(super) fn contract_error(
     node: &PlannedNode,
     upstream: &[Finding],
@@ -169,13 +183,14 @@ pub(super) fn contract_error(
     }
     if outputs.verdict.as_deref() == Some("VERDICT: PASS")
         && outputs.findings.iter().any(|finding| {
-            (repair::blocking(finding)
+            (contradicts_pass(finding)
                 && !(upstream.iter().any(|source| source.id == finding.id)
                     && finding
                         .extra
                         .get("verification")
                         .and_then(serde_json::Value::as_str)
-                        == Some("falsified")))
+                        == Some("falsified")
+                    && finding.falsified_with_evidence()))
                 || finding
                     .extra
                     .get("verification")

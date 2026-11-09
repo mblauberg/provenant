@@ -635,6 +635,26 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     }
 
     #[test]
+    fn lens_pass_conflicts_with_untriaged_boundary_and_default_path_findings() {
+        for class in ["boundary", "data_loss", "none"] {
+            let mut item = finding();
+            item.as_object_mut().unwrap().remove("triage");
+            item["class"] = json!(class);
+            if class != "none" {
+                item.as_object_mut().unwrap().remove("trigger");
+            }
+            let document = graph(vec![review("review.tests", "review")]);
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([terminal_with_result(AttemptOutcome::DeclaredStop,
+                    &answer(json!([item]), "VERDICT: PASS"))]),
+                ..Default::default()
+            };
+            let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+            assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("review_verdict_conflict"), "{class}");
+        }
+    }
+
+    #[test]
     fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
         let mut accepted = finding();
         accepted["disposition"] = json!("accepted");

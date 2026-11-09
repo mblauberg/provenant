@@ -656,7 +656,7 @@ fn qualified_findings_survive_model_synthesis() {
                 .unwrap();
             let finding = &node.outputs.as_ref().unwrap().findings[0];
             assert!(finding.id.ends_with(":F1"));
-            assert_eq!(finding.severity, "note");
+            assert_eq!(finding.effective_severity(), "note");
             assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
             assert_eq!(finding.extra["lens"], "tests");
             assert_eq!(finding.extra["evidence"], "observed failure");
