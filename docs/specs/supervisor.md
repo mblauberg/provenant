@@ -838,114 +838,50 @@ because it cannot lie inside a tree being removed. Mapped libraries and other
 platforms are not observed, so the executable image and descriptors are the
 only added occupancy sources.
 
-A live process whose cwd cannot be read remains unplaceable unless it meets
-one of the explicit policies below. Both policies require all real, effective
-and saved uids to be system accounts (0–499), and each uid must differ from
-every candidate root's owner. An unreadable process with any uid equal to an
-owner remains unplaceable, including an owner's setuid-root tool. Human-range
-uids (500 or higher) never qualify. Built-in daemon policy also excludes
-non-platform code and paths outside its permitted directories; only a host-owner
-listing can accept those remaining signed executables.
-Missing credentials or signing state, unsupported queries, identity races and
-other failures cannot establish
-the exception. Landing and other callers requiring a complete census keep every
-root that is not positively observed live `Unknown`; a placed occupant makes
-its root `Live`. An unreadable process is never `Gone`. The Darwin cwd seam
-reports absence only after an absence probe proves `ESRCH`; the worker observer
-also accepts a verified process disappearance. Ordinary manual removal uses
-writer custody without requiring a complete census, but still refuses a
-positively placed occupant.
+**Writer cohort and system-process trust.** The census observes user processes,
+including every Provenant service: executable names never establish absence.
+A process with real, effective and saved uids all in 0–499 and all different
+from every candidate root owner is outside the writer cohort when those
+credentials and its native process identity remain stable across observation.
+The credentials come from an exact-size `PROC_PIDT_SHORTBSDINFO` record on
+macOS or the `Uid` record in `/proc/<pid>/status` on Linux. Missing or changing
+credentials never grant this exclusion. A root-owned worktree still includes
+root processes; an owner's real, effective or saved uid in a setuid tool keeps
+that tool in the cohort.
 
-**Accepted-risk policy for sealed Apple daemons.** A process may be ignored
-only after the cwd syscall reports `EPERM`, all three uids meet the system and
-foreign-owner requirements, and the OS observer
-establishes all of the following. An I/O error, `EACCES`, ambiguous zero result,
-short/malformed record or unsupported query never reaches this exception.
-The cwd seam clears errno before the syscall and preserves the actual failure.
+The exclusion covers native cwd permission denials (`EPERM` on macOS,
+`EPERM` or `EACCES` on Linux) and residual executable/descriptor gaps. It does
+not skip path inspection. A positive cwd, executable or held path inside a root always makes that root `Live`, and a path that could be inside
+but cannot be placed still makes it `Unknown`. Unexpected cwd failures,
+unknown native identities and incomplete process listings remain closed.
+A readable outside cwd cannot excuse an incomplete descriptor observation
+for a possible writer: an open directory fd may still point into a worktree.
+Neither a sealed image nor a setuid transition excuses such a gap.
 
-- Kernel `csops(CS_OPS_STATUS)` reports `CS_VALID`, `CS_SIGNED` and
-  `CS_PLATFORM_BINARY`, without `CS_ADHOC`, `CS_LINKER_SIGNED`,
-  `CS_INVALID_ALLOWED`, `CS_DEBUGGED` or `CS_GET_TASK_ALLOW` flags.
-  The platform-binary bit is the signing control for this rule. `CS_ADHOC` is
-  checked but is not reliable on its own: live ad-hoc signing state may omit it.
-  A pathname or `CS_PLATFORM_PATH` alone never establishes platform code.
-- The executable path comes from `proc_pidpath`, the kernel path for the
-  process text vnode, and lies below `/sbin`, `/usr/sbin`, `/usr/libexec` or
-  `/System/Library`. Application and extension components within those
-  directories qualify. `/Applications`, `/System/Applications`, `/bin`,
-  `/usr/bin`, `/Library/Apple` and every other prefix stay outside the built-in
-  policy, even for platform binaries.
-- That executable is opened with `O_NOFOLLOW` and must be a regular file.
-  The daemon exception does not rely on `PROC_PIDREGIONPATHINFO`; access to
-  another process's regions can be restricted, and incomplete region records
-  cannot establish non-occupancy.
-- `fstatfs` on the retained executable fd identifies a read-only root
-  filesystem. The volume capability query reports `VOL_CAP_FMT_SEALED` in
-  both the valid and capabilities masks.
-- Real, effective and saved uids come from an exact-size `PROC_PIDT_SHORTBSDINFO`
-  record whose pid matches; a failed query never falls back to effective uid.
-  XNU exposes all three credentials in this record without the same-user
-  restriction that prevents unprivileged full `PROC_PIDTBSDINFO` daemon queries.
-  Executable path, signing status and all three uids are rechecked, and
-  process identity matches the census before and after these observations.
-  An undescribed census PID lacks this identity evidence and stays unknown.
+This is an accepted host trust policy, not proof that privileged processes
+cannot use a worktree. Root can enter any worktree, and a process may retain a
+cwd or file after changing credentials. The policy trusts foreign system
+processes when their paths cannot be inspected; it never discards observed
+occupancy. It replaces the requirement that each unrelated system updater or
+daemon satisfy a platform-signature, executable-directory or sealed-volume
+rule. Existing signed-image evidence and the host-only
+`confinement.census_ignore_unreadable` listing remain a fallback when direct
+credential evidence is unavailable. Their validation and exact path/team
+requirements remain unchanged; see
+[configuration](../runbooks/configuration.md#unreadable-process-census-exceptions).
 
-This is policy, not proof of non-occupancy. The accepted residual risk is a
-root or system-account daemon from those directories sitting in a worktree.
-It may retain or inherit a cwd or directory fd there; sealed Apple code can
-enter user worktrees. The directory, uid, signature and volume restrictions
-bound the exception but do not establish cwd history. The census does not
-inspect all descriptors or provide an atomic cwd, credential or exec snapshot.
-The sealed system volume is immutable, and live `csops` describes the running
-image rather than the reopened file. There remains a TOCTOU between exec and
-the path read: identity rechecks bound PID reuse but do not make exec atomic
-(exec can preserve PID/start time). Rechecking path, signing state and all uids
-narrows the window; later movement or credential/exec changes remain risks.
-WindowServer's real and saved uids of 0 and effective uid of 88 satisfy the
-credential requirement for a foreign owner. An owner's sudo invocation that
-resets all three uids to root remains an accepted cwd-history/ancestry risk.
-Root qualifies through all the daemon-policy checks, never from uid alone. Every failed evidence query
-leaves the process unplaceable. This policy does not guarantee a complete census
-on every host: unrelated unlisted executables still keep it unknown.
+Both initial observation and deadline-bound landing observation retry transient
+`Churn` and `DescriptorsUnavailable` gaps up to four attempts, with at most
+three 80 ms pauses. Every attempt retains earlier positive paths. Pauses and
+attempts check the caller's budget; a result completed after that budget is
+rejected. Persistent gaps for possible writers stay `Unknown`, including
+Provenant processes whose descriptors never settle. A verified exit or zombie
+holds nothing; PID reuse remains uncertainty.
 
-**Host-owner exceptions.** The strict, default-empty knob
-`confinement.census_ignore_unreadable` lists exact `{path, team_id}` records in
-the selected host state root's `config.toml`. It is not accepted through run
-`--knob`, Fabric overrides, project input or retained task stamps. Runtime
-composition reads the host config for land, worktree listing/removal, foreign
-GC, dispatch cleanup and disk inventory; malformed authority refuses the config.
-
-A listed process qualifies only after actual cwd `EPERM`, with all three uids
-in 0–499 and different from every root owner, a valid signed live `csops` state
-without ad-hoc, linker-signed, invalid-allowed, debugged or get-task-allow flags, and exact equality of
-`proc_pidpath` and the configured path. The path is opened with `O_NOFOLLOW` as a
-regular file. `CS_OPS_TEAMID` must report the configured team exactly, or the
-selector `platform` requires `CS_PLATFORM_BINARY`. For that selector the
-executable and every ancestor through `/` must be root-owned and not writable
-by group or other. No-follow descriptor-relative opens and fstat checks validate
-the chain, and its leaf must match the original executable fd's device/inode.
-Missing/malformed team state never matches. Signing state, path, all uids and
-any team evidence are rechecked. `CS_ADHOC` is not a reliable standalone signal;
-the platform bit controls Apple platform entries. A named team is a kernel-reported
-string, not an independent trust anchor. The exact path and explicit host-owner
-acceptance bound named-team entries.
-When a signed image fails the built-in unreadable-cwd checks, its refusal names
-`confinement.census_ignore_unreadable` and reports the canonical executable path
-and observed team ID needed for an exact entry.
-This policy does not require the built-in directory or sealed-volume
-restrictions. It may therefore list `/usr/bin/login`,
-third-party services or other signed executables the built-in rule refuses.
-The residual risk is a listed executable sitting in a worktree, including
-retained directory access; a reported team proves neither trusted signer
-provenance nor safe cwd behaviour. See [configuration](../runbooks/configuration.md#unreadable-process-census-exceptions)
-for entry syntax and validation.
-
-After listing unreadable daemons, the host owner can set
-`PROVENANT_CENSUS_HOST_LIST_COMPLETE=1` for native acceptance. This test-only
-declaration grants no exception and changes no runtime custody decision.
-Without complete host coverage, land cleanup is expected to report the first
-unlisted daemon rather than remove the worktree. Non-platform diagnostics
-include `CS_OPS_TEAMID` (or `unavailable`).
+Landing and complete-census collection require `Free` under this policy.
+Ordinary manual removal still uses writer custody without requiring a complete
+census, and refuses a positively placed occupant. The census is observational,
+not atomic exclusion against unmanaged processes starting after it completes.
 
 Native acceptance always audits every unplaceable process from the actual
 census pass, printing its pid, executable path, real/effective/saved uids, signing flags, team and
@@ -965,8 +901,8 @@ nearest existing ancestor. Failed identity lookup stays unknown. A cwd outside
 the root places only the cwd at observation time: it is not full non-occupancy
 evidence, because a held directory fd can still refer inside the root and allow
 `fchdir` back. Caller and verified ancestors through its session leader retain
-their separate landing exclusion. No UID or directory-permission shortcut
-alone excludes an unreadable process.
+their separate landing exclusion. Directory permissions alone do not exclude an unreadable process; the foreign
+system-credential rule above is an explicit trust policy.
 
 **Why current permissions cannot prove absence.** Consider two processes with
 the same current real, effective and saved foreign nonroot UIDs. One has always
@@ -989,7 +925,7 @@ with complete current ACL and group information, cannot distinguish them.
   acquired earlier, so neither ACL nor mode inspection supplies this proof.
 - Root can bypass discretionary search restrictions. Neither root nor a
   foreign system UID, including WindowServer's, supplies non-occupancy proof;
-  the exception above explicitly accepts a bounded daemon risk.
+  the cohort policy above explicitly accepts that system-process risk.
 
 These conclusions follow from Apple's [directory-change implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
 [credential transitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
@@ -1013,7 +949,10 @@ full-census cleanup. Native OS negatives reject the test process and `/bin/sleep
 an observable off-sealed platform process is also rejected, or its optional
 absence is logged. CI exposes these native markers and optional-case diagnostics.
 
-- Test: `crates/confinement/src/worktrees/census_tests.rs::denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence`;
+- Test: `crates/confinement/src/worktrees/census_tests.rs::writer_cohort::unreadable_foreign_system_process_allows_merged_worktree_and_branch_cleanup`;
+  `::writer_cohort::transient_user_occupancy_gaps_converge_and_keep_earlier_positive_paths`;
+  `::writer_cohort::possible_user_writers_and_positive_system_occupants_remain_protected`;
+  `::denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence`;
   `::cwd_query_errors_never_consult_the_daemon_policy`;
   `::unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns`;
   `::native_worker_census_places_both_data_firmlink_spellings`;

@@ -129,24 +129,14 @@ under the writer lock only, and no census runs under the repository lock.
 Exclusive repository custody is taken after that, briefly, for the final
 registration recheck, the Git removal and branch settlement. A dry run takes
 the same proofs without creating state.
-The census places occupancy per candidate root. A process that cannot be
-observed forces `Unknown` for every root and is reported by pid and reason,
-with these exceptions: a deleted executable, a zombie or kernel thread, an
-executable on the sealed system volume whose descriptor queries are refused
-(EPERM) while its cwd is known to be outside every candidate root, and a
-setuid sealed-system executable whose cwd is refused by its privilege
-transition (for example `/usr/bin/login`). User-owned descendants of such a
-process are observed normally.
-The sealed-system exemption covers a descriptor listing that is denied outright
-(a whole-listing EPERM), without enumerating descriptors: Apple sealed-system
-daemons are not workers, and treating them strictly left collection unusable
-on a normal host.
-When a signed executable fails the built-in unreadable-cwd checks, the refusal
-names `confinement.census_ignore_unreadable` and includes the canonical
-executable path and team ID needed for an exact host entry. See
-[supervisor host-owner exceptions](supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence) for
-the signing checks and entry format. Unsigned path-only exceptions are not
-supported.
+The census places cwd, executable and open-file occupancy per candidate root.
+Positive occupants always retain their root. Stable foreign system credentials
+scope out unreadable system-process gaps; same-user processes, mixed setuid
+credentials and missing credential evidence remain possible writers.
+Transient descriptor gaps retry before becoming `Unknown`. A readable outside
+cwd or sealed setuid image cannot excuse a possible writer's descriptor gap.
+See the [worker census policy](supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence)
+for the system-process trust assumption, retry bounds and host exceptions.
 Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;

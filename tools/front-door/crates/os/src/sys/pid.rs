@@ -89,6 +89,26 @@ fn occupancy_with_retries(
     occupancy_with_retries_and_backoff(attempt, std::thread::sleep)
 }
 
+pub(crate) fn occupancy_with_retries_while(
+    mut attempt: impl FnMut() -> crate::pid::OccupancyObservation,
+    keep_going: &dyn Fn() -> bool,
+) -> crate::pid::OccupancyObservation {
+    occupancy_with_retries_and_backoff(
+        || {
+            if keep_going() {
+                attempt()
+            } else {
+                crate::pid::OccupancyObservation::default()
+            }
+        },
+        |delay| {
+            if keep_going() {
+                std::thread::sleep(delay);
+            }
+        },
+    )
+}
+
 fn occupancy_with_retries_and_backoff(
     mut attempt: impl FnMut() -> crate::pid::OccupancyObservation,
     mut backoff: impl FnMut(std::time::Duration),
@@ -668,6 +688,27 @@ fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
 
 #[cfg(test)]
 #[test]
+fn budget_expiry_stops_retries_and_retains_positive_paths() {
+    use crate::pid::{OccupancyGap, OccupancyObservation};
+    let calls = std::cell::Cell::new(0);
+    let observed = occupancy_with_retries_while(
+        || {
+            calls.set(calls.get() + 1);
+            OccupancyObservation {
+                paths: vec!["/held".into()],
+                complete: false,
+                gap: Some(OccupancyGap::Churn),
+            }
+        },
+        &|| calls.get() == 0,
+    );
+    assert_eq!(calls.get(), 1);
+    assert!(!observed.complete);
+    assert_eq!(observed.paths, vec![std::path::PathBuf::from("/held")]);
+}
+
+#[cfg(test)]
+#[test]
 fn a_pidpath_enoent_is_a_deleted_executable_but_other_failures_are_gaps() {
     assert_eq!(darwin_pidpath_gap(Some(libc::ENOENT)), None);
     for errno in [Some(libc::EPERM), Some(libc::ESRCH), None] {
@@ -921,6 +962,31 @@ fn parses_linux_stat_states_with_complex_names() {
     }
     assert!(linux_stat_state("123 (broken").is_err());
     assert!(linux_stat_state("123 (name) ? 1").is_err());
+}
+
+pub(crate) fn process_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
+    #[cfg(target_os = "macos")]
+    {
+        darwin_uids(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let mut fields = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))?
+            .split_whitespace();
+        Some(crate::pid::ProcessUids {
+            real: fields.next()?.parse().ok()?,
+            effective: fields.next()?.parse().ok()?,
+            saved: fields.next()?.parse().ok()?,
+        })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 pub(crate) fn unreadable_policy_uids(
@@ -1623,11 +1689,11 @@ fn linux_cwd(pid: i32) -> Result<CwdObservation, PidError> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn map_cwd_error(pid: i32, error: io::Error) -> Result<CwdObservation, PidError> {
     match error.raw_os_error() {
         Some(libc::ESRCH | libc::ENOENT) => Ok(CwdObservation::Gone),
-        Some(libc::EPERM) => Ok(CwdObservation::PermissionDenied),
+        Some(libc::EPERM | libc::EACCES) => Ok(CwdObservation::PermissionDenied),
         Some(errno) if errno == libc::ENOTSUP || errno == libc::ENOSYS => {
             Ok(CwdObservation::Unsupported)
         }
@@ -2187,6 +2253,27 @@ mod tests {
             "sbin/daemon",
         ] {
             assert!(!darwin_daemon_path(std::path::Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn linux_cwd_errors_distinguish_denied_gone_and_query_failures() {
+        for (errno, expected) in [
+            (libc::EACCES, Some(CwdObservation::PermissionDenied)),
+            (libc::EPERM, Some(CwdObservation::PermissionDenied)),
+            (libc::EIO, None),
+            (libc::EINVAL, None),
+            (libc::ESRCH, Some(CwdObservation::Gone)),
+            (libc::ENOENT, Some(CwdObservation::Gone)),
+        ] {
+            let result = map_cwd_error(42, io::Error::from_raw_os_error(errno));
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected, "errno {errno}"),
+                None => assert!(
+                    matches!(result, Err(PidError::Io { pid: 42, source }) if source.raw_os_error() == Some(errno)),
+                    "errno {errno} must remain a query error"
+                ),
+            }
         }
     }
 

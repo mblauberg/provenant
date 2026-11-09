@@ -137,6 +137,20 @@ and working directory) when available. Hosts can tighten the census policy by se
 (default `true`); when disabled, ancestor shells inside the worktree contribute
 to census observations too.
 
+Landing cleanup checks cwd, executable images and open files as well as writer
+custody. A positive occupant always keeps the worktree. Unreadable processes
+with stable real, effective and saved system uids (0–499), all foreign to the
+candidate worktree owners, do not block cleanup solely on missing cwd or
+descriptor evidence. This trusts foreign system processes; root privileges do
+not prove that a process cannot retain a worktree path. Same-user processes,
+mixed setuid credentials, missing or changing credentials, and incomplete
+process listings remain uncertain and keep the tree when a complete census is
+required. Provenant services have no executable-name exception. Transient
+descriptor churn or unavailability retries within the observation budget;
+persistent gaps still keep a possible writer's worktree. See the
+[census policy](../specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence)
+for the observation limits and system-process trust assumption.
+
 A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
 writer custody is free. Dirty trees, held locks and retained import fences still refuse. When
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
