@@ -153,6 +153,7 @@ pub(super) fn apply_attempt_observation(
     let upstream_findings: Vec<Finding> = if node.dispositions.is_empty()
         && node.kind != Some(NodeKind::Synthesise)
         && !template::review_verifier(node)
+        && !repair_writer(node)
     {
         Default::default()
     } else {
@@ -355,7 +356,8 @@ pub(super) fn apply_attempt_observation(
                 };
                 let disposition_error = disposition_error
                     .or(propagation_error)
-                    .or(review_contract_error);
+                    .or(review_contract_error)
+                    .or_else(|| review::repair_result_error(node, &upstream_findings, &outputs));
                 if template::review_behaviour(node).is_some() {
                     retain_synthesis_findings(&mut outputs, &upstream_findings);
                     if let Some((code, _)) = &disposition_error {

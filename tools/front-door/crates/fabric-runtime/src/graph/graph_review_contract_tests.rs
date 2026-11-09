@@ -10,7 +10,10 @@ fn review(name: &str, id: &str) -> GraphNode {
 fn finding() -> Value {
     json!({"id":"F1","severity":"high","file":"a.rs","line":1,
             "summary":"The failing path is reachable","status":"open",
-            "evidence":"Input x reaches the panic","proposed_fix":"Handle x"})
+            "evidence":"Input x reaches the panic","proposed_fix":"Handle x",
+            "trigger":{"sequence":"Invoke the default operation with x","reach":"default_path","observed":true},
+            "triage":{"decision":"confirmed","reason":"Input x reproduces the failure","worth_fixing":true,
+                "root_cause":"unchecked input x","blocking_class":"default_path_defect","shared_flaw":false}})
 }
 
 fn answer(findings: Value, verdict: &str) -> String {
@@ -73,6 +76,8 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                     }
                     let mut note = finding();
                     note["severity"] = json!("low");
+                    note["triage"]["worth_fixing"] = json!(false);
+                    note["triage"]["blocking_class"] = json!("none");
                     observations.push_back(terminal_with_result(
                         AttemptOutcome::Succeeded,
                         &answer(json!([note]), "VERDICT: PASS"),

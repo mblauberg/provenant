@@ -50,25 +50,38 @@ fn approved(outputs: &NodeOutputs) -> bool {
 }
 
 pub(super) fn blocking(finding: &Finding) -> bool {
-    !matches!(
-        finding.status.to_ascii_lowercase().as_str(),
-        "closed" | "resolved" | "fixed"
-    ) && !matches!(
-        finding.disposition.as_deref(),
-        Some("rejected" | "resolved" | "fixed")
-    ) && matches!(
-        finding.severity.to_ascii_lowercase().as_str(),
-        "critical"
-            | "blocker"
-            | "blocking"
-            | "p0"
-            | "high"
-            | "error"
-            | "p1"
-            | "medium"
-            | "moderate"
-            | "should-fix"
-            | "p2"
+    if finding.spec_defect()
+        || matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
+        || matches!(
+            finding.disposition.as_deref(),
+            Some("rejected" | "resolved" | "fixed" | "disputed" | "removed-the-case")
+        )
+    {
+        return false;
+    }
+    let Some(triage) = finding.triage() else {
+        return false;
+    };
+    if triage.decision != "confirmed" {
+        return false;
+    }
+    if matches!(triage.blocking_class.as_str(), "boundary" | "data_loss") {
+        return true;
+    }
+    if !triage.worth_fixing {
+        return false;
+    }
+    if !finding.trigger().is_some_and(|trigger| {
+        trigger.reach == FindingReach::DefaultPath && !trigger.sequence.trim().is_empty()
+    }) {
+        return false;
+    }
+    matches!(
+        triage.blocking_class.as_str(),
+        "acceptance" | "default_path_defect"
+    ) || matches!(
+        finding.severity.as_str(),
+        "medium" | "moderate" | "should-fix"
     )
 }
 
@@ -396,8 +409,31 @@ fn same_finding(left: &Finding, right: &Finding) -> bool {
         && left.extra.get("lens") == right.extra.get("lens")
 }
 
-/// A concrete design defect or a finding surviving an attempted repair takes
-/// the principal path before consuming the remaining cycle budget.
+fn shared_flaw(findings: &[&Finding]) -> bool {
+    findings.iter().any(|finding| {
+        finding
+            .extra
+            .get("triage")
+            .and_then(|triage| triage.get("shared_flaw"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    })
+}
+
+fn design_cannot_hold(outputs: &NodeOutputs) -> bool {
+    outputs
+        .extra
+        .get("repair_items")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("status").and_then(serde_json::Value::as_str) == Some("design-cannot-hold")
+            })
+        })
+}
+
+/// Checked shared flaws and writer design failures take the principal path;
+/// the third review requests design judgement before another writer starts.
 pub(super) fn escalation(
     node: &PlannedNode,
     checkpoint: &GraphCheckpoint,
@@ -411,6 +447,18 @@ pub(super) fn escalation(
         .flat_map(|outputs| outputs.findings.iter())
         .filter(|finding| blocking(finding))
         .collect();
+    if shared_flaw(&initial) {
+        return Some("checked findings share a design flaw");
+    }
+    if checkpoint.nodes.iter().any(|progress| {
+        progress
+            .round
+            .as_ref()
+            .is_some_and(|round| round.loop_id == node.id)
+            && progress.outputs.as_ref().is_some_and(design_cannot_hold)
+    }) {
+        return Some("writer reports design cannot hold");
+    }
     if initial.iter().any(|finding| design_defect(finding)) {
         return Some("concrete design defect");
     }
@@ -443,6 +491,12 @@ pub(super) fn escalation(
             .iter()
             .filter(|finding| blocking(finding))
             .collect();
+        if shared_flaw(&current) {
+            return Some("checked findings share a design flaw");
+        }
+        if round >= 2 && !current.is_empty() {
+            return Some("third review round requires design judgement");
+        }
         if current.iter().any(|finding| design_defect(finding)) {
             return Some("concrete design defect");
         }
@@ -478,6 +532,16 @@ pub(super) fn inactive_round(
     }
     if escalation(owner, checkpoint, positions).is_none() {
         return false;
+    }
+    // A writer's design failure ends this round before launching any reviewers.
+    if checkpoint.nodes.iter().any(|progress| {
+        progress
+            .round
+            .as_ref()
+            .is_some_and(|member| member.loop_id == round.loop_id)
+            && progress.outputs.as_ref().is_some_and(design_cannot_hold)
+    }) {
+        return checkpoint.nodes[positions[&node.id]].attempts.is_empty();
     }
     // Only later unstarted rounds are inactive; preserve the round producing
     // the escalation evidence and every attempt already launched.
@@ -583,6 +647,25 @@ pub(super) fn terminal_outputs(
         outputs.findings_available = latest.findings_available;
         outputs.warnings.clone_from(&latest.warnings);
     }
+    // The principal needs the writer's explanation and structural alternative,
+    // including when this round ended before any reviewer could run.
+    if let Some(writer) = checkpoint
+        .nodes
+        .iter()
+        .filter(|progress| {
+            progress
+                .round
+                .as_ref()
+                .is_some_and(|round| round.loop_id == node.id)
+        })
+        .filter_map(|progress| progress.outputs.as_ref())
+        .find(|output| design_cannot_hold(output))
+    {
+        outputs.result.clone_from(&writer.result);
+        if let Some(items) = writer.extra.get("repair_items") {
+            outputs.extra.insert("repair_items".into(), items.clone());
+        }
+    }
     outputs
 }
 
@@ -590,8 +673,26 @@ pub(super) fn terminal_outputs(
 mod tests {
     use super::*;
     fn finding(id: &str, lens: &str) -> Finding {
-        serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample"})).unwrap()
+        serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample", "trigger":{"sequence":"default invocation","reach":"default_path","observed":true}, "triage":{"decision":"confirmed","reason":"observed","worth_fixing":true,"root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}})).unwrap()
     }
+    #[test]
+    fn repair_eligibility_uses_checked_reach_and_preserves_boundaries() {
+        let mut item = finding("F1", "correctness");
+        item.severity = "should-fix".into();
+        assert!(blocking(&item));
+        item.extra.get_mut("trigger").unwrap()["reach"] = "operator_mistake".into();
+        assert!(!blocking(&item));
+        for class in ["boundary", "data_loss"] {
+            item.extra.get_mut("triage").unwrap()["blocking_class"] = class.into();
+            assert!(blocking(&item));
+        }
+        item.extra.insert("kind".into(), "spec_defect".into());
+        assert!(!blocking(&item));
+        item.extra.remove("kind");
+        item.extra.get_mut("triage").unwrap()["decision"] = "rejected".into();
+        assert!(!blocking(&item));
+    }
+
     #[test]
     fn recurring_identity_keeps_lens_and_location() {
         assert!(same_finding(

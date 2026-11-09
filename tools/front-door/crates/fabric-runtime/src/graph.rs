@@ -1764,11 +1764,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         .map_err(|e| e.to_string())?;
                                     let panel = owner.resolve_repair_panel(document, &commit)?;
                                     let single = panel.slots.len() == 1;
+                                    // Repair input needs checked dispositions even for
+                                    // a single lens. Reuse the existing synthesis step.
                                     let topology = format!(
-                                        "f{}-v{}-s{}",
+                                        "f{}-v{}-s1",
                                         u8::from(panel.frame && !single),
                                         u8::from(panel.verifiers > 0 && !single),
-                                        u8::from(panel.synthesis && !single)
                                     );
                                     let verifier_ids = if single {
                                         Vec::new()

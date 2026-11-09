@@ -479,6 +479,8 @@ fn node_bound(
         bytes += 80
             + excerpt
             + REMAINING_BYTES
+            + 2 * provenant_records::handoff::HANDOFF_BYTES
+            + 256
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
             + 64

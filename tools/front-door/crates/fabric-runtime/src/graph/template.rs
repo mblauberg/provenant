@@ -465,13 +465,13 @@ impl ReviewBehaviour {
     fn apply(self, node: &mut Map<String, Value>) {
         let instruction = match self {
             Self::Lens => {
-                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional."
+                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional. Include trigger {sequence: real steps reaching the state, reach: default_path or operator_mistake or attacker_or_unreachable, observed: boolean}. Findings without a trigger are notes; off-default-path findings are notes except ADR 0035 boundary breaches (class boundary) and data loss (class data_loss). Use kind spec_defect for evidenced specification problems routed to the chair. Set design_defect=true with evidence when the design cannot hold or findings share a flaw, and name the invariant and structural alternative."
             }
             Self::Verify => {
-                "Try to falsify every input finding against the pinned subject. Preserve its qualified id and evidence, set verification to upheld, falsified or unverifiable, and give a reason. Mark newly discovered findings verification=new."
+                "Check every input finding against the pinned subject and its callers. Preserve its qualified id and evidence, set verification to upheld, falsified or unverifiable, and give a reason. Mark newly discovered findings verification=new. For every finding emit triage {decision: confirmed or rejected, reason: code evidence, worth_fixing: boolean, root_cause: invariant under repair, blocking_class: acceptance or default_path_defect or boundary or data_loss or none, shared_flaw: boolean}. Rejected findings stay in the record. Check the trigger sequence and reach; absent or off-default triggers are notes except ADR 0035 boundaries and data loss."
             }
             Self::Synthesis => {
-                "Reconcile every input finding by evidence. Preserve qualified ids and assign each finding disposition accepted, rejected or deferred with a non-empty reason. Never decide by majority vote."
+                "Reconcile every input finding by code evidence. Preserve qualified ids and assign each finding disposition accepted, rejected or deferred with a non-empty reason. Emit checked triage for every finding: decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean. Group confirmed worthwhile findings by shared cause before a writer starts. Keep rejected findings in the record. Evaluate disputed repair_items by evidence; a dispute is not automatically unresolved. A design-cannot-hold outcome or shared design flaw routes to principal design. Never decide by majority vote."
             }
         };
         node.remove("role");
@@ -491,7 +491,7 @@ impl ReviewBehaviour {
         }
         let prompt = node.entry("prompt").or_insert_with(|| "".into());
         let brief = prompt.as_str().unwrap_or_default();
-        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. End with exactly one final non-empty line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. PASS requires complete acceptance evidence and no unresolved blocking or accepted findings; missing evidence is INCONCLUSIVE.").into();
+        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. End with exactly one final non-empty line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. PASS requires complete acceptance evidence and no repair-eligible findings; missing evidence is INCONCLUSIVE.").into();
     }
 }
 

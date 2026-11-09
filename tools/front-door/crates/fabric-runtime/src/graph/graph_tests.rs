@@ -594,8 +594,11 @@ fn findings_text(entries: &str) -> String {
 }
 
 fn entry(extra: &str) -> String {
+    let trigger = serde_json::json!({"sequence":"Invoke the default operation with x","reach":"default_path","observed":true});
+    let triage = serde_json::json!({"decision":"confirmed","reason":"Input x reproduces the failure","worth_fixing":true,
+        "root_cause":"unchecked input x","blocking_class":"default_path_defect","shared_flaw":false});
     format!(
-        "{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":null,\"summary\":\"s\",\"status\":\"open\"{extra}}}"
+        "{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":null,\"summary\":\"s\",\"status\":\"open\",\"trigger\":{trigger},\"triage\":{triage}{extra}}}"
     )
 }
 

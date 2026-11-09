@@ -182,6 +182,51 @@ pub(super) fn make_outputs_with_upstream(
         .filter(|design| design.get("within_scope").is_some_and(serde_json::Value::is_boolean)
             && design.get("one_way_door").is_some_and(serde_json::Value::is_boolean))
         .map(|design| serde_json::json!({"within_scope":design["within_scope"],"one_way_door":design["one_way_door"]}));
+    let spec_concerns = result
+        .and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref))
+        .filter(|handoff| !handoff.spec_concerns.is_empty())
+        .map(|handoff| serde_json::json!(handoff.spec_concerns));
+    let spec_concern_count = spec_concerns
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let spec_defect_count = findings
+        .iter()
+        .filter(|finding| finding.spec_defect())
+        .count();
+    let repair_items = result
+        .filter(|capture| !capture.source_truncated)
+        .and_then(|capture| findings_block(capture).ok())
+        .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .and_then(|block| block.get("repair_items").cloned())
+        .filter(|items| {
+            items.as_array().is_some_and(|items| {
+                items.len() <= MAX_FINDINGS
+                    && items.iter().all(|item| {
+                        let text = |key| {
+                            item.get(key)
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|value| {
+                                    !value.trim().is_empty() && value.len() <= OUTPUT_FIELD_BYTES
+                                })
+                        };
+                        text("id")
+                            && text("reason")
+                            && item
+                                .get("status")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|status| {
+                                    matches!(
+                                        status,
+                                        "fixed"
+                                            | "removed-the-case"
+                                            | "disputed"
+                                            | "design-cannot-hold"
+                                    ) && (status != "design-cannot-hold" || text("alternative"))
+                                })
+                    })
+            })
+        });
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
         ResultOutput {
@@ -200,6 +245,16 @@ pub(super) fn make_outputs_with_upstream(
             .map(|tier| ("risk_tier".into(), tier.into()))
             .into_iter()
             .chain(repair_design.map(|design| ("repair_design".into(), design)))
+            .chain(repair_items.map(|items| ("repair_items".into(), items)))
+            .chain(spec_concerns.map(|concerns| ("spec_concerns".into(), concerns)))
+            .chain(
+                (spec_concern_count > 0)
+                    .then(|| ("spec_concern_count".into(), spec_concern_count.into())),
+            )
+            .chain(
+                (spec_defect_count > 0)
+                    .then(|| ("spec_defect_count".into(), spec_defect_count.into())),
+            )
             .collect(),
         verdict_error,
         schema_version: 2,
@@ -475,7 +530,9 @@ fn parse_findings(
                     .as_object()
                     .ok_or_else(|| fail("id", "invalid upstream finding"))?
                 {
-                    if field != "disposition" && field != "reason" && field != "propagates" {
+                    if matches!(field.as_str(), "trigger" | "triage" | "verification") {
+                        entry.entry(field.clone()).or_insert_with(|| value.clone());
+                    } else if !matches!(field.as_str(), "disposition" | "reason" | "propagates") {
                         entry.insert(field.clone(), value.clone());
                     }
                 }
@@ -543,6 +600,24 @@ fn parse_findings(
             if canonical_len(&extensions) > FINDINGS_BYTES {
                 return Err(fail("findings", "additional fields exceed byte cap"));
             }
+            // Missing trigger is valid input from older prompts. It describes a note.
+            let boundary = entry
+                .get("triage")
+                .and_then(|t| t.get("blocking_class"))
+                .or_else(|| entry.get("class"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|class| matches!(class, "boundary" | "data_loss"));
+            let trigger = entry
+                .get("trigger")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<FindingTrigger>(value).ok());
+            if !boundary
+                && trigger.as_ref().is_none_or(|trigger| {
+                    trigger.sequence.trim().is_empty() || trigger.reach != FindingReach::DefaultPath
+                })
+            {
+                entry.insert("severity".into(), "note".into());
+            }
             findings.push(
                 serde_json::from_value::<Finding>(entry.into())
                     .map_err(|_| fail("findings", "invalid entry"))?,
@@ -575,6 +650,9 @@ fn parse_findings(
                         | "design_defect"
                         | "risk_grew"
                         | "scope_grew"
+                        | "trigger"
+                        | "triage"
+                        | "kind"
                 )
             });
             finding.summary.clear();
@@ -1010,8 +1088,13 @@ pub(super) fn selected_findings(
 ) -> Vec<(String, Finding)> {
     resolved_inputs(node, plan, checkpoint, positions, false)
         .into_iter()
+        .filter(|item| !repair_writer(node) || repair::blocking(&item.finding))
         .map(|item| (item.source, item.finding))
         .collect()
+}
+
+pub(super) fn repair_writer(node: &PlannedNode) -> bool {
+    node.extra.get("repair_writer") == Some(&serde_json::Value::Bool(true))
 }
 
 /// Full identities from selected truncated composites, including nested members.
@@ -1117,6 +1200,13 @@ pub(super) fn required_input_unavailable(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<String> {
+    if repair_writer(node)
+        && resolved_inputs(node, plan, checkpoint, positions, false)
+            .iter()
+            .any(|item| item.finding.triage().is_none())
+    {
+        return Some("checked finding triage before repair writer".into());
+    }
     for input in &node.inputs {
         let source = positions
             .get(&input.node)
@@ -1273,7 +1363,7 @@ pub(super) fn render_input(
                 prompt.push_str(&section);
             }
             let value = match kind {
-                OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated}))),
+                OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated,"repair_items":outputs.extra.get("repair_items")}))),
                 OutputKind::Verdict => serde_json::to_string(&outputs.verdict.as_ref().filter(|_| positions.get(&input.node).is_some_and(|index| verdict_available(&plan.nodes[*index], &checkpoint.nodes[*index], outputs)))),
                 OutputKind::Findings => {
                     // A composite may retain a useful partial selection. Its
@@ -1287,7 +1377,19 @@ pub(super) fn render_input(
                         selected.iter().filter(|(source, _)| source == &input.node)
                             .map(|(_, finding)| finding).collect::<Vec<_>>()
                     });
-                    serde_json::to_string(&findings)
+                    if repair_writer(node) {
+                        let mut groups: std::collections::BTreeMap<String, Vec<&Finding>> = Default::default();
+                        for finding in findings.into_iter().flatten() {
+                            if let Some(triage) = finding.triage() {
+                                groups.entry(triage.root_cause).or_default().push(finding);
+                            }
+                        }
+                        serde_json::to_string(&groups.into_iter().map(|(invariant, findings)| {
+                            serde_json::json!({"id":invariant,"invariant":invariant,"findings":findings})
+                        }).collect::<Vec<_>>())
+                    } else {
+                        serde_json::to_string(&findings)
+                    }
                 },
                 OutputKind::Branch => serde_json::to_string(&outputs.branch),
                 OutputKind::Commit => serde_json::to_string(&outputs.commit.as_ref().filter(|commit| provenant_core::GitOid::parse(commit).is_ok())),
@@ -1333,6 +1435,23 @@ pub(super) fn upstream_results(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<InputRequest> {
+    // A repair writer receives the checked selection, never a full source
+    // transcript containing rejected or ineligible findings.
+    if repair_writer(node) {
+        let mut grouped: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
+        for (source, finding) in selected_findings(node, plan, checkpoint, positions) {
+            grouped.entry(source).or_default().push(finding);
+        }
+        return grouped
+            .into_iter()
+            .map(|(label, findings)| InputRequest {
+                label,
+                attempt_ref: None,
+                inline_findings: Some(findings),
+                finding_prefix: None,
+            })
+            .collect();
+    }
     #[allow(
         clippy::too_many_arguments,
         reason = "recursive traversal carries source selection and identity"
@@ -1676,6 +1795,37 @@ pub(super) fn attempt_input_manifest(
 #[cfg(test)]
 mod alias_tests {
     use super::*;
+
+    #[test]
+    fn missing_trigger_is_a_note_without_parse_refusal() {
+        let block = serde_json::json!({"schema_version":1,"findings":[{
+            "id":"F1","severity":"high","file":"a.rs","summary":"hypothesis","status":"open"
+        }]})
+        .to_string();
+        let (findings, warnings, _) = parse_findings(&block, &[]).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(findings[0].severity, "note");
+        assert!(!repair::blocking(&findings[0]));
+    }
+
+    #[test]
+    fn spec_concern_handoff_reaches_chair_view() {
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(b"Report.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"spec_concerns\":[{\"criterion\":\"Keep old format\",\"claim\":\"Format is retired\",\"evidence\":\"Approved scope removes reader\",\"proposed_change\":\"Use current format\",\"status\":\"as_written\"}]}\n```\n");
+        let captured = capture.finish();
+        let outputs = make_outputs(Some(&captured), None, None, None, None);
+        let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"g","plan_digest":"digest","asks":[],
+            "nodes":[{"id":"writer","state":"succeeded","worktree":null,"outputs":outputs,"attempts":[]}]
+        })).unwrap();
+        let view = graph_waits(&checkpoint);
+        assert_eq!(view[0].spec_concern_count, 1);
+        assert_eq!(view[0].spec_concerns[0].criterion, "Keep old format");
+        assert_eq!(
+            view[0].spec_concerns[0].status,
+            provenant_records::handoff::SpecConcernStatus::AsWritten
+        );
+    }
 
     #[test]
     fn display_id_uniqueness_property_for_colon_containing_roots() {

@@ -516,7 +516,10 @@ brief overrides (`crates/fabric-runtime/src/graph/review.rs#contract_error`).
 Their verdict is exactly one final `VERDICT: PASS`, `VERDICT: FAIL` or
 `VERDICT: INCONCLUSIVE`. A new finding needs non-empty strings `id`, `severity`,
 `file`, `summary`, `status`, `evidence` and `proposed_fix`; `line` is optional
-and may be null. Independent IDs cannot repeat. Invalid replies settle
+and may be null. Findings can include `trigger` with `sequence`, `reach`
+(`default_path`, `operator_mistake`, `attacker_or_unreachable`) and boolean
+`observed`. Missing triggers parse as notes; off-default-path findings are notes
+except ADR 0035 boundaries and data loss. Independent IDs cannot repeat. Invalid replies settle
 `task_failed` with `review_verdict_invalid`, `review_findings_invalid`,
 `review_propagation_invalid` or `review_verdict_conflict`; disposition and verification errors retain their
 specific codes. `verdict_error` records the code and `advance_error` explains it.
@@ -529,8 +532,23 @@ verdict correction; a second invalid reply leaves that lens unavailable.
 or `unverifiable` and a non-empty evidence reason; a new finding uses
 `verification = "new"`. `review.synthesis` must dispose of every selected
 finding as `accepted`, `rejected` or `deferred` with a non-empty reason. Both
-inherit qualified identities and original evidence. Omitted findings remain
-available to downstream repair even when their consumer violates the contract.
+inherit qualified identities and original evidence. Their findings carry checked
+`triage` with `decision` (`confirmed` or `rejected`), `reason`, `worth_fixing`,
+`root_cause`, `blocking_class` and `shared_flaw`. The sole repair eligibility
+rule is `graph/repair.rs#blocking`. Omitted findings remain in the record;
+unchecked findings cannot start a repair writer. Eligible findings are grouped
+by cause into fix items before being passed to the writer. Rejected findings
+remain visible without entering that input. Repair panels retain the existing
+synthesis step even for a single lens.
+
+Repair writers return a findings block with `repair_items`: each item reports
+`fixed`, `removed-the-case`, `disputed` with a reason, or `design-cannot-hold`
+with an alternative. Synthesis receives disputes; they are not automatically
+unresolved. A shared flaw, design failure or third review round requests
+principal design judgement. The existing authorised continuation can carry
+further repair. `kind = "spec_defect"` is reported to the chair and does not
+itself make a finding repair-eligible. Typed handoff `spec_concerns` and reviewer
+spec defects, including counts, appear in the graph chair view.
 
 A partial composite waits for its members to settle, exports the successful
 members and names unavailable members in its result. Review composites also

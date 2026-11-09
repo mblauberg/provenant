@@ -901,6 +901,47 @@ pub struct Finding {
     pub reason: Option<String>,
 }
 
+/// Evidence checked by verification or synthesis before a repair writer starts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingTrigger {
+    pub sequence: String,
+    pub reach: FindingReach,
+    pub observed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingReach {
+    DefaultPath,
+    OperatorMistake,
+    AttackerOrUnreachable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingTriage {
+    pub decision: String,
+    pub reason: String,
+    pub worth_fixing: bool,
+    pub root_cause: String,
+    pub blocking_class: String,
+    #[serde(default)]
+    pub shared_flaw: bool,
+}
+
+impl Finding {
+    pub fn trigger(&self) -> Option<FindingTrigger> {
+        serde_json::from_value(self.extra.get("trigger")?.clone()).ok()
+    }
+
+    pub fn triage(&self) -> Option<FindingTriage> {
+        serde_json::from_value(self.extra.get("triage")?.clone()).ok()
+    }
+
+    pub fn spec_defect(&self) -> bool {
+        self.extra.get("kind").and_then(serde_json::Value::as_str) == Some("spec_defect")
+    }
+}
+
 /// Fallback after provider launch is safe only for a confined read-only node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

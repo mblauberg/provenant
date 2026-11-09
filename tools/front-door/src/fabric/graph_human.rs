@@ -116,6 +116,78 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         Some(error) => format!("{node} {state}: {error}"),
         None => format!("{node} {state}"),
     }));
+    if let Some(nodes) = checkpoint
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for node in nodes {
+            let node_id = node
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            if let Some(concerns) = node
+                .pointer("/outputs/spec_concerns")
+                .and_then(serde_json::Value::as_array)
+            {
+                rows.push(format!(
+                    "{}: {} spec concerns for chair judgement",
+                    bounded_reason(node_id),
+                    concerns.len()
+                ));
+                for concern in concerns {
+                    let detail = |key| {
+                        concern
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .map(bounded_reason)
+                            .unwrap_or_default()
+                    };
+                    rows.push(format!(
+                        "criterion: {}; claim: {}; evidence: {}; proposed change: {}; status: {}",
+                        detail("criterion"),
+                        detail("claim"),
+                        detail("evidence"),
+                        detail("proposed_change"),
+                        detail("status")
+                    ));
+                }
+            }
+            if let Some(findings) = node
+                .pointer("/outputs/findings")
+                .and_then(serde_json::Value::as_array)
+            {
+                let defects: Vec<_> = findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.get("kind").and_then(serde_json::Value::as_str)
+                            == Some("spec_defect")
+                    })
+                    .collect();
+                if !defects.is_empty() {
+                    rows.push(format!(
+                        "{}: {} spec defects for chair judgement",
+                        bounded_reason(node_id),
+                        defects.len()
+                    ));
+                    for finding in defects {
+                        rows.push(format!(
+                            "spec defect {}: {}",
+                            finding
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(bounded_reason)
+                                .unwrap_or_default(),
+                            finding
+                                .get("summary")
+                                .and_then(serde_json::Value::as_str)
+                                .map(bounded_reason)
+                                .unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+        }
+    }
     let next = match status.as_str() {
         "complete" | "cancelled" => None,
         "paused" => Some(format!("provenant retry {id}")),
@@ -372,5 +444,29 @@ mod test_presentation {
             human.push_str(&format!("Advance error: {error}\n"));
         }
         human
+    }
+}
+
+#[cfg(test)]
+mod spec_chair_tests {
+    #[test]
+    fn completed_writer_spec_concerns_and_review_spec_defects_reach_chair_summary() {
+        let summary = super::graph_summary(&serde_json::json!({
+            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                {"id":"writer","state":"succeeded","outputs":{"spec_concerns":[{
+                    "criterion":"old reader", "claim":"format retired", "evidence":"approved scope",
+                    "proposed_change":"remove reader", "status":"diverged"
+                }]}},
+                {"id":"review","state":"succeeded","outputs":{"findings":[{
+                    "id":"F1","kind":"spec_defect","summary":"criterion conflicts with scope"
+                }]}}
+            ]}
+        }));
+        let text = summary.lines.join("\n");
+        assert!(text.contains("1 spec concerns"));
+        assert!(text.contains("format retired") && text.contains("approved scope"));
+        assert!(text.contains("remove reader") && text.contains("diverged"));
+        assert!(text.contains("1 spec defects"));
+        assert!(text.contains("criterion conflicts with scope"));
     }
 }

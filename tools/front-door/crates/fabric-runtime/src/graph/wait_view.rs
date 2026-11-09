@@ -23,6 +23,10 @@ pub struct GraphNodeWait {
     pub head: Option<String>,
     pub handoff: Option<String>,
     pub output_path: Option<String>,
+    pub spec_concerns: Vec<provenant_records::handoff::SpecConcern>,
+    pub spec_concern_count: usize,
+    pub spec_defect_count: usize,
+    pub spec_defects: Vec<super::Finding>,
 }
 
 /// Derive status without changing wake scheduling or checkpoint bytes.
@@ -141,6 +145,36 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                             .map(|binding| binding.head.clone())
                     }),
                 handoff: node.handoff.clone(),
+                spec_concerns: node
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| output.extra.get("spec_concerns"))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default(),
+                spec_concern_count: node
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| output.extra.get("spec_concern_count"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
+                spec_defects: node
+                    .outputs
+                    .as_ref()
+                    .map(|output| {
+                        output
+                            .findings
+                            .iter()
+                            .filter(|finding| finding.spec_defect())
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                spec_defect_count: node
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| output.extra.get("spec_defect_count"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
                 output_path: node
                     .outputs
                     .as_ref()
