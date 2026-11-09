@@ -2,8 +2,8 @@
 
 Inspect `provenant route list` and resolve a proposed pool with
 `provenant route resolve --route POOL`. Catalogue presence does not establish
-live availability. The [model-routing runbook](../../../docs/runbooks/model-routing.md)
-owns pool resolution, pacing and state locations.
+live availability. `provenant route list` shows the catalogue, pools, weights and pacing;
+`provenant route resolve` previews a route.
 
 Choose a template and override its requested `tier` where the brief needs it.
 Use junior by default for implementation slices, senior for contained design

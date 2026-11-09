@@ -47,4 +47,4 @@ a gate. Bound repair and independently review its delta.
 HARNESS owns review floors and authority; the chair keeps user communication
 and acceptance. Load [routing](references/routing-and-tiers.md) for tier and
 independence decisions and [writer boundaries](references/lane-safety.md) for
-confinement. See [Herdr](../../docs/runbooks/herdr.md) for observation.
+confinement. See [Herdr](references/herdr.md) for observation.

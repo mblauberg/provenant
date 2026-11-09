@@ -119,6 +119,16 @@ class HarnessChecks(unittest.TestCase):
         readme.write_text("See `skills/example/references/depth.md`.\n")
         self.assertIn("README.md: line 1: names", self.check(1))
 
+    def test_ambient_files_name_no_repository_paths(self):
+        ambient = self.root / "HARNESS.md"
+        ambient.write_text("Use `orchestrate` and `~/.codex/config.toml`.\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        ambient.write_text("See `docs/runbooks/x.md`.\n")
+        self.assertIn("HARNESS.md: line 1: ambient file names repository path docs/runbooks/x.md", self.check(1))
+        ambient.write_text("Governed by `MAINTAINING.md`.\n")
+        self.assertIn("ambient file names repository path MAINTAINING.md", self.check(1))
+
 
 if __name__ == "__main__":
     unittest.main()

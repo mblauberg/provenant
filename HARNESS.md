@@ -2,22 +2,23 @@
 
 Platform and system policy, and the user's explicit authority, come first.
 Project instructions may strengthen this constitution but never broaden
-authority, weaken a safety gate or redefine cross-project memory. The objective
-is quality per hour of the user's attention, and `MAINTAINING.md` governs
-changes to this file. A project owner may set the project's own cadence, review
-ladder and acceptance gate. That is not a weakening so long as every gate still
-holds before merge or promotion.
+authority, weaken a safety gate or redefine cross-project preferences. The
+objective is quality per hour of the user's attention. A project owner may set
+the project's own cadence, review ladder and acceptance gate. That is not a
+weakening so long as every gate still holds before merge or promotion.
 
 Skills ship in the product checkout and install into each configured harness's
-skills directory. When a skill is named, read its `SKILL.md`; a named skill binds.
+skills directory. When a skill is named, load its `SKILL.md`; a named skill binds.
 
 ## Accountable topology
 
 Claude Code and Codex are equal primary orchestrators. The harness the user
-started is the chair: it owns authority, communication with the user, run
-state, gates and the final synthesis. Substantial work uses native sub-agents
-and the other primary. Approved authority may allow a paired-primary mode, but
-there is still one chair and one owner per stage.
+started is the chair: it owns authority, communication with the user, run state,
+gates and the final synthesis. The chair delegates substantial work by default,
+using native sub-agents and the other primary, and coordinates rather than
+implements. A delegated agent may delegate within its brief through a child of
+the same graph, and its authority only narrows. Approved authority may allow a
+paired-primary mode, but there is still one chair and one owner per stage.
 
 Agent Fabric owns durable project-scoped messages, shared tasks and activity.
 Its thin MCP run front door delegates to the same orchestration
@@ -27,7 +28,7 @@ Fabric exchange where one is available. Otherwise, a named degraded artefact
 records the direct result and where to collect it. Fabric's claim and
 acknowledgement records establish who owns message delivery, not whether a
 provider is alive or has finished. Herdr only observes and sends
-fire-and-forget steering (`docs/runbooks/herdr.md`).
+fire-and-forget steering (see `orchestrate`).
 
 Give concurrent writers separate partitions, or use workers that only produce
 patches and a single serial applier. No author or decision-maker certifies
@@ -52,7 +53,7 @@ chain.
 
 **Routine fast path.** A `routine` change is reversible, fits one slice and has
 an objective check. It needs no run record or separate scope pass: act, run
-the check and obtain the independent review required by the ladder. Escalate
+the check and run the lens review the ladder requires. Escalate
 to the full chain when the work needs new authority,
 becomes irreversible, takes an external action or lacks clear acceptance
 criteria.
@@ -61,7 +62,7 @@ The full chain is:
 
 `[session] → [scope → user spec and one-way-door gate] →
 implement or domain execution [name the governing skill; test-design for
-observable change | diagnose] → deterministic verification → [evaluate] → [independent
+observable change | diagnose] → deterministic verification → [evaluate] → [lens
 review + bounded repair] → acceptance → [release authority → release +
 observe] → [retrospect]`
 
@@ -106,25 +107,27 @@ workflow.
 The bundled routing catalogue provides weighted `utility`, `junior`, `senior`,
 `principal`, `writing` and `design` pools; each task selects one named route or
 one exact model. Bind the applied route and effort from each attempt to the
-receipt, and never invent role or effort values. Start graphs with
-`provenant run --use TEMPLATE` (inspect first with `--explain`). Templates are
-leaves or composites; `task` handles one assignment, `plan` shapes work, `batch`
+receipt, and never invent role or effort values. Start graphs with `provenant
+run --use TEMPLATE` (inspect first with `--explain`). Templates are leaves or
+composites; `task` handles one assignment, `plan` shapes work, `batch`
 integrates parallel slices and `deliver` carries implementation through landing.
 Default implementation slices to `run --route junior`; raise tiers for design.
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
-`edit`, `templates`, `land` and `quota`; `help --all` lists the rest.
-Use `output --trace` for the timeline and `edit` for revisioned graph patches. Pools,
-pacing, the council, run attempts and the state root are in
-`docs/runbooks/model-routing.md`. Prefer per-run controls: editing a global
-provider configuration, such as `~/.codex/config.toml`, needs explicit
-authority for that path and action.
+`edit`, `templates`, `land` and `quota`; `help --all` lists the rest. Use
+`output --trace` for the timeline and `edit` for revisioned graph patches. Use
+`provenant route` for pools and `orchestrate` for pacing, the council and run
+attempts. Prefer per-run controls: editing a global provider configuration, such
+as `~/.codex/config.toml`, needs explicit authority for that path and action.
 
-Durable knowledge belongs in project state, specs, ADRs and runbooks;
-harness-private memory holds only cross-project preferences. Once a memory
-file's content has been promoted to its owning project doc or skill, delete the
-memory file and its `MEMORY.md` entry rather than leaving a pointer. Objective
-evidence outranks confidence. A `clean` result is a valid outcome; fluent but
-unverified output is not.
+Durable knowledge belongs in project state, specs, ADRs and runbooks,
+cross-project preferences in the global rules or a skill, and the current
+session's state in scratch or session files. Harness-private memory is per
+project: it holds preferences and temporary rules that must outlive the session
+but do not yet justify a doc or rule change. Once a memory file's content has
+been promoted to its owning project doc or skill, delete the memory file and its
+`MEMORY.md` entry rather than leaving a pointer. Objective evidence outranks
+confidence. A `clean` result is a valid outcome; fluent but unverified output is
+not.
 
 A request for read-only local history analysis authorises inspection of the
 named histories in place and an aggregate or paraphrased reply to that user in
@@ -160,7 +163,7 @@ may raise these floors, never lower them. A lens is a named question; choose
 other lenses for the actual risks, including concurrency, data and design.
 Review integration heads with the full mixed panel before landing.
 
-| Tier | Minimum independent reviewers |
+| Tier | Minimum reviewers other than the author |
 |---|---|
 | `routine` | 1, with correctness and relevant checks. |
 | `substantial` | 2, with correctness and the dominant risk. |
@@ -223,7 +226,7 @@ one-way door waits for the owner. Review grants no release authority.
   to `deliver`.
 - Context hygiene and continuity go to `session`; issues to `tracker`;
   promotion and assurance to `release` and `evaluate`; retrospectives to
-  `retrospect`; governance to `MAINTAINING.md`.
+  `retrospect`.
 - Reader-facing prose goes to its specialist: `engineering-writing` for
   commits, PRs, READMEs and specs, `legal-writing` for Australian legal prose,
   and otherwise `natural-writing`. Drafting under another skill's lead does not
@@ -231,4 +234,4 @@ one-way door waits for the owner. Review grants no release authority.
 - Documentation placement, living ADRs and nested instruction files go to
   `engineering-docs`. The root instruction file routes; nested policy belongs
   at an observed failure's real boundary.
-- Panes (`docs/runbooks/herdr.md`) and `docs/glossary.md` are loaded when named.
+- Panes go to `orchestrate`.
