@@ -9,10 +9,12 @@ use thiserror::Error;
 mod diff;
 mod discovery;
 mod hooks;
+mod standing;
 mod state;
 mod summary;
 pub use discovery::*;
 pub use hooks::*;
+pub use standing::*;
 pub use state::*;
 pub use summary::*;
 
@@ -2939,5 +2941,81 @@ mod tests {
             DurationMicros::ZERO,
         );
         assert_eq!(response.status, CheckpointStatus::Unavailable);
+    }
+
+    /// One chair record through a save, a compaction and an account switch:
+    /// sourced grants restore as active, an unsourced one as unverified, an
+    /// expired one not at all, and the raw section never reaches the excerpt.
+    #[test]
+    fn standing_survives_compaction_and_account_switch() {
+        let (temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let checkpoint = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Land issue 3080\"\n  grants:\n    - scope: \"Land lane PRs after green CI\"\n      source: \"owner:transcript#turn-42\"\n      expires: none\n    - scope: \"Publish the release notes\"\n      source: \"rule:docs/runbooks/release.md#notes\"\n      expires: \"2999-01-01T00:00:00Z\"\n    - scope: \"Force-push main\"\n      source: \"the owner said so\"\n    - scope: \"Rotate the chair\"\n      source: \"owner:transcript#turn-7\"\n      expires: \"2000-01-01T00:00:00Z\"\n  obligations: [\"Report CI results\"]\n  waiting_on_owner: []\n---\n# Goal\nProse notes.\n";
+        save(&selected, checkpoint.as_bytes()).unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let restored = |text: &str| {
+            assert!(text.contains("Goal: Land issue 3080"), "{text}");
+            assert!(text.contains("Waiting on owner: nothing"));
+            assert!(text.contains(
+                "- Land lane PRs after green CI (source owner:transcript#turn-42; expires none)"
+            ));
+            assert!(text.contains("- Publish the release notes (source rule:docs/runbooks/release.md#notes; expires 2999-01-01T00:00:00Z)"));
+            let unverified = text.find("Unverified grants").unwrap();
+            assert!(text[unverified..].contains("- Force-push main"));
+            assert!(!text[..unverified].contains("Force-push main"));
+            assert!(text.contains("Expired grants not restored: 1"));
+            assert!(!text.contains("Rotate the chair"));
+            assert!(text.contains("- Report CI results"));
+        };
+
+        // Compaction: PreCompact leaves the record alone; the compact
+        // SessionStart restores it ahead of the prose, never as raw YAML.
+        let pre = run_hook(&root, project, "PreCompact", mtime);
+        assert!(
+            !String::from_utf8(pre.stdout)
+                .unwrap()
+                .contains("## Standing")
+        );
+        assert_eq!(selected.read().unwrap().unwrap().markdown, checkpoint);
+        let start = run_hook(&root, project, "SessionStart", mtime);
+        assert!(start.stdout.len() <= HOOK_OUTPUT_LIMIT);
+        let text = context(&start);
+        restored(&text);
+        assert!(text.find("## Standing").unwrap() < text.find("# Goal").unwrap());
+        assert!(!text.contains("provenant_standing") && !text.contains("schema_version"));
+
+        // Account switch: the new account's session restores the same record
+        // from the source session's checkpoint.
+        let cwd = temp.path().canonicalize().unwrap();
+        let handoffs = crate::chair::HandoffStore::new(root.clone(), cwd.clone());
+        let handoff = crate::chair::Handoff {
+            session_id: HostSessionId::parse("host-1").unwrap(),
+            cwd,
+            transcript_path: None,
+            state_handoff_file: None,
+            project: Some(project),
+            created_unix: 1000,
+            open_lanes: vec![],
+            target_account: Some("spare".into()),
+            reason: "quota threshold".into(),
+            consumed: false,
+        };
+        handoffs.save(&handoff).unwrap();
+        let consumed = handoffs
+            .consume("spare", &HostSessionId::parse("host-2").unwrap(), 1001)
+            .unwrap()
+            .unwrap();
+        let now = UtcMicros::from_micros(mtime).unwrap();
+        restored(&consumed.standing(&root, now).unwrap());
+
+        // An ask waiting on the owner is restored by name.
+        let asking = checkpoint.replace(
+            "waiting_on_owner: []",
+            "waiting_on_owner: [\"Approve the release window\"]",
+        );
+        save(&selected, asking.as_bytes()).unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let text = context(&run_hook(&root, project, "SessionStart", mtime));
+        assert!(text.contains("Waiting on owner:\n- Approve the release window"));
     }
 }

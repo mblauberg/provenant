@@ -4,7 +4,7 @@ use provenant_confinement::{
     UtilityBudget, UtilityRuntime,
     push::{PushContext, PushUpdate},
 };
-use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, WaitBudget};
+use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_fabric_store::{Page, Store};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
 use provenant_records::{Harness, inbox::*};
@@ -677,7 +677,7 @@ fn checkpoint(
         moment.event(),
         input,
         &clock,
-        DurationMicros::from_micros(24 * 60 * 60 * 1_000_000),
+        session::CHECKPOINT_MAX_AGE,
         session::Advice {
             digest: &digest,
             commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),

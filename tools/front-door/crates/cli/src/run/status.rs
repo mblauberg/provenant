@@ -71,6 +71,12 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 open_read_only(edge, &call)?
             };
             let (exempt, exempt_line) = review_exempt_view(&context);
+            let owner = command
+                .id
+                .is_none()
+                .then(|| now(&clock))
+                .transpose()?
+                .map(|at| owner_wait(&context, at));
             let native = if command.id.is_none() {
                 Some(provenant_telemetry::native_attempts::read(edge.roots))
             } else {
@@ -79,6 +85,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let Some(store) = store else {
                 let mut data = json!({"lanes": [], "next_cursor": null, "review_exempt": exempt});
                 let mut human = format!("no lanes\n{exempt_line}");
+                append_owner_wait(owner.as_ref(), &mut data, &mut human);
                 append_native_status(native, &mut data, &mut human);
                 return Ok((data, human));
             };
@@ -182,6 +189,10 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             let mut human = format!("{human}{exempt_line}");
+            if let Some(owner) = &owner {
+                compact.lines.push(owner.line());
+            }
+            append_owner_wait(owner.as_ref(), &mut data, &mut human);
             if let Some(object) = data.as_object_mut() {
                 object.remove("capacity_cooldowns");
             }
@@ -227,6 +238,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             "cloud_jobs",
             "operation",
             "refused_operations",
+            "waiting_on_owner",
         ] {
             if let Some(value) = out.result.data.get(key) {
                 data[key] = value.clone();
@@ -400,6 +412,66 @@ pub(super) fn append_refused_operations(
     }
     data["refused_operations"] = json!(refusals);
     Ok(true)
+}
+
+/// What the chair's standing record says waits on the owner. The chair is
+/// found as settlement finds it: the session this actor last saved. A
+/// checkpoint older than the session-start hook's freshness window is stale,
+/// not a current ask, and a read failure is unknown rather than not recorded.
+fn owner_wait(
+    context: &run::ExecutionContext,
+    now: provenant_core::UtcMicros,
+) -> provenant_workflow::session::OwnerStatus {
+    use provenant_workflow::session::{
+        CHECKPOINT_MAX_AGE, OwnerStatus, OwnerWait, SessionStore, chair_sessions_for,
+        checkpoint_is_fresh,
+    };
+    let sessions = chair_sessions_for(&context.state_root, context.project_id, context.actor_id);
+    let Some(((session, saved), rest)) = sessions.split_first() else {
+        return OwnerStatus::new(OwnerWait::NotRecorded, None, None, Vec::new());
+    };
+    let other_live = rest
+        .iter()
+        .filter(|(_, at)| checkpoint_is_fresh(now, *at, CHECKPOINT_MAX_AGE))
+        .map(|(id, _)| id.as_str().to_owned())
+        .collect();
+    let read = SessionStore::new(
+        context.state_root.clone(),
+        context.project_id,
+        session.clone(),
+    )
+    .read();
+    let (wait, saved_at) = match read {
+        Err(error) => (OwnerWait::Unknown(error.to_string()), Some(*saved)),
+        Ok(None) => (OwnerWait::NotRecorded, Some(*saved)),
+        Ok(Some(checkpoint))
+            if !checkpoint_is_fresh(now, checkpoint.modified_at, CHECKPOINT_MAX_AGE) =>
+        {
+            (OwnerWait::Stale, Some(checkpoint.modified_at))
+        }
+        Ok(Some(checkpoint)) => (
+            OwnerWait::from_checkpoint(Some(&checkpoint.markdown)),
+            Some(checkpoint.modified_at),
+        ),
+    };
+    OwnerStatus::new(
+        wait,
+        Some(session.as_str().to_owned()),
+        saved_at,
+        other_live,
+    )
+}
+
+fn append_owner_wait(
+    owner: Option<&provenant_workflow::session::OwnerStatus>,
+    data: &mut Value,
+    human: &mut String,
+) {
+    if let Some(owner) = owner {
+        human.push_str(&owner.line());
+        human.push('\n');
+        data["waiting_on_owner"] = owner.value();
+    }
 }
 
 fn append_native_status(

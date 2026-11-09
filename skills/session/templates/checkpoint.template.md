@@ -3,8 +3,19 @@
 Rewrite the current context near 2 KiB. The continuity reference owns the
 content contract; this template supplies headings only.
 
+---
+provenant_standing:
+  schema_version: 1
+  goal: ""
+  grants: []
+  obligations: []
+  waiting_on_owner: []
+---
+
 ## Goal
 Outcome, done-criteria and the tracker or project document that owns them.
+The standing record above holds the goal, sourced grants, obligations and
+owner asks; the continuity reference owns its format.
 
 ## Direction
 User rulings, authority pointers, one-way doors and unresolved gates.

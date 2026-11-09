@@ -120,7 +120,7 @@ the full context, so it needs no earlier chair checkpoint. The hook only
 asks; whether the summary complied is checked in a live compaction.
 
 `session-start` and `compact` print the checkpoint's `## Intent` section
-first, after the status diagnostic and ahead of the digest and the rest of the
+after the status diagnostic and any standing section, ahead of the digest and the rest of the
 checkpoint (capped at 3 KiB inside the 8 KiB output cap), and name the host
 transcript path from the hook input as the source of exact words when an entry
 is in doubt. A checkpoint with no intent section gets one `Intent:` line in
@@ -135,6 +135,30 @@ the chair saves it.
 Codex: only the `SessionStart` rendering is shared, so a saved intent section
 is restored there. No Codex `PreCompact` hook is registered, so Codex has no
 summary instruction and relies on the saved section.
+
+## Standing record
+
+A checkpoint may open with a typed `provenant_standing` frontmatter key: goal,
+standing grants (scope, source reference, expiry or none), open obligations
+and what waits on the owner. Its format is in the
+[session skill's continuity contract](../../skills/session/SKILL.md).
+
+`session-start` and `compact` print it as a `## Standing` section first, ahead
+of the intent section, the digest and the prose, and withhold the raw key from
+the excerpt. A grant whose source is `owner:<ref>` or `rule:<ref>` is listed as
+active; one with no such source, or an unreadable expiry, is listed as
+unverified; an expired one is only counted. The section is cut in whole lines
+and shares the intent section's 3 KiB, so the 8 KiB output cap is unchanged. A
+checkpoint without one gets a `Standing:` line in the diagnostic, and an
+invalid one restores nothing from it. The record points at authority; it never
+creates any, and landing, publishing and chair-switching gates check held
+authority themselves.
+
+After an account switch, `chair-start` appends the source session's standing
+section to its handoff context, read from the source checkpoint. `provenant
+status` prints `waiting on owner: nothing` or the specific asks from the
+chair's latest saved session (`waiting_on_owner` in JSON), or says the record
+is missing or invalid.
 
 ## Worktree hooks
 

@@ -358,6 +358,7 @@ fn switch(
         cwd: context.cwd.clone(),
         transcript_path: input.transcript_path.clone(),
         state_handoff_file: None,
+        project: None,
         created_unix: context.now(),
         open_lanes: vec![],
         target_account: target.map(|a| a.key().into()),
@@ -374,6 +375,7 @@ fn switch(
         provenant_cli::run::chair_snapshot(&context.edge()).map_err(|e| e.message)?;
     check_time(deadline)?;
     handoff.open_lanes = lanes;
+    handoff.project = Some(project);
     if SessionStore::new(
         context.roots.state.clone(),
         project,
@@ -1230,11 +1232,20 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
                 return Ok(None);
             };
             let path = context.store().path(&handoff.session_id);
-            let text = format!(
+            let mut text = format!(
                 "Chair account-switch checkpoint consumed. Source session: {}. Read checkpoint {} and its state/handoff file before acting. The checkpoint lists open Fabric lanes by ID. Inspect these IDs in the run store and collect their results; never re-run completed lanes. Preserve originating authority limits.",
                 handoff.session_id.as_str(),
                 path.display()
             );
+            // The source session's standing grants, goal and owner asks carry
+            // over; save them into this session's checkpoint before relying
+            // on its own hooks.
+            if let Ok(now) = context.clock.wall_now()
+                && let Some(standing) = handoff.standing(&context.roots.state, now)
+            {
+                text.push_str("\n\n");
+                text.push_str(&standing);
+            }
             Ok(Some(
                 json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":text}}),
             ))

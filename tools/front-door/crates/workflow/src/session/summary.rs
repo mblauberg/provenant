@@ -402,10 +402,11 @@ pub struct SummaryOutcome {
     pub replayed: bool,
 }
 
-const HEADER_LIMIT: usize = 8192;
+/// Bound on the whole frontmatter, shared by every typed key in it.
+pub(super) const HEADER_LIMIT: usize = 8192;
 
 // Return the byte offset through the closing delimiter, including its newline.
-fn header_end(text: &str) -> Result<Option<usize>, SummaryError> {
+pub(super) fn header_end(text: &str) -> Result<Option<usize>, SummaryError> {
     if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         return Ok(None);
     }
@@ -419,7 +420,7 @@ fn header_end(text: &str) -> Result<Option<usize>, SummaryError> {
     Err(SummaryError)
 }
 
-fn empty_header(text: &str, end: usize) -> bool {
+pub(super) fn empty_header(text: &str, end: usize) -> bool {
     text[..end]
         .lines()
         .skip(1)
@@ -444,7 +445,7 @@ fn header_content(text: &str, end: usize) -> &str {
     &text[start..stop]
 }
 
-fn parse_header(text: &str, end: usize) -> Result<Mapping, SummaryError> {
+pub(super) fn parse_header(text: &str, end: usize) -> Result<Mapping, SummaryError> {
     let header = header_content(text, end);
     if header.len() > 256 * 1024 {
         return Err(SummaryError);
@@ -509,6 +510,67 @@ fn root_key_line(lines: &[&str], line: usize, end: usize) -> Result<usize, Summa
     Ok(start)
 }
 
+/// Lines `[start, stop)` of root key `key` in a header known to hold it,
+/// trailing blank and comment lines excluded. `lines` are the text's
+/// inclusive lines and `end` the index of the closing delimiter.
+fn root_key_span(
+    text: &str,
+    header_end: usize,
+    lines: &[&str],
+    end: usize,
+    key: &str,
+) -> Result<(usize, usize), SummaryError> {
+    let keys: RootKeys =
+        serde_saphyr::from_str_with_options(header_content(text, header_end), yaml_options())
+            .map_err(|_| SummaryError)?;
+    let key_index = keys
+        .0
+        .iter()
+        .position(|(name, _)| name == key)
+        .ok_or(SummaryError)?;
+    let start = root_key_line(lines, keys.0[key_index].1, end)?;
+    let mut stop = match keys.0.get(key_index + 1) {
+        Some((_, line)) => root_key_line(lines, *line, end)?,
+        None => end,
+    };
+    if stop <= start || stop > end {
+        return Err(SummaryError);
+    }
+    while stop > start + 1 {
+        let trimmed = lines[stop - 1].trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            break;
+        }
+        stop -= 1;
+    }
+    Ok((start, stop))
+}
+
+/// The text with root key `key` and its value removed from the frontmatter;
+/// unchanged when the header does not hold it.
+pub(super) fn strip_root_key(text: &str, key: &str) -> Result<String, SummaryError> {
+    let Some(header_end) = header_end(text)? else {
+        return Ok(text.to_owned());
+    };
+    if empty_header(text, header_end) || !parse_header(text, header_end)?.contains_key(key) {
+        return Ok(text.to_owned());
+    }
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, line)| line.trim_end_matches('\n').trim_end_matches('\r') == "---")
+        .map(|(i, _)| i)
+        .ok_or(SummaryError)?;
+    let (start, stop) = root_key_span(text, header_end, &lines, end, key)?;
+    Ok(format!(
+        "{}{}",
+        lines[..start].concat(),
+        lines[stop..].concat()
+    ))
+}
+
 fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::SessionError> {
     let newline = if text.starts_with("---\r\n") {
         "\r\n"
@@ -543,32 +605,7 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
             .map(|(i, _)| i)
             .ok_or(SummaryError)?;
         let (start, stop) = if root.contains_key("provenant_summary") {
-            let keys: RootKeys = serde_saphyr::from_str_with_options(
-                header_content(text, header_end),
-                yaml_options(),
-            )
-            .map_err(|_| SummaryError)?;
-            let key_index = keys
-                .0
-                .iter()
-                .position(|(key, _)| key == "provenant_summary")
-                .ok_or(SummaryError)?;
-            let start = root_key_line(&lines, keys.0[key_index].1, end)?;
-            let mut stop = match keys.0.get(key_index + 1) {
-                Some((_, line)) => root_key_line(&lines, *line, end)?,
-                None => end,
-            };
-            if stop <= start || stop > end {
-                return Err(SummaryError.into());
-            }
-            while stop > start + 1 {
-                let trimmed = lines[stop - 1].trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    break;
-                }
-                stop -= 1;
-            }
-            (start, stop)
+            root_key_span(text, header_end, &lines, end, "provenant_summary")?
         } else {
             (end, end)
         };
