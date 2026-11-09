@@ -257,7 +257,9 @@ pub(crate) fn run(
     let store = provenant_run::RunStore::open(&context, &call)?;
     // A later explicit delivery may supersede an earlier final retention.
     // Finality belongs to this request, not every request for the attempt.
-    if collect_outcome(&settled, &roots, workers, delivery.as_ref())? == CollectionOutcome::Busy {
+    if collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())?
+        == CollectionOutcome::Busy
+    {
         return Ok(());
     }
     if store
@@ -283,16 +285,6 @@ pub(crate) fn run(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn collect_owned_worktree(
-    settled: &provenant_run::HolderContext,
-    roots: &provenant_core::Roots,
-    workers: &dyn WorkerObserver,
-    delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    collect_outcome(settled, roots, workers, delivery_override).map(|_| ())
-}
-
 // Keep lock-contention regression tests deterministic without a two-minute sleep.
 #[cfg(test)]
 thread_local! {
@@ -300,12 +292,12 @@ thread_local! {
 }
 
 #[derive(PartialEq, Eq)]
-enum CollectionOutcome {
+pub(crate) enum CollectionOutcome {
     Finished,
     Busy,
 }
 
-fn collect_outcome(
+pub(crate) fn collect_owned_worktree(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
