@@ -366,7 +366,7 @@ pub(super) fn handoff(
 ) -> Result<Option<String>, String> {
     let handoff = capture.handoff.clone().map_err(str::to_owned)?;
     let Some(fenced) = handoff
-        .filter(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::StoppedEarly)
+        .filter(provenant_records::handoff::Handoff::unfinished)
         .map(|handoff| handoff.fenced())
     else {
         return Ok(None);
@@ -1736,6 +1736,21 @@ fn continuation(
             limits.continuations
         ));
     }
+    if no_work::handoff_requires_chair(note) {
+        return Err(
+            "writer needs an owner decision, capability or external change; inspect its handoff"
+                .into(),
+        );
+    }
+    let progress = checkpoint
+        .nodes
+        .iter()
+        .find(|row| row.id == node.id)
+        .ok_or("continuation progress missing")?;
+    let routes = no_work::restart_routes(node, progress);
+    if routes.is_empty() {
+        return Err("writer stopped; no different route is available; return to the chair".into());
+    }
     let mut child = document
         .nodes
         .iter()
@@ -1754,6 +1769,8 @@ fn continuation(
             child.id
         ));
     }
+    child.route = None;
+    child.routes = Some(routes);
     child.title = None;
     child.depends_on = vec![node.id.clone()];
     child.after_expansion.clear();

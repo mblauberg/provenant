@@ -110,7 +110,7 @@ until its children and every parent-level gate are handled.
 2. Link the pull request with `Closes #N` only when merge leaves no user or
    external-action gate; otherwise use `References #N` and keep the issue open.
 3. Set `In review` while exact-head checks and independent review run. A new
-   head needs CI; apply the review ladder's head-move rules.
+   head needs CI and a review of its delta.
 4. If machine gates pass but a user gate remains, set `Awaiting user`. The
    user's decision comment names the choice, artefact or exact head, its
    evidence and every remaining gate.
@@ -249,7 +249,7 @@ hotfix and takes its normal review.
 succeeded or was path-skipped. "CI is green" means exactly that context. The
 `Protect main` ruleset does not require heads to be up to date with `main`, so
 overlapping single-PR landings need a serial train: merge one, update the next,
-rerun exact-head checks and apply the head-move rules. For status-check rollup
+rerun exact-head checks. For status-check rollup
 traps, see [shell pitfalls](shell-pitfalls.md#shell-pitfalls).
 
 The user review or merge gate applies only when an agent is stuck: split
@@ -290,9 +290,7 @@ Every PR gets an outcome receipt under the project state's
 `landing/receipts/`: landed, red, conflicted, excluded or pending-unknown, with
 each unmet check named. Batch errors distinguish `LAND_CONTENTION`,
 `LAND_CONFLICT`, `LAND_GATE_UNMET`, `LAND_PUBLICATION_UNKNOWN` and
-`LAND_SPENDING_CAP`. Head-move classifications in the report are shadow
-evidence and never replace review on the exact head; add project review
-exclusions with `git config --add provenant.reviewProtected 'pattern'`.
+`LAND_SPENDING_CAP`.
 
 #### Recover an interrupted landing
 

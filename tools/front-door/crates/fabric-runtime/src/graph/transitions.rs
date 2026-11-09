@@ -398,12 +398,24 @@ pub(super) fn apply_attempt_observation(
                 } else if !warned
                     && launched
                     && node.access == AccessMode::WorktreeWrite
-                    && outcome == AttemptOutcome::StoppedNoWork
+                    && matches!(
+                        outcome,
+                        AttemptOutcome::StoppedNoWork | AttemptOutcome::DeclaredStop
+                    )
                 {
+                    // One rule for every writer stop, committed, clean or with
+                    // uncommitted edits: restart in place on the retained
+                    // worktree, or return to the chair (see `no_work`).
                     progress.advance_error_code = Some("stopped_no_work".into());
-                    progress.advance_error =
-                        Some("writer stopped with no work: no new commit".into());
-                    AttemptOutcome::StoppedNoWork
+                    progress.advance_error = Some(
+                        if outcome == AttemptOutcome::StoppedNoWork {
+                            "writer stopped with no work: no new commit"
+                        } else {
+                            "writer stopped before finishing"
+                        }
+                        .into(),
+                    );
+                    outcome
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
                     AttemptOutcome::OtherFailure
                 } else if outcome == AttemptOutcome::Succeeded
@@ -428,6 +440,14 @@ pub(super) fn apply_attempt_observation(
                 {
                     progress.advance_error_code = Some(code.into());
                     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                }
+                if node.access == AccessMode::WorktreeWrite {
+                    progress.handoff = result
+                        .as_ref()
+                        .and_then(|capture| capture.handoff.as_ref().ok())
+                        .and_then(|handoff| handoff.as_ref())
+                        .filter(|handoff| handoff.unfinished())
+                        .map(provenant_records::handoff::Handoff::fenced);
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);

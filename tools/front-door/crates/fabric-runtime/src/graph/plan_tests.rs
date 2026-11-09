@@ -1850,7 +1850,7 @@ fn plan_disjoint_writers_are_admitted_while_a_peer_is_running() {
 }
 
 fn writer_graph() -> GraphDocument {
-    let mut writer = node("write", route("fixture"));
+    let mut writer = node("write", pool_route("senior"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some(".worktrees/writer".into());
     writer.required_verdict = Some("VERDICT: PASS".into());
@@ -3938,4 +3938,50 @@ fn planner_writer_provisioning_recovers_fenced_source_after_crash() {
     assert_eq!(owner.provisioned.len(), 2);
     assert!(owner.provisioned.iter().all(|(_, source)| source == &"a".repeat(40)));
     assert!(relay::pending_provisioning(&recovered.checkpoint).is_empty());
+}
+
+#[test]
+fn pending_writer_continuation_reopens_and_excludes_its_predecessor_model() {
+    let doc = writer_graph();
+    let mut owner = FakeOwner {
+        observations: [terminal_from(STOP, "stopped-writer"), AttemptObservation::Pending { attempt_ref: Some("fresh-writer".into()) }].into(),
+        models: [("stopped-writer".into(), "codex/previous".into())].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.prior_attempts[1], ["codex/previous"]);
+    assert_eq!(owner.stored_refs[1], None);
+    assert_eq!(owner.calls[1].0.node_id, "write--continue");
+    // This is the existing checkpoint wire shape: the expansion journal itself
+    // supplies lineage, with no new required continuation metadata.
+    let saved = serde_json::to_vec(&run.checkpoint).unwrap();
+    journal.0 = Some(serde_json::from_slice(&saved).unwrap());
+    owner.observations.extend([terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"), terminal_with_result(AttemptOutcome::Succeeded, "checked")]);
+    let reopened = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(reopened.status, GraphStatus::Complete);
+    assert_eq!(owner.prior_attempts[2], ["codex/previous"]);
+    assert_eq!(owner.calls[1].0, owner.calls[2].0);
+}
+
+#[test]
+fn declared_writer_stop_restarts_with_handoff_and_excludes_the_used_pool_model() {
+    let doc = writer_graph();
+    let mut observation = terminal_from(STOP, "stopped-writer");
+    if let AttemptObservation::Terminal { outcome, .. } = &mut observation {
+        *outcome = AttemptOutcome::DeclaredStop;
+    }
+    let mut owner = FakeOwner {
+        observations: [observation, terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"), terminal_with_result(AttemptOutcome::Succeeded, "checked")].into(),
+        models: [("stopped-writer".into(), "codex/previous".into())].into(),
+        ..Default::default()
+    };
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(owner.calls.len(), 3);
+    assert_ne!(owner.calls[0].0, owner.calls[1].0);
+    assert_eq!(owner.stored_refs[1], None);
+    assert_eq!(owner.prior_attempts[1], ["codex/previous"]);
+    assert!(owner.prompts[1].contains("First half committed"));
+    assert_eq!(owner.permissions[0], owner.permissions[1]);
 }

@@ -66,7 +66,6 @@ pub mod budget;
 pub mod candidate;
 pub mod driver;
 pub mod gate;
-pub mod head_move;
 pub mod postmerge;
 pub mod publish;
 pub mod receipt;
@@ -188,7 +187,7 @@ fn batch_response(
         }
         None => (Outcome::Failed, ""),
     };
-    let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "head_moves": report.head_moves, "local_follow_up": report.local_steps});
+    let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps});
     if report.outcomes.len() == 1
         && let Some((&number, outcome)) = report.outcomes.iter().next()
     {

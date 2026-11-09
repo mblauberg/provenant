@@ -54,7 +54,21 @@ impl RunStore {
             .and_then(|route| route.extra.get("max_continuations"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        // Graphs own fresh restarts and pool redraws. Only an explicit model
+        // policy selecting session resume delegates continuation to the run
+        // owner. Previously sealed decisions still replay unchanged above.
+        let graph_restart = task
+            .context
+            .as_ref()
+            .is_some_and(|context| context.graph_id.is_some())
+            && old
+                .applied_route
+                .as_ref()
+                .and_then(|route| route.extra.get("resume_continuations"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(true);
         let decision = if eligible
+            && !graph_restart
             && task.writer.is_some()
             && used < limit
             && handoff.is_some_and(|h| h.status == HandoffStatus::StoppedEarly)
@@ -216,89 +230,108 @@ mod tests {
     #[test]
     fn stopped_early_queues_one_visible_successor_in_the_terminal_transaction()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        for (status, writer, eligible, limit, used, expected) in [
-            (Some("stopped_early"), true, true, 2, 0, true),
-            (Some("stopped_early"), true, true, 2, 1, true),
-            (Some("stopped_early"), true, true, 2, 2, false),
-            (Some("stopped_early"), true, true, 0, 0, false),
-            (Some("done"), true, true, 2, 0, false),
-            (Some("blocked"), true, true, 2, 0, false),
-            (None, true, true, 2, 0, false),
-            (Some("malformed"), true, true, 2, 0, false),
-            (Some("stopped_early"), false, true, 2, 0, false),
-            (Some("stopped_early"), true, false, 2, 0, false),
+        for (graph, resume) in [
+            (false, None),
+            (true, None),
+            (true, Some(false)),
+            (true, Some(true)),
         ] {
-            let temp = tempfile::tempdir()?;
-            let clock = clock();
-            let cancel = provenant_core::CancelToken::new();
-            let call = call(&clock, &cancel);
-            let store = RunStore::open(&context(temp.path())?, &call)?;
-            let mut input = input();
-            if writer {
-                input.request.tasks[0].writer = Some(WriterRequest {
-                    extra: Default::default(),
-                    project: temp.path().into(),
-                    worktree: temp.path().join("worktree"),
+            for (status, writer, eligible, limit, used, expected) in [
+                (Some("stopped_early"), true, true, 2, 0, true),
+                (Some("stopped_early"), true, true, 2, 1, true),
+                (Some("stopped_early"), true, true, 2, 2, false),
+                (Some("stopped_early"), true, true, 0, 0, false),
+                (Some("done"), true, true, 2, 0, false),
+                (Some("blocked"), true, true, 2, 0, false),
+                (None, true, true, 2, 0, false),
+                (Some("malformed"), true, true, 2, 0, false),
+                (Some("stopped_early"), false, true, 2, 0, false),
+                (Some("stopped_early"), true, false, 2, 0, false),
+            ] {
+                let expected = expected && (!graph || resume == Some(true));
+                let temp = tempfile::tempdir()?;
+                let clock = clock();
+                let cancel = provenant_core::CancelToken::new();
+                let call = call(&clock, &cancel);
+                let store = RunStore::open(&context(temp.path())?, &call)?;
+                let mut input = input();
+                if writer {
+                    input.request.tasks[0].writer = Some(WriterRequest {
+                        extra: Default::default(),
+                        project: temp.path().into(),
+                        worktree: temp.path().join("worktree"),
+                    });
+                }
+                input.request.tasks[0].context = Some(WorkContext {
+                    graph_id: graph.then(|| "graph-fixture".into()),
+                    node_id: Some("writer".into()),
+                    ..Default::default()
                 });
-            }
-            input.request.tasks[0].context = Some(WorkContext {
-                graph_id: Some("graph-fixture".into()),
-                node_id: Some("writer".into()),
-                ..Default::default()
-            });
-            store.create(&input, &call)?;
-            let id = input.attempts[0].attempt_id;
-            let mut old = store.record(id, &call)?;
-            let mut applied = route();
-            applied
-                .extra
-                .insert("max_continuations".into(), limit.into());
-            old.applied_route = Some(applied);
-            old.extra
-                .insert("automatic_continuations".into(), used.into());
-            let attempt = store.attempt_dir(old.run_id, id, false)?;
-            let handoff = status.and_then(|status| Handoff::from_json(serde_json::json!({
+                store.create(&input, &call)?;
+                let id = input.attempts[0].attempt_id;
+                let mut old = store.record(id, &call)?;
+                let mut applied = route();
+                applied
+                    .extra
+                    .insert("max_continuations".into(), limit.into());
+                if let Some(resume) = resume {
+                    applied
+                        .extra
+                        .insert("resume_continuations".into(), resume.into());
+                }
+                old.applied_route = Some(applied);
+                old.extra
+                    .insert("automatic_continuations".into(), used.into());
+                let attempt = store.attempt_dir(old.run_id, id, false)?;
+                let handoff = status.and_then(|status| Handoff::from_json(serde_json::json!({
                 "schema_version":2,"status":status,"note":"Continue renderer", "remaining":["Finish renderer"],"decisions":[],"verify":[]
             }).to_string().as_bytes()).ok());
-            store.seal_automatic_continuation(&old, &attempt, eligible, handoff.as_ref(), &call)?;
-            // A repeated settlement cannot spend the allowance again or change
-            // an already sealed decision when policy changes.
-            store.seal_automatic_continuation(&old, &attempt, false, None, &call)?;
-            seal_observation(&store, &input, &exit())?;
-            let mut publication = publication();
-            publication.outcome = Outcome::ReviewRequired;
-            let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
-            let pending = store.pending_attempts(old.run_id, &call)?;
-            assert_eq!(
-                pending.len(),
-                usize::from(expected),
-                "{status:?}, {limit}, {used}"
-            );
-            assert_eq!(terminal.superseded_by.is_some(), expected);
-            assert_eq!(
-                store.run(old.run_id, &call)?.closure == Closure::Closed,
-                !expected
-            );
-            if let Some(successor) = pending.first() {
-                assert_eq!(terminal.superseded_by, Some(successor.attempt_id));
-                assert_eq!(successor.retry_of, Some(id));
-                assert_eq!(successor.context, input.request.tasks[0].context);
-                assert_eq!(successor.extra["automatic_continuations"], used + 1);
+                store.seal_automatic_continuation(
+                    &old,
+                    &attempt,
+                    eligible,
+                    handoff.as_ref(),
+                    &call,
+                )?;
+                // A repeated settlement cannot spend the allowance again or change
+                // an already sealed decision when policy changes.
+                store.seal_automatic_continuation(&old, &attempt, false, None, &call)?;
+                seal_observation(&store, &input, &exit())?;
+                let mut publication = publication();
+                publication.outcome = Outcome::ReviewRequired;
+                let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+                let pending = store.pending_attempts(old.run_id, &call)?;
                 assert_eq!(
-                    store.artifact_bytes(old.run_id, &successor.prompt, RECORD_LIMIT)?,
-                    b"exact prompt"
+                    pending.len(),
+                    usize::from(expected),
+                    "{status:?}, {limit}, {used}"
                 );
-                assert_eq!(successor.trace.parent, Some(id));
-                let events =
-                    Service::new(&store).events(0, 64, Some(successor.attempt_id), &call)?;
-                assert_eq!(events.len(), 1);
-                assert!(matches!(events[0].change, AttemptState::Queued { .. }));
+                assert_eq!(terminal.superseded_by.is_some(), expected);
+                assert_eq!(
+                    store.run(old.run_id, &call)?.closure == Closure::Closed,
+                    !expected
+                );
+                if let Some(successor) = pending.first() {
+                    assert_eq!(terminal.superseded_by, Some(successor.attempt_id));
+                    assert_eq!(successor.retry_of, Some(id));
+                    assert_eq!(successor.context, input.request.tasks[0].context);
+                    assert_eq!(successor.extra["automatic_continuations"], used + 1);
+                    assert_eq!(
+                        store.artifact_bytes(old.run_id, &successor.prompt, RECORD_LIMIT)?,
+                        b"exact prompt"
+                    );
+                    assert_eq!(successor.trace.parent, Some(id));
+                    let events =
+                        Service::new(&store).events(0, 64, Some(successor.attempt_id), &call)?;
+                    assert_eq!(events.len(), 1);
+                    assert!(matches!(events[0].change, AttemptState::Queued { .. }));
+                }
+                // Publication replay keeps the same successor and terminal record.
+                assert_eq!(
+                    store.replay_terminal(id, &call)?.superseded_by,
+                    terminal.superseded_by
+                );
             }
-            // Publication replay keeps the same successor and terminal record.
-            assert_eq!(
-                store.replay_terminal(id, &call)?.superseded_by,
-                terminal.superseded_by
-            );
         }
         Ok(())
     }

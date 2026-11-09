@@ -85,6 +85,38 @@ impl Handoff {
         capture.finish()
     }
 
+    /// The declaration a provider's completed turns settle on. A fence counts
+    /// only at the end of the turn it was written in, so a handoff quoted or
+    /// drafted mid-turn is never final. A later turn that neither declares
+    /// nor runs a tool, such as an acknowledgement of a late notification,
+    /// leaves the earlier declaration standing; a later declaration, a later
+    /// malformed one or later tool work replaces it. Without usable turn
+    /// boundaries this is exactly [`Handoff::from_result`].
+    pub fn from_turns(result: &str, turns: &[TurnEnd]) -> Result<Option<Self>, &'static str> {
+        let mut start = 0;
+        let mut segments = Vec::with_capacity(turns.len());
+        for turn in turns {
+            if turn.at < start || !result.is_char_boundary(turn.at) {
+                return Self::from_result(result);
+            }
+            segments.push((&result[start..turn.at], turn.tool_activity));
+            start = turn.at;
+        }
+        // Text no turn ended, such as an appended diagnostic or an interrupted
+        // answer, keeps the whole-answer rule.
+        if segments.len() < 2 || !result[start..].trim().is_empty() {
+            return Self::from_result(result);
+        }
+        for (text, tool_activity) in segments.into_iter().rev() {
+            match Self::from_result(text)? {
+                Some(handoff) => return Ok(Some(handoff)),
+                None if tool_activity => return Ok(None),
+                None => {}
+            }
+        }
+        Ok(None)
+    }
+
     pub fn unfinished(&self) -> bool {
         self.status != HandoffStatus::Done
     }
@@ -92,6 +124,15 @@ impl Handoff {
     pub fn fenced(&self) -> String {
         format!("```handoff\n{}\n```", serde_json::json!(self))
     }
+}
+
+/// Where one completed provider turn ends in the decoded result text, and
+/// whether that turn ran a tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnEnd {
+    /// Byte offset in the result text.
+    pub at: usize,
+    pub tool_activity: bool,
 }
 
 /// Parse the complete stream, independently of clipped result windows. Lines
@@ -214,6 +255,80 @@ fn fence(line: &str) -> Option<(u8, usize, &str)> {
 mod tests {
     use super::*;
     const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Parser done.\",\"remaining\":[\"Renderer\"],\"decisions\":[],\"verify\":[\"Parser tests pass\"]}\n```";
+
+    /// Join turns as the decoder does, recording where each one ended.
+    fn turns(parts: &[(&str, bool)]) -> (String, Vec<TurnEnd>) {
+        let mut result = String::new();
+        let mut ends = Vec::new();
+        for (text, tool_activity) in parts {
+            if !result.is_empty() && !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(text);
+            ends.push(TurnEnd {
+                at: result.len(),
+                tool_activity: *tool_activity,
+            });
+        }
+        (result, ends)
+    }
+
+    #[test]
+    fn a_turn_ending_handoff_survives_a_later_acknowledgement() {
+        let stop = Handoff::from_result(STOP).unwrap();
+        let done = STOP.replace("stopped_early", "done");
+        let report = format!("Report.\n{STOP}");
+        // Acceptance 1: a later turn with prose only, even several, keeps it.
+        let (result, ends) = turns(&[
+            (&report, true),
+            ("The wait was redundant.", false),
+            ("Noted.", false),
+        ]);
+        assert!(Handoff::from_result(&result).is_err());
+        assert_eq!(Handoff::from_turns(&result, &ends), Ok(stop.clone()));
+        // Acceptance 4: a later valid declaration wins.
+        let (result, ends) = turns(&[(&report, true), ("Ack.", false), (&done, false)]);
+        assert_eq!(
+            Handoff::from_turns(&result, &ends).unwrap().unwrap().status,
+            HandoffStatus::Done
+        );
+        // Acceptance 3: a later malformed declaration still fails.
+        let (result, ends) = turns(&[(&report, false), ("```handoff\n{}\n```", false)]);
+        assert!(Handoff::from_turns(&result, &ends).is_err());
+        // Later tool work without a new declaration invalidates the old one.
+        let (result, ends) = turns(&[(&report, false), ("Pushed a fix.", true)]);
+        assert_eq!(Handoff::from_turns(&result, &ends), Ok(None));
+        // Without turn boundaries, or with text no turn ended, nothing changes.
+        assert_eq!(
+            Handoff::from_turns(&result, &[]),
+            Handoff::from_result(&result)
+        );
+        let mut tail = ends.clone();
+        tail.pop();
+        assert_eq!(
+            Handoff::from_turns(&result, &tail),
+            Handoff::from_result(&result)
+        );
+        let bad = [TurnEnd {
+            at: result.len() + 1,
+            tool_activity: false,
+        }];
+        assert_eq!(
+            Handoff::from_turns(&result, &bad),
+            Handoff::from_result(&result)
+        );
+    }
+
+    #[test]
+    fn a_handoff_that_did_not_end_its_turn_is_not_final() {
+        // Acceptance 2: drafted mid-turn, with work continuing after it.
+        let drafted = format!("Draft:\n{STOP}\nNow running the tests.");
+        let (result, ends) = turns(&[(&drafted, true), ("Ack.", false)]);
+        assert!(Handoff::from_turns(&result, &ends).is_err());
+        let quoted = format!("The brief's example:\n````text\n{STOP}\n````");
+        let (result, ends) = turns(&[(&quoted, true), ("Ack.", false)]);
+        assert_eq!(Handoff::from_turns(&result, &ends), Ok(None));
+    }
 
     #[test]
     fn spec_concerns_round_trip_and_absence_is_unchanged() {
