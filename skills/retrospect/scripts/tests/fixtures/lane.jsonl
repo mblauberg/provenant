@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"synthetic-lane"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"synthetic-commentary","type":"agent_message","text":"Inspecting the fixture."}}
+{"type":"item.completed","item":{"id":"synthetic-final","type":"agent_message","text":"The fixture checks out."}}
+{"type":"turn.completed","usage":{"input_tokens":8,"cached_input_tokens":2,"output_tokens":3}}

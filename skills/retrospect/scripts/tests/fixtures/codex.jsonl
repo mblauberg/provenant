@@ -1,0 +1,14 @@
+{"type":"session_meta","timestamp":"2030-01-01T00:00:00Z","payload":{"id":"synthetic-codex","cwd":"/synthetic/project","base_instructions":{"text":"Use evidence."}}}
+{"type":"turn_context","timestamp":"2030-01-01T00:00:01Z","payload":{"model":"fixture-model","developer_instructions":"Check assumptions."}}
+{"type":"event_msg","timestamp":"2030-01-01T00:00:02Z","payload":{"type":"user_message","message":"Inspect this example."}}
+{"type":"response_item","timestamp":"2030-01-01T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect this example."}]}}
+{"type":"response_item","timestamp":"2030-01-01T00:00:03Z","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Reading."}]}}
+{"type":"response_item","timestamp":"2030-01-01T00:00:04Z","payload":{"type":"message","id":"synthetic-first","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"First answer."}]}}
+{"type":"event_msg","timestamp":"2030-01-01T00:00:04Z","payload":{"type":"agent_message","message":"First answer."}}
+{"type":"event_msg","timestamp":"2030-01-01T00:00:05Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":1}}}}
+{"type":"event_msg","timestamp":"2030-01-01T00:00:05Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":1}}}}
+{"type":"compacted","timestamp":"2030-01-02T00:00:00Z","payload":{"message":"summary"}}
+{"type":"turn_context","timestamp":"2030-01-02T00:00:01Z","payload":{"developer_instructions":"Examine source rationale."}}
+{"type":"event_msg","timestamp":"2030-01-02T00:00:02Z","payload":{"type":"user_message","message":"Why that answer?"}}
+{"type":"response_item","timestamp":"2030-01-02T00:00:03Z","payload":{"type":"message","id":"synthetic-second","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Second answer."}]}}
+{"type":"event_msg","timestamp":"2030-01-02T00:00:04Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":16,"cached_input_tokens":5,"output_tokens":7,"reasoning_output_tokens":2}}}}

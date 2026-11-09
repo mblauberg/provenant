@@ -103,6 +103,47 @@
           "orchestrate"
         ]
       }
+    },
+    {
+      "id": "q9",
+      "relation": "positive",
+      "prompt": "Compare local Claude, Codex and lane histories by experiment, release era and instruction version; say when causes cannot be separated and file useful findings either way.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "retrospect",
+        "companion_skills": [
+          "tracker"
+        ]
+      }
+    },
+    {
+      "id": "q10",
+      "relation": "boundary",
+      "prompt": "Run a local history retrospective, keep the labels blind, and have multiple models inspect only the aggregate comparisons.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "retrospect",
+        "companion_skills": [
+          "orchestrate"
+        ]
+      }
+    },
+    {
+      "id": "q11",
+      "relation": "negative",
+      "prompt": "Implement prospective capture of the installed release and instruction version for future sessions.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
     }
   ]
 }
