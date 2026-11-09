@@ -1098,6 +1098,8 @@ mod tests {
             bundled = false
             [defaults.cache]
             read_share_target = 0.8
+            [defaults.lane]
+            resume_continuations = false
             [[rules]]
             model = "opencode/policy-fixture"
             [rules.schedule]

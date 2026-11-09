@@ -3351,7 +3351,7 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             "auto-continuation",
             json!({
                 "id":"writer", "prompt":prompt, "access":"worktree_write", "worktree":tree,
-                "route":{"model":"codex/gpt-6-luna","effort":"low"}
+                "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
             }),
             "30s",
         )?;
