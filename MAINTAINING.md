@@ -261,9 +261,10 @@ They always exit 0, so they only warn:
 
 Test tiers are T0 (touched crates), T1 (selected integration binaries),
 T2 (full suite), and T3 (stress and native tests). In a lane, run one cheap
-compile check and let CI run the tiers; `scripts/verify-tier` is for a person
-or a host with spare capacity, and T2 and T3 run in CI or on a suitable host.
-The host can enforce this with `lanes.local_cargo`.
+compile check, push the commit and run `scripts/lane-check <branch-or-sha>`,
+and let CI run the tiers; `scripts/verify-tier` is for a person or a host with
+spare capacity, and T2 and T3 run in CI or on a suitable host. The host can
+enforce this with `lanes.local_cargo`.
 The [test tiers runbook](docs/runbooks/test-tiers.md) describes the selector,
 runner configuration and current limits.
 

@@ -13,13 +13,14 @@ on:
       tier:
         required: true
         type: choice
-        options: ['2', '3']
+        options: ['lane', '2', '3']
 
 permissions:
   contents: read
 
 jobs:
   verify:
+    if: inputs.tier != 'lane'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -49,3 +50,41 @@ jobs:
         env:
           VERIFY_TIER: ${{ inputs.tier }}
         run: scripts/verify-tier --tier "$VERIFY_TIER"
+
+  lane:
+    name: Lane compile and lint
+    if: inputs.tier == 'lane'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Verify the dispatched ref
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          DISPATCH_COMMIT: ${{ github.sha }}
+        run: test "$REQUESTED_COMMIT" = "$DISPATCH_COMMIT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: front-door-ci-lint
+          add-job-id-key: false
+          save-if: false
+      - name: Check formatting
+        working-directory: tools/front-door
+        run: cargo fmt --all --check
+      - name: Lint
+        working-directory: tools/front-door
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Check generated reference
+        run: scripts/generate-reference --check
+      - name: Check documentation headers and blob sizes
+        run: scripts/pre-push

@@ -1,1 +1,1 @@
-Claude cloud placement from a graph now submits under the pseudo-terminal it needs, and a cloud job whose submission outcome is unknown can be settled with `provenant reconcile --abandon`. There are no breaking changes.
+Agy lanes can now reach the native keychain they need to sign in, and a cloud job whose submission outcome is unknown can be abandoned.
