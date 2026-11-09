@@ -332,6 +332,8 @@ fn mixed_status_wait_returns_on_fake_lane_while_pr_read_is_blocked() -> Result {
         &[
             "status",
             "--wait=10s",
+            "--until",
+            "any",
             "--target",
             &target,
             "--target",
