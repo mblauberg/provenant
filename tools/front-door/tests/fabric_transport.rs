@@ -2447,12 +2447,14 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
             "codex/gpt-6-luna",
             "--operation-id",
             "held-submit",
-            "--wait=3s",
+            "--wait=10s",
             "--json",
         ],
     )?;
+    // The whole call shares this budget, so a loaded host that spends part of
+    // it before the submission must still leave time to reach the peer.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(8),
+        start.elapsed() < std::time::Duration::from_secs(25),
         "{result}"
     );
     assert!(
@@ -2460,6 +2462,10 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
         "the mutating submission must reach the peer: {result}"
     );
     assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
+    assert!(
+        !result.to_string().contains("home_unavailable"),
+        "a deadline is not an unavailable home: {result}"
+    );
     assert!(!rig.root.join("peer-state/runs").exists());
     Ok(())
 }

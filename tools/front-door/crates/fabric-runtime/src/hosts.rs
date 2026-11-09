@@ -81,6 +81,10 @@ pub enum PeerError {
     SourceHost,
     #[error("peer is unavailable")]
     Unavailable,
+    /// The caller's wait ran out before the request reached the peer, so
+    /// nothing was sent and nothing is known about the peer's home.
+    #[error("the wait deadline passed before the peer was contacted")]
+    Deadline,
     /// A read-only exchange failed for a known cause. Same wire code as
     /// [`PeerError::Unavailable`]; only the message carries the detail.
     #[error("peer is unavailable: {0}")]
@@ -999,7 +1003,8 @@ impl SshTransport<'_> {
             grace
         });
         if timeout.is_zero() {
-            return Err(PeerError::Unavailable);
+            // An exhausted budget is a deadline, not an unavailable home.
+            return Err(PeerError::Deadline);
         }
         let remote_executable = peer
             .remote_executable
@@ -1598,7 +1603,7 @@ mod tests {
         };
         assert!(matches!(
             transport.exchange_within(&peer, &submit, budget, &CancelToken::new(), Duration::ZERO),
-            Err(PeerError::Unavailable)
+            Err(PeerError::Deadline)
         ));
         assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
         assert!(matches!(
@@ -2561,7 +2566,7 @@ mod tests {
         // A deadline too short to leave any timeout fails before SSH starts.
         assert!(matches!(
             transport.exchange_within(&peer, &request, budget, &CancelToken::new(), Duration::ZERO),
-            Err(PeerError::Unavailable)
+            Err(PeerError::Deadline)
         ));
         assert_eq!(executor.0.lock().unwrap().len(), 3);
     }
