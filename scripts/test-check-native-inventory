@@ -11,7 +11,7 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
 name = 'example::native_test'
-row = [name, 'macOS', 'native', 'PROVENANT_CONFINEMENT_REQUIRED', 'sandbox-exec', 'suite']
+row = [name, 'macOS', 'native', 'PROVENANT_CONFINEMENT_REQUIRED', 'suite']
 listing = {'rust-suites': {'suite': {'testcases': {name: {}}}}}
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
@@ -43,12 +43,12 @@ with tempfile.TemporaryDirectory() as directory:
     (root / 'duplicate.xml').unlink()
     # Names are scoped to a binary: two suites may legitimately use the same
     # Rust module/test name, but each must supply its own execution evidence.
-    other_row = [*row[:5], 'other']
+    other_row = [*row[:4], 'other']
     listing['rust-suites']['other'] = {'testcases': {name: {}}}
     report.write_text(f'<testsuites><testsuite><testcase classname="suite" name="{name}"/><testcase classname="other" name="{name}"/></testsuite></testsuites>')
     assert not module.check([row, other_row], listing, root)
     inventory_file = root / 'inventory.md'
-    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Tools | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 5) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
+    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 4) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
     assert len(module.inventory(inventory_file)) == 2
     unquoted = inventory_file.read_text().replace('`example::native_test`', 'example::native_test', 1)
     inventory_file.write_text(unquoted)
@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     else:
         raise AssertionError('unquoted inventory row accepted')
-    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Tools | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 5) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
+    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 4) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
     # A row without its leading pipe fails instead of ending the table early.
     lines = inventory_file.read_text().splitlines()
     inventory_file.write_text('\n'.join([lines[0], lines[1], lines[1].lstrip('| '), lines[2]]) + '\n')

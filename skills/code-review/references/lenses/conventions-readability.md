@@ -1,7 +1,6 @@
 # Lens: conventions and readability
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Ownership and structure", and the project instructions for naming and docs.
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Compare naming, layout, error style and test style with the neighbouring code
   and the project instructions.

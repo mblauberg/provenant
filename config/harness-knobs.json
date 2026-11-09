@@ -35,7 +35,47 @@
   "host_gc_settings": {
     "path": "gc",
     "settings": {
-      "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"}
+      "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"},
+      "schedule": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Run the daily scheduled sweep. false also skips admission collection; settlement pressure collection and landing cleanup still run"},
+      "idle_days": {"type": "int", "allowed": "1 to 3650 days", "default": "7", "effect": "Minimum idle age before a lane cache or declared output is collected"},
+      "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "10% of the state volume, at least 50 GiB", "effect": "Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first"},
+      "alert_below": {"type": "size", "allowed": "same syntax as free_floor", "default": "free_floor", "effect": "Free space below which an applied collection emits one gc.low_disk note per dip"},
+      "projects.{project}.regenerable": {"type": "string_list", "allowed": "directory names; not .git, .worktrees, absolute or parent paths", "default": "[\"target\"] with a root Cargo.toml, otherwise []", "effect": "Git-ignored directory names collected at any depth in the project's linked worktrees"},
+      "projects.{project}.keep": {"type": "string_list", "allowed": "worktree-relative paths", "default": "[]", "effect": "Paths, their descendants and any matching directory containing them that collection preserves"},
+      "projects.{project}.foreign_worktrees": {"type": "string", "allowed": "keep or merged-clean", "default": "keep", "effect": "merged-clean removes clean, merged linked worktrees with no known writer after a complete free census"}
+    }
+  },
+  "host_retention_settings": {
+    "path": "retention",
+    "settings": {
+      "provider_state_days": {"type": "int", "allowed": "1 to 3650 days", "default": "7", "effect": "Days a terminal attempt's provider state stays resumable; reread on each sweep"},
+      "logs_days": {"type": "int", "allowed": "1 to 3650 days", "default": "30", "effect": "Days before captures over 64 KiB and intermediate event rows of closed runs expire; the last 64 KiB is kept as a .tail file"},
+      "session_revisions": {"type": "int", "allowed": "1 to 64", "default": "8", "effect": "Checkpoint revisions a session keeps, the current one included; reread on each save"},
+      "chair_log_days": {"type": "int", "allowed": "1 to 3650 days", "default": "30", "effect": "Days a chair log payload is kept"},
+      "chair_log_entries": {"type": "int", "allowed": "1 to 100000", "default": "10000", "effect": "Chair log entries kept per session"},
+      "chair_log_bytes": {"type": "int", "allowed": "65536 to 1073741824 bytes", "default": "16777216 (16 MiB)", "effect": "Chair log payload bytes kept per session"},
+      "chair_log_replay_days": {"type": "int", "allowed": "7 to 3650 days", "default": "chair_log_days, at least 7", "effect": "Days chair log replay receipts are kept"},
+      "projects.{project}.checkpoint_soft_bytes": {"type": "int", "allowed": "1 to 262144 bytes", "default": "2048", "effect": "Advisory checkpoint size above which a save warns; the hard limit is unchanged"}
+    }
+  },
+  "host_quota_settings": {
+    "path": "domains.quota",
+    "settings": {
+      "max_parallel": {"type": "int", "allowed": "1 to 16", "default": "3", "effect": "Accounts per quota probe batch; batches and probes currently run sequentially. Out-of-range values refuse the file"},
+      "wall_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "default": "55", "effect": "Wall-clock budget for a whole quota tick. Out-of-range values refuse the file"}
+    }
+  },
+  "host_opencode_go_settings": {
+    "path": "domains.routing.opencode_go",
+    "settings": {
+      "min_monthly_allowance_usd": {"type": "int", "allowed": "0 or more; 0 disables the floor", "default": "60", "effect": "Lowest documented monthly allowance an OpenCode Go model needs to be routed or selected; a model with an unknown allowance is refused while the floor is on"}
+    }
+  },
+  "host_codex_cloud_settings": {
+    "path": "providers.codex.cloud",
+    "settings": {
+      "transport": {"type": "string", "allowed": "official or thread", "default": "official", "effect": "official uses codex cloud exec, status and list; thread uses a client for the cloud thread API"},
+      "command": {"type": "string", "allowed": "one executable name or path; no arguments", "default": "codex for official, codex-cloud-task for thread", "effect": "Cloud client executable, resolved through the host PATH"}
     }
   },
   "provider_updates": {
@@ -81,6 +121,9 @@
       "source_view_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "300", "effect": "Total time allowed to build the pinned source view of a `--use review` lane. The view is built with one batched object read, so a healthy large repository needs far less. Raise it on a slow disk or a heavily loaded host."},
       "source_view_entries": {"type": "int", "allowed": "1 to 4294967295 files", "default": "100000", "effect": "Maximum files in a pinned source view. A larger tree is refused, naming this limit."},
       "source_view_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "536870912", "effect": "Maximum total file bytes in a pinned source view. A larger tree is refused, naming this limit."},
+      "writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "[]", "effect": "Directories writer lanes may read, write and execute as subtrees; read-only lanes are unchanged"},
+      "review_exempt": {"type": "string_list", "allowed": "repository-relative paths without wildcards", "default": "[\"docs/release-notes/next.d/\", \"docs/specs/\", \"Cargo.lock\", \".tracker-input\"]", "effect": "Paths that do not count toward an uncommitted outcome; a project list replaces the host list and an empty list disables exemptions"},
+      "push_conflict_markers": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Refuse pushes that add lines starting with <<<<<<< or >>>>>>>"},
       "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."}
     }
   },
@@ -303,10 +346,10 @@
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},
-      "max_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": 64, "effect": "Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source."},
-      "max_project_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": 32, "effect": "Most lanes of any class live at once for one project; at most max_lanes."},
-      "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": 40, "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},
-      "max_project_writer_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": 30, "effect": "Most writer lanes live at once for one project; at most max_writer_lanes."},
+      "max_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "unset (no limit)", "effect": "Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source."},
+      "max_project_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": "unset (no limit)", "effect": "Most lanes of any class live at once for one project; at most max_lanes."},
+      "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "unset (no limit)", "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},
+      "max_project_writer_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": "unset (no limit)", "effect": "Most writer lanes live at once for one project; at most max_writer_lanes."},
       "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."},
       "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
       "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
@@ -500,7 +543,7 @@
       "default": "private",
       "status": "wired",
       "reader": "tools/front-door/src/fabric/owner.rs",
-      "effect": "Whether a pinned read-only lane gets an immutable source view (private) or reads the live checkout (shared, no snapshot). Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`),.",
+      "effect": "Whether an unpinned read-only graph node reads its bound checkout live (shared). A read-only lane pinned to a commit always gets an immutable source view, under every setting. Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`),.",
       "trade_off": "shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."
     },
     "lanes.supervision": {

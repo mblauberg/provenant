@@ -1,6 +1,6 @@
 # Run the Claude Code session and worktree hooks
 Owner: provenant
-Anchor: tools/front-door/tests/hooks_session.rs
+Anchor: [`hooks_session.rs`](../../tools/front-door/tests/hooks_session.rs)
 
 `provenant install --harness claude --hooks on` registers the hooks below in
 the Claude settings (see [install](install.md)). Rerun it after an upgrade to
@@ -18,19 +18,11 @@ diagnostics to stderr.
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
 
-The guard keeps its one-second deadline and enforces policy independently of
-answer-delivery support. A malformed `cwd` is rejected rather than evaluated
-against the hook process's directory. Optional delivery gets at most 50 ms
-off-thread, including blocking identity reads and offer recording. Final JSON,
-escaping and newline fit 8 KiB. Queued answers take priority; when no queued answer
-fits the final hook output, offered answers may be re-offered to the same session
-until explicitly acknowledged. Deduplicate by answer ID before acting. Denials
-take priority.
-Errors, timeouts, oversized candidates and output failures diagnose on stderr;
-a committed answer remains eligible for a later hook after a deadline or stdout
-failure. Fabric mail remains available. Injected answers are escaped untrusted
-data and confer no new authority; see the [human inbox](human-inbox.md#consume-once)
-for acknowledgement commands.
+The guard keeps its one-second deadline and enforces policy whether or not
+answer delivery is available; a malformed `cwd` is rejected rather than
+evaluated against the hook's own directory. Denials take priority over
+delivery. The [human inbox](human-inbox.md#delivery-service) owns how the hook
+offers answers, its budgets and acknowledgement.
 
 If every Bash call is denied with `guard policy unavailable`, policy root
 resolution has failed. From a terminal outside Claude, check that `HOME` resolves

@@ -3,7 +3,7 @@
 Owner: `crates/os/src/disk.rs` (measurement, report shape),
 `crates/confinement/src/disk.rs` (lane classes), `crates/run/src/disk.rs`
 (run inventory), `src/disk.rs` (composition)
-Anchor: `crates/os/src/disk.rs`, `crates/run/src/disk.rs`, `tests/disk_report.rs`
+Anchor: `crates/os/src/disk.rs`, `crates/run/src/disk.rs`
 
 `provenant disk report` inventories lane build caches, the selected
 repository's worktrees and the host state root. The JSON fields are

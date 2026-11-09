@@ -1,7 +1,6 @@
 # Lens: reliability
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Correctness and failure".
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Trace failure and partial failure paths, including visibility to operators.
 - Check retries, timeouts and idempotency for duplicate or lost work.

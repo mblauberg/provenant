@@ -219,9 +219,9 @@ pub struct AttemptSpec {
     /// below that the node leaves unset; an explicit setting always wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
-    /// `private` (default) gives a pinned read-only lane an immutable source
-    /// view; `shared` reads the live checkout. Writers keep their one
-    /// worktree, so `shared` is refused on a writer node.
+    /// `shared` lets an unpinned read-only node read its bound checkout live;
+    /// a node pinned to a commit always gets an immutable source view. Writers
+    /// keep their one worktree, so `shared` is refused on a writer node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
     /// `standard` (default) or `minimal` supervision of the lane.

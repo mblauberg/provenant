@@ -61,8 +61,9 @@ cross-tracker routes, not a second current-work owner.
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: harness asset checks for retained runtime-graph projections;
-  other prose is review-checked
+- Drift gate: `scripts/check-doc-truth` checks spec indexes, Owner/Anchor
+  headers, Anchor paths, Test citations and diagram metadata; harness asset
+  checks cover retained runtime-graph projections. Other prose is review-checked
 
 ### Merge policy
 
@@ -85,12 +86,14 @@ Documentation claims sit in three tiers, and the third is deliberate:
 
 1. **Code-checked.** Runtime schema and migration structure is owned by code
    and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
-   machine-checked.
+   machine-checked. `scripts/check-doc-truth` requires every runbook and spec
+   `Anchor:` to resolve to a source file and compares the event-intake and
+   delivery tables with the code they project. `scripts/check-harness` rejects
+   a skill `references/` path named outside its skill.
 2. **Review-checked.** The README skill count and architecture risk factors are
    maintained from current files and code; no harness check binds those regions
    to a source file. Specification prose, fenced commands, placeholders,
-   unbound projections, skill-reference links and other links remain
-   review-owned.
+   unbound projections and other links remain review-owned.
    `HARNESS.md` stays compact because it is read before cross-provider dispatch,
    risk-tier, authority or memory decisions; see [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md).
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
@@ -180,9 +183,8 @@ only licensed, evidence-backed mechanisms into the nearest owner; create a skill
 only when its trigger, authority, artefact and gate remain distinct.
 
 Nothing outside a skill may name a file under that skill's `references/`
-directory. Cross-skill references use the skill name only. This is a review
-rule; no contract test currently scans it. Required licence notices may name
-the files they cover.
+directory. Cross-skill references use the skill name only; `scripts/check-harness`
+enforces this. Required licence notices may name the files they cover.
 
 `natural-writing` is the writing hub and single owner of the shared prose
 doctrine (mechanism catalogue, Australian-English house style, condense pass
@@ -219,11 +221,7 @@ materially distinct.
 
 Trigger fixtures remain mandatory. Contract tests follow the
 machine-enforced-invariant test in **Change a skill** step 7. The eval
-triggers under **Change a skill** apply unchanged. When they fire here, use the
-held-out portfolio ([`docs/evals/skill-portfolio-2026`](docs/evals/skill-portfolio-2026/README.md))
-and lifecycle ([`docs/evals/lifecycle-routing-2026-07`](docs/evals/lifecycle-routing-2026-07/README.md))
-datasets with repeated trials, recording raw
-numerator and denominator, model and harness versions.
+triggers under **Change a skill** apply unchanged.
 
 ## Public and third-party hygiene
 

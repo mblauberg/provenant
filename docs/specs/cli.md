@@ -1,12 +1,11 @@
 # Command surface
 
 Owner: `crates/cli` (grammar, rendering), `src/` (composition, hooks)
-Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/hooks.rs`, `tests/catalogue_read_only.rs`, `crates/cli/src/console/board.rs`, `crates/run/src/board.rs`
+Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/catalogue_read_only.rs`
 
 One executable, `provenant`, serves people, skills, hooks and CI. The `cli`
 crate parses arguments, calls typed library operations and renders typed
-results. The [cross-cutting decisions](README.md#cross-cutting-decisions)
-define the envelope, exit codes and wait budgets. The machine-readable help
+results. This spec owns the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 covers the core verbs and everyday flags. The generated
 [complete CLI reference](../reference/cli-all.md), from `help --all --json`,
@@ -25,7 +24,7 @@ retain their four-hour runtime limit; since filters also accept dates and
 RFC3339 timestamps. Git-revision and console-cursor `--since` options keep
 their own types.
 
-## Lane projections
+## Attempt projections
 
 `status`, `output`, `stop` and `land` use the shared lane row for
 attempt identity, state, typed settlement cause and retry lineage. A missing
@@ -38,11 +37,8 @@ current lane field declarations.
 ## Agent output
 
 Ordinary human results default to a compact summary. The command's owner
-supplies it as typed data: a headline with counts by state, then action rows
-first (failed, review required, uncommitted, running) with IDs and states, at
-most 12 rows of 200 bytes, a count of rows held back, and one typed `next`
-command. `status`, `route list`, `quota show`, `pr status`,
-and `accounts list` do this. A command without an owner
+supplies a bounded typed summary: counts by state, action rows first, an explicit
+omission count and one typed `next` command. A command without an owner
 summary falls back to a generic truncator that shows text of up to 2 KiB whole
 and otherwise says how many lines it omitted. `next` is the only source of the
 next command: when a command has none, none is printed. Errors keep their
@@ -94,7 +90,7 @@ duplicate, invalid and truncated observations as partial coverage. A peer
 continuation indicates partial coverage; the local cursor continues the local
 walk and does not page the peer.
 
-- Test: `crates/cli/src/console/peer.rs::tests::peer_board_coverage`
+- Test: `crates/cli/src/console/peer.rs::peer_board_coverage`
 - Owner: `crates/cli/src/console/peer.rs`
 
 ### Nested tree
@@ -129,199 +125,80 @@ known sum and a missing count per token category; they describe observed nodes,
 not an estimate of unseen work. Provider-internal children are not inferred.
 
 - Why: nested work must remain visible without inventing edges or complete totals.
-- Test: `crates/cli/src/console/tree.rs::tests::nested_tree_once`
+- Test: `crates/cli/src/console/tree.rs::host_tree_preserves_lineage_detail_and_usage`
 - Owner: `crates/cli/src/console/tree.rs`, `crates/run/src/board.rs`
 
 ### Board snapshot and cursor contract
 
-`console board` must return current host-local facts in descending immutable
-attempt-sequence order, with retries as separate rows. The default selection
-must exclude terminal attempts; `--all` must include them. `--project` must
-restrict the existing binding; otherwise the board must span local projects.
-The generated reference owns syntax and the default 50 / maximum 100 row bound.
+`console board` reads indexed host-local attempts in descending immutable
+sequence order, preserving retries as separate rows. A cursor fixes the first
+page's high-water ceiling and binds the state root, host, project and filters.
+It is opaque and detects edits; it grants no authority. New attempts cannot
+enter an existing walk. Each matching attempt appears once as its range is
+read, but later state changes may remove it from an active-only selection.
+Replaying a cursor re-reads current facts rather than a frozen snapshot.
+Invalid or incompatible cursors require a fresh walk.
 
-The version 2 payload must identify UTC `observed_at`, effective `filters`,
-`high_water`, `snapshot`, current `generation`, `lanes`, `next_cursor`,
-`truncated` and `coverage`. The first page must fix `high_water` to the store's
-maximum attempt sequence (zero when empty). A continuation must retain this
-inclusive ceiling and use an exclusive descending position. New attempts above
-the ceiling must not enter that walk. Each attempt below the ceiling matching
-the filter when its sequence range is read must appear exactly once in a walk
-that follows each returned cursor once. Later state changes must not invalidate
-the cursor. A row becoming terminal before its range is read may disappear from
-an active-only walk. A valid continuation with no remaining matches must return
-an empty final page. `truncated` must mean more matching rows existed at the page
-read; `next_cursor: null` must end the walk.
+Indexed rows, ceiling validation and generation come from one SQLite read
+transaction. Every board-visible write appends an event transactionally;
+pruning preserves the latest event per attempt. Generation discovery uses
+indexed lookups, not history-blob scans. Ancillary observations cannot replace
+indexed execution facts, and a damaged observation must not hide a valid row.
 
-`snapshot` must be the CanonicalV1 record digest for domain `console-board`,
-version 2, of `(high_water,filters)`. It identifies a selection, **not frozen
-facts**. Filters must bind the resolved state-root native-path file digest,
-host identity (nullable), selected project (nullable), active/all flag and limit.
-A cursor must have shape `2.<high_water>.<before>.<checksum>`, using canonical
-decimal positions and a CanonicalV1 `console-board-position` version 2 digest
-of `(snapshot,before)`. Positions must satisfy `0 < before <= high_water <=
-i64::MAX`. Clients must treat cursors as opaque. Edited positions, checksums,
-filters, root bindings, unsupported versions and ceilings exceeding the current
-store maximum must fail with exit 2, `CATALOGUE_INPUT` and instructions to restart
-without `--cursor`. A missing store must also invalidate a continuation.
-The checksum detects accidental edits; it is public and supplies no authority
-or security boundary. Replaying a valid cursor re-reads its range.
+Rows preserve unknowns and complete owner metadata. Chair associations are
+immutable host facts checked against the request digest; provider sessions
+never imply a chair. Usage totals distinguish known zero from missing data.
+No Git probing, issue/PR inference, nested-store traversal or body reads occur.
+Artifact descriptors locate bounded reads and never prove the body is present.
 
-Each page must obtain indexed records, ceiling validation and generation in one
-SQLite read transaction. `generation` must be `events:<N>`, where N is the
-store-wide maximum committed event sequence (`events:0` for an initialised
-store with no events). Every board-visible run/attempt write must append an event in
-the same transaction, and pruning must preserve the latest event per attempt.
-Generation discovery must use primary-key end lookups, never history blob
-hashing. Unrelated project writes may advance the generation. Clients may use
-it to detect change but must not require it to stay fixed across pages.
-Missing or uninitialised run state must return `generation: "empty"`,
-`high_water: 0`, empty lanes and no cursor; `empty` is a literal, not a digest.
-Unsafe, corrupt or incompatible indexed state must fail through the error
-envelope. Reads must create no product state, identity, cache or migrations;
-SQLite WAL/shared-memory bookkeeping remains permitted.
-
-Rows must preserve complete owner metadata and unknown facts:
-
-- `lane_id: {host,run_id,task_id,attempt_id}`; unknown host identity is null.
-- `metadata: {attempt,run}` containing the complete owner records: title,
-  state and terminal reason, all four routes (including effort and account),
-  timings, usage, trace, delivery and write-grant facts, and artifact
-  descriptors. Run metadata distinguishes continuation `parent`, nested
-  `parent_attempt` and `children`; attempt metadata retains `retry_of`.
-- `chair`, from the immutable host-owned index, checked against the run request
-  digest. A missing binding is null; provider sessions never imply a chair.
-- `wait`, a best-effort admission observation, and `attention`, true for
-  terminal outcomes other than success or cancellation.
-- `usage_coverage: {known,missing}` listing the five token categories. Null
-  remains unknown, including reasoning; a reported zero is known. Source and
-  context coverage remain in the attempt usage record.
-- `observation_coverage`, `complete` when the owner observation read succeeded
-  for this generation, otherwise `unavailable`. Failed observations must leave
-  last-output time and priority null and must not discard indexed row facts.
-- `estimated_cost` and `verified_links`, null with unavailable coverage until
-  their owners expose these facts. Worktree delivery metadata stays in the
-  attempt delivery receipt; no Git probing or inferred issue/PR links.
-
-Chair bindings must remain immutable, digest-checked host facts. Wait reasons,
-process-checkpoint last-output time/priority and observation time are ancillary
-observations outside the SQLite transaction; they must not replace indexed
-execution facts. Checkpoints must match the indexed attempt generation.
-
-Successful page coverage must use these exact values:
-
-| Field | Values and meaning |
-|---|---|
-| `scope`, `host` | `local`; nullable host ID, never allocated by a read |
-| `runs` | `complete` for an opened owner store, including zero matches; `empty` for missing/uninitialised state |
-| `chairs` | `complete` when the index opened and every requested association read was valid or unbound; `partial` for lookup errors/digest mismatches; `unavailable` when the index cannot open, including missing/incompatible state |
-| `observations` | `complete` when all rows' owner reads succeeded (including an empty page); `partial` when some succeeded; `unavailable` when none succeeded on a nonempty page |
-| `nested_runs`, `estimated_cost`, `verified_links` | `unavailable`; no isolated child-store/peer traversal or inferred facts |
-
-Artifact descriptors must be bounded locators, never assertions of present file
-bodies. Board reads must never read or return prompt, result or transcript
-bodies. The existing 1 MiB envelope must refuse oversized pages without writing
-overflow artefacts and advise reducing the limit. If one row still exceeds the
-cap at limit 1, clients must use bounded `provenant output ATTEMPT` reads; this
-surface cannot render that row. A 100-row page must meet p95 ≤1 second, including
-with at least 100,000 retained attempts. Tests measure the indexed reader at
-100,000 attempts and the full console page on a small fixture. The full board
-at 100,000 attempts, including per-row observation lookups, still needs a
-measurement on a real host before this bound counts as verified.
+Reads allocate no product state or migrations; SQLite bookkeeping is permitted.
+Missing state is empty; unsafe, corrupt or incompatible state fails explicitly.
+Coverage distinguishes missing stores, partial observations and unavailable
+facts. The result cap refuses an oversized page without writing an overflow
+artifact; a single oversized row must be inspected through bounded output reads.
+[Board projection](../../tools/front-door/crates/cli/src/console/board.rs#read)
+owns payload and cursor encoding; [indexed reader](../../tools/front-door/crates/run/src/board.rs)
+owns selection and generation. A 100-row full-board page must meet p95 ≤1 second with at least 100,000
+retained attempts. That full-board target has not been verified on a real host.
 
 - Why: an active board must remain pageable while work changes, without blob
   scans, invented usage or one damaged ancillary checkpoint hiding other lanes.
-- Test: `crates/cli/src/console/board.rs::tests::board_paging_end_to_end_and_100_row_p95`;
-  `crates/run/src/board.rs::tests::board_paging_snapshot_and_metadata`;
+- Test: `crates/cli/src/console/board.rs::board_paging_end_to_end`;
+  `crates/run/src/board.rs::board_paging_snapshot_and_metadata`;
   `tests/catalogue_read_only.rs::board_read_only`;
-  `src/console.rs::tests::oversized_single_board_row_explains_recovery`
+  `src/console.rs::oversized_single_board_row_explains_recovery`
 - Owner: `crates/cli/src/console/board.rs`, `crates/run/src/board.rs`, `src/console.rs`, `src/lib.rs`
 
 ### Project and session catalogue
 
-`console projects` lists registered project IDs and their canonical Git common
-directories. Linked worktrees share a binding. `console sessions [SESSION]`
-lists only explicitly registered chairs, with the discovery record and its
-checkpoint consistency. Summary is null with `summary_status: unavailable`;
-provider, lifecycle and lane facts are not inferred. Legacy checkpoints without
-discovery remain readable through `workflow session show` and are not chairs
-inferred by the catalogue. Both commands cover local state only. `--project`
-selects an existing binding by checkout path; without it all registered local
-projects are included. Reads create no state or identity and do not repair
-stale discovery. The registry is limited to 16,384 entries (excluding its
-lock); an invalid project entry name fails the whole catalogue. Valid
-in-progress binding stages are skipped.
+`console projects` lists existing Git-common-directory bindings; linked
+worktrees share one project. Session catalogues list only explicitly registered
+chairs and report checkpoint consistency. Legacy checkpoints remain readable
+without being inferred as registrations. Reads allocate no identity, repair
+nothing and report unreadable records and scan exhaustion explicitly.
+Session cursors bind the selection and observed records; changed snapshots
+require a fresh walk. Tagged paths preserve native bytes.
 
-`chair summary show SESSION` reads the current checkpoint summary without
-allocating identity. `chair summary update SESSION --file PATCH.json
---expect-revision N` applies selected fields under the checkpoint save lock.
-Revision 0 creates a summary; stale edits return `SUMMARY_STALE` with the
-current summary revision. The returned checkpoint includes publication warnings.
-`chair summary diff SESSION --from N [--to N]` compares retained summary revision
-numbers, defaulting to the current revision and reporting unavailable revisions
-if pruned. Summary show includes a
-bounded inbox comparison for the local host, project and chair. Coverage marks
-incomplete scans and unavailable host identity; references attributed elsewhere
-or not accounted for by an incomplete scan are unknown.
+Workflow owns [summary revisions and inbox coverage](workflow.md#structured-summary-revisions-and-inbox-coverage).
+Viewer state records only local presentation and the summary revision actually
+rendered. Acknowledgements are monotonic; unavailable or pruned baselines stay
+unavailable. A lane may mark bounded request presentation state but cannot
+answer, resolve or unblock a request. Closed/expired requests refuse writes,
+and capacity refusal preserves existing baselines.
 
-`chair viewer` stores local presentation state under an explicit viewer name.
-Request state is separate from resolution and blocking. A rendered summary
-acknowledgement names the revision displayed; comparison uses retained summary
-history and reports a pruned baseline as unavailable. Acknowledged revisions are
-monotonic; `chair viewer forget VIEWER SESSION` clears a baseline when a session
-has restarted at an earlier revision. Summary responses include `to`, `summary`
-and `coverage`: an unavailable session has no summary, and a baseline ahead of
-the current revision reports `baseline_ahead` while returning the current summary.
-An explicit `--to` remains visible even when the summary is unavailable.
-A lane may run `chair viewer set-request` for the bounded `seen_revision`,
-`snoozed_until` and `dismissed` fields; it cannot answer, resolve or unblock a
-request, and `rendered` and `forget` remain outside a lane.
-Closed or expired requests refuse presentation-state writes. Closed and expired
-request state is reclaimed on successful writes for that viewer. Each viewer is limited to 10,000 request
-rows and 10,000 summary baselines per project; the project also has a combined
-limit of 100,000 viewer rows. New rows are refused at capacity, preserving
-existing baselines; forget an unneeded baseline to free space.
+Remote request answers are human acts committed by the configured owner with
+source-host and actor provenance. Retry IDs bind content. Closing and
+acknowledgement stay owner-local and grant no delegation.
 
-The console may list, show and answer requests on a configured owner host
-using the inbox CLI's `--host` or a `host:request` ID. Answers are human acts
-recorded by the owner with source host and peer actor provenance. Operation IDs
-bind retries and changed content conflicts. Close and acknowledgement remain
-owner-local operations and remote attempts return `OWNER_LOCAL_ONLY`; run them
-on the owner or in the owning chair session. No delegation is implied.
+The overview combines bounded request titles and recent attempt attention,
+excluding bodies, prompts and results. Counts describe observed rows; partial,
+unavailable and incompatible sources remain distinct. Missing labels and task
+associations stay null. It creates no owner state or migrations. The
+[console owner](../../tools/front-door/crates/cli/src/console.rs) owns payloads,
+scan budgets and pagination.
 
-`console overview` combines local pending request titles and recent lane
-attention in one bounded read. Project labels use the registered Git common
-directory's parent name; unavailable labels and task titles are null. Inbox
-requests have no task association, so their task label is always null. Each
-request includes its addressed `chair_session_id` from the inbox routing
-column, even when the record omits it. These rows remain in the scan and in
-the needs-you count. Bodies, prompts and results are excluded. The inbox scan
-returns at most 100 requests; the run scan examines at most 128 recent
-attempts, deduplicating retries. Both
-scans share a 1 MiB budget for stored record bytes, with inbox records first;
-reaching the budget marks the affected source partial.
-Counts describe the observed rows and are partial when their source reports
-`partial`. Running includes queued, starting, running and settling attempts;
-attention includes terminal outcomes other than success or cancellation.
-Missing or unreadable owner stores report `unavailable` with null
-counts; incompatible schemas report `incompatible`. Nested run stores and
-peers are not included. The overview never creates, initialises or migrates an
-owner database. SQLite may create or update its own WAL and shared-memory
-companions when reading an existing database, and committed WAL data is visible.
-
-Session pages default to 50 rows and cap at 100. The cursor binds the selected
-project, session filter, page size and observed session records; an invalid or
-changed snapshot requires restarting without the cursor. A scan is limited to
-16,384 directory entries across projects, including invalid or unregistered
-names. Exhaustion conservatively sets `scan_truncated` and `truncated`; it does
-not provide a cursor beyond the scanned subset. Directory iteration order is not
-guaranteed, so a repeated truncated scan can invalidate its cursor. An oversized
-result over 1 MiB is refused without publishing an artefact. Unreadable
-owner records return an error rather than implying complete coverage. Directory
-paths are tagged as UTF-8 or hex-encoded native bytes.
-
-- Test: `tests/catalogue_read_only.rs::catalogue_read_only`
-- Test: `tests/overview_needs_you.rs::overview_needs_you`
+- Test: `tests/catalogue_read_only.rs::catalogue_read_only`;
+  `tests/overview_needs_you.rs::overview_needs_you`
 - Owner: `crates/cli/src/console.rs`, `src/console.rs`
 
 ## Parsing
@@ -344,19 +221,17 @@ CLI and Fabric submissions share one typed request model. Manifest validation
 rejects conflicting task settings rather than silently choosing a source.
 - Why: cancel and resume act on exactly one attempt, and one request shape
   serves CLI and MCP.
-- Test: `crates/run/src/service.rs::bare_target_resolves_attempts_and_unambiguous_runs`;
-  `crates/cli/src/run.rs::manifest_rejects_flat_route_fields`
+- Test: `crates/run/src/service.rs::bare_target_resolves_attempts_and_unambiguous_runs`
 - Owner: `crates/run/src/service.rs`, `crates/cli/src/run.rs`
 
 ### Status targets
 
-`status` lists active lanes and the twenty most recent settled lanes. An optional
-run, qualified task or attempt target uses the shared ID resolver and includes
-older terminal records. `--all` includes full records and supports pagination;
-`status ID --all` is also valid. The output ends with the project's
-`review-exempt paths:` line (`review_exempt` in `--json`), the paths a writer
-may leave uncommitted without that path causing an `uncommitted` outcome.
-- Test: `tests/parser.rs::core_run_reports_generated_operation_and_status_is_newest_first`
+Status selection follows [status selection](#status-selection). An exact run,
+task or attempt target uses the shared resolver and may select older terminal
+records. The output reports the project's review-exempt paths from configuration;
+it never invents an uncommitted-work exemption.
+
+- Test: `src/fabric/unified.rs::unified_status_uses_one_row_contract_and_selects_attempts`
 - Owner: `crates/cli/src/run.rs`
 
 ### Output references and bounded tails
@@ -366,49 +241,31 @@ and a clamped tail reports its effective bound. The generated
 [complete CLI reference](../reference/cli-all.md) owns target syntax and read limits.
 - Why: a chair can inspect a precise attempt without copying a full target or
   opening a shell on its host.
-- Test: `tests/parser.rs::run_leaves_accept_control_and_report_work_refused_per_task`;
-  `tests/fabric_transport.rs::read_only_dispatch_places_on_a_peer_and_forwards_by_id`
+- Test: `crates/cli/src/run/tests_access.rs::paged_output_never_splits_a_character`;
+  `src/fabric/unified.rs::peer_output_follows_host_qualified_subtree_attempts`
 - Owner: `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
 
 ### Settled attempt provenance receipts
 
-`output TARGET --part receipt` prints one local, settled attempt's applied
-route, resolution source and canonical reviewer attribution. An attempt target
-is exact; `RUN` or `RUN/TASK` is accepted only when it selects exactly one
-attempt. Ambiguous targets,
-nonterminal attempts and peer transport are refused. `--trace` conflicts with
-`--part receipt`.
+An output receipt identifies one local settled attempt's applied route,
+resolution source and canonical reviewer attribution. Ambiguous, nonterminal
+and peer-owned targets refuse rather than guess. A canonical writer request
+is labelled as a writer, never a reviewer.
 
-The full human output has this shape (compact output adds a next command):
+Only a matching recorded pool pick proves a pool selection; only a matching
+applied request proves an explicit model. Fallback requires both a canonical
+fallback match and evidence that the requested route was skipped. Missing
+route, effort or family evidence remains unknown: no provider default is
+inferred. Reviewer identity comes from `AttemptFact.reviewer`, independently
+of the route projection. The
+[receipt renderer](../../tools/front-door/crates/cli/src/run.rs) owns field and
+text encoding.
 
-```text
-Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run RUN/TASK/ATTEMPT
-Reviewer provenance: observed, actor ACTOR, model codex/gpt-6.1-sol, family openai
-```
-
-A canonical task with a writer request uses `Writer:` instead of `Reviewer:`.
-The resolution source is `explicit`, `pool NAME`, `fallback` or `unknown`.
-A matching recorded pool pick proves `pool NAME`; an applied model matching the
-requested model proves `explicit`. A different applied model proves `fallback`
-only when it matches a canonical task fallback and the requested route was
-recorded as skipped. Other records print `unknown`.
-
-A settled attempt without a recorded route still produces a receipt. Missing
-route fields, unrecorded effort and uncatalogued model family print `unknown`;
-no provider default effort is inferred. Model names are qualified with their
-adapter before family lookup. The second line reports `AttemptFact.reviewer`
-provenance and actor identity, with its observed model and catalogue family.
-Missing reviewer fields print `unknown`.
-
-`--json` returns `run_id`, `task_id`, `attempt_id`, `adapter`, `model`, `effort`,
-`family`, `role` (`reviewer` or `writer`), `resolved_from`, the exact first
-`receipt` line and second `reviewer_provenance` line without trailing newlines,
-and `reviewer` with `provenance`, `actor_id`, `model` and `family`.
 - Why: chairs can cite grep-able provenance without calling a writer a reviewer
   or guessing provider defaults.
-- Test: `tests/dispatch_provider.rs::receipt_output_resolves_run_task_and_attempt`;
-  `::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
-  `::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
+- Test: `tests/graph_provider.rs::receipt_output_resolves_run_task_and_attempt`;
+  `tests/graph_provider.rs::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
+  `tests/graph_provider.rs::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
   `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`
 - Owner: `crates/cli/src/run.rs`
 
@@ -429,8 +286,11 @@ with `RESULT_TOO_LARGE` (exit 3) and a pointer to a published file or paged
 read; it never truncates a result
 or reruns a mutation. Paged lists bind their cursor to the input digest and
 preserve findings on every page. Human-readable output escapes terminal
-control sequences, including in peer text. Envelope and exit-code contracts
-belong to the [cross-cutting decisions](README.md#cross-cutting-decisions).
+control sequences, including in peer text. The [renderer](../../tools/front-door/crates/cli/src/render.rs#exit_status)
+owns exit mapping: success/waiting 0, failure/refusal 1, invalid input 2,
+internal error 3, unavailable 4, pending 5, timeout 124 and cancellation 130.
+The versioned JSON envelope carries command, status, data, warnings and error;
+unknown facts remain null and commands never silently truncate machine results.
 - Why: a result must be whole or absent, and a lane must not forge terminal
   output.
 - Test: `crates/cli/src/render.rs::oversize_is_rejected_before_any_stdout_and_lf_counts`;
@@ -472,8 +332,7 @@ and its fallback receipt; account and quota guards still apply.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;
-  `crates/cli/src/lib.rs::help_all_lists_each_error_code_once_with_its_meaning`;
-  `tests/fabric_transport.rs::writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch`
+  `crates/cli/src/lib.rs::help_all_lists_each_error_code_once_with_its_meaning`
 - Owner: `crates/run/src/service.rs`
 
 ### Waits are readers
@@ -487,7 +346,7 @@ own the accepted bounds.
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
 - Owner: `crates/cli/src/lib.rs`
 
-### Lane waits count only new settlements
+### Waits count only new settlements
 
 An unqualified lane wait counts a lane only if it was unsettled when the wait started
 or settled since, so a settled older attempt never satisfies a wait on a newer
@@ -511,27 +370,12 @@ refuse rather than silently omitting lanes.
 - Why: a stale settlement must never wake a chair that waits for newer work,
   and selecting by session removes hand-copied ID lists.
 - Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
-  `::a_named_attempt_counts_whenever_it_settled`;
-  `::since_counts_settlements_before_arming`;
-  `::already_settled_named_lanes_return_their_terminal_rows`;
-  `::a_fetch_gets_the_time_left_and_none_starts_after_the_deadline`;
-  `::arming_stops_retrying_at_the_deadline_with_the_last_cause`;
-  `::since_selects_by_settlement_time_not_queue_order`;
-  `::since_refuses_a_scan_past_its_cap_instead_of_missing_lanes`;
-  `::a_lane_that_settles_during_initial_peer_failures_still_counts`;
-  `::a_running_lane_pushed_off_the_page_keeps_the_wait_open`;
-  `::a_lane_that_settles_off_the_page_is_kept_in_the_result`;
-  `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`;
-  `::wait_starts_no_fetch_after_its_deadline`;
-  `::every_read_of_a_fetch_gets_only_the_time_the_earlier_ones_left`;
-  `::no_read_starts_at_or_after_the_deadline`;
-  `::a_zero_second_budget_still_makes_its_one_read`;
-  `::the_missing_lane_lookup_shares_the_first_reads_deadline`;
-  `crates/cli/src/lib.rs::lanes_session_and_watch_have_bounded_shapes`;
-  `tests/parser.rs::lanes_watch_and_session_selection_report_an_empty_store`
+  `crates/cli/src/run/watch.rs::a_named_attempt_counts_whenever_it_settled`;
+  `crates/cli/src/run/watch.rs::since_counts_settlements_before_arming`;
+  `crates/cli/src/run/remote.rs::a_peer_call_is_capped_by_the_time_left_and_the_peer_limit`
 - Owner: `crates/cli/src/run/watch.rs`, `crates/cli/src/run.rs`, `crates/cli/src/run/remote.rs`
 
-### Lane watch is one stable line per event
+### Watch is one stable line per event
 
 A lane watch uses the same selection rules as a wait and emits each observed
 state transition once. Event lines contain stable identifiers rather than free
@@ -539,7 +383,7 @@ text and are flushed immediately. Newly dispatched lanes join the watch.
 The final event distinguishes settlement from timeout.
 - Why: a chair must be told when work settles without polling for it.
 - Test: `crates/cli/src/run/watch.rs::watch_emits_each_state_once_and_ends_when_all_settle`;
-  `::watch_times_out_with_pending_lanes_and_names_the_host`
+  `crates/cli/src/run/watch.rs::watch_times_out_with_pending_lanes_and_names_the_host`
 - Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
 
 ### Status selection
@@ -559,7 +403,7 @@ skipped), refuse a head change during verification and fail closed on
 incomplete evidence.
 - Why: a merge must land exactly the head that CI verified.
 - Test: `tests/pr.rs::land_refuses_head_changes_before_and_after_checks`;
-  `::land_refuses_unpassed_missing_and_malformed_checks`
+  `tests/pr.rs::land_refuses_unpassed_missing_and_malformed_checks`
 - Owner: `src/pr.rs`
 
 ### Landing adds no merge authority
@@ -628,18 +472,9 @@ Retrying an already-merged PR bypasses CI and merge and retries safe cleanup.
 - Why: a landing is four routine steps, and none of them may widen what was
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
-  `::pr_land_prunes_the_selected_merged_worktree`;
-  `::pr_land_from_lane_ignores_only_its_callers`;
-  `::pr_land_refuses_incomplete_worker_census`;
-  `::pr_land_canonicalises_quoted_worktree_paths`;
-  `::pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence`;
-  `::pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores`;
-  `::pr_land_primary_with_separate_git_directory`;
-  `::pr_land_refuses_each_unsafe_step_and_reports_the_rest`;
-  `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
-  `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;
-  `::pr_land_leaves_a_reused_branch_name_alone`;
-  `crates/confinement/src/worktrees.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`
+  `src/pr_land_tests.rs::pr_land_prunes_the_selected_merged_worktree`;
+  `src/pr_land_tests.rs::pr_land_from_lane_ignores_only_its_callers`;
+  `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`
 - Owner: `src/pr/land.rs`, `src/worktrees.rs`, `crates/confinement/src/worktrees.rs`
 
 ### Pull request bodies come from receipts
@@ -653,8 +488,7 @@ The generated [complete CLI reference](../reference/cli-all.md) owns invocation 
 - Why: the chair rebuilt the same body by hand for every pull request, and a
   hand-built body can state a head or route the receipts do not hold.
 - Test: `crates/cli/src/pr_body.rs::the_repository_template_is_filled_from_the_receipts`;
-  `::a_review_of_another_head_or_no_review_is_stated_not_hidden`;
-  `::a_template_missing_a_section_is_refused`;
+  `crates/cli/src/pr_body.rs::a_review_of_another_head_or_no_review_is_stated_not_hidden`;
   `src/pr_land_tests.rs::pr_open_refuses_what_the_receipts_cannot_support`;
   `tests/pr.rs::pr_status_prints_one_compact_line_per_pull_request`
 - Owner: `crates/cli/src/pr_body.rs`, `src/pr/open.rs`, `src/pr/status.rs`
@@ -666,7 +500,7 @@ and backslashes as double-quoted characters, so `sh`, `bash`, `zsh` and `fish` r
 them literally.
 - Why: a path or session ID must never become shell syntax.
 - Test: `src/chair.rs::chair_quote_encodes_apostrophes_and_backslashes`;
-  `::chair_command_and_hook_run_the_same_in_every_shell`
+  `src/chair.rs::chair_command_and_hook_run_the_same_in_every_shell`
 - Owner: `src/chair.rs`
 
 ### Bash guard fails closed
@@ -678,7 +512,7 @@ second; oversized, malformed, unreadable or timed-out input is denied, and if th
 denial cannot be written it exits 2. It never echoes or persists input.
 - Why: a guard that allows on error is no guard.
 - Test: `tests/hooks.rs::unreadable_and_stalled_input_cannot_allow_bash`;
-  `::denial_write_failure_uses_recorded_exit_two_fallback`
+  `tests/hooks.rs::denial_write_failure_uses_recorded_exit_two_fallback`
 - Owner: `crates/cli/src/hooks.rs`, `src/hooks.rs`
 
 ### Shell commands use confinement
@@ -702,7 +536,8 @@ false` turns it off; the other refusals remain. It identifies the default
 branch from the remote's advertisement, refuses when any inspection fails,
 disables inherited redirects and never fetches.
 - Why: the last local guard before shared history changes.
-- Test: `tests/hooks.rs::pre_push_refuses_non_fast_forward_to_remote_default_alias` and `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
+- Test: `tests/hooks.rs::pre_push_refuses_non_fast_forward_to_remote_default_alias`;
+  `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
 - Owner: `src/hooks.rs`
 
 ### Claude worktree hooks go through the worktree owner
@@ -719,9 +554,9 @@ a bounded stderr cause on refusal.
   hook must not widen what removal may delete, so a clean tree a person made
   is never removed on Claude's say-so.
 - Test: `tests/hooks_session.rs::worktree_hooks_create_and_remove_through_the_worktree_owner`;
-  `::worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths`;
-  `::worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make`;
-  `::worktree_remove_accepts_an_owned_tree_after_a_commit`
+  `tests/hooks_session.rs::worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths`;
+  `tests/hooks_session.rs::worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make`;
+  `tests/hooks_session.rs::worktree_remove_accepts_an_owned_tree_after_a_commit`
 - Owner: `src/hook_worktree.rs`
 
 ### Checks report, never repair
@@ -743,10 +578,10 @@ listed paths, and commit metadata checks are unaffected. Changes to this
 allowlist require review.
 - Why: a release scan that passes on missing evidence would publish secrets.
 - Test: `tests/checks.rs::release_ignores_grafts_and_rejects_missing_ancestry_evidence`;
-  `::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`;
-  `crates/cli/src/check/release.rs::tests::reviewed_literal_is_suppressed_but_other_line_at_same_path_is_reported`;
-  `::different_history_token_at_a_listed_path_is_reported`;
-  `::stale_fixture_entry_is_reported_and_suppression_count_is_noted`
+  `tests/checks.rs::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`;
+  `crates/cli/src/check/release.rs::reviewed_literal_is_suppressed_but_other_line_at_same_path_is_reported`;
+  `crates/cli/src/check/release.rs::different_history_token_at_a_listed_path_is_reported`;
+  `crates/cli/src/check/release.rs::stale_fixture_entry_is_reported_and_suppression_count_is_noted`
 - Owner: `crates/cli/src/check/`, `src/checks.rs`
 
 ## Not provided

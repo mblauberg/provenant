@@ -2,7 +2,9 @@
 
 Copy these sections into the target's declared work-item runbook (default
 `docs/runbooks/github-workflow.md`), cut what does not apply, and let the project add
-its own mechanics. This repository's own runbook is the worked example.
+its own mechanics. Open the runbook with `Owner:` (the responsible role) and
+`Anchor:` (the target's source symbols or tests that the text must track).
+This repository's own runbook is the worked example.
 
 ## Statuses
 

@@ -7,8 +7,8 @@ Source: `provenant-records print-wire-schemas`.
 These JSON Schemas (draft 2020-12) describe retained version 1 wire records.
 Their lane rows share the same projection. Historical schema filenames and
 titles are record identifiers, not current command guidance. Use the
-[CLI reference](cli.md) for the graph commands. MCP schemas describe planned
-structuredContent; version 2 is not emitted yet.
+[CLI reference](cli.md) for the graph commands. MCP tools emit schema version 2
+as `_meta."io.provenant/schemaVersion"`.
 
 A non-ok status may carry `error: null` and partial `data`, so the schemas
 check `data` only for `ok`, `pending` and `waiting`. An unobserved stop may

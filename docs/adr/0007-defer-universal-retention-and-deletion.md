@@ -34,8 +34,8 @@ Approved collection classes are:
   first-parent history stay. A failed fetch grants no deletion authority
   ([#1683](https://github.com/mblauberg/provenant/issues/1683)).
 - Explicitly declared regenerable output: require a clean registered worktree,
-  known terminal lanes, writer exclusion and no writes in the preceding
-  24 hours. Protect tracked and configured keep paths; never follow symlinks;
+  known terminal lanes and writer exclusion. Collection ages and immediate
+  settlement/merged-tree exceptions belong to the [GC runbook](../runbooks/gc.md). Protect tracked and configured keep paths; never follow symlinks;
   recheck identity and recursive write times after detachment
   ([#1687](https://github.com/mblauberg/provenant/issues/1687)).
 - Verified detached provider-state payloads under ADR 0031.
