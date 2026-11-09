@@ -1,4 +1,4 @@
 ## Fixes
 ### Pipelines and graphs
 
-- Read-only lanes using `light` now read the bound writer checkout. A dirty checkout or a HEAD that differs from the pinned commit uses a snapshot, so the review describes its recorded commit (#3051).
+- Pinned read-only lanes always use a snapshot of the pinned commit, including with `light` or `shared` isolation. Unpinned read-only lanes under `shared` read the bound worktree or current directory live (#3051).

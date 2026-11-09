@@ -3160,8 +3160,7 @@ impl BoundGraphOwner<'_> {
                         self.network,
                     )?;
                 }
-                // Every pinned reader resolves and verifies its source, including
-                // shared readers that may be able to skip the immutable view.
+                // Every pinned reader resolves and verifies its snapshot source.
                 if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     && source_commit.is_some()
                 {
@@ -3210,30 +3209,9 @@ impl BoundGraphOwner<'_> {
                             });
                         }
                         grants.source_identity = Some(source_identity);
-                        // A verdict's pin must describe the tree being read. Failed
-                        // or incomplete Git observations conservatively use a snapshot.
-                        grants.source_live = node
-                            .attempt
-                            .is_some_and(|spec| spec.effective_isolation() == "shared")
-                            && self
-                                .repair_git(&source, &["rev-parse", "--verify", "HEAD"])
-                                .is_ok_and(|head| Some(head.trim()) == source_commit)
-                            && self
-                                .repair_git(
-                                    &source,
-                                    &[
-                                        "status",
-                                        "--porcelain=v1",
-                                        "--untracked-files=all",
-                                        "--ignored",
-                                    ],
-                                )
-                                .is_ok_and(|status| status.is_empty());
-                        if !grants.source_live {
-                            // A preset may lower its source worktree to a read root.
-                            // The immutable view replaces those live-source grants.
-                            grants.read_roots.retain(|root| !root.starts_with(&source));
-                        }
+                        grants.source_live = false;
+                        // The immutable view replaces live-source grants.
+                        grants.read_roots.retain(|root| !root.starts_with(&source));
                         Some(source)
                     };
                 }

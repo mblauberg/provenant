@@ -65,7 +65,7 @@ settings:
 
 | Setting | `light` | Default | Effect |
 |---|---|---|---|
-| `attempt.isolation` | `shared` | `private` | A pinned read-only lane reads its bound live checkout when clean and at the pinned commit; otherwise it uses an immutable source view. |
+| `attempt.isolation` | `shared` | `private` | Pinned read-only lanes use an immutable source view; unpinned read-only lanes read the bound checkout live. |
 | `attempt.supervision` | `minimal` | `standard` | A silent provider is marked after one hour, not `lanes.silence_seconds`. |
 | `attempt.receipts` | `none` | `delivery` | Requested writer delivery still runs and records its outcome. |
 
@@ -80,9 +80,10 @@ provenant run --use task --file brief.md --knob lanes.supervision=minimal
 
 An explicit setting beats the preset. The preset skips only steps a read-only
 lane does not need: a read-only lane already has no writer worktree, dependency
-install or branch. `shared` skips the source snapshot only when the bound checkout
-is clean and its HEAD matches the pinned commit. Source registration and identity
-checks still apply. Writers keep one
+install or branch. Pinned read-only lanes always use a snapshot of their pinned commit, including
+under `shared`. Unpinned read-only lanes under `shared` read the bound worktree
+or current directory live. Source registration and identity checks still apply
+to pinned readers. Writers keep one
 writer per worktree, so `shared` isolation is refused on a writer node. Secret
 redaction, confinement and object integrity are not settings and stay on in
 every preset. The matching knobs are `lanes.isolation`, `lanes.supervision` and

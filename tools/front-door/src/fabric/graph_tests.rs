@@ -2732,14 +2732,14 @@ mod provisioned_writer_submission_tests {
     }
 
     #[test]
-    fn light_reader_pinned_to_writer_binds_live_or_snapshot_source()
+    fn light_reader_pinned_to_writer_binds_snapshot_source()
     -> Result<(), Box<dyn std::error::Error>> {
         if super::peer_tests::host_test(
-            "fabric::provisioned_writer_submission_tests::light_reader_pinned_to_writer_binds_live_or_snapshot_source",
+            "fabric::provisioned_writer_submission_tests::light_reader_pinned_to_writer_binds_snapshot_source",
         )? {
             return Ok(());
         }
-        for condition in ["clean", "moved", "dirty", "untracked"] {
+        for condition in ["clean", "moved", "dirty", "untracked", "unpinned"] {
             let rig = crate::worktree_tests::repository()?;
             crate::worktree_tests::git(&rig, &["worktree", "add", "-qb", "reader-source", ".worktrees/reader-source"])?;
             let source = rig.project.join(".worktrees/reader-source");
@@ -2780,7 +2780,11 @@ mod provisioned_writer_submission_tests {
                 extra: Default::default(), graph_id: "light-reader-source".into(),
                 node_id: "reader".into(), route_index: 0,
             };
-            let spec = serde_json::from_value(serde_json::json!({"preset":"light"}))?;
+            let spec = if condition == "unpinned" {
+                serde_json::from_value(serde_json::json!({"isolation":"shared", "directory": source}))?
+            } else {
+                serde_json::from_value(serde_json::json!({"preset":"light"}))?
+            };
             let node = graph::NodeInput {
                 require_skill_location: false, settlement_retries: Some(1),
                 prior_attempts: &[], family_peers: &[],
@@ -2790,7 +2794,7 @@ mod provisioned_writer_submission_tests {
                 },
                 read_roots: &[], attachments: &[], capabilities: None, capability_sources: None,
                 attempt: Some(&spec), distinct_from_attempts: &[], require_distinct: false,
-                source_commit: Some(&head), review_base: None, title: "reader",
+                source_commit: (condition != "unpinned").then_some(head.as_str()), review_base: None, title: "reader",
                 prompt: "review the pinned writer", required_verdict: None,
                 deadline_seconds: None, inputs_dir: None,
             };
@@ -2814,10 +2818,12 @@ mod provisioned_writer_submission_tests {
             let record = store.record(id.parse()?, &call)?;
             let request = store.request(record.run_id, &call)?;
             let task = request.tasks.first().ok_or("sealed reader")?;
-            assert_eq!(task.head.as_deref(), Some(head.as_str()), "{condition}");
+            if condition != "unpinned" {
+                assert_eq!(task.head.as_deref(), Some(head.as_str()), "{condition}");
+            }
             assert_eq!(task.access.source_root.as_deref(), Some(source.as_path()), "{condition}");
             assert!(task.access.source_identity.is_some(), "{condition}");
-            assert_eq!(task.access.source_live, condition == "clean", "{condition}");
+            assert_eq!(task.access.source_live, condition == "unpinned", "{condition}");
             assert!(task.writer.is_none(), "{condition}");
         }
         Ok(())
