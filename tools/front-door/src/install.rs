@@ -1591,6 +1591,7 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String>
         .unwrap_or(provenant_records::BASELINE_STATE_FORMAT_VERSION);
     let legacy = pending_upgrade_findings(&targets.roots.state, true)?;
     let legacy_graphs: std::collections::BTreeSet<_> = legacy.pending_graphs.into_iter().collect();
+    let legacy_lanes: std::collections::BTreeSet<_> = legacy.live_lanes.into_iter().collect();
     let declared_break = installed_version != provenant_records::STATE_FORMAT_VERSION;
 
     for (project, id) in classified.pending_graphs {
@@ -1604,10 +1605,12 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String>
                 .push(format!("Pending graph {project}/{id} in flight"));
         }
     }
-    if declared_break {
-        outcome.blocking.extend(classified.live_lanes);
-    } else {
-        outcome.warnings.extend(classified.live_lanes);
+    for lane in classified.live_lanes {
+        if declared_break || legacy_lanes.contains(&lane) {
+            outcome.blocking.push(lane);
+        } else {
+            outcome.warnings.push(lane);
+        }
     }
 
     let config = std::env::var_os("XDG_CONFIG_HOME")

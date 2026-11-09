@@ -1720,8 +1720,15 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
 }
 
 #[test]
-fn upgrade_preflight_warns_and_proceeds_on_pending_work_when_no_break() -> Result {
-    let rig = TestRig::new()?;
+fn upgrade_preflight_blocks_legacy_live_lane_on_matching_version() -> Result {
+    let mut rig = TestRig::new()?;
+    let stage = staged(&rig)?;
+    let installed = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &args(&stage, false),
+        None,
+    )?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
     let db_path = rig.state.join("run.sqlite3");
     let db = rusqlite::Connection::open(&db_path)?;
     db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('proj-warn','run-warn','lane-warn',X'7b7d',0);")?;
@@ -1740,14 +1747,14 @@ fn upgrade_preflight_warns_and_proceeds_on_pending_work_when_no_break() -> Resul
         rig.root.to_str().ok_or("fixture source")?,
         "--upgrade-preflight",
     ])?;
-    assert_eq!(code(&result), 0, "{result:?}");
+    assert_eq!(code(&result), 2, "{result:?}");
     let output = String::from_utf8(result.stdout.bytes)?;
     assert!(
-        output.contains("Warning: Live lane proj-warn/run-warn/lane-warn"),
+        output.contains("Live lane proj-warn/run-warn/lane-warn"),
         "{output}"
     );
     assert!(
-        !output.contains("Finish or cancel pending graphs"),
+        !output.contains("Warning: Live lane proj-warn/run-warn/lane-warn"),
         "{output}"
     );
     Ok(())
