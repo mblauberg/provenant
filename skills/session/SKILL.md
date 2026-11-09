@@ -70,8 +70,8 @@ lane progress outside commits and end lane results with their current handoff.
 Report changed work, criterion evidence, omissions and remaining gates using
 `deliver`'s outcome report.
 
-Runtime details live in [session checkpoints](../../docs/runbooks/session-checkpoints.md),
-[Claude hooks](../../docs/runbooks/claude-hooks.md) and the
-[human inbox](../../docs/runbooks/human-inbox.md). Cross-host
+Inspect checkpoint commands with `provenant workflow session --help` and
+inbox commands with `provenant ask --help`. Follow the repository's runbook
+for hook setup. Cross-host
 `provenant workflow session handoff` can transfer content and launch a peer
 session; inspect its dry run and existing disclosure authority first.

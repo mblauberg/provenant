@@ -116,8 +116,11 @@ Harness asset checks enforce the machine-checkable subset.
 3. Nothing outside an owning skill names a file under its `references/`
    directory. Cross-skill references use the skill name only.
 4. `GLOBAL-AGENTS.md` and `HARNESS.md` contain no repository-relative `docs/`,
-   `config/` or `scripts/` paths and do not name `MAINTAINING.md`;
-   `scripts/check-harness` enforces this. Runnable commands are PATH-resolved. Fabric
+   `config/` or `scripts/` paths and do not name `MAINTAINING.md`. Installed skills
+   keep local Markdown links within their own directory; use a skill-local
+   reference, a `provenant` command or the consuming repository's runbook for
+   other guidance. `scripts/check-harness` enforces this for skill entrypoints and
+   supporting Markdown. Runnable commands are PATH-resolved. Fabric
    identity derives from the working directory.
 5. `HARNESS.md` is the sole ambient skill resolver. It states that skills
    install into each configured harness's skills directory and names no

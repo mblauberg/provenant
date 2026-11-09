@@ -114,6 +114,7 @@ def main():
             fail(path, f"line {number}: names {named}; link the owning skill's SKILL.md instead")
 
     def markdown(path, text):
+        owner = next((p for p in path.parents if p / "SKILL.md" in paths), None)
         fenced = None
         for number, line in enumerate(text.splitlines(), 1):
             for named in re.findall(r"(?<![\w/.-])((?:skills|library)/[\w-]+/references/[\w./-]*)", line):
@@ -129,12 +130,20 @@ def main():
             if fenced:
                 continue
             line = re.sub(r"(`+).*?\1", "", line)
-            for match in re.finditer(r"\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)", line):
-                target = match.group(1).strip("<>")
-                if ":" in target or target.startswith("/"):
+            targets = re.findall(r"\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)", line)
+            definition = re.match(r"^ {0,3}\[[^\]]+\]:\s*(<[^>]+>|\S+)", line)
+            if definition:
+                targets.append(definition.group(1))
+            for target in targets:
+                target = target.strip("<>")
+                if ":" in target or target.startswith("//"):
                     continue
                 relative, _, anchor = target.partition("#")
                 destination = (root / path.parent / urllib.parse.unquote(relative)).resolve() if relative else root / path
+                if owner and not destination.is_relative_to(root / owner):
+                    fail(path, f"line {number}: link leaves the installed skill: {target}; use a skill-local reference, a provenant command or the repository's runbook")
+                if target.startswith("/"):
+                    continue
                 if not destination.is_relative_to(root):
                     warnings.append(f"{path}:{number}: link escapes the repository: {target}")
                     continue
