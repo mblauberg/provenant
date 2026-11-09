@@ -486,6 +486,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "CARGO_TARGET_DIR",
                 "CARGO_BUILD_BUILD_DIR",
                 "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
+                "CARGO_NET_OFFLINE",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
                 "CODEX_HOME",
@@ -525,7 +526,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         {
             let index = expected
                 .iter()
-                .position(|key| *key == "CARGO_CACHE_AUTO_CLEAN_FREQUENCY")
+                .position(|key| *key == "CARGO_NET_OFFLINE")
                 .expect("cargo env")
                 + 1;
             expected.splice(index..index, ["DEVELOPER_DIR", "SDKROOT"]);
@@ -559,6 +560,13 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         // Git selection is replaced after the adapter's environment is built.
         expected.push("PROVENANT_GIT");
         assert_eq!(keys, expected, "{id}");
+        if id == "codex" {
+            // This fixture grants provider-only networking. Cargo must use
+            // cached sources rather than attempting dependency downloads.
+            assert!(spec.env.iter().any(|(key, value)| {
+                key == "CARGO_NET_OFFLINE" && value == "true"
+            }));
+        }
         assert!(
             spec.env.iter().any(|(key, value)| {
                 key == "PROVENANT_GIT" && value == "/fixture/scratch/read-only-git/git"

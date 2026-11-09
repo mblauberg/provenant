@@ -2178,7 +2178,7 @@ mod tests {
         };
         assert_eq!(refusal.template, "task");
         assert!(
-            matches!(&refusal.fault, provenant_fabric_runtime::graph::template::ParameterFault::Unknown { key: Some(key), .. } if key == "bogus"),
+            matches!(&refusal.fault, provenant_fabric_runtime::graph::template::ParameterFault::Unknown { key: Some(key), accepted, .. } if key == "bogus" && accepted.is_empty()),
             "{refusal:?}"
         );
         let diagnostic = error.diagnostic();
@@ -2188,7 +2188,10 @@ mod tests {
             detail.contains("template task has no parameter bogus"),
             "{detail}"
         );
-        assert!(detail.contains("accepted parameters:"), "{detail}");
+        assert!(
+            detail.contains("template task takes no parameters"),
+            "{detail}"
+        );
         let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
         assert_eq!(restored.diagnostic(), diagnostic);
         Ok(())
