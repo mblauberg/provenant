@@ -6,8 +6,8 @@ use std::path::Path;
 /// test can hold the set to snake_case without duplicates.
 macro_rules! detail_codes {
     ($($name:ident = $text:literal),* $(,)?) => {
-        // Toolchain verification runs only on macOS, where seeds are cloned.
-        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        // Toolchain verification runs only on Unix, where seeds are cloned.
+        #[cfg_attr(not(unix), allow(dead_code))]
         pub(crate) mod codes {
             $(pub(crate) const $name: &str = $text;)*
             #[cfg(test)]
@@ -81,13 +81,24 @@ impl Outcome {
             detail: None,
         }
     }
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn fallback(reason: &'static str) -> Self {
         Self {
             status: "fallback",
             reason,
             detail: None,
         }
+    }
+    /// One line for the host's stderr when a seed was wanted and not used, so
+    /// a lane that builds its dependencies from scratch is not a surprise.
+    pub(crate) fn fallback_warning(&self, what: &str) -> Option<String> {
+        (self.status == "fallback").then(|| {
+            format!(
+                "warning: {what} not seeded ({}{}); this lane builds without it",
+                self.reason,
+                self.detail.map(|d| format!(": {d}")).unwrap_or_default()
+            )
+        })
     }
     pub(crate) fn fallback_detail(reason: &'static str, detail: &'static str) -> Self {
         Self {
@@ -107,13 +118,13 @@ pub(crate) fn seed_registry(
     if !enabled {
         return Outcome::skipped("disabled");
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         seed_store_cancellable(home, cache, "registry", Some(cancel), |source, dest| {
             clone_registry(source, dest, cancel)
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         let _ = (home, cache, cancel);
         Outcome::skipped("unsupported_platform")
@@ -130,13 +141,13 @@ pub(crate) fn seed_git(
     if !enabled {
         return Outcome::skipped("disabled");
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         seed_store_cancellable(home, cache, "git", Some(cancel), |source, dest| {
             clone_git(source, dest, cancel)
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         let _ = (home, cache, cancel);
         Outcome::skipped("unsupported_platform")
@@ -155,7 +166,7 @@ pub(crate) fn seed_target(
     if !enabled {
         return Outcome::skipped("disabled");
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         let (version, triple) = match crate::target_seed::lane_rustc_metadata_cancellable(
             worktree,
@@ -175,7 +186,7 @@ pub(crate) fn seed_target(
             |source, dest| clone_target(source, dest, cancel),
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         let _ = (state, cache, worktree, home, environment, cancel);
         Outcome::skipped("unsupported_platform")
@@ -193,7 +204,7 @@ fn seed_target_with(
     seed_target_cancellable(state, cache, version, triple, None, clone)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn seed_target_cancellable(
     state: &Path,
     cache: &Path,
@@ -336,7 +347,7 @@ fn seed_target_cancellable(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn clone_target(
     source: &Path,
     destination: &provenant_os::fs::Directory,
@@ -376,7 +387,7 @@ fn seed_store_with(
     seed_store_cancellable(home, cache, store, None, clone)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn seed_store_cancellable(
     home: &Path,
     cache: &Path,
@@ -505,7 +516,7 @@ fn seed_store_cancellable(
 
 // Stale or failed staging trees can be large too. Leave a partial private
 // tree for the next seed if cancellation arrives during cleanup.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn remove_seed_tree(
     parent: &provenant_os::fs::Directory,
     name: &std::ffi::OsStr,
@@ -542,7 +553,7 @@ fn remove_seed_tree(
     Ok(true)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn clone_registry(
     source: &Path,
     destination: &provenant_os::fs::Directory,
@@ -562,7 +573,7 @@ fn clone_registry(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn clone_git(
     source: &Path,
     destination: &provenant_os::fs::Directory,
@@ -583,7 +594,7 @@ fn clone_git(
 }
 
 /// One seeded store: its refusal codes, and whether clones must be writable.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 struct CloneStore {
     unavailable: &'static str,
     read_failed: &'static str,
@@ -593,7 +604,7 @@ struct CloneStore {
 }
 
 /// Clone one entry at a time so cancellation can interrupt large stores.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn clone_tree(
     source: &Path,
     destination: &provenant_os::fs::Directory,
@@ -604,7 +615,7 @@ fn clone_tree(
     clone_entries(&source, destination, store, cancel, 0)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn clone_entries(
     source: &provenant_os::fs::Directory,
     destination: &provenant_os::fs::Directory,
@@ -954,22 +965,6 @@ mod tests {
                 &provenant_core::CancelToken::new()
             ),
             Outcome::skipped("disabled")
-        );
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn enabled_is_a_no_op_on_other_platforms() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(
-            seed_registry(
-                true,
-                tmp.path(),
-                tmp.path(),
-                &provenant_core::CancelToken::new()
-            ),
-            Outcome::skipped("unsupported_platform")
         );
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }

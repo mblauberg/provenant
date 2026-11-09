@@ -89,16 +89,20 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if !(1..=64).contains(&gate.slots) || gate.wait_seconds == 0 {
+        if !(1..=64).contains(&gate.slots)
+            || gate.wait_seconds == 0
+            || !["all", "check", "none"].contains(&gate.local_cargo)
+        {
             return Err(ProviderError::Malformed);
         }
         let bin = scratch.join("bin");
         let script = format!(
-            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={} PROVENANT_BUILD_WAIT_MARKER={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS PROVENANT_BUILD_WAIT_MARKER\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={} PROVENANT_BUILD_WAIT_MARKER={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS PROVENANT_BUILD_WAIT_MARKER PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
             gate.slots,
             gate.wait_seconds,
             text(gate.wait_marker)?,
+            gate.local_cargo,
             text(gate.provenant)?,
             text(gate.cargo)?,
         );
@@ -533,6 +537,9 @@ pub struct BuildSlotGate<'a> {
     /// File in the lane's private temporary directory where a waiting build
     /// says so, for the host's `lanes` and `status`.
     pub wait_marker: &'a Path,
+    /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
+    /// refuses the rest; see the `lanes.local_cargo` knob.
+    pub local_cargo: &'a str,
 }
 
 /// Canonical runtime paths supplied by the composition edge.
@@ -1782,12 +1789,17 @@ mod tests {
     }
 
     #[test]
-    fn publishing_setup_supports_every_writer_adapter() -> Result<(), ProviderError> {
+    fn publishing_setup_supports_every_adapter_read_only_included() -> Result<(), ProviderError> {
         let prompt = crate::Prompt::new("fixture".into());
         let token = crate::tests::fixture_token();
-        for entry in crate::REGISTRY {
+        for (entry, access) in crate::REGISTRY.iter().flat_map(|entry| {
+            [crate::Access::ReadOnly, crate::Access::WorktreeWrite].map(|access| (entry, access))
+        }) {
             let id = entry.adapter.id();
             if id == "command" {
+                if access == crate::Access::ReadOnly {
+                    continue;
+                }
                 assert!(
                     !provenant_records::AdapterSpec::get(id)
                         .expect("registered adapter spec")
@@ -1799,7 +1811,7 @@ mod tests {
             let mut route = crate::tests::route(id, "fixture-model");
             route.account_key = None;
             let plan = crate::tests::fixture_access_plan(
-                crate::Access::WorktreeWrite,
+                access,
                 provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
                 false,
             );
@@ -1810,6 +1822,10 @@ mod tests {
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
+            // The host token reaches only the live environment: never argv,
+            // prompts or any generated setup file.
+            spec.env
+                .push(("GH_TOKEN".into(), "fixture-host-token".into()));
             let result = spec.configure_publishing(
                 &plan.permissions().scratch.path,
                 Path::new("/fixture/git/bin/git"),
@@ -1817,7 +1833,10 @@ mod tests {
                 Path::new("/fixture/home"),
                 &provenant_config::GithubPolicy::default(),
             );
-            assert!(result.is_ok(), "publishing setup for {id}: {result:?}");
+            assert!(
+                result.is_ok(),
+                "publishing setup for {id} ({access:?}): {result:?}"
+            );
             let wrapper = plan.permissions().scratch.path.join("bin/git");
             let bytes = spec
                 .setup
@@ -1829,6 +1848,43 @@ mod tests {
                 .ok_or(ProviderError::InvalidPath)?;
             let wrapper_text = String::from_utf8_lossy(bytes);
             assert!(wrapper_text.contains("include.path="));
+            // `git push` reads its credential from the gh helper in the
+            // included config; `gh` itself is on the lane's PATH.
+            let config_bytes = spec.setup.iter().find_map(|step| match step {
+                SetupStep::WriteFile { path, bytes } if path.ends_with("publishing.gitconfig") => {
+                    Some(bytes)
+                }
+                _ => None,
+            });
+            let config_text =
+                String::from_utf8_lossy(config_bytes.ok_or(ProviderError::Malformed)?);
+            assert!(config_text.contains("auth git-credential"), "{id}");
+            assert!(config_text.contains("interactive = false"), "{id}");
+            assert!(
+                spec.setup.iter().any(|step| matches!(step,
+                    SetupStep::WriteExecutable { path, .. }
+                        if path == &plan.permissions().scratch.path.join("bin/gh"))),
+                "{id} has a gh shim"
+            );
+            assert!(
+                spec.env
+                    .iter()
+                    .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
+            );
+            let leaked =
+                |bytes: &[u8]| String::from_utf8_lossy(bytes).contains("fixture-host-token");
+            assert!(
+                !spec.argv.iter().any(|arg| leaked(arg.as_encoded_bytes())),
+                "{id}"
+            );
+            for step in &spec.setup {
+                let bytes = match step {
+                    SetupStep::WriteFile { bytes, .. }
+                    | SetupStep::WriteExecutable { bytes, .. } => bytes,
+                    _ => continue,
+                };
+                assert!(!leaked(bytes), "{id} setup carries the token");
+            }
         }
         Ok(())
     }
@@ -2032,6 +2088,7 @@ mod tests {
             wait_seconds: 1800,
             cargo: Path::new("/home/.cargo/bin/cargo"),
             wait_marker: Path::new("/tmp/lane/build-slot-wait"),
+            local_cargo: "all",
         };
         spec.configure_build_slots(&scratch, &gate).unwrap();
         let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
@@ -2124,6 +2181,7 @@ mod tests {
             wait_seconds: 60,
             cargo: Path::new("/home/.cargo/bin/cargo"),
             wait_marker: Path::new("/tmp/lane/build-slot-wait"),
+            local_cargo: "all",
         };
         spec.configure_build_slots(&base.join("scratch"), &gate)
             .unwrap();
@@ -2163,6 +2221,7 @@ mod tests {
                 wait_seconds: wait,
                 cargo: Path::new("/c"),
                 wait_marker: Path::new("/t/build-slot-wait"),
+                local_cargo: "all",
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
@@ -2182,6 +2241,7 @@ mod tests {
             wait_seconds: 60,
             cargo: Path::new("/cargo"),
             wait_marker: Path::new("/scratch/wait"),
+            local_cargo: "all",
         };
         for missing_path in [true, false] {
             let mut spec = bare_spec("/usr/bin");

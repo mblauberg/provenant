@@ -453,7 +453,9 @@ launches: a block is skipped while a held block of another layout overlaps it.
 The kernel drops the lock when the last holder exits, so there is no leaked
 range to reclaim and `provenant gc` has nothing to do; a later lane takes the
 same block again. A writer launched while every block is held does not start and reports
-`no free lane port block`; raise `lane_port_blocks`. Read-only lanes get no
+`no free lane port block` when `lane_port_blocks` was explicitly configured;
+raise that setting. Exhausting the default pool warns and starts the writer
+without a port allocation, so port blocks do not impose a default lane cap. Read-only lanes get no
 block. The block is a convention, not a firewall: a lane can still bind outside
 it, and an unrelated program can already be listening inside it.
 

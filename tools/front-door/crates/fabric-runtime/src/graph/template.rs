@@ -220,6 +220,171 @@ impl ParameterKind {
     }
 }
 
+impl TemplateParameter {
+    /// The shape this parameter accepts, read from its declaration alone, so a
+    /// refusal never echoes the value that was supplied.
+    fn expected(&self) -> String {
+        let article = if self.kind == ParameterKind::Integer {
+            "an"
+        } else {
+            "a"
+        };
+        let mut shape = format!("{article} {}", self.kind.name());
+        match (
+            self.min.as_ref().and_then(Value::as_f64),
+            self.max.as_ref().and_then(Value::as_f64),
+        ) {
+            (Some(min), Some(max)) => shape.push_str(&format!(" from {min} to {max}")),
+            (Some(min), None) => shape.push_str(&format!(" of at least {min}")),
+            (None, Some(max)) => shape.push_str(&format!(" of at most {max}")),
+            (None, None) => {}
+        }
+        if !self.allowed.is_empty() {
+            shape.push_str(&format!(", one of {}", Value::Array(self.allowed.clone())));
+        }
+        shape
+    }
+}
+
+/// A supplied parameter that a template cannot bind. Every name it carries is
+/// either declared by the template or an identifier, so it can be disclosed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParameterRefusal {
+    /// The graph node whose `with` failed, when it is known.
+    pub node: Option<String>,
+    pub template: String,
+    pub fault: ParameterFault,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ParameterFault {
+    /// The `with` table is not a table.
+    NotTable,
+    /// A key the template does not declare. `key` is `None` when it is not an
+    /// identifier, so the supplied text is never echoed.
+    Unknown {
+        key: Option<String>,
+        accepted: Vec<String>,
+        suggestion: Option<String>,
+    },
+    Missing {
+        key: String,
+    },
+    Shape {
+        key: String,
+        expected: String,
+    },
+}
+
+impl std::fmt::Display for ParameterRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(node) = &self.node {
+            write!(f, "node {node}: ")?;
+        }
+        let template = &self.template;
+        match &self.fault {
+            ParameterFault::NotTable => write!(f, "template {template} parameters must be a table"),
+            ParameterFault::Unknown {
+                key,
+                accepted,
+                suggestion,
+            } => {
+                match key {
+                    Some(key) => write!(f, "template {template} has no parameter {key}")?,
+                    None => write!(f, "template {template} has no such parameter")?,
+                }
+                if accepted.is_empty() {
+                    return write!(f, "; template {template} takes no parameters");
+                }
+                write!(f, "; accepted parameters: {}", accepted.join(", "))?;
+                match suggestion {
+                    Some(name) => write!(f, "; did you mean {name}?"),
+                    None => Ok(()),
+                }
+            }
+            ParameterFault::Missing { key } => {
+                write!(f, "template {template} requires parameter {key}")
+            }
+            ParameterFault::Shape { key, expected } => {
+                write!(f, "template {template} parameter {key} expects {expected}")
+            }
+        }
+    }
+}
+
+/// A compile failure. A refused parameter keeps its structure so the front
+/// door can name it; everything else stays a message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompileError {
+    Message(String),
+    Parameter(ParameterRefusal),
+}
+
+impl From<String> for CompileError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for CompileError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
+impl From<ParameterRefusal> for CompileError {
+    fn from(refusal: ParameterRefusal) -> Self {
+        Self::Parameter(refusal)
+    }
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message) => f.write_str(message),
+            Self::Parameter(refusal) => refusal.fmt(f),
+        }
+    }
+}
+
+/// The declared name closest to an unknown key. A key that extends a declared
+/// name with a dot (`subject.commit`) matches that name; otherwise a close
+/// edit distance does.
+fn nearest_name<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    accepted
+        .into_iter()
+        .filter_map(|name| {
+            let extends = key
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('.'));
+            let distance = if extends { 0 } else { edit_distance(key, name) };
+            let limit = (key.len().max(name.len()) / 3).max(1);
+            (distance <= limit).then_some((distance, name))
+        })
+        .min()
+        .map(|(_, name)| name.to_owned())
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut row: Vec<usize> = (0..=right.len()).collect();
+    for (i, lc) in left.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, rc) in right.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if lc == *rc {
+                diagonal
+            } else {
+                1 + diagonal.min(above).min(row[j])
+            };
+            diagonal = above;
+        }
+    }
+    row[right.len()]
+}
+
 /// Identity of a top-level submission, inherited by dotted flavours.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -538,26 +703,44 @@ impl Template {
     }
 
     /// Effective parameters: supplied values over defaults, each checked.
-    pub fn bind(&self, name: &str, supplied: &Value) -> Result<Map<String, Value>, String> {
+    pub fn bind(
+        &self,
+        name: &str,
+        supplied: &Value,
+    ) -> Result<Map<String, Value>, ParameterRefusal> {
+        let refuse = |fault: ParameterFault| ParameterRefusal {
+            node: None,
+            template: name.to_owned(),
+            fault,
+        };
         let supplied = match supplied {
             Value::Null => Map::new(),
             Value::Object(map) => map.clone(),
-            _ => return Err(format!("template {name} parameters must be a table")),
+            _ => return Err(refuse(ParameterFault::NotTable)),
         };
         if let Some(unknown) = supplied
             .keys()
             .find(|key| !self.parameters.contains_key(key.as_str()))
         {
-            return Err(format!("template {name} has no parameter {unknown}"));
+            let accepted: Vec<String> = self.parameters.keys().cloned().collect();
+            return Err(refuse(ParameterFault::Unknown {
+                key: valid_identifier(unknown).then(|| unknown.clone()),
+                suggestion: nearest_name(unknown, self.parameters.keys().map(String::as_str)),
+                accepted,
+            }));
         }
         let mut effective = Map::new();
         for (key, parameter) in &self.parameters {
             let value = supplied
                 .get(key)
                 .or(parameter.default.as_ref())
-                .ok_or_else(|| format!("template {name} requires parameter {key}"))?;
-            check_value(parameter, value)
-                .map_err(|reason| format!("template {name} parameter {key}: {reason}"))?;
+                .ok_or_else(|| refuse(ParameterFault::Missing { key: key.clone() }))?;
+            if check_value(parameter, value).is_err() {
+                return Err(refuse(ParameterFault::Shape {
+                    key: key.clone(),
+                    expected: parameter.expected(),
+                }));
+            }
             effective.insert(key.clone(), value.clone());
         }
         Ok(effective)
@@ -877,7 +1060,7 @@ impl<'a> Compiler<'a> {
     /// Lower one node document to compiled-node JSON. A raw node with no
     /// `use`, `over` or `repeat` passes through unchanged, apart from nested
     /// composite and loop members, which are lowered in turn.
-    pub fn lower(&self, node: &Value) -> Result<Value, String> {
+    pub fn lower(&self, node: &Value) -> Result<Value, CompileError> {
         let lowered = self.lower_in(node, &Map::new(), &mut Vec::new())?;
         if lowered.to_string().contains("${item}") {
             return Err("${item} is bound only inside `over`".into());
@@ -885,17 +1068,18 @@ impl<'a> Compiler<'a> {
         Ok(lowered)
     }
 
-    pub fn compile(&self, node: &Value) -> Result<GraphNode, String> {
+    pub fn compile(&self, node: &Value) -> Result<GraphNode, CompileError> {
         let lowered = self.lower(node)?;
         let id = lowered
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("<unknown>")
             .to_owned();
-        serde_json::from_value(lowered).map_err(|error| format!("node {id}: {error}"))
+        serde_json::from_value(lowered)
+            .map_err(|error| CompileError::from(format!("node {id}: {error}")))
     }
 
-    pub fn compile_all(&self, nodes: &[Value]) -> Result<Vec<GraphNode>, String> {
+    pub fn compile_all(&self, nodes: &[Value]) -> Result<Vec<GraphNode>, CompileError> {
         nodes.iter().map(|node| self.compile(node)).collect()
     }
 
@@ -904,12 +1088,13 @@ impl<'a> Compiler<'a> {
         raw: &Value,
         bindings: &Map<String, Value>,
         stack: &mut Vec<String>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CompileError> {
         if stack.len() > MAX_TEMPLATE_DEPTH {
             return Err(format!(
                 "template nesting exceeds {MAX_TEMPLATE_DEPTH} levels: {}",
                 stack.join(" > ")
-            ));
+            )
+            .into());
         }
         let object = raw.as_object().ok_or("template node must be a table")?;
         if object.contains_key("use") || !stack.is_empty() {
@@ -956,7 +1141,8 @@ impl<'a> Compiler<'a> {
                 return Err(format!(
                     "template {name} uses itself: {} > {name}",
                     stack.join(" > ")
-                ));
+                )
+                .into());
             }
             let template = self.library.resolve(&name)?;
             let mut with = node.remove("with").unwrap_or(Value::Null);
@@ -983,13 +1169,17 @@ impl<'a> Compiler<'a> {
                         if items.len() != 1 {
                             return Err(format!(
                                 "resolver @{resolver} must return one parameter value"
-                            ));
+                            )
+                            .into());
                         }
                         *value = Value::String(items[0].clone());
                     }
                 }
             }
-            let mut parameters = template.bind(&name, &with)?;
+            let mut parameters = template.bind(&name, &with).map_err(|mut refusal| {
+                refusal.node = node.get("id").and_then(Value::as_str).map(str::to_owned);
+                CompileError::Parameter(refusal)
+            })?;
             // The surrounding `over` binds item throughout the instantiated
             // template, even when it is not a declared input parameter.
             if let Some(item) = bindings.get(ITEM) {
@@ -1020,7 +1210,7 @@ impl<'a> Compiler<'a> {
         over: &Value,
         bindings: &Map<String, Value>,
         stack: &mut Vec<String>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CompileError> {
         let items = self.items(over)?;
         let mut copy = object.clone();
         copy.remove("over");
@@ -1177,7 +1367,7 @@ impl<'a> Compiler<'a> {
         mut node: Map<String, Value>,
         repeat: Value,
         stack: &mut Vec<String>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CompileError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Repeat {
@@ -1245,7 +1435,7 @@ impl<'a> Compiler<'a> {
         mut overrides: Map<String, Value>,
         parameters: &Map<String, Value>,
         stack: &mut Vec<String>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CompileError> {
         let stage = overrides
             .get("id")
             .and_then(Value::as_str)
@@ -1263,7 +1453,7 @@ impl<'a> Compiler<'a> {
                         .get("id")
                         .and_then(Value::as_str)
                         .unwrap_or("<unknown>")
-                ));
+                ).into());
             }
             let mut children = Vec::with_capacity(template.nodes.len());
             for member in &template.nodes {
@@ -1418,7 +1608,8 @@ impl<'a> Compiler<'a> {
         if overrides.contains_key("min_ok") {
             return Err(format!(
                 "min_ok applies to a composite or an `over` node, not leaf template {name}"
-            ));
+            )
+            .into());
         }
         let mut leaf = Map::new();
         for (key, value) in &template.node {
@@ -1480,7 +1671,7 @@ impl<'a> Compiler<'a> {
         &self,
         mut node: Map<String, Value>,
         stack: &mut Vec<String>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CompileError> {
         for pointer in ["composite", "loop"] {
             let key = if pointer == "composite" {
                 "nodes"
@@ -1502,7 +1693,7 @@ impl<'a> Compiler<'a> {
         self.finish_shallow(node)
     }
 
-    fn finish_shallow(&self, mut node: Map<String, Value>) -> Result<Value, String> {
+    fn finish_shallow(&self, mut node: Map<String, Value>) -> Result<Value, CompileError> {
         flatten_extensions(&mut node)?;
         if let Some(after) = node.remove("after") {
             let after = after.as_array().ok_or("`after` must be a list")?;
@@ -1527,7 +1718,7 @@ impl<'a> Compiler<'a> {
         for alias in ["brief", "goal"] {
             if let Some(brief) = node.remove(alias) {
                 if node.contains_key("prompt") {
-                    return Err(format!("a node sets `{alias}` and `prompt`; keep one"));
+                    return Err(format!("a node sets `{alias}` and `prompt`; keep one").into());
                 }
                 node.insert("prompt".into(), brief);
             }

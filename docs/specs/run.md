@@ -18,7 +18,7 @@ the applied effort and effective network access.
 
 ## Cargo home seed
 
-An opted-in macOS writer may seed its private Cargo registry and Git store from
+An opted-in writer on a filesystem that clones may seed its private Cargo registry and Git store from
 the host stores independently. It must never replace an existing store or publish
 a partially cloned tree. Unsupported entries or clone failures must fall back without
 blocking the lane. Each attempt must report the seed outcome and reason in
@@ -35,7 +35,7 @@ blocking the lane. Each attempt must report the seed outcome and reason in
 
 ## Cargo target seed
 
-A macOS writer with seeding enabled (the default) and a fresh target may clone the newest host target
+A writer with seeding enabled (the default) and a fresh target may clone the newest host target
 generation matching the complete `rustc -vV` output and host triple. Preparation
 must never execute a writer-controlled toolchain outside confinement and must
 fall back when the lane compiler cannot be verified, recording a stable
@@ -268,11 +268,9 @@ Nested continuation requests use version 1, retaining the original
 parent-attempt namespace and including their continuation parent in the
 canonical digest. Replays retain the original scheme, including legacy
 prepared operations whose request was not yet published. A child-store
-continuation uses its requesting parent's sealed network bound, or the same
-provider-only profile as other provider-only lanes when that context is
-unavailable. On macOS that profile currently permits outbound TCP 443 beyond
-provider endpoints ([#2118](https://github.com/mblauberg/provenant/issues/2118));
-see [child launch policy](routing.md#the-host-validates-and-launches-children).
+continuation uses its requesting parent's sealed network bound, or open network
+when that context is unavailable. The host network ceiling still
+narrows the effective access; see [child launch policy](routing.md#the-host-validates-and-launches-children).
 
 This scheme avoids rekeying lane-published records and IDs already returned to
 callers. There is no migration of existing child records: an absent version
@@ -384,11 +382,22 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 
 ## Atomic admission
 
+Writer admission serialises ownership and custody per worktree. A writer
+checks retained-import fences only in its own custody slot, including when
+its run belongs to another project. Git probes, directory scans, Cargo seeding
+and provider preparation never hold a shared writer registry lock. Repository
+mutation locks still protect worktree creation and removal; they do not
+serialise ownership claims or fast-forwarding an existing writer checkout.
+Lock contention defers launch until its own admission deadline; a retry-count
+limit cannot end a contention wait early. One writer per worktree and the
+retained-import fence remain mandatory regardless of optional admission limits.
+
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
-supervisor call happens inside a transaction. Admission bounds active lanes by
-`max_lanes` (host, default 64) and `max_project_lanes` (project, default 32),
-with hard ceilings of 64 and 32; writers also have the configured caps below.
+supervisor call happens inside a transaction. Admission has no host or project
+count limit by default. Optional
+`max_lanes` (host) and `max_project_lanes` (project) cap all lane classes;
+explicit values accept up to 64 and 32 respectively.
 Queued lanes are bounded at 256 per host, with
 the disk floor, startup spacing and a deadline. The unconfigured memory floor
 is advisory and emits `MEMORY_FLOOR` with a next action.
@@ -405,8 +414,8 @@ admission: a host-wide build throttle (not a hard cap), by default
 max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
 compiling cargo command a lane runs (`provenant_os::build_slots`, reached
 through the lane's `cargo` shim), so idle writers are admitted beyond the slot
-count. Writer lanes are capped separately by `max_writer_lanes` (host, default
-40) and `max_project_writer_lanes` (per project, default 30); a writer at the
+count. Optional `max_writer_lanes` (host) and `max_project_writer_lanes`
+(per project) cap writers separately; both are off by default. A writer at the
 cap queues to the admission deadline and is then refused with a reason naming
 the cap, its scope and the key to raise. All lanes also count against the
 configured total caps. At expiry, disk floor, known pressure and the applicable
@@ -501,7 +510,7 @@ lane; silence never counts as completion or settlement.
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
   `::memory_floor_warns_for_both_lane_classes`;
-  `::project_cap_allows_up_to_32_active_lanes`;
+  `::configured_project_cap_allows_up_to_32_active_lanes`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
@@ -905,6 +914,39 @@ could not read, truncated captures and `slices_complete: false`.
   `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
+## The pinned source view names its failure
+
+An isolated lane (`--use review`) reads a pinned view of the subject commit,
+built in the attempt's temporary directory from the shared object store: one
+`ls-tree` listing, blobs read through `cat-file --batch` in groups of at most
+32 MiB and 4096 objects, then a synthetic index. The subject need not be the
+checked-out HEAD of a linked worktree, and may be a full SHA or a
+remote-tracking ref resolved to one. One deadline bounds the whole build; no
+process gets a smaller fixed share.
+
+Every failure ends the attempt `rejected` with `terminal_cause =
+"source_view_refused"` and a note of the form `pinned source view failed at
+STEP: CAUSE`. STEP is one of `repository check`, `tree listing`, `tree
+validation`, `object read`, `temporary directory` and `index build`. CAUSE is
+fixed-form text: timed out, which stream exceeded its output limit, the Git exit
+status or signal, a named refusal (unsupported entry, unsafe symlink, a limit),
+or a short description of an internal failure. It never carries Git output, file
+contents or credential values. `status` and `output` show the note, and the
+public text does not point at route or account configuration.
+
+Limits are `domains.run.source_view_seconds` (default 300),
+`source_view_entries` (100000) and `source_view_bytes` (512 MiB). One file is
+limited to 60 MiB, which is not configurable because it is the single-read
+capture ceiling.
+- Why: a refusal that discards its cause sends the reader to the wrong place,
+  and a process per blob made a large tree exhaust a fixed time share.
+- Test: `crates/cli/src/run/provider/tests_source_view.rs`
+  (`source_view_builds_from_a_linked_worktree_behind_the_subject`,
+  `source_view_names_the_failing_step_and_cause`,
+  `source_view_of_twenty_thousand_files_uses_batched_reads_within_budget`,
+  `source_view_batch_reader_decodes_in_order_and_names_missing_objects`)
+- Owner: `crates/cli/src/run/provider/source_tree.rs`
+
 ## Host-native launch rows
 
 The optional `host-native` adapter selects a named
@@ -960,6 +1002,9 @@ Shell here-documents use the attempt scratch directory through `TMPDIR` and
 profiles also allow its `/private/var/tmp/sh-thd*` files. Denial hints name the
 reported operation and point to the captured output, which holds the path,
 without claiming which sandbox or filesystem rule caused the refusal.
+
+Commit-pinned source views permit execution while staying immutable. Read-only
+lanes set `CARGO_NET_OFFLINE` only when their effective network is restricted.
 
 Read-only runs use their bound repository with its Git metadata read-only.
 Their PATH selects the host-resolved Git executable; the sandbox grants that

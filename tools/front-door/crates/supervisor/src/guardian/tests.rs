@@ -1645,6 +1645,14 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
             origin: provenant_records::diagnostic::PortSettingSource::Configuration
         }
     );
+    // The automatic port range is a convenience, never an implicit writer cap.
+    let automatic = provenant_os::lane_ports::Plan {
+        blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault),
+        ..available
+    };
+    let (lease, warning) = lane_port_allocation(Some(&automatic)).map_err(std::io::Error::other)?;
+    assert!(lease.is_none());
+    assert!(warning.is_some());
     Ok(())
 }
 

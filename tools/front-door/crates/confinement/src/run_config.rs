@@ -30,6 +30,9 @@ argv_prompt_limit_bytes = 65536
 continuation_copy_limit_bytes = 4294967296
 continuation_copy_entries = 100000
 continuation_copy_depth = 32
+source_view_seconds = 300
+source_view_entries = 100000
+source_view_bytes = 536870912
 
 [projects]
 "#;
@@ -88,6 +91,15 @@ pub struct RunConfig {
     /// Maximum directory depth searched or copied from retained provider state.
     #[serde(default = "default_continuation_copy_depth")]
     pub continuation_copy_depth: u32,
+    /// Total seconds for building one pinned source view.
+    #[serde(default = "default_source_view_seconds")]
+    pub source_view_seconds: u64,
+    /// Maximum files in one pinned source view.
+    #[serde(default = "default_source_view_entries")]
+    pub source_view_entries: u32,
+    /// Maximum total file bytes in one pinned source view.
+    #[serde(default = "default_source_view_bytes")]
+    pub source_view_bytes: u64,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -113,6 +125,15 @@ fn default_continuation_copy_entries() -> u32 {
 }
 fn default_continuation_copy_depth() -> u32 {
     32
+}
+fn default_source_view_seconds() -> u64 {
+    300
+}
+fn default_source_view_entries() -> u32 {
+    100_000
+}
+fn default_source_view_bytes() -> u64 {
+    512 << 20
 }
 fn default_true() -> bool {
     true
@@ -154,6 +175,9 @@ impl Default for RunConfig {
             continuation_copy_limit_bytes: default_continuation_copy_limit_bytes(),
             continuation_copy_entries: default_continuation_copy_entries(),
             continuation_copy_depth: default_continuation_copy_depth(),
+            source_view_seconds: default_source_view_seconds(),
+            source_view_entries: default_source_view_entries(),
+            source_view_bytes: default_source_view_bytes(),
             projects: BTreeMap::new(),
         }
     }
@@ -370,6 +394,9 @@ impl DomainConfig for RunConfig {
                 "continuation_copy_depth",
                 u64::from(self.continuation_copy_depth),
             ),
+            ("source_view_seconds", self.source_view_seconds),
+            ("source_view_entries", u64::from(self.source_view_entries)),
+            ("source_view_bytes", self.source_view_bytes),
         ] {
             if value == 0 {
                 errors.push(SectionError {
@@ -438,6 +465,9 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("continuation_copy_limit_bytes", "int"),
     FieldMetadata::new("continuation_copy_entries", "int"),
     FieldMetadata::new("continuation_copy_depth", "int"),
+    FieldMetadata::new("source_view_seconds", "int"),
+    FieldMetadata::new("source_view_entries", "int"),
+    FieldMetadata::new("source_view_bytes", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("admission_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),

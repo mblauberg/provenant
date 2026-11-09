@@ -822,6 +822,8 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
     PreparationRefused,
+    /// The pinned source view of an isolated lane could not be built.
+    SourceViewRefused,
     AccountLoginRequired,
     RouteResolutionRefused,
     AccessPolicyRefused,
@@ -856,6 +858,7 @@ impl TerminalCause {
     pub fn reason(self) -> &'static str {
         match self {
             Self::PreparationRefused => "preparation refused; provenant output ID",
+            Self::SourceViewRefused => "source view refused; provenant output ID",
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
@@ -894,6 +897,9 @@ impl TerminalCause {
             }
             Self::PreparationRefused => {
                 "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
+            }
+            Self::SourceViewRefused => {
+                "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"

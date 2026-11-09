@@ -1,3 +1,28 @@
+#[test]
+fn read_only_cargo_offline_tracks_network() -> Result<(), ProviderError> {
+    use provenant_confinement::permissions::NetworkAccess;
+    let prompt = Prompt::new("fixture".into());
+    let repo = Path::new("/fixture/repo");
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    for network in [
+        NetworkAccess::Provider,
+        NetworkAccess::Local,
+        NetworkAccess::Open,
+    ] {
+        let plan = fixture_network_plan(Access::ReadOnly, Some("login"), network);
+        let spec =
+            crate::codex::Codex.prepare(fixture_input(&route, &plan, &prompt, repo, None))?;
+        assert_eq!(
+            spec.env
+                .iter()
+                .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true"),
+            network != NetworkAccess::Open,
+            "{network:?}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_stores() {

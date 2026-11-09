@@ -13,6 +13,11 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     let base = std::fs::canonicalize(temp.path())?;
     let host = base.join("host");
     let mut stores = Vec::new();
+    std::fs::create_dir_all(&host)?;
+    std::fs::write(
+        host.join("config.toml"),
+        "schema_version=1\n[domains.fabric.lanes]\nmax_project_lanes = 32\n",
+    )?;
     for name in ["first", "second"] {
         std::fs::create_dir(base.join(name))?;
         let mut store =

@@ -1547,10 +1547,10 @@ fn simultaneous_writer_launches_create_attempts() -> Result {
         let rig = writer_registry_fixture()?;
         let _cleanup = rig.process_cleanup();
         let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
-        let barrier = std::sync::Barrier::new(6);
+        let barrier = std::sync::Barrier::new(12);
         std::thread::scope(|scope| -> Result {
             let mut launches = Vec::new();
-            for index in 0..6 {
+            for index in 0..12 {
                 let barrier = &barrier;
                 let rig = &rig;
                 launches.push(scope.spawn(move || {

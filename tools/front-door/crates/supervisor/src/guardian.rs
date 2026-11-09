@@ -787,6 +787,17 @@ fn lane_port_allocation(
     };
     match plan.try_acquire() {
         Ok(Some(lease)) => Ok((Some(lease), None)),
+        Ok(None)
+            if plan.blocks_origin
+                == Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) =>
+        {
+            Ok((
+                None,
+                Some(
+                    "default lane port pool exhausted; continuing without allocation (domains.fabric.lanes.lane_port_blocks)",
+                ),
+            ))
+        }
         Ok(None) => {
             use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {

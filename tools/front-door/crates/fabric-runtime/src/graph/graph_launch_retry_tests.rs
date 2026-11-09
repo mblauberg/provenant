@@ -100,7 +100,7 @@ fn launch_retry_policy_limits_failures_and_persists_the_source() {
         let document = graph(vec![node("one", route("first"))]);
         let mut owner = ErrorLauncher {
             now: Some(at(0)),
-            errors: busy_times(2),
+            errors: [(1, crate::coordination::facade::FacadeError::HomeUnavailable), (2, crate::coordination::facade::FacadeError::HomeUnavailable)].into(),
             launch_policy: Some(LaunchRetryPolicy {
                 limit,
                 limit_source: "override".into(),
@@ -522,10 +522,17 @@ fn expired_launch_replays_an_accepted_operation() {
 
 #[test]
 fn launch_succeeds_after_more_than_three_transient_failures() {
+    for kind in 0..4 {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
+        launch_policy: Some(LaunchRetryPolicy { limit: 0, ..Default::default() }),
         now: Some(at(0)),
-        errors: busy_times(4),
+        errors: (1..=4).map(|index| (index, match kind {
+            0 => crate::coordination::facade::FacadeError::Busy,
+            1 => crate::coordination::facade::FacadeError::WriterLockBusy,
+            2 => crate::coordination::facade::FacadeError::WriterUnknown,
+            _ => crate::coordination::facade::FacadeError::WriterBusy { holder: None },
+        })).collect(),
         observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
         ..Default::default()
     };
@@ -543,6 +550,7 @@ fn launch_succeeds_after_more_than_three_transient_failures() {
     assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
     assert!(owner.calls.iter().all(|key| key == &owner.calls[0]));
     assert_eq!(owner.calls.len(), 5);
+}
 }
 
 #[test]
@@ -718,6 +726,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
         FacadeError::WriterUnknown,
+        FacadeError::WriterBusy { holder: None },
         FacadeError::WriterLockBusy,
         FacadeError::Io {
             delivery_limit: None,
@@ -736,7 +745,6 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     for permanent in [
         FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused { resource: None },
-        FacadeError::WriterBusy { holder: None },
         FacadeError::DispatchRefused {
             fact: None,
             disk: None,

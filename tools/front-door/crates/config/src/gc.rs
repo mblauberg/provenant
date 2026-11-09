@@ -95,8 +95,6 @@ pub struct LaneBuildSettings {
 }
 /// Longest configurable gap between lane starts: ten minutes.
 pub const MAX_START_SPACING_MS: u64 = 600_000;
-pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
-pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
 pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
 /// ephemeral ranges of macOS and Linux and one block per possible writer lane.
@@ -274,32 +272,30 @@ impl LaneBuildSettings {
         let by_memory = total_bytes / (6 * 1024_u64.pow(3));
         by_cpu.min(by_memory).clamp(1, 64)
     }
-    /// Total caps retain the existing fixed ceilings as shipped defaults.
+    /// Unconfigured caps are disabled. Explicit settings retain their bounds.
     pub fn total_lanes(&self) -> u64 {
         self.max_lanes
-            .unwrap_or(WRITER_LANES_CEILING)
-            .clamp(1, WRITER_LANES_CEILING)
+            .map(|limit| limit.clamp(1, WRITER_LANES_CEILING))
+            .unwrap_or(u64::MAX)
     }
 
     pub fn project_total_lanes(&self) -> u64 {
         self.max_project_lanes
-            .unwrap_or(PROJECT_WRITER_LANES_CEILING)
-            .clamp(1, PROJECT_WRITER_LANES_CEILING)
+            .map(|limit| limit.clamp(1, PROJECT_WRITER_LANES_CEILING))
+            .unwrap_or(u64::MAX)
             .min(self.total_lanes())
     }
 
     pub fn writer_lanes(&self) -> u64 {
         self.max_writer_lanes
-            .unwrap_or(DEFAULT_MAX_WRITER_LANES)
-            .clamp(1, WRITER_LANES_CEILING)
+            .map(|limit| limit.clamp(1, WRITER_LANES_CEILING))
+            .unwrap_or(u64::MAX)
     }
-    /// The per-project writer cap. An unset key defaults to
-    /// `min(default, writer_lanes)`, so lowering only the host cap never makes
-    /// the default project cap exceed it.
+    /// An unset project cap adds no limit beyond the host cap.
     pub fn project_writer_lanes(&self) -> u64 {
         self.max_project_writer_lanes
-            .unwrap_or(DEFAULT_MAX_PROJECT_WRITER_LANES)
-            .clamp(1, PROJECT_WRITER_LANES_CEILING)
+            .map(|limit| limit.clamp(1, PROJECT_WRITER_LANES_CEILING))
+            .unwrap_or(u64::MAX)
             .min(self.writer_lanes())
     }
     pub fn build_wait(&self) -> std::time::Duration {
@@ -816,7 +812,9 @@ mod build_tests {
     fn writer_caps_and_wait_validate_and_default() {
         let defaults = LaneBuildSettings::default();
         assert!(defaults.invalid_keys().is_empty());
-        assert!(defaults.project_writer_lanes() <= defaults.writer_lanes());
+        assert_eq!(defaults.writer_lanes(), u64::MAX);
+        assert_eq!(defaults.project_writer_lanes(), u64::MAX);
+        assert_eq!(defaults.start_spacing_ms.unwrap_or(0), 0);
         let invalid: LaneBuildSettings = toml_edit::de::from_str(
             "max_writer_lanes = 65\nmax_project_writer_lanes = 0\nbuild_wait_minutes = 0",
         )
@@ -876,13 +874,10 @@ mod build_tests {
         assert_eq!(wild.build_limit(0), 1);
     }
     #[test]
-    fn total_lane_caps_preserve_defaults_and_validate_host_policy() {
+    fn total_lane_caps_are_optional_and_validate_host_policy() {
         let defaults = LaneBuildSettings::default();
-        assert_eq!(defaults.total_lanes(), crate::WRITER_LANES_CEILING);
-        assert_eq!(
-            defaults.project_total_lanes(),
-            crate::PROJECT_WRITER_LANES_CEILING
-        );
+        assert_eq!(defaults.total_lanes(), u64::MAX);
+        assert_eq!(defaults.project_total_lanes(), u64::MAX);
         let configured: LaneBuildSettings =
             toml_edit::de::from_str("max_lanes = 12\nmax_project_lanes = 5").unwrap();
         assert!(configured.invalid_keys().is_empty());

@@ -2220,7 +2220,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     | FacadeError::GraphRelayRefused { .. }
                     | FacadeError::ConfinementRefused { .. }
                     | FacadeError::CredentialRoot { .. }
-                    | FacadeError::WriterBusy { .. }
                     | FacadeError::ContinuationUnsupported
                     | FacadeError::ProviderStateExpired
                     | FacadeError::LaneDepth
@@ -3023,6 +3022,9 @@ impl BoundGraphOwner<'_> {
                     knobs
                 } else {
                     let mut knobs = Vec::new();
+                    if let Some(scope) = node.attempt.and_then(|a| a.local_cargo.as_deref()) {
+                        knobs.push(format!("lanes.local_cargo={scope}"));
+                    }
                     if !exclude.is_empty() {
                         knobs.push(format!(
                             "routing.graph_exclude={}",
@@ -3741,11 +3743,11 @@ mod journal_error_tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)] // Real registry contention across two launch stages.
-    fn provision_and_later_registry_acquisition_share_the_launch_deadline()
+    fn provisioned_writer_fast_forward_leaves_sibling_registry_mutation_alone()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         if super::super::peer_tests::host_test(
-            "fabric::owner::journal_error_tests::provision_and_later_registry_acquisition_share_the_launch_deadline",
+            "fabric::owner::journal_error_tests::provisioned_writer_fast_forward_leaves_sibling_registry_mutation_alone",
         )? {
             return Ok(());
         }
@@ -3804,30 +3806,11 @@ mod journal_error_tests {
             &cancel,
             &factory.clock,
         )?;
-        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-            scope.spawn(move || {
-                let clock = provenant_os::clock::SystemClock;
-                clock
-                    .wait_until(
-                        clock
-                            .mono_now()
-                            .checked_add(provenant_core::DurationMicros::from_micros(6_000_000))
-                            .unwrap(),
-                    )
-                    .unwrap();
-                drop(held);
-            });
-            owner.fast_forward_writer(
-                &rig.project,
-                &rig.project.join(".worktrees/later"),
-                source.trim().parse()?,
-            )?;
-            Ok(())
-        })?;
-        assert_eq!(
-            settlement.remaining(factory.clock.mono_now()).as_micros(),
-            0
-        );
+        owner.fast_forward_writer(
+            &rig.project,
+            &rig.project.join(".worktrees/later"),
+            source.trim().parse()?,
+        )?;
         assert_eq!(
             owner.writer_launch_budget.ok_or("budget")?.deadline(),
             budget.deadline()
@@ -3836,30 +3819,7 @@ mod journal_error_tests {
             owner.begin_launch(AccessMode::WorktreeWrite, Some(deadline))?,
             Some(deadline)
         );
-        assert!(owner.admission_timeout_seconds().ok_or("remaining")? <= 6);
-        let _held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
-            LockMode::Exclusive,
-            WaitBudget::nonblocking(factory.clock.mono_now()),
-            &cancel,
-            &factory.clock,
-        )?;
-        assert!(matches!(
-            owner.fast_forward_writer(
-                &rig.project,
-                &rig.project.join(".worktrees/later"),
-                source.trim().parse()?
-            ),
-            Err(provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout)
-        ));
-        assert_eq!(
-            owner
-                .writer_launch_budget
-                .ok_or("budget")?
-                .remaining(factory.clock.mono_now())
-                .as_micros(),
-            0
-        );
+        drop(held);
         assert_eq!(
             crate::worktree_tests::git(&rig, &["-C", ".worktrees/later", "rev-parse", "HEAD"])?
                 .trim(),

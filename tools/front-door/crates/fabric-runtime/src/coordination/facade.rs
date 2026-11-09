@@ -298,6 +298,8 @@ pub enum InvalidInputDetail {
     CloudPlacement(CloudPlacementIssue),
     GraphReason(String),
     GraphRelayCause(GraphRelayCause),
+    /// A `--set` or `with` parameter a template refuses; names are disclosable.
+    Parameter(Box<crate::graph::template::ParameterRefusal>),
     TemplateInvalid,
     UpgradeDrainRequired,
     CutoverFindings(String),
@@ -305,8 +307,14 @@ pub enum InvalidInputDetail {
     LandingLock,
     UnresolvableBase(String),
     Field(String),
-    FieldDecode { field: String, missing: bool },
-    FieldTooLarge { field: String, limit: usize },
+    FieldDecode {
+        field: String,
+        missing: bool,
+    },
+    FieldTooLarge {
+        field: String,
+        limit: usize,
+    },
     FieldTitle(String),
     InputUnreadable,
     InputTooLarge,
@@ -367,6 +375,7 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::GraphReason(_) => Some("graph input could not be processed".into()),
+            Self::Parameter(refusal) => Some(refusal.to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
@@ -765,6 +774,10 @@ impl FacadeError {
                 projected = projected.detail("graph input could not be processed")
                     .next("inspect the graph definition and template fields");
             }
+            Self::InvalidInput { detail: Some(InvalidInputDetail::Parameter(refusal)) } => {
+                projected = projected.detail(refusal.to_string())
+                    .next("pass only the accepted template parameters, each with a value of the shape shown, and retry");
+            }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
@@ -1100,6 +1113,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "confidential",
         "capabilities",
         "build_heavy",
+        "local_cargo",
         "write_roots",
         "digest",
         "encoding",

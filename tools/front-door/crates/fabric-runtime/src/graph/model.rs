@@ -210,6 +210,11 @@ pub struct AttemptSpec {
     /// Explicit write roots outside the worktree.
     #[serde(default, alias = "write_root", skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
+    /// Cargo commands this node's lane may run locally: `all`, `check` or
+    /// `none`. Sets the `lanes.local_cargo` knob for this node alone; omitted
+    /// inherits the run's and the host's setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_cargo: Option<String>,
 }
 
 impl AttemptSpec {
@@ -224,6 +229,7 @@ impl AttemptSpec {
             && self.capabilities.is_empty()
             && !self.build_heavy
             && self.write_roots.is_empty()
+            && self.local_cargo.is_none()
     }
 }
 

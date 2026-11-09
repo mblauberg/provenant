@@ -34,3 +34,4 @@ config/installation.json
 # Patch and merge leftovers.
 *.orig
 *.rej
+target/

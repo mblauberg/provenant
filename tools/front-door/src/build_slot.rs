@@ -46,6 +46,78 @@ pub(crate) const WAIT_ENV: &str = "PROVENANT_BUILD_WAIT_SECS";
 /// directory; the build adds `.pid`.
 pub(crate) const MARKER_ENV: &str = "PROVENANT_BUILD_WAIT_MARKER";
 
+/// Which cargo subcommands the host lets this lane run, written into the shim
+/// script from the `lanes.local_cargo` knob and never from a lane's arguments.
+pub(crate) const LOCAL_ENV: &str = "PROVENANT_LOCAL_CARGO";
+
+/// The compiling cargo commands a lane may run locally.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Local {
+    #[default]
+    All,
+    /// Only `cargo check`; CI runs builds, tests, lints and the rest.
+    Check,
+    None,
+}
+impl Local {
+    /// An unset or unrecognised value is the permissive default, so a host
+    /// that predates the setting behaves as before.
+    pub(crate) fn from_env(env: &[(OsString, OsString)]) -> Self {
+        match env
+            .iter()
+            .find(|(key, _)| key == OsStr::new(LOCAL_ENV))
+            .and_then(|(_, value)| value.to_str())
+        {
+            Some("check") => Self::Check,
+            Some("none") => Self::None,
+            _ => Self::All,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Check => "check",
+            Self::None => "none",
+        }
+    }
+    /// The one-line refusal for `args`, or none when the command may run.
+    /// Subcommands that do not compile (`fmt`, `metadata`, `tree`) always may.
+    pub(crate) fn refusal(self, args: &[OsString]) -> Option<String> {
+        let command = subcommand(args)?;
+        let allowed = match self {
+            Self::All => true,
+            Self::Check => matches!(command, "check" | "c") || !GATED.contains(&command),
+            Self::None => !GATED.contains(&command),
+        };
+        (!allowed).then(|| {
+            format!(
+                "cargo {command} is not run in lanes here (lanes.local_cargo = {}); CI runs it. Set the lanes.local_cargo knob (or the node's attempt.local_cargo) to all to run it locally",
+                self.name()
+            )
+        })
+    }
+}
+
+/// The first argument that is not an option or a toolchain selector.
+fn subcommand(args: &[OsString]) -> Option<&str> {
+    let mut args = args.iter().map(OsString::as_os_str);
+    while let Some(arg) = args.next() {
+        let arg = arg.to_str()?;
+        if arg.starts_with('+') {
+            continue;
+        }
+        if VALUED.contains(&arg) {
+            args.next();
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
+
 /// What the host's shim script supplies, read from the environment.
 pub(crate) struct Settings {
     pub state: PathBuf,
@@ -80,6 +152,7 @@ impl Settings {
 /// The real cargo with its arguments, and the host's settings if any.
 pub(crate) struct Gate<'a> {
     pub settings: Option<Settings>,
+    pub local: Local,
     pub command: &'a [OsString],
 }
 
@@ -226,7 +299,13 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
     };
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let mut held = None;
-    let gate_this = gated(args) && !nested(&env);
+    let nested = nested(&env);
+    // A nested cargo (a build script, a test) runs under a parent the policy
+    // already let through.
+    if !nested && let Some(message) = gate.local.refusal(args) {
+        return report(&message);
+    }
+    let gate_this = gated(args) && !nested;
     if gate_this && gate.settings.is_none() {
         warn(&"the host's build slot settings are missing or invalid");
     }
@@ -402,6 +481,37 @@ fn warn(error: &dyn std::fmt::Display) {
     reason = "the custom worktree test driver includes this library without the test harness"
 )]
 mod tests {
+    fn args(list: &[&str]) -> Vec<std::ffi::OsString> {
+        list.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn local_cargo_policy_refuses_by_subcommand() {
+        use super::Local;
+        for command in [
+            &["test"][..],
+            &["+stable", "build", "--release"],
+            &["nextest", "run"],
+        ] {
+            assert_eq!(Local::All.refusal(&args(command)), None);
+            let message = Local::Check.refusal(&args(command)).unwrap();
+            assert!(message.contains("CI runs it") && message.contains("lanes.local_cargo"));
+            assert!(!message.contains('\n'));
+            assert!(Local::None.refusal(&args(command)).is_some());
+        }
+        for command in [
+            &["check", "-p", "x"][..],
+            &["c"],
+            &["--color", "never", "check"],
+        ] {
+            assert_eq!(Local::Check.refusal(&args(command)), None);
+            assert!(Local::None.refusal(&args(command)).is_some());
+        }
+        for command in [&["fmt"][..], &["metadata"], &[]] {
+            assert_eq!(Local::None.refusal(&args(command)), None);
+        }
+    }
+
     #[test]
     fn cargo_lock_time_reduces_slot_budget() {
         assert_eq!(

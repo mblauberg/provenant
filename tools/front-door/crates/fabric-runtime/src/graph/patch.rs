@@ -6,7 +6,7 @@
 //! expansion. A planner's fragment, a host submission and a live call from a
 //! lane all use it. Started attempts are immutable: `skip` and `replace` act
 //! only on nodes that have not started.
-use super::template::{Compiler, Layer, Template, TemplateLibrary};
+use super::template::{CompileError, Compiler, Layer, ParameterRefusal, Template, TemplateLibrary};
 use super::*;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -175,6 +175,8 @@ pub struct PatchError {
     /// project it exactly as it projects a raw document, so one compile
     /// failure reads the same through every entry path.
     pub admission: Option<AdmissionError>,
+    /// The supplied parameter a template refused, when compilation failed on one.
+    pub parameter: Option<ParameterRefusal>,
 }
 
 impl PatchError {
@@ -184,6 +186,7 @@ impl PatchError {
             message: message.into(),
             cause: None,
             admission: None,
+            parameter: None,
         }
     }
     fn invalid(message: impl Into<String>) -> Self {
@@ -194,6 +197,18 @@ impl PatchError {
 impl From<String> for PatchError {
     fn from(message: String) -> Self {
         Self::invalid(message)
+    }
+}
+
+impl From<CompileError> for PatchError {
+    fn from(error: CompileError) -> Self {
+        match error {
+            CompileError::Message(message) => Self::invalid(message),
+            CompileError::Parameter(refusal) => Self {
+                parameter: Some(refusal.clone()),
+                ..Self::invalid(refusal.to_string())
+            },
+        }
     }
 }
 
@@ -1119,7 +1134,11 @@ pub(super) fn prepare(
             let parameters = match raw.get("over") {
                 None => library
                     .resolve(name)
-                    .and_then(|template| template.bind(name, &supplied))
+                    .and_then(|template| {
+                        template
+                            .bind(name, &supplied)
+                            .map_err(|refusal| refusal.to_string())
+                    })
                     .map(Value::Object)
                     .unwrap_or(supplied),
                 Some(_) => supplied,
@@ -1330,6 +1349,7 @@ pub(super) fn prepare(
             message: limit.to_string(),
             cause: Some(PlanFailureFact::Structural(limit)),
             admission: None,
+            parameter: None,
         });
     }
     let mut expansions = checkpoint.expansions.clone();
@@ -1342,6 +1362,7 @@ pub(super) fn prepare(
             message: limit.to_string(),
             cause: Some(PlanFailureFact::Envelope(limit)),
             admission: None,
+            parameter: None,
         });
     }
     Ok(Prepared::Ready(Box::new(Admission {

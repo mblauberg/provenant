@@ -1527,7 +1527,8 @@ fn assert_pattern_parameter_error(
     // failure at the binding boundary before exercising the planner refusal.
     let error = doc.nodes[0].plan.as_ref().unwrap().templates[0]
         .bind("generator", &parameters)
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
     assert!(error.contains(reason), "{case}: {error}");
     let mut owner = fixture_owner(&[&pattern_result(
         json!({"id":"impl", "pattern":"generator", "parameters":parameters}),
@@ -1589,7 +1590,7 @@ fn pattern_parameter_errors_are_refused() {
             "enum violation",
             enum_violation,
             json!({"retries":2}),
-            "must be one of",
+            "one of",
         ),
     ] {
         assert_pattern_parameter_error(case, &doc, parameters, reason);

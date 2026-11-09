@@ -27,7 +27,10 @@ Syntax, file size and schema-version errors remain hard failures, as do
 invalid known credentials, authority, confinement and Git-boundary settings.
 Recovery never widens an enforced restriction, so these also refuse the file:
 
-- knobs marked `strict` in the registry (`lanes.publish`,
+- knobs marked `strict` in the registry (`lanes.publish`, which defaults on
+  for every networked lane: a malformed value refuses the file rather than
+  falling back to the default, so `lanes.publish = false` is the only way to
+  withhold GitHub credentials and a typo never silently re-enables them;
   `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
   `lanes.max_depth` and `confinement.census_ignore_unreadable`), whose defaults could grant what the user withheld, and a
   `knobs` or `domains` value that is not a table;
@@ -70,6 +73,32 @@ message identity. If posting fails or the dispatcher stops before sending,
 restore inbox access and run `provenant reconcile` from the submitting session.
 Reconcile retries all pending notices, continuing past an individual failure,
 and reports when any notice still needs recovery.
+
+## Lane GitHub access and `ps`
+
+Every lane with open network, read-only lanes included, receives the host's `gh` login (the
+host-only lookup in `gh_auth.rs`, bounded token) and a Git credential helper by
+default, so `gh issue view` and `gh issue comment` work, and a writer can `git push` its own branch. Set
+`lanes.publish = false` in `[knobs]`, or `knobs: ["lanes.publish=false"]` on a
+dispatch, to withhold it. Launch environments set `GIT_CONFIG_GLOBAL` to a lane
+file, so the credential comes from the generated `publishing.gitconfig`
+included by the `git` wrapper on the lane's `PATH`, not from host Git
+configuration. Lanes without open network get no publishing setup, and provider credential files and keychains stay denied.
+
+The host runs `gh auth token` up to three times (20 seconds each) when it hits a
+timeout or signal, which heavy host load can cause, and reuses the token for
+later routes. If every attempt fails, the launch prints
+`warning: <route>: GitHub login lookup failed (<cause>)` and the lane starts
+without `GH_TOKEN`; with a keychain login, `git push` then fails with `could not
+read Username`. The warning never contains the token.
+
+`/bin/ps` exits with "Operation not permitted" in a confined lane. This is
+macOS, not the profile: the writer profile allows `process-exec` broadly, yet
+every setuid-root binary (`/bin/ps`, `/usr/bin/top`, `/usr/bin/su`,
+`/usr/bin/sudo`) is refused while non-setuid tools such as `/usr/bin/uptime`
+run. A sandboxed process cannot exec a setuid image. Use a tool that needs no
+privilege instead, such as `pgrep` or `kill -0 PID`; there is no setting that
+changes this.
 
 ## Graph launch retries
 
@@ -232,10 +261,11 @@ wall clock changes; a reboot resets spacing, except that the one-time upgrade
 of a version 1 ledger that recorded a start holds each class for one spacing.
 Spacing is enforced at admission, not at provider spawn, so a guardian
 suspended between the two can spawn alongside a later lane. The host
-caps writer lanes at `max_writer_lanes` (default 40) and at
-`max_project_writer_lanes` per project (default 30). All lanes also count
-against `max_lanes` (host, default 64) and `max_project_lanes` (project,
-default 32), bounded by hard ceilings of 64 and 32. A lane at a cap waits until
+admits writers without a host or project count limit by default.
+`max_writer_lanes` and `max_project_writer_lanes` optionally cap writers;
+`max_lanes` and `max_project_lanes` optionally cap all lane classes. All four
+limits are off when omitted or set to `-1`. Explicit host limits accept up to
+64 and project limits up to 32. A lane at a cap waits until
 the admission deadline and is then refused with the cap, setting and source. On
 macOS it defers starts at critical kernel memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
 to `warning` to defer at warning and critical, or `never` to disable this gate.
@@ -344,10 +374,10 @@ half the available cores, at least one. Set host overrides in `config.toml`:
 max_concurrent_builds = 2
 cargo_build_jobs = 5
 build_wait_minutes = 30
-max_lanes = 64
-max_project_lanes = 32
-max_writer_lanes = 40
-max_project_writer_lanes = 30
+max_lanes = -1
+max_project_lanes = -1
+max_writer_lanes = -1
+max_project_writer_lanes = -1
 lane_port_base = 30000
 lane_port_block = 16
 lane_port_blocks = 64
@@ -360,10 +390,12 @@ behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
 `build_wait_minutes` 1 to 1440, `max_lanes` 1 to 64 and
 `max_project_lanes` 1 to 32 (at most `max_lanes`); `max_writer_lanes` is 1 to
 64 and `max_project_writer_lanes` is 1 to 32 and, when set, at most `max_writer_lanes`
-(left unset it follows the host cap down, as the smaller of 30 and the host
-cap). `lane_port_base` is 1024 to 65535, `lane_port_block` 1 to 1024 and
+(left unset it adds no project limit; the host cap still applies).
+`lane_port_base` is 1024 to 65535, `lane_port_block` 1 to 1024 and
 `lane_port_blocks` 0 to 1024 (0 turns off the per-lane port blocks described in
 [providers](providers.md#writer-lanes)); the range must end at or below 65536.
+Exhausting the default port pool warns and continues without an allocation;
+an explicitly configured pool refuses when full.
 An out-of-range value is rejected when configuration loads, so it never blocks
 lane admission. A lane keeps the slot count and wait it was launched with; a
 change applies to lanes launched afterwards.
@@ -395,6 +427,32 @@ build_dir_survey_interval_seconds = 300
 `cargo_debug` takes any Cargo `debug` level: `none`, `line-directives-only`,
 `line-tables-only`, `limited`, `full`, `0`, `1`, `2`, `true` or `false`. A
 value already in the lane environment takes precedence over both settings.
+
+#### Which cargo commands a lane may run
+
+The knob `lanes.local_cargo` limits what the lane's `cargo` shim runs. It is
+enforced in the shim every provider's lane gets, so it does not depend on the
+brief or on the provider:
+
+| Value | Runs | Refuses |
+|---|---|---|
+| `all` (default) | every cargo command | nothing |
+| `check` | `cargo check`, and subcommands that do not compile (`fmt`, `metadata`, `tree`) | `build`, `test`, `clippy`, `nextest`, `run`, `doc` and the rest of the compiling set |
+| `none` | subcommands that do not compile | every compiling command, `cargo check` included |
+
+A refused command exits 1 with one line, for example `provenant: cargo test is
+not run in lanes here (lanes.local_cargo = check); CI runs it. Set the
+lanes.local_cargo knob (or the node's attempt.local_cargo) to all to run it
+locally`. Set it for the host under `[knobs]`, for a run with
+`--knob lanes.local_cargo=check` (or `knobs` on a Fabric submit), and for one
+graph node with `"attempt": {"local_cargo": "check"}`; the node's value wins
+over the run's. A cargo run nested inside an allowed command (a build script,
+a test that spawns cargo) is not checked again. The shim is cooperative: a lane
+that calls `~/.cargo/bin/cargo` or `rustc` directly is not stopped, and a lane
+whose build slot shim could not be installed has no shim to enforce it.
+This repository has no project-level file the host reads for lane settings
+(`.provenant/verify.json` only maps tiers), so set `check` for it under
+`[knobs]` on each host that builds it.
 
 Fabric also collects idle build output. A Cargo profile directory in a lane
 cache (`target/debug`, `target/<triple>/release`, or the same under

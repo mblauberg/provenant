@@ -123,7 +123,7 @@ pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<
 }
 
 /// Update ownership metadata only if the observed record is still current.
-/// The repository lock serialises this check with lane-owner claims, and the
+/// The per-worktree owner lock serialises this check with lane-owner claims; the
 /// writer guard excludes updates while custody is held. Call before acquiring
 /// writer custody; the guard does not bind this reservation to a later lease.
 pub fn update_owner_when_unchanged(
@@ -135,12 +135,27 @@ pub fn update_owner_when_unchanged(
 ) -> Result<(), WorktreeError> {
     validate(updated)?;
     validate_binding(context)?;
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    // Ownership is a per-worktree record. Serialise its CAS without holding
+    // the repository mutation lock through inventory and cleanliness probes.
+    let slot = writer_directory(context.project_state, worktree.path())?;
+    let _owner = slot
+        .lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            context.lock_budget,
+            cancel,
+            context.clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            other => other.into(),
+        })?;
     let tree = verify_worktree(context.repo, worktree.path())?;
     if !tree.identity().same_identity(&worktree.identity()) {
         return Err(WorktreeError::IdentityChanged);
     }
     let current = load_owner(&tree)?;
+    // An exact replay performs no mutation and remains valid under live custody.
     if current.as_ref() == Some(updated) {
         return Ok(());
     }
@@ -150,10 +165,14 @@ pub fn update_owner_when_unchanged(
     let _writer =
         cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
             Occupancy::Held => WorktreeError::WriterBusy {
-                holder: current.as_ref().and_then(|owner| owner.attempt_id),
+                holder: expected.attempt_id,
             },
             other => custody_refusal(other),
         })?;
+    // Custody also excludes direct owner publications outside owner.lock.
+    if load_owner(&tree)?.as_ref() != Some(expected) {
+        return Err(WorktreeError::IdentityChanged);
+    }
     save_owner(&tree, updated)
 }
 
@@ -169,7 +188,7 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-/// Publish lane ownership only while both repository and writer custody are
+/// Publish lane ownership only while both owner updates and writer custody are
 /// excluded. Reassignment requires the caller's owner snapshot to remain
 /// current and the worktree HEAD must still be the one the caller observed
 /// (and validated, for example for base ancestry). An unowned tree or a
@@ -190,15 +209,31 @@ pub fn save_lane_owner_when_free(
     }
     validate(owner)?;
     validate_binding(context)?;
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    // Ownership is a per-worktree record. Serialise its CAS without holding
+    // the repository mutation lock through inventory and cleanliness probes.
+    let slot = writer_directory(context.project_state, worktree.path())?;
+    let _owner = slot
+        .lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            context.lock_budget,
+            cancel,
+            context.clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            other => other.into(),
+        })?;
     let tree = verify_worktree(context.repo, worktree.path())?;
     if !tree.identity().same_identity(&worktree.identity()) {
         return Err(WorktreeError::IdentityChanged);
     }
+    let _writer =
+        cache_writer_guard(context.project_state, tree.path()).map_err(custody_refusal)?;
     let branch = format!("refs/heads/{}", owner.branch);
     if !context
         .facts
-        .read_inventory(context, cancel)?
+        .fresh_inventory(context, cancel)?
         .iter()
         .any(|entry| {
             canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
@@ -210,8 +245,6 @@ pub fn save_lane_owner_when_free(
     {
         return Err(WorktreeError::IdentityChanged);
     }
-    let _writer =
-        cache_writer_guard(context.project_state, tree.path()).map_err(custody_refusal)?;
     let current_prior = load_owner(&tree)?;
     if current_prior.as_ref() != expected_prior {
         return Err(WorktreeError::IdentityChanged);

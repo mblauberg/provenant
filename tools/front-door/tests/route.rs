@@ -61,6 +61,107 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
 }
 
 #[test]
+fn resolve_uses_fresh_account_quota_and_reports_only_real_quota_refusals() -> Result {
+    use provenant_core::Clock;
+    let rig = rig()?;
+    for (label, key) in [("one", "key-one"), ("two", "key-two")] {
+        let directory = rig.home.join(label);
+        fs::create_dir_all(&directory)?;
+        support::register_account(&rig, "codex", label, key, &directory)?;
+    }
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    let write = |label: &str, key: &str, status: &str, observed: i64| -> Result {
+        let dir = rig.state.join("quota").join(key);
+        fs::create_dir_all(&dir)?;
+        for path in [rig.state.join("quota"), dir.clone()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        let account = serde_json::json!({"adapter":"codex", "account_key":key, "label":label});
+        let record = serde_json::json!({
+            "schema_version":1, "account":account, "revision":1,
+            "snapshot":{"schema_version":1, "account":account, "revision":1,
+                "status":status, "observed_unix_seconds":observed, "source_ref":"fixture",
+                "authority_ref":null, "windows":[]},
+            "claim":null, "last_attempt_unix_seconds":observed,
+            "backoff_until_unix_seconds":null, "failures":0, "last_error":null, "refusals":[]
+        });
+        let path = dir.join("codex.json");
+        fs::write(&path, serde_json::to_vec(&record)?)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    };
+    write("one", "key-one", "available", now)?;
+    write("two", "key-two", "auth_required", now)?;
+    let args = ["route", "resolve", "codex/gpt-6-luna"];
+    let preview = call(&rig, &args, 0)?;
+    let rows = preview["data"]["recorded_readiness"]
+        .as_array()
+        .ok_or("rows")?;
+    let one = rows
+        .iter()
+        .find(|row| row["account_key"] == "key-one")
+        .ok_or("one")?;
+    assert_eq!(one["observation"]["state"], "ready");
+    assert_eq!(one["observation"]["observed_unix_seconds"], now);
+    assert_eq!(one["observation"]["evidence_ref"], "fixture");
+    let two = rows
+        .iter()
+        .find(|row| row["account_key"] == "key-two")
+        .ok_or("two")?;
+    assert_eq!(two["observation"]["state"], "unavailable");
+    assert_eq!(two["observation"]["reason"], "signed_out");
+    assert!(preview["data"]["admission_refusal"].is_null(), "{preview}");
+    let human = rig.command(&args)?;
+    let text = String::from_utf8(human.stdout.bytes)?;
+    assert!(
+        text.contains("recorded readiness one [key-one] for codex/gpt-6-luna: ready"),
+        "{text}"
+    );
+    assert!(!text.contains("admission:"), "{text}");
+    let pinned = call(
+        &rig,
+        &["route", "resolve", "codex/gpt-6-luna", "--account", "two"],
+        0,
+    )?;
+    let refusal = pinned["data"]["admission_refusal"]
+        .as_str()
+        .ok_or("refusal")?;
+    assert!(refusal.contains("authentication required"), "{refusal}");
+    assert!(!refusal.contains("provider readiness"), "{refusal}");
+    write("one", "key-one", "auth_required", now)?;
+    let refused = call(&rig, &args, 0)?;
+    assert!(
+        refused["data"]["admission_refusal"]
+            .as_str()
+            .ok_or("refusal")?
+            .contains("authentication required")
+    );
+    let fallback = call(
+        &rig,
+        &[
+            "route",
+            "resolve",
+            "codex/gpt-6-luna",
+            "--fallback",
+            "claude/claude-opus-5-5",
+        ],
+        0,
+    )?;
+    assert!(fallback["data"]["admission_refusal"].is_null());
+    write("one", "key-one", "available", now - 86400)?;
+    let stale = call(&rig, &args, 0)?;
+    let one = stale["data"]["recorded_readiness"]
+        .as_array()
+        .ok_or("rows")?
+        .iter()
+        .find(|row| row["account_key"] == "key-one")
+        .ok_or("one")?;
+    assert_eq!(one["observation"]["state"], "unknown");
+    assert!(stale["data"]["admission_refusal"].is_null());
+    Ok(())
+}
+
+#[test]
 fn config_retains_registry_only_account_and_quota_policy() -> Result {
     let rig = rig()?;
     let account = rig.home.join("fixture-account");

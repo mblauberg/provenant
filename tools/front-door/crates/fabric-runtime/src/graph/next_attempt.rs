@@ -25,14 +25,29 @@ pub(crate) enum NextAttempt {
     None,
 }
 
+/// Contention waits for this lane's launch deadline, independently of the
+/// retry-count policy used for transport failures.
+pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
+    use crate::coordination::facade::FacadeError;
+    matches!(
+        error.downcast_ref::<FacadeError>(),
+        Some(
+            FacadeError::Busy
+                | FacadeError::WriterLockBusy
+                | FacadeError::WriterUnknown
+                | FacadeError::WriterBusy { .. }
+        )
+    )
+}
+
 /// Classify whether a launch error is transient (eligible for retry) or permanent.
 pub(crate) fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
     use crate::coordination::facade::FacadeError;
     use provenant_core::retry::{RetryCause, is_transient};
+    if launch_contention(error) {
+        return true;
+    }
     let cause = match error.downcast_ref::<FacadeError>() {
-        Some(FacadeError::Busy | FacadeError::WriterLockBusy | FacadeError::WriterUnknown) => {
-            RetryCause::Contention
-        }
         Some(FacadeError::Timeout) => RetryCause::Timeout,
         Some(
             FacadeError::HomeUnavailable
@@ -90,6 +105,7 @@ pub(crate) fn apply_launch_disposition(
     policy: LaunchRetryPolicy,
 ) -> Result<(), String> {
     let retrying = launch_retry_kind(error);
+    let contention = launch_contention(error);
     if retrying {
         let Some(now) = clock else {
             return Err("wall clock unavailable; cannot record a launch retry wake".into());
@@ -134,7 +150,7 @@ pub(crate) fn apply_launch_disposition(
             ),
             MAX_ADVANCE_ERROR_BYTES,
         ));
-        if now < deadline && retry.failures <= retry.policy.limit {
+        if now < deadline && (contention || retry.failures <= retry.policy.limit) {
             let delay = provenant_core::retry::Backoff::new(
                 std::time::Duration::from_secs(retry.policy.first_seconds),
                 2,
@@ -1062,6 +1078,18 @@ mod tests {
         assert_eq!(retry_of(&checkpoint).failures, 1);
         assert_eq!(retry_of(&checkpoint).wake_at, Some(at(5)));
         apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(5)), 60, policy).unwrap();
+        assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+        assert_eq!(retry_of(&checkpoint).failures, 2);
+        assert_eq!(retry_of(&checkpoint).deadline, Some(at(60)));
+        apply_launch_disposition(
+            &mut checkpoint,
+            0,
+            &busy,
+            Some(at(60)),
+            60,
+            LaunchRetryPolicy::default(),
+        )
+        .unwrap();
         assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
         assert_eq!(
             checkpoint.nodes[0].advance_error_code.as_deref(),
@@ -1073,7 +1101,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .failures,
-            2
+            3
         );
     }
 
@@ -1086,6 +1114,7 @@ mod tests {
             FacadeError::Timeout,
             FacadeError::HomeUnavailable,
             FacadeError::WriterUnknown,
+            FacadeError::WriterBusy { holder: None },
             FacadeError::WriterLockBusy,
             FacadeError::Io {
                 delivery_limit: None,
@@ -1104,7 +1133,6 @@ mod tests {
         for permanent in [
             FacadeError::InvalidInput { detail: None },
             FacadeError::ConfinementRefused { resource: None },
-            FacadeError::WriterBusy { holder: None },
             FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,

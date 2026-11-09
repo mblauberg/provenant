@@ -219,7 +219,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         if !writer {
             task.writer = None;
         }
-        // Publishing is opt-in (`lanes.publish`, default off), so the
+        // Publishing defaults on (`lanes.publish`), so the
         // publishing rows request it the way dispatch resolves the knob.
         if publishing {
             task.profile

@@ -2023,53 +2023,14 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                 return Ok(());
             }
             let slot = directory.open_verified_directory(&name)?;
-            for (index, attempt) in slot.entries()?.enumerate() {
-                if index >= 10_000 {
-                    return Err(CustodyError::InvalidRecord);
-                }
-                let attempt = attempt?;
-                if attempt == OsStr::new("reservation.json") {
-                    let path = PathBuf::from(&name).join(&attempt);
-                    listing.issues.push(ReservationIssue {
-                        reservation: path,
-                        reason: "slot-root writer reservation requires reconciliation".into(),
-                    });
-                    continue;
-                }
-                let path = PathBuf::from(&name).join(&attempt).join("reservation.json");
-                let entry = || -> Result<Option<WriterReservation>> {
-                    // Other retired registry files do not hold recovery evidence.
-                    if slot.metadata_at(&attempt, false)?.kind
-                        != provenant_os::fs::FileKind::Directory
-                    {
-                        return Ok(None);
-                    }
-                    let child = slot.open_verified_directory(&attempt)?;
-                    let reservation: Reservation =
-                        match read_record(&child, "reservation.json", RECORD_LIMIT) {
-                            Ok(reservation) => reservation,
-                            Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
-                                return Ok(None);
-                            }
-                            Err(error) => return Err(error),
-                        };
-                    validate_anchor(&child, &reservation)?;
-                    if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
-                        return Err(CustodyError::InvalidRecord);
-                    }
-                    Ok(Some(WriterReservation {
-                        scope: reservation.scope,
-                        reservation: path.clone(),
-                    }))
-                };
-                match entry() {
-                    Ok(Some(reservation)) => listing.reservations.push(reservation),
-                    Ok(None) => {}
-                    Err(error) => listing.issues.push(ReservationIssue {
-                        reservation: path,
-                        reason: error.to_string(),
-                    }),
-                }
+            let local = list_writer_reservations_in_slot(&slot)?;
+            for mut reservation in local.reservations {
+                reservation.reservation = PathBuf::from(&name).join(reservation.reservation);
+                listing.reservations.push(reservation);
+            }
+            for mut issue in local.issues {
+                issue.reservation = PathBuf::from(&name).join(issue.reservation);
+                listing.issues.push(issue);
             }
             Ok(())
         };
@@ -2078,6 +2039,59 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                 reservation: PathBuf::from(&name).join("reservation.json"),
                 reason: error.to_string(),
             });
+        }
+    }
+    Ok(listing)
+}
+/// Read only one worktree's predecessor reservations. The caller holds that
+/// slot's writer exclusion; sibling worktrees need no observation or lock.
+/// Paths are relative to the slot, including malformed evidence.
+pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationListing> {
+    let mut listing = ReservationListing::default();
+    for (index, attempt) in slot.entries()?.enumerate() {
+        if index >= 10_000 {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let attempt = attempt?;
+        if attempt == OsStr::new("reservation.json") {
+            let path = PathBuf::from(&attempt);
+            listing.issues.push(ReservationIssue {
+                reservation: path,
+                reason: "slot-root writer reservation requires reconciliation".into(),
+            });
+            continue;
+        }
+        let path = PathBuf::from(&attempt).join("reservation.json");
+        let entry = || -> Result<Option<WriterReservation>> {
+            // Other retired registry files do not hold recovery evidence.
+            if slot.metadata_at(&attempt, false)?.kind != provenant_os::fs::FileKind::Directory {
+                return Ok(None);
+            }
+            let child = slot.open_verified_directory(&attempt)?;
+            let reservation: Reservation =
+                match read_record(&child, "reservation.json", RECORD_LIMIT) {
+                    Ok(reservation) => reservation,
+                    Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                };
+            validate_anchor(&child, &reservation)?;
+            if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
+                return Err(CustodyError::InvalidRecord);
+            }
+            Ok(Some(WriterReservation {
+                scope: reservation.scope,
+                reservation: path.clone(),
+            }))
+        };
+        match entry() {
+            Ok(Some(reservation)) => listing.reservations.push(reservation),
+            Ok(None) => {}
+            Err(error) => listing.issues.push(ReservationIssue {
+                reservation: path,
+                reason: error.to_string(),
+            }),
         }
     }
     Ok(listing)

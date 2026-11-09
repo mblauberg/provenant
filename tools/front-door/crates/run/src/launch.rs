@@ -543,7 +543,7 @@ impl RunStore {
             // A sealed contributor cannot add a capability through a rewritten
             // request. Database access needs a host-validated declaration.
             task.access.database_ipc = false;
-            let bound = NetworkAccess::Provider;
+            let bound = self.sealed_parent_network.unwrap_or(NetworkAccess::Open);
             let reach = |network| match network {
                 NetworkAccess::Provider => 0,
                 NetworkAccess::Local => 1,

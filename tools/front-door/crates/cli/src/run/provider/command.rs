@@ -262,6 +262,7 @@ pub(super) fn prepare_command(
         &scratch,
         &runtime,
         roots.state.as_path(),
+        &task.profile.knobs,
     );
     if let Some(policy) = plan.policy_mut() {
         for root in std::iter::once(process_tree_read).chain(coordination_reads) {
@@ -365,6 +366,23 @@ pub(super) fn configure_process_tree(
     Ok(grant)
 }
 
+/// Cargo commands a lane may run locally, from the sealed `lanes.local_cargo`
+/// knob (host configuration, the run's `--knob`, or the graph node's
+/// `attempt.local_cargo`). The registry default and any unreadable value are
+/// `all`.
+pub(super) fn local_cargo(
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> &'static str {
+    match knobs
+        .get("lanes.local_cargo")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("check") => "check",
+        Some("none") => "none",
+        _ => "all",
+    }
+}
+
 #[allow(clippy::print_stderr)]
 pub(super) fn configure_build_slots(
     spec: &mut provenant_providers::LaunchSpec,
@@ -373,6 +391,7 @@ pub(super) fn configure_build_slots(
     scratch: &Path,
     runtime: &Path,
     state: &Path,
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Vec<PathGrant> {
     // Builds, not lanes, share the host's build slots: a `cargo` shim takes
     // one around each compiling command. The host (this process, outside
@@ -395,6 +414,7 @@ pub(super) fn configure_build_slots(
                         // Inside the lane's writable scratch (its $TMPDIR), where
                         // the host finds it; each waiting build adds its pid.
                         wait_marker: &scratch.join(provenant_os::build_slots::WAIT_MARKER),
+                        local_cargo: local_cargo(knobs),
                     },
                 ) {
                     eprintln!(

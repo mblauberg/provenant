@@ -139,6 +139,39 @@ fn version(db: &Connection) -> Result<i64> {
     Ok(provenant_sqlite::read_version(db, 6)? as i64)
 }
 
+/// Native and owner-store observations prepared before either admission
+/// database takes its write transaction. Existing leases retain their identity.
+pub(crate) struct LeaseOwner {
+    identity: Option<String>,
+    store: Option<String>,
+}
+
+pub(crate) fn prepare_lease(
+    db: &Connection,
+    store: &Path,
+    ticket: &AdmissionTicket,
+    caps: LaneCaps,
+    time: &dyn Clock,
+    resources: &dyn Resources,
+) -> Result<LeaseOwner> {
+    let held: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1)",
+        [ticket.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if held || cap_hit(db, ticket.project_id, ticket.lane_class, caps)?.is_some() {
+        prune(db, time, resources)?;
+    }
+    Ok(LeaseOwner {
+        identity: resources
+            .guardian_identity()
+            .map(|identity| serde_json::to_string(&identity))
+            .transpose()
+            .map_err(|_| RunError::Refused)?,
+        store: store_identity(&store.join("run.sqlite3")),
+    })
+}
+
 /// Take this attempt's lease when host and project counts and startup spacing
 /// allow, returning the wall time it started at, for display only. Idle
 /// writers are admitted whatever `max_concurrent_builds` says: that limit gates
@@ -156,43 +189,25 @@ pub(crate) fn lease(
     caps: LaneCaps,
     time: &dyn Clock,
     request: &Request<'_>,
-    resources: &dyn Resources,
+    owner: &LeaseOwner,
 ) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let spacing = spacing_micros(ticket.startup_spacing_ms)?;
+    let id = ticket.attempt_id.to_string();
     immediate(db, request, |tx| {
         let now = time
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
-        let id = ticket.attempt_id.to_string();
         let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1)",
+            "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1 AND yielded=0)",
             [&id],
             |r| r.get(0),
         )?;
         if held {
-            // A retry must not preserve a malformed lease merely because its
-            // attempt key matches. Recheck it through the same pruning rules.
-            prune(tx, time, resources)?;
-            let still_held: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1)",
-                [&id],
-                |r| r.get(0),
-            )?;
-            let yielded: bool = tx.query_row(
-                "SELECT COALESCE((SELECT yielded FROM leases WHERE attempt=?1),0)",
-                [&id],
-                |r| r.get(0),
-            )?;
-            if still_held && !yielded {
-                return Ok(Some(now));
-            }
+            return Ok(Some(now));
         }
         if cap_hit(tx, project, class, caps)?.is_some() {
-            prune(tx, time, resources)?;
-            if cap_hit(tx, project, class, caps)?.is_some() {
-                return Ok(None);
-            }
+            return Ok(None);
         }
         let host = HostInstant::read(time)?;
         let last = recorded_start(tx, class)?;
@@ -208,11 +223,13 @@ pub(crate) fn lease(
         if tx.execute("UPDATE leases SET yielded=0 WHERE attempt=?1", [&id])? > 0 {
             return Ok(Some(now));
         }
-        let identity = resources
-            .guardian_identity()
+        let identity = owner
+            .identity
+            .as_ref()
             .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
-        let identity = serde_json::to_string(&identity).map_err(|_| RunError::Refused)?;
-        let owner_id = store_identity(&store.join("run.sqlite3"))
+        let owner_id = owner
+            .store
+            .as_ref()
             .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
         tx.execute(
             "INSERT INTO leases(attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -431,47 +448,42 @@ fn prune(tx: &Connection, time: &dyn Clock, resources: &dyn Resources) -> Result
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, Option<Vec<u8>>>(1)?,
-                    r.get::<_, Option<Vec<u8>>>(2)?
-                        .and_then(|bytes| String::from_utf8(bytes).ok()),
-                    r.get::<_, Option<Vec<u8>>>(3)?
-                        .and_then(|bytes| String::from_utf8(bytes).ok()),
-                    r.get::<_, Option<Vec<u8>>>(4)?
-                        .and_then(|bytes| String::from_utf8(bytes).ok()),
-                    r.get::<_, Option<Vec<u8>>>(5)?
-                        .and_then(|bytes| String::from_utf8(bytes).ok()),
+                    r.get::<_, Option<Vec<u8>>>(2)?,
+                    r.get::<_, Option<Vec<u8>>>(3)?,
+                    r.get::<_, Option<Vec<u8>>>(4)?,
+                    r.get::<_, Option<Vec<u8>>>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (rowid, store, attempt, lease_boot, guardian, owner_id) in leases {
-        let (Some(store), Some(attempt)) = (store, attempt.filter(|value| !value.is_empty()))
-        else {
-            malformed_row(rowid);
-            if released(
-                &Owner::Unreadable,
-                "",
-                lease_boot.as_deref(),
-                guardian.as_deref(),
-                &boot,
-                resources,
-            ) {
-                tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
-            }
-            continue;
+        let text = |raw: &Option<Vec<u8>>| {
+            raw.as_deref()
+                .and_then(|raw| std::str::from_utf8(raw).ok())
+                .map(str::to_owned)
         };
-        let owner = Owner::open(
-            &Path::new(OsStr::from_bytes(&store)).join("run.sqlite3"),
-            owner_id.as_deref(),
-        );
+        let attempt_text = text(&attempt).filter(|value| !value.is_empty());
+        let owner = match (store.as_deref(), attempt_text.as_deref()) {
+            (Some(store), Some(_)) => Owner::open(
+                &Path::new(OsStr::from_bytes(store)).join("run.sqlite3"),
+                text(&owner_id).as_deref(),
+            ),
+            _ => {
+                malformed_row(rowid);
+                Owner::Unreadable
+            }
+        };
         if released(
             &owner,
-            &attempt,
-            lease_boot.as_deref(),
-            guardian.as_deref(),
+            attempt_text.as_deref().unwrap_or_default(),
+            text(&lease_boot).as_deref(),
+            text(&guardian).as_deref(),
             &boot,
             resources,
         ) {
-            tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
+            // Observation ran without a write transaction. Delete only the
+            // exact lease observed, never a replacement reusing its rowid.
+            tx.execute("DELETE FROM leases WHERE rowid=?1 AND CAST(store AS BLOB) IS ?2 AND CAST(attempt AS BLOB) IS ?3 AND CAST(boot AS BLOB) IS ?4 AND CAST(guardian AS BLOB) IS ?5 AND CAST(owner_id AS BLOB) IS ?6", params![rowid, store, attempt, lease_boot, guardian, owner_id])?;
         }
     }
     Ok(())
@@ -574,7 +586,16 @@ mod tests {
                 params![index.to_string(), project.to_string()],
             ).unwrap();
         }
-        let hit = cap_hit(&db, project, LaneClass::Writer, defaults)
+        assert!(
+            cap_hit(&db, project, LaneClass::Writer, defaults)
+                .unwrap()
+                .is_none()
+        );
+        let configured = LaneCaps::of(&provenant_config::LaneBuildSettings {
+            max_project_lanes: Some(PROJECT_ACTIVE),
+            ..Default::default()
+        });
+        let hit = cap_hit(&db, project, LaneClass::Writer, configured)
             .unwrap()
             .unwrap();
         assert_eq!(hit.kind, LaneLimit::ProjectTotal);
@@ -590,7 +611,7 @@ mod tests {
         let detail = projection.detail.unwrap();
         assert!(detail.contains("project lanes"));
         assert!(detail.contains("max_project_lanes"));
-        assert!(detail.contains("shipped default"));
+        assert!(detail.contains("configuration"));
         assert!(projection.next.unwrap().contains("max_project_lanes"));
         let settings = provenant_config::LaneBuildSettings {
             max_lanes: Some(HOST_ACTIVE),
@@ -614,7 +635,13 @@ mod tests {
             ).unwrap();
         }
         let third = ProjectId::from_bytes([3; 16]);
-        let hit = cap_hit(&db, third, LaneClass::Writer, defaults)
+        // Without a configured limit, a full host still admits a writer.
+        assert!(
+            cap_hit(&db, third, LaneClass::Writer, defaults)
+                .unwrap()
+                .is_none()
+        );
+        let hit = cap_hit(&db, third, LaneClass::Writer, configured)
             .unwrap()
             .unwrap();
         assert_eq!(hit.kind, LaneLimit::HostTotal);

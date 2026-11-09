@@ -386,3 +386,91 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         review_verification_error(&plan.nodes[1], &output.findings, &[], &[], output).is_none()
     );
 }
+
+#[test]
+fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
+    use crate::coordination::facade::FacadeError;
+    struct ContendedOwner {
+        phase: u8,
+        failed: bool,
+        calls: usize,
+        now: provenant_core::WallTime,
+    }
+    impl ContendedOwner {
+        fn contend(&mut self, phase: u8) -> Result<(), FacadeError> {
+            self.calls += 1;
+            if self.phase == phase && !self.failed {
+                self.failed = true;
+                return Err(FacadeError::WriterLockBusy);
+            }
+            Ok(())
+        }
+        fn binding(&self, path: &str) -> Option<WriterWorktreeBinding> {
+            Some(WriterWorktreeBinding {
+                extra: Default::default(),
+                worktree: format!("/fixture/{path}"),
+                head: "a".repeat(40),
+            })
+        }
+    }
+    impl AttemptOwner for ContendedOwner {
+        type Error = FacadeError;
+        fn actor(&self) -> String { "fixture".into() }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> { Some(self.now) }
+        fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+            LaunchRetryPolicy { limit: 0, ..Default::default() }
+        }
+        fn bind_writer_worktree(&mut self, path: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+            self.contend(0)?;
+            Ok(self.binding(path))
+        }
+        fn resolve_creation_base(&mut self, _: &str, _: &str, _: bool) -> Result<Option<String>, Self::Error> {
+            Ok(Some("a".repeat(40)))
+        }
+        fn provision_writer_worktree(&mut self, path: &str, _: &str, _: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+            self.contend(1)?;
+            Ok(self.binding(path))
+        }
+        fn provision_child_worktree(&mut self, _: &str, _: &str) -> Result<bool, Self::Error> {
+            self.contend(2)?;
+            Ok(true)
+        }
+        fn observe_or_start(&mut self, _: &AttemptKey, _: NodeInput<'_>, _: &GraphRoute, _: AccessMode, _: Option<&str>, _: Replay<'_>) -> Result<AttemptObservation, Self::Error> {
+            Ok(terminal(AttemptOutcome::Succeeded))
+        }
+    }
+    for phase in 0..3 {
+        let mut writer = node("writer", route("first"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(".worktrees/topic-fix".into());
+        if phase == 1 {
+            writer.attempt = Some(serde_json::from_value(serde_json::json!({
+                "new_worktree":{"branch":"topic/fix","base":"main"}
+            })).unwrap());
+        } else if phase == 2 {
+            writer.extra.insert("provision_worktree".into(), true.into());
+            writer.source = Some(SourceBinding::Commit { commit: "a".repeat(40) });
+        }
+        let mut document = graph(vec![writer]);
+        document.schema_version = 2;
+        let mut owner = ContendedOwner { phase, failed: false, calls: 0, now: at(0) };
+        let mut journal = MemoryJournal::default();
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+        assert!(first.checkpoint.nodes[0].attempts.is_empty());
+        assert_eq!(retry_of(&first.checkpoint).deadline, Some(at(3600)));
+        assert_eq!(first.checkpoint.wake_at, Some(at(5)));
+        if phase == 2 {
+            assert_eq!(relay::pending_provisioning(&first.checkpoint).len(), 1);
+        }
+        let calls = owner.calls;
+        owner.now = at(1);
+        advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls, calls, "binding must honour its persisted wake");
+        owner.now = at(5);
+        let done = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
+        assert!(relay::pending_provisioning(&done.checkpoint).is_empty());
+    }
+}

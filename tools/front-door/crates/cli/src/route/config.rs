@@ -874,7 +874,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     _ => None,
                 };
                 let pacing = provenant_routing::pacing_preview(&model, context);
-                let recorded_readiness = recorded_model_readiness(
+                let mut recorded_readiness = recorded_model_readiness(
                     accounts,
                     &model,
                     &context.catalogue.admission_pools(&model),
@@ -889,21 +889,104 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     },
                 );
                 let pools = context.catalogue.admission_pools(&model);
-                let admission_refusal = provenant_quota::Admission {
-                    policies,
-                    now_unix_seconds: now.unix_seconds(),
+                let quota_evidence = quota_observations(
+                    context.catalogue,
+                    context.availability,
                     records,
-                    pools: &pools,
-                }
-                .check_with_partial_headroom(&route, context.config.allow_unknown_partial_headroom)
-                .err()
-                .map(|error| error.to_string());
+                    policies,
+                    std::slice::from_ref(&model),
+                )?;
                 let admission = provenant_quota::Admission {
                     policies,
                     now_unix_seconds: now.unix_seconds(),
                     records,
                     pools: &pools,
                 };
+                // Preview has no executable probe, so its resolved route has no
+                // selected account. Assess each eligible account's quota as
+                // dispatch would after provider availability is established.
+                let mut refusals = Vec::new();
+                let mut possible = false;
+                for row in &mut recorded_readiness {
+                    let mut candidate = route.clone();
+                    candidate.account_key = Some(row.account_key.clone());
+                    candidate.readiness = RouteReadiness::Ready {
+                        extra: Default::default(),
+                        availability_ref: "preview".into(),
+                        expires_unix_seconds: now.unix_seconds().saturating_add(60),
+                    };
+                    let result = admission.check_with_partial_headroom(
+                        &candidate,
+                        context.config.allow_unknown_partial_headroom,
+                    );
+                    match &result {
+                        Ok(()) => possible = true,
+                        Err(error) => refusals.push(format!("{}: {error}", row.account_key)),
+                    }
+                    if row.observation.reason == Some(provenant_quota::ReadinessReason::NotProbed)
+                        && let Some(observation) = quota_evidence.iter().find(|observation| {
+                            observation.model == model
+                                && observation.snapshot.account.account_key == row.account_key
+                                && observation.snapshot.observed_unix_seconds <= now.unix_seconds()
+                                && observation.expires_unix_seconds > now.unix_seconds()
+                        })
+                    {
+                        use provenant_quota::{
+                            PartialHeadroom, QuotaStatus, ReadinessReason, ReadinessState,
+                        };
+                        let headroom = provenant_quota::partial_headroom(
+                            &observation.snapshot,
+                            &route.adapter,
+                            &route.model,
+                            &pools,
+                            now.unix_seconds(),
+                        );
+                        let verdict = match (observation.snapshot.status, headroom) {
+                            (QuotaStatus::AuthRequired, _) => Some((
+                                ReadinessState::Unavailable,
+                                Some(ReadinessReason::SignedOut),
+                            )),
+                            (_, PartialHeadroom::Exhausted) => Some((
+                                ReadinessState::Unavailable,
+                                Some(ReadinessReason::Exhausted),
+                            )),
+                            (_, PartialHeadroom::Unknown) => Some((
+                                ReadinessState::Unknown,
+                                Some(ReadinessReason::UncalibratedPartialCoverage),
+                            )),
+                            (
+                                QuotaStatus::Available | QuotaStatus::CreditOnly,
+                                PartialHeadroom::Known,
+                            ) if result.is_ok() => Some((ReadinessState::Ready, None)),
+                            _ => None,
+                        };
+                        if let Some((state, reason)) = verdict {
+                            row.observation = provenant_quota::ReadinessRead {
+                                observed_scope: Some(provenant_quota::ReadinessScope {
+                                    host: provenant_quota::LOCAL_HOST.into(),
+                                    adapter: route.adapter.clone(),
+                                    account_key: row.account_key.clone(),
+                                    route: model.as_str().into(),
+                                }),
+                                state,
+                                reason,
+                                observed_unix_seconds: Some(
+                                    observation.snapshot.observed_unix_seconds,
+                                ),
+                                expires_unix_seconds: Some(observation.expires_unix_seconds),
+                                reset_unix_seconds: None,
+                                evidence_ref: Some(observation.snapshot.source_ref.clone()),
+                            };
+                        }
+                    }
+                }
+                // A pool or explicit fallback may try another model during
+                // dispatch. One member cannot decide the whole request.
+                let admission_refusal = (route.pool_selection.is_none()
+                    && !matches!(request.fallback, Fallback::Models(_))
+                    && !possible
+                    && !refusals.is_empty())
+                .then(|| refusals.join("; "));
                 let mut provider_refusals = Vec::new();
                 for record in records
                     .iter()
