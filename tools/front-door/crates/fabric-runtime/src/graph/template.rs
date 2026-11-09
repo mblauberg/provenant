@@ -255,8 +255,12 @@ pub struct ParameterRefusal {
     pub template: String,
     pub fault: ParameterFault,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example: Option<Box<String>>,
+    pub example: Option<Box<ParameterExample>>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ParameterExample(String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -284,7 +288,7 @@ pub enum ParameterFault {
 
 impl ParameterRefusal {
     pub fn example(&self) -> Option<String> {
-        self.example.as_deref().cloned()
+        self.example.as_ref().map(|example| example.0.clone())
     }
 
     pub(crate) fn redacted(&self) -> Self {
@@ -292,7 +296,10 @@ impl ParameterRefusal {
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
         safe.template = clean(&safe.template);
-        safe.example = safe.example.as_deref().map(|value| Box::new(clean(value)));
+        safe.example = safe
+            .example
+            .as_deref()
+            .map(|value| Box::new(ParameterExample(clean(&value.0))));
         match &mut safe.fault {
             ParameterFault::NotTable => {}
             ParameterFault::Unknown {
@@ -413,7 +420,7 @@ impl std::fmt::Display for ParameterRefusal {
                     write!(f, "template {template} requires parameter {}", list[0])?;
                 }
                 if let Some(example) = &self.example {
-                    write!(f, "; example: {example}")?;
+                    write!(f, "; example: {}", example.0)?;
                 }
                 Ok(())
             }
@@ -851,7 +858,7 @@ impl Template {
             let key = missing[0].clone();
             let example = template_example(name, &self.parameters, &supplied, &missing);
             let mut refusal = refuse(ParameterFault::Missing { key, keys: missing });
-            refusal.example = example.map(Box::new);
+            refusal.example = example.map(|value| Box::new(ParameterExample(value)));
             return Err(refusal);
         }
         let mut effective = Map::new();
