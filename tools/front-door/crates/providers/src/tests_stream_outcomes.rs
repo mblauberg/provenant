@@ -808,6 +808,16 @@ pub(super) fn read_only_plan(
     root: &str,
     authentication: Option<&str>,
 ) -> provenant_confinement::ConfinedPlan {
+    read_only_plan_protecting(root, authentication, &[])
+}
+
+/// A read-only fixture whose `protected` members stand in for the other
+/// checkouts a host inventories as protected roots.
+pub(super) fn read_only_plan_protecting(
+    root: &str,
+    authentication: Option<&str>,
+    protected: &[&str],
+) -> provenant_confinement::ConfinedPlan {
     use provenant_confinement::permissions::{
         AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
     };
@@ -829,7 +839,7 @@ pub(super) fn read_only_plan(
             scratch: grant("scratch"),
             private_state: Some(grant("state")),
             read_roots: vec![grant("repo")],
-            protected_roots: vec![],
+            protected_roots: protected.iter().map(|path| grant(path)).collect(),
             secret_roots: vec![],
             selected_authentication: authentication.map(Into::into),
             include_continuation: false,

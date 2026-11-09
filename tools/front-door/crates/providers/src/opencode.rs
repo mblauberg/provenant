@@ -382,7 +382,9 @@ fn prepare(
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
     // Read-only Bash needs a shell and atomic rename utilities, but receives
-    // no writer toolchain or source write grant. The outer profile owns writes.
+    // no writer toolchain or source write grant. As for Claude, Codex and AGY
+    // readers, the rendered profile denies writes to the source and protected
+    // checkouts (`push_boundaries`); OpenCode's permission config is not that boundary.
     let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin")];
     if shell {
         tool_exec_roots.push(package.clone());
@@ -1513,7 +1515,14 @@ mod tests {
         let cached = root.join("state/cache/opencode/bin/rg");
         std::fs::create_dir_all(cached.parent().unwrap())?;
         std::fs::copy(rg, &cached)?;
-        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), Some("login"));
+        // `repo` is the read root the renderer takes as the lane's source and
+        // `other-member` a protected checkout, the two roots a read-only
+        // shell must not write.
+        let plan = crate::tests::read_only_plan_protecting(
+            root.to_str().unwrap(),
+            Some("login"),
+            &["other-member"],
+        );
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
@@ -1555,29 +1564,45 @@ mod tests {
             );
         }
         // The same launch must support the brief's temporary-file + rename
-        // protocol. This profile is `allow default` with typed grants layered
-        // on top; the outer confinement owns refusing other writes, so refusal
-        // is asserted on the write grants above, not by probing here.
+        // protocol while the shell it grants cannot write the source or a
+        // protected checkout. The profile is `allow default`; these refusals
+        // come from the read-only source and protected-root denials in
+        // `provenant_confinement::permissions::render::push_boundaries`, not
+        // from OpenCode's permission config.
         let private = &plan.permissions().private_state.as_ref().unwrap().path;
         std::fs::create_dir_all(private)?;
+        let source = root.join("repo");
+        let protected = root.join("other-member");
+        std::fs::create_dir_all(&source)?;
+        std::fs::create_dir_all(&protected)?;
         let output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/sh", "-c"])
             .arg(r#"set -eu
 printf '%s' '{"schema_version":2,"status":"done","note":"progress","remaining":[],"decisions":[],"verify":[]}' > "$1/handoff.tmp"
 /bin/mv "$1/handoff.tmp" "$1/handoff.json"
+if (printf forbidden > "$2/forbidden") 2>/dev/null; then exit 91; fi
+if (printf forbidden > "$3/forbidden") 2>/dev/null; then exit 92; fi
+if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
 "#)
             .arg("handoff-probe")
             .arg(private)
+            .arg(&source)
+            .arg(&protected)
             .output()?;
         assert!(
             output.status.success(),
-            "{}",
+            "probe exit {:?} (91: source written, 92: protected checkout written, \
+             93: handoff moved into source): {}",
+            output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
         let progress: serde_json::Value =
             serde_json::from_slice(&std::fs::read(private.join("handoff.json"))?)?;
         assert_eq!(progress["status"], "done");
         assert!(!private.join("handoff.tmp").exists());
+        assert!(!source.join("forbidden").exists());
+        assert!(!source.join("handoff.json").exists());
+        assert!(!protected.join("forbidden").exists());
         Ok(())
     }
 
