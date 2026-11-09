@@ -492,7 +492,13 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             observations,
             ..Default::default()
         };
-        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        // This fixture reconstructs 640 copies, including checked triage.
+        // Give the consumer room to inspect them while retaining checkpoint caps.
+        let limits = crate::config::GraphLimits {
+            node_prompt_bytes: 512 * 1024,
+            ..Default::default()
+        };
+        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
         let synthesis = run
             .checkpoint
             .nodes
@@ -560,9 +566,12 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
                     .and_then(serde_json::Value::as_str)
                     == Some("repair")
         }));
+        let consumer = run.checkpoint.nodes.last().unwrap();
         assert_eq!(
-            run.checkpoint.nodes.last().unwrap().state,
-            NodeState::Succeeded
+            consumer.state,
+            NodeState::Succeeded,
+            "verifying={verifying}: {:?}",
+            consumer.advance_error
         );
         let prompt = owner.prompts.last().unwrap();
         assert!(
@@ -573,7 +582,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         );
         let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
         journal.0 = Some(serde_json::from_slice(&stored).unwrap());
-        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        let replay = advance_with_budget(&document, &mut FakeOwner::default(), &mut journal, &limits, &Default::default()).unwrap();
         assert_eq!(run.checkpoint, replay.checkpoint);
         let checkpoint = journal.0.as_mut().unwrap();
         let outputs = checkpoint
@@ -589,7 +598,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             serde_json::json!("{}"),
         );
         assert!(matches!(
-            advance(&document, &mut FakeOwner::default(), &mut journal),
+            advance_with_budget(&document, &mut FakeOwner::default(), &mut journal, &limits, &Default::default()),
             Err(GraphError::BadCheckpoint { .. })
         ));
     }
