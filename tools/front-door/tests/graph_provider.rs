@@ -3267,6 +3267,93 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
     run_graph_provider_with_wait(rig, graph_id, node, "5s")
 }
 
+fn light_graph_delivers_and_applies_preset_per_node() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        fs::write(rig.project.join(name), "original\n")?;
+    }
+    let remote = rig.root.join("remote.git");
+    for args in [
+        vec!["init", "--bare", remote.to_str().ok_or("remote")?],
+        vec!["add", "."],
+        vec!["commit", "-qm", "base"],
+        vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+        vec![
+            "worktree",
+            "add",
+            "-qb",
+            "light-writer",
+            ".worktrees/light-writer",
+        ],
+    ] {
+        let out = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&out), 0, "{out:?}");
+    }
+    let route = json!({"adapter":"codex","model":"gpt-6-luna","effort":"low"});
+    let document = rig.project.join("light-graph.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(
+            &json!({"schema_version":2,"graph_id":"light-graph","nodes":[
+                {"id":"writer","prompt":"fixture writer shell","access":"worktree_write","worktree":".worktrees/light-writer","delivery":"push","attempt":{"preset":"light","isolation":"private"},"route":route},
+                {"id":"reader","prompt":"fixture read only","access":"read_only","route":route}
+            ]}),
+        )?,
+    )?;
+    let out = rig.command(&["run", "--file", "light-graph.json", "--wait=30s", "--json"])?;
+    let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(code(&out), 0, "{response}");
+    let nodes = response["data"]["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("nodes")?;
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    for node in nodes {
+        let reference = node["attempts"][0]["attempt_ref"]
+            .as_str()
+            .ok_or("attempt")?;
+        let id = reference.rsplit_once('/').ok_or("reference")?.1;
+        let bytes: Vec<u8> =
+            db.query_row("SELECT record FROM attempts WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?;
+        let record: provenant_run::AttemptRecord = serde_json::from_slice(&bytes)?;
+        if node["id"] == "writer" {
+            assert_eq!(
+                record.profile.knobs.get("lanes.receipts"),
+                Some(&json!("none"))
+            );
+            assert!(record.delivery.is_some(), "{record:?}");
+            let pushed = rig.execute(
+                &git,
+                &[
+                    "--git-dir",
+                    remote.to_str().ok_or("remote")?,
+                    "rev-parse",
+                    "refs/heads/light-writer",
+                ],
+                None,
+            )?;
+            assert_eq!(code(&pushed), 0, "{pushed:?}");
+        } else {
+            assert_ne!(
+                record.profile.knobs.get("lanes.receipts"),
+                Some(&json!("none"))
+            );
+            assert_ne!(
+                record.profile.knobs.get("lanes.supervision"),
+                Some(&json!("minimal"))
+            );
+        }
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
 fn run_graph_provider_with_wait(
     rig: &TestRig,
     graph_id: &str,
@@ -3497,6 +3584,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         let mut node = json!({
             "id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
             "worktree":".worktrees/shell-evidence", "delivery":"none",
+            "attempt":{"preset":"light", "isolation":"private"},
             "route": if adapter == "claude" {
                 json!({"adapter":"claude","model":"claude-sonnet-5-5","effort":"medium"})
             } else {
@@ -3504,7 +3592,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
             }
         });
         if adapter == "claude" {
-            node["attempt"] = json!({"account":"pro"});
+            node["attempt"]["account"] = json!("pro");
         }
         let lane = run_graph_provider_with_wait(&rig, "shell-evidence", node, "30s")?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
@@ -3532,6 +3620,13 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         let output = rig.command(&["output", id, "--json"])?;
         let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(code(&output), 0, "{data}");
+        assert!(
+            data["data"]["bytes"]["data"]
+                .as_str()
+                .is_some_and(|text| text
+                    .contains("No delivery was requested; this work has not been delivered.")),
+            "{data}"
+        );
         let paths = data["data"]["changed_files"]
             .as_array()
             .ok_or("changed files")?;
@@ -4042,6 +4137,10 @@ fn main() -> ExitCode {
             (
                 "writer_shell_edits_instructions_and_redacts_logs",
                 writer_shell_edits_instructions_and_redacts_logs,
+            ),
+            (
+                "light_graph_delivers_and_applies_preset_per_node",
+                light_graph_delivers_and_applies_preset_per_node,
             ),
             (
                 "uncatalogued_cli_model_launches_and_surfaces_provider_failure",

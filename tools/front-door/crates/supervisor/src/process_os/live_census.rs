@@ -53,7 +53,24 @@ pub(crate) fn observe(
     if observer.boot_identity()? != root.boot {
         return Err(CensusError::InvalidRecord);
     }
-    walk(&Native(observer), root, known, bound).map(Some)
+    walk_with_retry(&Native(observer), root, known, bound).map(Some)
+}
+
+/// A fork or exit during the validation pass need not turn a cheap lane walk
+/// into a host scan. Try one fresh scoped snapshot before falling back. Both
+/// attempts enforce the same identity and edge checks; persistent churn,
+/// unavailable observations and overflow still reach the full-scan backstop.
+#[cfg(any(target_os = "macos", test))]
+fn walk_with_retry(
+    source: &impl Source,
+    root: &ProcessIdentity,
+    known: &[ProcessIdentity],
+    bound: usize,
+) -> Result<Census, CensusError> {
+    match walk(source, root, known, bound) {
+        Err(CensusError::ProcessList(_)) => walk(source, root, known, bound),
+        result => result,
+    }
 }
 
 /// Recheck identity, links and listings; churn, permission errors and overflow
@@ -320,6 +337,72 @@ mod tests {
             };
             assert!(walk(&source, &root.identity, &[], bound).is_err());
         }
+    }
+
+    #[test]
+    fn live_census_retries_transient_churn_without_describing_the_host() {
+        struct ExitingChild {
+            source: Fake,
+        }
+        impl Source for ExitingChild {
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                self.source.observe(pid)
+            }
+            fn children(&self, pid: i64) -> Result<Vec<i64>, CensusError> {
+                self.source.children(pid)
+            }
+            fn group(&self, pid: i64) -> Result<Vec<i64>, CensusError> {
+                // The first listing includes a child already gone by the time
+                // it is described. The next scoped snapshot is stable.
+                let mut members = self.source.group(pid)?;
+                if self.source.groups.get() == 1 {
+                    members.push(20);
+                }
+                Ok(members)
+            }
+        }
+        let root = fact(10, 1, 10, 1);
+        let source = ExitingChild {
+            source: Fake {
+                facts: [(10, root.clone())].into_iter().collect(),
+                members: vec![10],
+                fail: false,
+                groups: Cell::new(0),
+                churn: false,
+            },
+        };
+        let snapshot = walk_with_retry(&source, &root.identity, &[], 10).unwrap();
+        assert!(!snapshot.is_complete());
+        assert!(matches!(
+            snapshot.process(10),
+            crate::census::ProcessLookup::Present(_)
+        ));
+        assert!(matches!(
+            snapshot.process(20),
+            crate::census::ProcessLookup::Unknown
+        ));
+        // One failed snapshot and one independently validated snapshot.
+        assert_eq!(source.source.groups.get(), 3);
+    }
+
+    #[test]
+    fn live_census_retry_is_bounded_and_keeps_overflow_errors() {
+        let root = fact(10, 1, 10, 1);
+        let source = Fake {
+            facts: [(10, root.clone())].into_iter().collect(),
+            members: vec![10],
+            fail: true,
+            groups: Cell::new(0),
+            churn: false,
+        };
+        assert!(walk_with_retry(&source, &root.identity, &[], 10).is_err());
+        assert_eq!(source.groups.get(), 2);
+        source.groups.set(0);
+        assert!(matches!(
+            walk_with_retry(&source, &root.identity, &[], 0),
+            Err(CensusError::InvalidBound)
+        ));
+        assert_eq!(source.groups.get(), 0);
     }
 
     #[test]

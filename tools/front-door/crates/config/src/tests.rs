@@ -2010,6 +2010,11 @@ fn registered_knobs_have_production_readers() {
         if let Some(accessor) = name.strip_prefix("confinement.") {
             return source.contains(&format!(".{accessor}()"));
         }
+        // Graph isolation is consumed from the typed per-node attempt before
+        // dispatch, when deciding whether to create a pinned source view.
+        if name == "lanes.isolation" {
+            return source.contains(".effective_isolation()");
+        }
         [".get(", "get(", "knob(", ".knob_u64(", ".knob_is_set("]
             .iter()
             .any(|call| source.contains(&format!("{call}\"{name}\"")))

@@ -56,6 +56,39 @@ edits, missing Git evidence, cancellation or a graph pause does not trigger it.
 The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`,
 `templates`, `land` and `quota`; `help --all` reveals the rest.
 
+## The `light` lane preset
+
+`light` is a bundled preset for read-only or scratch work. It is configuration
+on one graph node, not a template or a launch path, so it composes with every
+template and a basic lane stays one node. It sets three per-node attempt
+settings:
+
+| Setting | `light` | Default | Effect |
+|---|---|---|---|
+| `attempt.isolation` | `shared` | `private` | Pinned read-only lanes use an immutable source view; unpinned read-only lanes read the bound checkout live. |
+| `attempt.supervision` | `minimal` | `standard` | A silent provider is marked after one hour, not `lanes.silence_seconds`. |
+| `attempt.receipts` | `none` | `delivery` | Requested writer delivery still runs and records its outcome. |
+
+Apply it, or set any one setting alone, in a run document or a template's
+`[node]` table, or per run with `--set`:
+
+```sh
+provenant run --use review --file brief.md --set 'attempt.preset="light"'
+provenant run --use task --file brief.md --set 'attempt.isolation="shared"' --set 'attempt.receipts="none"'
+provenant run --use task --file brief.md --knob lanes.supervision=minimal
+```
+
+An explicit setting beats the preset. The preset skips only steps a read-only
+lane does not need: a read-only lane already has no writer worktree, dependency
+install or branch. Pinned read-only lanes always use a snapshot of their pinned commit, including
+under `shared`. Unpinned read-only lanes under `shared` read the bound worktree
+or current directory live. Source registration and identity checks still apply
+to pinned readers. Writers keep one
+writer per worktree, so `shared` isolation is refused on a writer node. Secret
+redaction, confinement and object integrity are not settings and stay on in
+every preset. The matching knobs are `lanes.isolation`, `lanes.supervision` and
+`lanes.receipts` in the [configuration reference](../reference/config-keys.md).
+
 ## Deliver through CI to land
 
 The `deliver` composite binds implementation, CI, bounded repair, independent
