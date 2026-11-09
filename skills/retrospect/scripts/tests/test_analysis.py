@@ -34,6 +34,27 @@ class ComparisonAcceptance(unittest.TestCase):
         self.assertLess(result["confidence_interval"][0], .35)
         self.assertGreater(result["confidence_interval"][1], .35)
 
+    def test_no_joint_overlap_despite_marginal_overlap(self):
+        rows = [row(f"{g}{i}", g, i, project=f"P{p}", period=f"D{d}")
+                for g, pairs in (("A", ((0, 0), (1, 1))),
+                                 ("B", ((0, 1), (1, 0))))
+                for i, (p, d) in enumerate(pairs)]
+        result = self.compare(rows)
+        self.assertEqual(result["reason"], "no_joint_overlap")
+        self.assertEqual(result["joint_overlap_sessions"], 0)
+        self.assertIsNone(result["adjusted_difference"])
+
+    def test_within_session_switch_does_not_adjust_for_derived_era(self):
+        rows = [dict(row(f"s{i}", group, value), id=f"{i}-{group}",
+                     within_session_era=era, user_objection=value)
+                for i in range(4) for group, era, value in (("A", 0, 0), ("B", 1, 1))]
+        comparisons = analysis.report(rows)["comparisons"]
+        result = next(c for c in comparisons if c["dimension"] == "experiment"
+                      and c["metric"] == "user_objection")
+        self.assertEqual(result["status"], "identifiable")
+        self.assertAlmostEqual(result["adjusted_difference"], 1)
+        self.assertEqual(result["joint_overlap_sessions"], 4)
+
     def test_one_unknown_context_keeps_numeric_adjustment_estimable(self):
         rows = [dict(row(f"s{i}", "B" if i % 2 else "A",
                          .2 + .3 * (i % 2) + .002 * (i + 1)), context=i + 1)
@@ -51,7 +72,11 @@ class ComparisonAcceptance(unittest.TestCase):
                             "cache_read": None, "cache_write": None}
         rows[1]["usage"] = {"input_total": None, "cache_creation_total": 8,
                             "cache_read": None, "cache_write": None}
-        usage = analysis.report(rows)["usage"]
+        rows[1]["work_mix"] = "review"
+        report = analysis.report(rows)
+        self.assertTrue(any(c["dimension"] == "work_mix" and c["metric"] == "usage_input_total"
+                            for c in report["comparisons"]))
+        usage = report["usage"]
         self.assertEqual(usage["input_total"], {"observed_total": 10, "measured_replies": 1})
         self.assertEqual(usage["cache_creation_total"], {"observed_total": 12, "measured_replies": 2})
         self.assertEqual(usage["cache_read"]["measured_replies"], 0)

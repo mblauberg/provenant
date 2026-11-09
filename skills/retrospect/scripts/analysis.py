@@ -7,9 +7,12 @@ import statistics
 
 ADJUST = ('project', 'period', 'work_mix', 'context', 'compactions')
 GROUPS = ('experiment', 'installed_release', 'instruction_version',
-          'release_era_proxy', 'captured_instruction_hash', 'within_session_era')
+          'release_era_proxy', 'captured_instruction_hash', 'within_session_era', 'work_mix')
 METRICS = ('user_objection', 'examines_source', 'document_basis', 'code_basis',
            'change_cost_argument')
+TOKENS = ('input_total', 'uncached_input', 'cache_read', 'cache_creation_total',
+          'cache_write', 'cache_write_1h', 'output', 'reasoning')
+OUTCOME_SIGNALS = ('reverts', 'follow_up_fixes', 'ci_failures')
 
 
 def _dot(a, b):
@@ -72,7 +75,15 @@ def compare(rows, group='experiment', metric='user_objection', adjust=ADJUST,
     selected = [r for r in rows if r.get(group) is not None
                 and isinstance(r.get(metric), (int, float))
                 and math.isfinite(r[metric])]
+    adjust = tuple(k for k in adjust if k != group)
     levels = sorted({r[group] for r in selected}, key=str)
+    categorical = [k for k in adjust if k != 'context' or not all(
+        r.get(k) is None or isinstance(r.get(k), (int, float)) for r in selected)]
+    strata = collections.defaultdict(set)
+    for r in selected:
+        strata[tuple(r.get(k) for k in categorical)].add(r[group])
+    supported_sessions = {r['session'] for r in selected
+                          if len(strata[tuple(r.get(k) for k in categorical)]) == 2}
     result = dict(status='non_identifiable', raw_difference=None,
                   adjusted_difference=None, permutation_interval=None,
                   confidence_interval=None, p_value=None,
@@ -82,6 +93,7 @@ def compare(rows, group='experiment', metric='user_objection', adjust=ADJUST,
                           'excluded': len(rows) - len(selected)},
                   loso={'min': None, 'max': None, 'sign_flip': False,
                         'non_identifiable': 0},
+                  joint_overlap_sessions=len(supported_sessions),
                   unknown_adjustment=sum(any(r.get(k) is None for k in adjust) for r in selected))
     if len(levels) != 2:
         result['reason'] = 'requires_two_observed_levels'
@@ -94,6 +106,9 @@ def compare(rows, group='experiment', metric='user_objection', adjust=ADJUST,
                 sessions[r['session']].append(r[metric])
         means.append(statistics.mean(statistics.mean(v) for v in sessions.values()))
     result['raw_difference'] = means[1] - means[0]
+    if not supported_sessions:
+        result['reason'] = 'no_joint_overlap'
+        return result
     fit = _fit(selected, group, metric, adjust, levels)
     if fit is None:
         result['reason'] = 'group_inseparable_from_adjustment'
@@ -133,6 +148,11 @@ def report(rows, labels=None, iterations=499, seed=7):
     # Labels are joined by private row identity before aggregating.
     if labels is not None:
         rows = [dict(r, **labels.get(r['id'], {})) for r in rows]
+    rows = [dict(r, **{f'usage_{k}': (r.get('usage') or {}).get(k) for k in TOKENS},
+                 **{f'outcome_{k}': (r['outcome']['signals'].get(k)
+                    if r.get('outcome') and r['outcome']['mature']
+                    and r['outcome']['stratum'] == 'attributed' else None)
+                    for k in OUTCOME_SIGNALS}) for r in rows]
     output = {'replies': len(rows), 'sessions': len({r['session'] for r in rows}),
               'comparisons': [], 'usage': {}, 'coverage': {}}
     for host in ('claude', 'codex', 'lane'):
@@ -151,8 +171,7 @@ def report(rows, labels=None, iterations=499, seed=7):
         'ci_measured': sum(o['signals'].get('ci_failures') is not None for o in outcomes.values()),
     }
     usages = [r.get('usage') for r in rows]
-    for token in ('input_total', 'uncached_input', 'cache_read', 'cache_creation_total',
-                  'cache_write', 'cache_write_1h', 'output', 'reasoning'):
+    for token in TOKENS:
         values = [u[token] for u in usages if u is not None and u.get(token) is not None]
         output['usage'][token] = {'observed_total': sum(values), 'measured_replies': len(values)}
     for group in GROUPS:
@@ -161,8 +180,11 @@ def report(rows, labels=None, iterations=499, seed=7):
                                      'levels': len(levels)}
         for i, j in itertools.combinations(range(len(levels)), 2):
             subset = [r for r in rows if r.get(group) in (levels[i], levels[j])]
-            for metric in METRICS:
-                other_exposures = tuple(k for k in GROUPS if k != group
+            for metric in METRICS + tuple(f'usage_{k}' for k in TOKENS) + tuple(
+                    f'outcome_{k}' for k in OUTCOME_SIGNALS):
+                other_exposures = tuple(k for k in GROUPS
+                                        if k != group and k != 'within_session_era'
+                                        and k not in ADJUST
                                         and any(r.get(k) is not None for r in subset))
                 comparison = compare(subset, group, metric, adjust=ADJUST + other_exposures,
                                      iterations=iterations, seed=seed)

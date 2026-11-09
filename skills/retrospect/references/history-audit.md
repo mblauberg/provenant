@@ -11,7 +11,8 @@ home directories, modify source histories, call providers or file issues.
 Read the authorised local files in place. Keep intermediate files local, outside
 Git. Do not select credential stores or files containing secrets for model input.
 
-Create a private manifest with explicit sources. Paths below are placeholders:
+Create a private manifest with explicit sources at `$audit_dir/manifest.json`.
+Paths below are placeholders:
 
 ```json
 {
@@ -53,9 +54,13 @@ maturity and unmeasured states owned by `outcome.rs`. It never guesses a merge
 from a transcript or duplicates that attribution algorithm.
 
 ```sh
-python3 skills/retrospect/scripts/audit.py prepare local/manifest.json local/audit --seed 7 --audit-count 30
+audit_dir="$(mktemp -d)"
+# Create "$audit_dir/manifest.json" using the template above.
+python3 skills/retrospect/scripts/audit.py prepare "$audit_dir/manifest.json" "$audit_dir/audit" --seed 7 --audit-count 30
 ```
 
+Keep the manifest and output outside the checkout because they contain private
+paths and transcript excerpts.
 `rows.json` and `key.json` are private. `blind.json` and `audit-blind.json` contain
 only shuffled opaque IDs and user/reply/next-user excerpts. Review these packets
 before dispatch: mask explicit group, date, release, project and instruction
@@ -83,8 +88,8 @@ local model, or keep the packets local and report labelling as unverified.
 Local read-only history analysis needs no receipt.
 
 ```sh
-python3 skills/retrospect/scripts/audit.py report local/audit --cheap local/cheap.json --audit local/strong.json > local/report.json
-python3 skills/retrospect/scripts/audit.py lenses local/report.json > local/lenses.json
+python3 skills/retrospect/scripts/audit.py report "$audit_dir/audit" --cheap "$audit_dir/cheap.json" --audit "$audit_dir/strong.json" > "$audit_dir/report.json"
+python3 skills/retrospect/scripts/audit.py lenses "$audit_dir/report.json" > "$audit_dir/lenses.json"
 ```
 
 The report contains aggregates only: no transcript text, project names, native
@@ -98,15 +103,16 @@ their conclusions against the estimates and coverage, never by majority vote.
 Each pair compares the second level with the first, sorted by its source value.
 The estimator is a session-balanced linear probability comparison: each
 session's turns together have weight one. It adjusts for project, calendar day,
-work mix, context and compaction, plus other observed exposure dimensions.
+work mix, context and compaction, plus other observed exposure dimensions,
+except the derived within-session era and the dimension being compared.
 Numeric context stays linear when some measurements are missing, with a
 separate missingness indicator. Other controls are categorical. Missing controls
 form explicit unknown levels and are counted. This does not adjust for
 unrecorded causes. Tight daily controls can leave historical comparisons
 unestimable; widen periods only with a stated sensitivity analysis.
 
-Rank loss reports `non_identifiable`: the data cannot separate group from the
-controls. Otherwise `identifiable` means an estimable adjusted association,
+Zero joint categorical overlap or rank loss reports `non_identifiable`: the
+data cannot separate group from the controls. Otherwise `identifiable` means an estimable adjusted association,
 not proof of causation. Both raw and adjusted differences are returned.
 
 Uncertainty uses whole-session residual sign permutations, exactly enumerated
@@ -119,8 +125,8 @@ one project can violate that assumption. Neither interval treats turns as
 independent observations. Leave-one-session-out reports the range, sign flips
 and losses of identifiability.
 
-Read session counts, excluded replies, missing controls, audit agreement and
-leave-one-out sensitivity before any effect claim. A few sessions, weak overlap,
+Read session counts, joint-overlap sessions, excluded replies, missing controls,
+audit agreement and leave-one-out sensitivity before any effect claim. A few sessions, weak overlap,
 rare outcomes, a wide interval or one influential session means inconclusive.
 Report all pairwise comparisons as exploratory; there is no multiple-testing
 correction. A null or non-identifiable result does not establish equivalence.
