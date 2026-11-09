@@ -1689,11 +1689,11 @@ fn linux_cwd(pid: i32) -> Result<CwdObservation, PidError> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn map_cwd_error(pid: i32, error: io::Error) -> Result<CwdObservation, PidError> {
     match error.raw_os_error() {
         Some(libc::ESRCH | libc::ENOENT) => Ok(CwdObservation::Gone),
-        Some(libc::EPERM) => Ok(CwdObservation::PermissionDenied),
+        Some(libc::EPERM | libc::EACCES) => Ok(CwdObservation::PermissionDenied),
         Some(errno) if errno == libc::ENOTSUP || errno == libc::ENOSYS => {
             Ok(CwdObservation::Unsupported)
         }
@@ -2253,6 +2253,27 @@ mod tests {
             "sbin/daemon",
         ] {
             assert!(!darwin_daemon_path(std::path::Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn linux_cwd_errors_distinguish_denied_gone_and_query_failures() {
+        for (errno, expected) in [
+            (libc::EACCES, Some(CwdObservation::PermissionDenied)),
+            (libc::EPERM, Some(CwdObservation::PermissionDenied)),
+            (libc::EIO, None),
+            (libc::EINVAL, None),
+            (libc::ESRCH, Some(CwdObservation::Gone)),
+            (libc::ENOENT, Some(CwdObservation::Gone)),
+        ] {
+            let result = map_cwd_error(42, io::Error::from_raw_os_error(errno));
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected, "errno {errno}"),
+                None => assert!(
+                    matches!(result, Err(PidError::Io { pid: 42, source }) if source.raw_os_error() == Some(errno)),
+                    "errno {errno} must remain a query error"
+                ),
+            }
         }
     }
 

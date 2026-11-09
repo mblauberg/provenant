@@ -849,9 +849,9 @@ credentials never grant this exclusion. A root-owned worktree still includes
 root processes; an owner's real, effective or saved uid in a setuid tool keeps
 that tool in the cohort.
 
-The exclusion covers unreadable-cwd `EPERM` and residual executable/descriptor
-gaps. It does not skip path inspection. A positive cwd, executable or held path
-inside a root always makes that root `Live`, and a path that could be inside
+The exclusion covers native cwd permission denials (`EPERM` on macOS,
+`EPERM` or `EACCES` on Linux) and residual executable/descriptor gaps. It does
+not skip path inspection. A positive cwd, executable or held path inside a root always makes that root `Live`, and a path that could be inside
 but cannot be placed still makes it `Unknown`. Unexpected cwd failures,
 unknown native identities and incomplete process listings remain closed.
 A readable outside cwd cannot excuse an incomplete descriptor observation

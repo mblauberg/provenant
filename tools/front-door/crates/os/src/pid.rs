@@ -75,13 +75,14 @@ fn signal_process_with(
 pub enum CwdObservation {
     Path(PathBuf),
     Gone,
-    /// The cwd syscall failed with EPERM; other failures remain errors.
+    /// Native permission denial: EPERM on macOS, EPERM or EACCES on Linux.
     PermissionDenied,
     Unsupported,
 }
 
-/// Why an occupancy observation could not prove non-occupancy. The caller
-/// reports it, and may excuse only `DescriptorsDenied` under its own policy.
+/// Why an occupancy observation could not prove non-occupancy. A caller may
+/// scope out uncertainty under an explicit process trust policy; positive
+/// paths remain occupancy evidence regardless of the gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OccupancyGap {
     /// Every failed query was a descriptor query refused with EPERM; the
@@ -111,8 +112,8 @@ impl OccupancyGap {
         }
     }
 
-    /// The more serious of two gaps. A refused query is the least serious: it
-    /// is the only gap a caller may excuse, and only if nothing else failed.
+    /// The more serious of two gaps. A permission refusal ranks below other
+    /// failures, so it cannot hide a missing path or unstable observation.
     pub fn worse(self, other: Self) -> Self {
         if self == Self::DescriptorsDenied {
             other

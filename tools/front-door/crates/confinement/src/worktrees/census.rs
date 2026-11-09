@@ -1508,7 +1508,7 @@ pub(super) fn observe_worker_holders_while(
             }
             NativeCwd::Unknown(category) => {
                 let condition = if category.starts_with("cwd ") {
-                    "actual cwd EPERM required"
+                    "native cwd permission denial required"
                 } else {
                     "stable process identity unavailable"
                 };
@@ -1535,7 +1535,9 @@ pub(super) fn observe_worker_holders_while(
                     if placement_failed {
                         unplaceable(
                             Some(pid),
-                            Some("actual cwd EPERM required (directory identity placement failed)"),
+                            Some(
+                                "native cwd permission denial required (directory identity placement failed)",
+                            ),
                         );
                     }
                     for (root, state) in &states {
@@ -1569,7 +1571,9 @@ pub(super) fn observe_worker_holders_while(
                 } else {
                     unplaceable(
                         Some(pid),
-                        Some("actual cwd EPERM required (readable cwd placement failed)"),
+                        Some(
+                            "native cwd permission denial required (readable cwd placement failed)",
+                        ),
                     );
                     let detail = process_detail(cwd_observer, pid, "cwd unreadable");
                     for (root, state) in &mut states {
