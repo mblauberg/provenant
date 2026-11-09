@@ -15,6 +15,8 @@ pub enum WorktreeOrigin {
 /// Stored in the linked worktree's private Git admin directory. Optional IDs
 /// distinguish an adopted human checkout from a lane. Ownership alone never
 /// grants deletion authority. `base` is pinned to a commit when created.
+/// `reference` links the branch to its generation in the host ref ledger
+/// (see `RefLedger`); an owner without it has an unobserved branch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeOwner {
@@ -27,6 +29,8 @@ pub struct WorktreeOwner {
     pub origin: WorktreeOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<RefOwnership>,
 }
 
 pub fn load_owner(worktree: &VerifiedWorktree) -> Result<Option<WorktreeOwner>, WorktreeError> {
@@ -163,6 +167,11 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     if owner.label.as_ref().is_some_and(|label| {
         label.is_empty() || label.len() > 128 || label.chars().any(char::is_control)
     }) || owner.origin == WorktreeOrigin::Lane && owner.operation_id.is_none()
+        || owner.reference.as_ref().is_some_and(|reference| {
+            reference.endpoint != RefEndpoint::Local
+                || reference.generation == 0
+                || reference.reference != format!("refs/heads/{}", owner.branch)
+        })
     {
         return Err(WorktreeError::InvalidRequest);
     }
@@ -248,6 +257,25 @@ pub fn save_lane_owner_when_free(
     save_owner(&tree, owner)
 }
 
+/// The ledger generation to link from a new owner of `branch`, when the
+/// ledger observed it and the branch still sits on the commit recorded there.
+/// Any other state, including an unreadable ledger, leaves the branch
+/// unobserved, which retains it.
+pub fn branch_ownership(
+    context: &WorktreeContext<'_>,
+    branch: &str,
+    head: GitOid,
+) -> Result<Option<RefOwnership>, WorktreeError> {
+    let branch = GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?;
+    let Ok(ledger) = RefLedger::for_context(context) else {
+        return Ok(None);
+    };
+    let Ok(Some(record)) = ledger.load(&RefEndpoint::Local, &branch) else {
+        return Ok(None);
+    };
+    Ok((record.tip == head).then(|| record.ownership()))
+}
+
 /// Opt-in lane cleanup. The delivered/base OID is pinned by the host. The
 /// normal merged-clean GC policy for other worktrees is unchanged. Only
 /// declared regenerable output is removed, through GC's existing walker.
@@ -268,7 +296,11 @@ pub fn prune_owned(
     {
         return Err(WorktreeError::UnknownWriter);
     }
-    if !is_ancestor(context, head, upstream, cancel)? {
+    let delivered = LandingTarget {
+        reference: None,
+        tip: upstream,
+    };
+    if !landed::landed_on(context, head, &delivered, cancel)? {
         return Err(WorktreeError::InvalidRequest);
     }
     let lanes = list_for_gc_matching(context, cancel, |candidate, _| candidate == path)?
@@ -294,14 +326,24 @@ pub fn prune_owned(
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     if branch.as_str() != format!("refs/heads/{}", owner.branch)
         || entry.head != head
-        || !is_ancestor(context, head, upstream, cancel)?
+        || !landed::landed_on(context, head, &delivered, cancel)?
     {
         return Err(WorktreeError::IdentityChanged);
     }
     // A pushed lane ref or an open PR is not an integration target. Its
     // worktree can be pruned while the local ref remains for landing and GC.
     let disposition = match policy.upstream {
-        Some(integration) if is_ancestor(context, head, integration, cancel)? => {
+        Some(integration)
+            if landed::landed_on(
+                context,
+                head,
+                &LandingTarget {
+                    reference: None,
+                    tip: integration,
+                },
+                cancel,
+            )? =>
+        {
             Disposition::Merged
         }
         _ => Disposition::Keep(RetainReason::NotMerged),

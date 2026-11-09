@@ -802,6 +802,7 @@ pub(crate) mod peer_tests {
                                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
                             origin: WorktreeOrigin::Lane,
                             label: None,
+                            reference: None,
                         },
                     )?;
                     Ok(())

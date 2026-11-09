@@ -56,6 +56,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
                     .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
                 label: None,
+                reference: None,
             };
             let head = provenant_confinement::run_utility(
                 context.executor,
@@ -205,6 +206,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
                     .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
                 label: None,
+                reference: None,
             };
             let head = provenant_confinement::run_utility(
                 context.executor,

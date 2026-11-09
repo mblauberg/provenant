@@ -318,7 +318,11 @@ fn collect_impl(
         let Some(upstream) = policy.upstream else {
             continue;
         };
-        match is_ancestor(context, lane.head, upstream, cancel) {
+        let target = LandingTarget {
+            reference: None,
+            tip: upstream,
+        };
+        match landed::landed_on(context, lane.head, &target, cancel) {
             Ok(true) => {}
             Ok(false) => {
                 retain(&mut report.worktrees, &branch, RetainReason::NotMerged);
@@ -1146,7 +1150,11 @@ fn collect_foreign(
     let Some(upstream) = policy.upstream else {
         return Err(WorktreeError::UnknownWriter);
     };
-    if !is_ancestor(context, lane.head, upstream, cancel)? {
+    let target = LandingTarget {
+        reference: None,
+        tip: upstream,
+    };
+    if !landed::landed_on(context, lane.head, &target, cancel)? {
         return Ok(None);
     }
     let mut info = lane.clone();
