@@ -3391,16 +3391,18 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             .join(lane["run_id"].as_str().ok_or("run")?)
             .join("attempts")
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
-        assert_eq!(
-            lane["state"],
-            match (resume, dirty) {
-                (true, _) => "succeeded",
-                (false, false) => "review_required",
-                (false, true) => "uncommitted",
-            },
-            "{lane}\nprovider stderr: {}",
-            fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
-        );
+        // The helper reads the node's current attempt. A stopped writer is
+        // restarted in place, so that is the successor, not the stopped
+        // attempt. The successor is refused before launch when the exclusion
+        // leaves no route; its refusal is checked on its record below.
+        if alternative {
+            assert_eq!(
+                lane["state"],
+                "succeeded",
+                "{lane}\nprovider stderr: {}",
+                fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
+            );
+        }
         if alternative {
             assert_eq!(
                 fs::read_to_string(tree.join("auto-finished.txt"))?,
@@ -3419,16 +3421,24 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             .map(|raw| serde_json::from_slice::<provenant_run::AttemptRecord>(raw))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         assert_eq!(attempts.len(), 2);
+        // The first attempt is the stopped writer: it settled as uncommitted
+        // when it left edits behind, and as needing review otherwise.
+        let stopped = if dirty {
+            provenant_records::run::Outcome::Uncommitted
+        } else {
+            provenant_records::run::Outcome::ReviewRequired
+        };
+        assert!(
+            matches!(
+                &attempts[0].state,
+                provenant_records::run::AttemptState::Terminal { outcome, .. } if *outcome == stopped
+            ),
+            "{:?}",
+            attempts[0].state
+        );
         if dirty {
             // The stopped writer committed nothing; its retained edit reached
             // the fresh successor, which committed it with the rest.
-            assert!(matches!(
-                attempts[0].state,
-                provenant_records::run::AttemptState::Terminal {
-                    outcome: provenant_records::run::Outcome::Uncommitted,
-                    ..
-                }
-            ));
             let out = rig.execute(
                 &git,
                 &[
