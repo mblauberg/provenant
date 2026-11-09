@@ -81,7 +81,9 @@ it is given. Mark each one confirmed or rejected with a reason, and worth fixing
 or not. Rejected findings stay in the record and out of the writer's brief.
 Group confirmed findings by shared cause into fix items, so one flaw is fixed
 once. State the invariant under repair in the repair brief and the delta review,
-not only the files, so a twin copy elsewhere is caught.
+not only the files, so a twin copy elsewhere is caught. You may overrule a
+changes verdict after checking the code, with the reason on the pull request;
+a dispute touching a hard boundary or data loss needs a test or a second lens.
 
 After a shared flaw or a third round, ask whether the design is wrong, comparing
 the structural fix with the small one and recommending one. Round count prompts
