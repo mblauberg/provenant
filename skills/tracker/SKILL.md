@@ -85,7 +85,7 @@ Each PR carries one `Closes #n` or `Refs #n` per issue, never in commits. Close 
 evidence: completed (merge link), not planned (reason, and the successor compared to
 merged code), or duplicate-of. An epic closes on its `Done when`, not child count.
 Quiet is not done; staleness comes from changed evidence, never age.
-Each stacked PR links its own issues; see the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+Each stacked PR links its own issues; follow the repository's runbook for stacked pull requests.
 
 ## Steward sweep
 

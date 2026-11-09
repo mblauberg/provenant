@@ -1,8 +1,8 @@
 # Brief and collect
 
-Use a [template](../../../docs/runbooks/presets.md) before creating a custom
-composite. Give each assignment outcome, acceptance evidence, source SHA,
-read roots, literal write scope, authority, budget, output location and stop
+Inspect `provenant templates` and `provenant templates NAME --json` before
+creating a custom composite. Give each assignment outcome, acceptance evidence,
+source SHA, read roots, literal write scope, authority, budget, output location and stop
 conditions. The [planner brief](planner.md) owns slicing and tier choice.
 
 Keep writer budgets near 35 to 60 minutes; reserve longer lanes for coupled

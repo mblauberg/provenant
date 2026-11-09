@@ -21,7 +21,7 @@ provenant run --use batch --file brief.md --set 'worktree="/absolute/project/.wo
 Use `explore` over areas, `research` for primary sources and `review` for
 a pinned head. Nodes use `over`, `after` and `inputs` for copies, dependencies
 and evidence. Layers are bundled, user, repository and inline; project templates go under
-`.provenant/templates/`. See the [template runbook](../../docs/runbooks/presets.md).
+`.provenant/templates/`. Inspect them with `provenant templates NAME --json`.
 
 Register writer worktrees first with `provenant worktree create NAME --base BASE`.
 The bundled `batch` composite gives every slice the same `worktree` and `write_scope` bindings, so its writers sharing that worktree run in sequence. For parallel writers, define a graph with a separate registered worktree and write scope for each node; review the integrated head. The [planner brief](references/planner.md)

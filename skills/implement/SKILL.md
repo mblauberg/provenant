@@ -40,7 +40,8 @@ Check authority, write scopes and gates in the explanation,
 then submit without `--explain`. `deliver` is the default composite; use
 `implement` for one slice, `implement.fix` for a known defect, and `batch` for
 parallel slices into one integration branch. Use `plan` when the shape is open.
-See [templates](../../docs/runbooks/presets.md).
+Inspect available templates with `provenant templates` and their definitions
+with `provenant templates NAME --json`.
 
 Follow `provenant status`, collect `provenant output TARGET`, and use `retry`
 for unfinished work. `edit` changes unstarted nodes. Landing uses

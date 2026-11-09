@@ -1,7 +1,6 @@
 # Steward and closing
 
-Owner: `skills/tracker`
-Anchor: [`steward::run`](../../../tools/front-door/src/tick/steward.rs); [bundled brief](../../../tools/front-door/crates/fabric-runtime/assets/templates/steward.toml)
+Inspect the bundled brief with `provenant templates steward --json`.
 
 ## Scheduled proposal sweep
 

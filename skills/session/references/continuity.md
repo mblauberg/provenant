@@ -13,8 +13,9 @@ Save through `provenant workflow session save SESSION --file checkpoint.md`,
 selecting the actual `--client` when needed to preserve the chair identity.
 Use the host-supplied key, never another session's latest file. Lanes cannot
 save chair checkpoints. Hooks derive a separate autosave; the chair alone
-writes its checkpoint. The [runtime runbook](../../../docs/runbooks/session-checkpoints.md)
-owns revision history, identity rebinding and summary metadata.
+writes its checkpoint. Inspect `provenant workflow session show --help` for
+revision history and metadata, and `provenant workflow session save --help`
+for identity options.
 
 Before compaction, retain rulings, authority, evidence pointers, unresolved
 questions and the next action. Drop transcripts, tool output and contents
@@ -53,7 +54,7 @@ mission's STOP rule.
 
 Append milestones to the chair log. For retryable appends, retain
 `--operation-id ID`, `--issued-at UNIX_SECONDS` and identical JSON input;
-the [runbook](../../../docs/runbooks/session-checkpoints.md#chair-log)
-owns replay and retention. Preserve the original host/project/session/actor
-for pending inbox answers across handoff; changing a label does not transfer
+`provenant chair log append --help` describes replay options. Follow the
+repository's runbook for retention policy. Preserve the original
+host/project/session/actor for pending inbox answers across handoff; changing a label does not transfer
 their delivery target.
