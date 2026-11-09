@@ -69,10 +69,8 @@ jobs:
           add-job-id-key: false
           save-if: false
       - name: Install nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
-        timeout-minutes: 3
-        with:
-          tool: cargo-nextest@0.9.149
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
       - name: Stress-run changed tests
         env:
           PROVENANT_ROOT: ${{ github.workspace }}
@@ -99,10 +97,8 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Install nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
-        timeout-minutes: 3
-        with:
-          tool: cargo-nextest@0.9.149
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
       - name: Stress harness binaries
         working-directory: tools/front-door
         env:
@@ -145,11 +141,14 @@ jobs:
           shared-key: front-door-ci
           add-job-id-key: false
           save-if: false
-      - name: Install nextest and cargo-mutants
+      - name: Install nextest
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Install mutation testing
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
-        timeout-minutes: 6
+        timeout-minutes: 3
         with:
-          tool: cargo-nextest@0.9.149,cargo-mutants@25.3.1
+          tool: cargo-mutants@25.3.1
       - name: Run mutation testing
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
