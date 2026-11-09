@@ -553,14 +553,18 @@ fn codex_credit_blocked(payload: &Value) -> bool {
     let main = nonempty_object(root.get("rateLimits"))
         .or_else(|| nonempty_object(root.get("rate_limit")))
         .unwrap_or(&Value::Null);
+    let credits = root.get("credits").or_else(|| main.get("credits"));
     root.get("spend_control")
         .and_then(|value| value.get("reached"))
         == Some(&Value::Bool(true))
-        || root
-            .get("credits")
-            .or_else(|| main.get("credits"))
-            .and_then(|credits| credits.get("overage_limit_reached"))
+        || credits.and_then(|credits| credits.get("overage_limit_reached"))
             == Some(&Value::Bool(true))
+        // A balance the provider says it will not spend is not spendable.
+        || credits.and_then(|credits| {
+            credits
+                .get("hasCredits")
+                .or_else(|| credits.get("has_credits"))
+        }) == Some(&Value::Bool(false))
 }
 
 fn details_mut(details: &mut Option<QuotaDetails>) -> &mut QuotaDetails {

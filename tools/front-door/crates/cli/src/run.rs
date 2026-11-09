@@ -113,6 +113,22 @@ impl QuotaEvidence {
     }
 }
 
+/// A usage-limit settlement names the spent account and, when the provider
+/// gave one, its reset, so a chair need not infer either from several lanes.
+fn quota_reason(fact: &str, account: Option<&str>, resets: Option<i64>) -> String {
+    let mut reason = fact.to_owned();
+    if let Some(account) = account {
+        reason.push_str("; account ");
+        reason.push_str(account);
+    }
+    match resets.and_then(|reset| jiff::Timestamp::from_second(reset).ok()) {
+        Some(reset) => reason.push_str(&format!("; resets at {reset}")),
+        None if account.is_some() => reason.push_str("; reset not stated"),
+        None => {}
+    }
+    reason
+}
+
 /// Catalogue family of a provider-qualified model, for family-distinct routing.
 pub fn model_family(model: &str) -> Option<String> {
     let catalogue = provenant_routing::Catalogue::bundled().ok()?;
@@ -972,7 +988,20 @@ impl Registry<'_> {
                     return Err("quota evidence has no state root".into());
                 }
             }
-            decoded.reason = Some(fact.reason().into());
+            decoded.reason = Some(quota_reason(
+                fact.reason(),
+                route.account_label.as_deref(),
+                quota_evidence.as_ref().map_or_else(
+                    || {
+                        resets_in_seconds
+                            .and_then(|seconds| i64::try_from(seconds).ok())
+                            .and_then(|seconds| {
+                                SystemClock::new().unix_seconds().checked_add(seconds)
+                            })
+                    },
+                    |evidence| evidence.resets,
+                ),
+            ));
         } else if let Some((outcome, fact)) = events.iter().find_map(|event| match event {
             ProviderEvent::RateLimited { .. } => Some((
                 run::Outcome::RateLimited,

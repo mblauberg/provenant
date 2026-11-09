@@ -162,6 +162,31 @@ fn codex_app_server_decodes_extra_windows_and_credit_only_status() {
 }
 
 #[test]
+fn codex_spent_window_without_spendable_credits_is_exhausted_not_credit_only() {
+    let fixture = include_str!("fixtures/codex-app-server.json");
+    let mut envelope: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    // The provider reports a balance it will not spend.
+    envelope["payload"]["result"]["rateLimits"]["credits"] =
+        serde_json::json!({"hasCredits": false, "unlimited": false, "balance": "9.50"});
+    assert_eq!(
+        decode_json(&effect_plan("codex"), &envelope.to_string()).status,
+        QuotaStatus::Exhausted
+    );
+    envelope["payload"]["result"]["rateLimits"]["credits"] =
+        serde_json::json!({"hasCredits": true, "balance": "0"});
+    assert_eq!(
+        decode_json(&effect_plan("codex"), &envelope.to_string()).status,
+        QuotaStatus::Exhausted
+    );
+    envelope["payload"]["result"]["rateLimits"]["credits"] =
+        serde_json::json!({"hasCredits": true, "balance": "9.50"});
+    assert_eq!(
+        decode_json(&effect_plan("codex"), &envelope.to_string()).status,
+        QuotaStatus::CreditOnly
+    );
+}
+
+#[test]
 fn agy_keeps_independent_model_pools_and_reports_available_if_any_pool_has_headroom() {
     let snapshot = decode_fixture("agy", include_str!("fixtures/agy.json"));
 

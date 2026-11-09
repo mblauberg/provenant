@@ -403,8 +403,34 @@ freshly reloaded records immediately before launch, so a refusal written after
 resolution still prevents it. Invalid evidence excludes only the account it
 belongs to (`invalid_account_evidence`) and fails admission; absent evidence is
 not proof of readiness. Cooldown stays a selection preference, never a block.
+A provider's plan usage limit is the one refusal that spans models. When a lane
+ends on it (Codex's `You've hit your usage limit.`, either as the stream error,
+the failed turn or `codex_error_info: usage_limit_exceeded`), the host records a
+refusal on that account whose pool is the account route `*`, with the reset the
+provider names (`try again at …` in local time, or `try again in …`) or the
+one-hour wait when it names none. `account_block` holds every model on that
+account until the reset, or until a newer reading shows headroom in every window
+the account reports. `provenant quota` shows the account `exhausted` with that
+reset, resolution and pools pass to another account or member, and a graph node
+falls back as for any `provider_refused` exclusion. A limit that names a model
+(`usage limit for <model>`) stays scoped to that model. The lane itself settles
+`quota_limited`; its reason names the account and the reset, so several lanes
+stopped by one spent account read as one cause. Only the limit and its reset are
+read from the provider's text. `credit_only` means credits are spendable: a
+spent window reads `exhausted` when the provider reports no balance, reports
+`hasCredits: false`, or reports that spending is blocked.
 - Why (default): one probe outage or model limit must not take a provider offline.
+- Why (account limit): one spent account must not take pool and exact-route
+  lanes down while other accounts have capacity (#3109).
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
+  `crates/quota/src/admission.rs::admission_tests::account_usage_limit_holds_every_model_until_its_reset`;
+  `crates/quota/src/schedule.rs::zen_tests::account_usage_limit_reads_exhausted_until_its_reset`;
+  `crates/providers/src/codex.rs::usage_limit_tests::a_plan_usage_limit_holds_the_account_until_its_named_reset`;
+  `crates/providers/src/codex.rs::usage_limit_tests::a_model_usage_limit_holds_only_that_model`;
+  `crates/providers/src/tests_stream_outcomes.rs::codex_usage_limit_text_without_error_info_is_quota_limited`;
+  `crates/providers/src/quota/tests.rs::codex_spent_window_without_spendable_credits_is_exhausted_not_credit_only`;
+  `crates/routing/src/tests/exclusions.rs::account_usage_limit_excludes_the_spent_account_for_every_model`;
+  `crates/cli/src/run/holder.rs::tests::an_account_usage_limit_settles_typed_and_holds_every_model_until_reset`;
   `crates/routing/src/tests/alternatives.rs::stale_availability_is_selectable_but_current_account_wins`;
   `crates/quota/src/admission.rs::independent_pool_reset_and_refusal_scope`;
   `tests/graph_provider.rs::codex_capacity_settles_without_quota_refusal`;

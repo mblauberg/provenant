@@ -492,28 +492,30 @@ pub fn report(
             .and_then(|spec| spec.free_account.map(|(key, _)| (key, spec.free_pool)))
             .filter(|(key, _)| record.account.account_key == *key)
             .map(|(_, pool)| pool);
-        let active_free_refusals: Vec<_> = free_pool
-            .map(|pool| {
-                refusals
-                    .iter()
-                    .filter(|refusal| refusal.pool.as_deref() == pool)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let free_refused = !active_free_refusals.is_empty();
+        let in_free = |refusal: &&crate::RefusalRow| {
+            free_pool.is_some_and(|pool| refusal.pool.as_deref() == pool)
+        };
+        let free_refused = refusals.iter().any(|refusal| in_free(&refusal));
+        // A free-pool refusal or a spent plan usage limit makes the whole
+        // account read exhausted until the latest named reset.
+        let account_refusals: Vec<_> = refusals
+            .iter()
+            .filter(|refusal| in_free(refusal) || refusal.pool.as_deref() == Some(ACCOUNT_ROUTE))
+            .collect();
+        let account_refused = !account_refusals.is_empty();
         let status = match &record.snapshot {
             _ if record.last_error == Some(ProbeFailure::IsolatedKeychainUnavailable) => {
                 QuotaStatus::KeychainUnavailable
             }
-            _ if free_refused => QuotaStatus::Exhausted,
+            _ if account_refused => QuotaStatus::Exhausted,
             _ if auth_required => QuotaStatus::AuthRequired,
             Some(snapshot) if fresh => snapshot.status,
             Some(_) => QuotaStatus::Stale,
             None if record.last_error == Some(ProbeFailure::Disabled) => QuotaStatus::Unsupported,
             None => QuotaStatus::Unknown,
         };
-        let reset_seconds = if free_refused {
-            active_free_refusals
+        let reset_seconds = if account_refused {
+            account_refusals
                 .iter()
                 .map(|refusal| refusal.resets_at.as_deref())
                 .collect::<Option<Vec<_>>>()
@@ -1809,6 +1811,47 @@ mod zen_tests {
             assert_eq!(row.status, expected);
             assert_eq!(row.error, Some(ProbeFailure::Auth));
             assert_eq!(row.free_pool_refusal, now == 101);
+        }
+    }
+
+    #[test]
+    fn account_usage_limit_reads_exhausted_until_its_reset() {
+        let account = AccountScope {
+            adapter: "claude".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "some-model".into(),
+            pool: Some(ACCOUNT_ROUTE.into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(5_000),
+        });
+        let detections = [Detection {
+            adapter: "claude".into(),
+            accounts: Some(vec![account]),
+            status: QuotaStatus::Available,
+        }];
+        for (now, expected, resets_at) in [
+            (101, QuotaStatus::Exhausted, Some("1970-01-01T01:23:20Z")),
+            (5_000, QuotaStatus::Unknown, None),
+        ] {
+            let report = report(
+                crate::source::TEST_POLICIES,
+                std::slice::from_ref(&record),
+                &detections,
+                &QuotaQuery { adapter: None },
+                now,
+                "report.json".into(),
+            )
+            .unwrap();
+            let row = &report.accounts[0];
+            assert_eq!(row.status, expected, "now={now}");
+            assert_eq!(row.resets_at.as_deref(), resets_at);
+            assert!(!row.free_pool_refusal);
         }
     }
 

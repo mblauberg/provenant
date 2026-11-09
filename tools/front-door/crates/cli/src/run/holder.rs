@@ -511,6 +511,64 @@ mod tests {
     }
 
     #[test]
+    fn an_account_usage_limit_settles_typed_and_holds_every_model_until_reset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let attempt = state.join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&attempt)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let observed = SystemClock::new().unix_seconds();
+        let resets = observed + 4 * 86_400;
+        QuotaEvidence {
+            pool: Some(provenant_quota::ACCOUNT_ROUTE.into()),
+            observed,
+            resets: Some(resets),
+            shared: true,
+        }
+        .write(&Directory::open_anchor(&attempt)?)?;
+        let route = quota_test_route();
+        let decoded = run::Providers::decode_captures(
+            &Registry::default(),
+            &route,
+            b"",
+            b"",
+            &super::super::tests::clean_exit(),
+            &attempt.join("provider-state"),
+            None,
+        )?;
+        assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        let reason = decoded.reason.unwrap_or_default();
+        let reset = jiff::Timestamp::from_second(resets)?.to_string();
+        assert!(reason.contains("; account key"), "{reason}");
+        assert!(reason.contains(&format!("; resets at {reset}")), "{reason}");
+        let records = crate::quota::read_cache_at(&state)?;
+        assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(resets));
+        let admission = provenant_quota::Admission {
+            policies: &[],
+            now_unix_seconds: observed + 1,
+            records: &records,
+            pools: &[],
+        };
+        // Another model on the same account is held until the reset.
+        assert_eq!(
+            admission.account_block("opencode", "key", "another")?,
+            Some(provenant_quota::AccountBlock::ScopedRefusal)
+        );
+        assert_eq!(
+            admission.account_block("opencode", "other", "another")?,
+            None
+        );
+        let after = provenant_quota::Admission {
+            now_unix_seconds: resets,
+            ..admission
+        };
+        assert_eq!(after.account_block("opencode", "key", "another")?, None);
+        Ok(())
+    }
+
+    #[test]
     fn busy_quota_cache_preserves_terminal_and_sealed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::WaitBudget;
