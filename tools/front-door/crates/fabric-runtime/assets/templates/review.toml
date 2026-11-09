@@ -3,6 +3,7 @@ doc = "Find defects at a pinned head."
 review = "lens"
 brief = """
 Review the change at its pinned head through the ${lens} lens. The host supplies the pinned subject and diff context; Git metadata in the lane is read-only and cannot be fetched. ${advice}
+For each finding include trigger with sequence (the real steps reaching the state), reach (default_path, operator_mistake or attacker_or_unreachable), and observed (boolean; false means inferred). Without a trigger the finding is a note. Off-default-path findings are notes except ADR 0035 boundary breaches and data loss; identify those with class boundary or data_loss. Use kind spec_defect for an evidenced problem in an acceptance criterion; it goes to the chair and does not itself request repair. Set design_defect true with concrete evidence when the design cannot hold or findings share a flaw; explain the shared cause and the structural alternative. Prefer removing the cause, and state the invariant rather than only the affected files.
 After all findings and prose, end with exactly one verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow.
 Example: ```findings
 {"schema_version":1,"findings":[]}

@@ -184,7 +184,7 @@ def check_test_citations(root, document):
     count = 0
     text = document.read_text()
     blocks = re.finditer(
-        r"^\s*(?:[-*]\s*)?(?:\*\*)?Tests?:(?:\*\*)?([^\n]*(?:\n(?!\s*$|\s*(?:[-*]\s*)?(?:\*\*)?(?:Why|Owner):)[^\n]*)*)",
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?Tests?:(?:\*\*)?([^\n]*(?:\n(?!\s*$|\s*(?:[-*]\s*)?(?:\*\*)?(?:Why(?: \(default\))?|Owner):)[^\n]*)*)",
         text, re.M,
     )
     for block in blocks:

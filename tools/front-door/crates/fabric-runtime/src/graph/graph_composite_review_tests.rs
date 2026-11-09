@@ -141,6 +141,9 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
     assert_eq!(outputs.findings[2].severity, "high");
+    assert!(outputs.findings.iter().all(|finding| {
+        finding.effective_severity() == "note" && finding.trigger().is_none()
+    }));
     assert_eq!(outputs.findings[2].summary, "valid finding");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
     assert!(
@@ -171,6 +174,14 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
             .iter()
             .any(|w| w.contains("field status"))
     );
+    assert_eq!(composite.findings.len(), 3);
+    for (finding, severity) in composite.findings.iter().zip(["blocking", "blocking", "high"]) {
+        assert_eq!(finding.severity, severity);
+        assert_eq!(finding.effective_severity(), "note");
+        assert!(finding.trigger().is_none());
+        assert!(owner.prompts[3].contains(&format!("\"severity\":\"{severity}\"")));
+        assert!(owner.prompts[3].contains(&finding.file));
+    }
     assert!(owner.prompts[3].contains("malformed finding:"));
     assert!(owner.prompts[3].contains("field status"));
 }
@@ -456,7 +467,17 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
         excerpt
             .contains("lens-b: findings block missing or invalid: field findings: block missing")
     );
-    assert!(excerpt.contains("lens-c: adapter unavailable"));
+    let unavailable = node("lens-c");
+    assert_eq!(unavailable.state, NodeState::Failed);
+    assert_eq!(
+        unavailable.advance_error_code.as_deref(),
+        Some("adapter_unavailable")
+    );
+    assert!(excerpt.contains(&format!(
+        "{}: {}",
+        unavailable.id,
+        unavailable.advance_error.as_deref().unwrap()
+    )));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
     let verify_input = &owner.prompts[3];
@@ -656,7 +677,7 @@ fn qualified_findings_survive_model_synthesis() {
                 .unwrap();
             let finding = &node.outputs.as_ref().unwrap().findings[0];
             assert!(finding.id.ends_with(":F1"));
-            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.effective_severity(), "note");
             assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
             assert_eq!(finding.extra["lens"], "tests");
             assert_eq!(finding.extra["evidence"], "observed failure");

@@ -201,7 +201,7 @@ fn overlapping_origin_requests_share_a_fetch_even_when_it_starts_later()
                 coalesced_origin_refresh(common, &requested, &CancelToken::new(), || {
                     // Origin refresh must never need or retain the config lock.
                     let _config = common.try_lock(
-                        std::ffi::OsStr::new("provenant-lane-setup.lock"),
+                        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
                         provenant_os::fs::LockMode::Exclusive,
                     )?;
                     fetches.fetch_add(1, Ordering::SeqCst);

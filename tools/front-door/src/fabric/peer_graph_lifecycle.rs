@@ -526,7 +526,7 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
     }))?;
     let spec = graph::AttemptSpec { host: Some("old_alias".into()), ..Default::default() };
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
-    let node = || graph::NodeInput {
+    let node = || graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
         require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
         context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
@@ -624,7 +624,7 @@ esac
             "target":"cloud-test", "provider":"codex", "environment":"env", "repository":"repo",
             "branch":"main", "model":"requested", "deadline_seconds":3600
         }}))?;
-        let node = || graph::NodeInput {
+        let node = || graph::NodeInput { review_launch: false,
             attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
             require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
             context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
@@ -643,7 +643,7 @@ esac
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"cloud-owner", "node_id":"verify-read-only", "route_index":0
         }))?;
-        let node = || graph::NodeInput {
+        let node = || graph::NodeInput { review_launch: false,
             attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
             require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
             context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,

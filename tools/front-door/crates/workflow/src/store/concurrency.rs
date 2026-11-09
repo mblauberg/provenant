@@ -120,6 +120,7 @@ fn run_writer_fixture(base: &Path, socket_path: &Path) -> String {
         0,
         SaveContext {
             risk_policy: &RiskPolicy::default(),
+            changed_paths: &[],
             downgrade_approval: None,
             subject: candidate.subject(),
             valid_until,

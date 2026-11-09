@@ -1650,10 +1650,10 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         .join(binding.project_id().to_string());
     fs::create_dir_all(&registry)?;
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
-    let directory = Directory::open_anchor(&registry)?;
+    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let clock = SystemClock;
     let _held = directory.lock(
-        std::ffi::OsStr::new("worktrees.lock"),
+        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
         LockMode::Exclusive,
         WaitBudget::nonblocking(clock.mono_now()),
         &provenant_core::CancelToken::new(),
@@ -1804,10 +1804,10 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         .join(binding.project_id().to_string());
     fs::create_dir_all(&registry)?;
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
-    let directory = Directory::open_anchor(&registry)?;
+    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let clock = SystemClock;
     let _held = directory.lock(
-        std::ffi::OsStr::new("worktrees.lock"),
+        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
         LockMode::Exclusive,
         WaitBudget::nonblocking(clock.mono_now()),
         &provenant_core::CancelToken::new(),
@@ -3493,6 +3493,64 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
     Ok(())
 }
 
+/// A real owner observation must retain a non-adapter preparation refusal.
+fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
+    for routes in [
+        json!([{"adapter": "codex", "model": "gpt-6-luna", "effort": "low"}]),
+        json!([
+            {"adapter": "codex", "model": "gpt-6-luna", "effort": "low"},
+            {"adapter": "codex", "model": "gpt-6-luna", "effort": "medium"}
+        ]),
+    ] {
+        let expected_attempts = routes.as_array().ok_or("routes")?.len();
+        let rig = policy_codex_fixture()?;
+        let _cleanup = rig.process_cleanup();
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let committed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+        assert_eq!(code(&committed), 0, "{committed:?}");
+        let document = rig.project.join("preparation-refusal.json");
+        fs::write(
+            &document,
+            serde_json::to_vec(&json!({
+                "schema_version": 2, "graph_id": "preparation-refusal", "nodes": [{
+                    "id": "lane", "prompt": "reply OK", "access": "read_only",
+                    "attempt": {"account": "not-registered"},
+                    "routes": routes
+                }]
+            }))?,
+        )?;
+        let out = rig.command(&[
+            "run",
+            "--file",
+            "preparation-refusal.json",
+            "--wait=5s",
+            "--json",
+        ])?;
+        let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        assert_eq!(code(&out), 1, "{response}");
+        let node = &response["data"]["checkpoint"]["nodes"][0];
+        assert_eq!(
+            node["attempts"].as_array().ok_or("attempts")?.len(),
+            expected_attempts,
+            "{node}"
+        );
+        assert_eq!(node["state"], "failed", "{response}");
+        assert_eq!(node["attempts"][0]["launched"], false, "{node}");
+        assert_eq!(
+            node["attempts"][0]["outcome"],
+            json!({"preparation_refused": "unregistered_account"}),
+            "{node}"
+        );
+        assert_eq!(node["advance_error_code"], "preparation_refused", "{node}");
+        assert_eq!(
+            node["advance_error"],
+            provenant_records::run::TerminalCause::UnregisteredAccount.detail(),
+            "{node}"
+        );
+    }
+    Ok(())
+}
+
 fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Value> {
     run_graph_provider_with_wait(rig, graph_id, node, "5s")
 }
@@ -4367,6 +4425,10 @@ fn main() -> ExitCode {
             (
                 "writer_shell_edits_instructions_and_redacts_logs",
                 writer_shell_edits_instructions_and_redacts_logs,
+            ),
+            (
+                "graph_preparation_refusal_retains_non_adapter_cause",
+                graph_preparation_refusal_retains_non_adapter_cause,
             ),
             (
                 "light_graph_delivers_and_applies_preset_per_node",

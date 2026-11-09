@@ -35,3 +35,6 @@ coordination does not promise multi-tenant isolation. Cross-host federation
 uses the explicit ownership boundary in
 [ADR 0026](0026-federate-fabric-across-own-hosts-over-ssh.md), not a shared
 network-mounted database.
+
+Overturn when: one Fabric store must serve more than one OS user, which
+same-user SQLite file access cannot isolate.

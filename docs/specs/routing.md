@@ -25,7 +25,7 @@ bundled field. The price table keeps base rates without a second schedule.
 Writer advice uses exact catalogue classes and pool order in
 `crates/routing/assets/writer-advisory.toml`, replaceable under `domains.routing.writer_advisory`.
 Provider-family assurance remains established by provider evidence.
-- Why: changing operating policy should not require a Rust branch or model-name inference.
+- Why (default): changing operating policy should not require a Rust branch or model-name inference.
 - Test: `crates/routing/src/policy.rs::tests::bundled_policy_has_valid_rules_and_schedules`;
   `crates/routing/src/policy.rs::bundled_fields_and_peak_schedule_can_be_overridden_per_account`;
   `crates/routing/src/catalog.rs::tests::writer_advisory_classes_and_pool_priority_are_overridable`
@@ -54,7 +54,7 @@ whether account selection was pinned, automatic or continued. For a fallback,
 `pool_selection.pick` retains the original pool draw; `source = fallback`
 identifies the route actually launched. The receipt contains routing evidence,
 not prompt or credential text.
-- Why: retries pick the same model without stored state, and the receipt
+- Why (default): retries pick the same model without stored state, and the receipt
   names what ran.
 - Test: `crates/routing/src/tests/policies.rs::exact_unknown_is_retained_but_requires_availability`;
   `crates/routing/src/tests/selection.rs::table_driven_weighted_pools_record_effort_readiness_roll_and_seed`
@@ -81,7 +81,7 @@ Adapters distinguish capacity (`model_unavailable`) from account allowance
 must preserve the resolved authority, release custody before a successor and
 spend the single lineage allowance in [retry owner](retry-owner.md). That spec
 owns budgets, admission deadlines and continuation identity.
-- Why: capacity and quota need different remedies without multiplying retries.
+- Why (default): capacity and quota need different remedies without multiplying retries.
 - Test: `crates/providers/src/tests_stream_outcomes.rs::agy_overload_is_typed_capacity_not_a_generic_failure`;
   `crates/providers/src/tests_stream_outcomes.rs::codex_usage_limit_is_quota_limited`;
   `crates/providers/src/claude.rs::overload_tests::usage_limit_is_a_typed_quota_refusal_not_a_generic_failure`;
@@ -111,7 +111,7 @@ its source and is not an executable or login probe. Its admission preview checks
 the eligible accounts' quota using the launch admission rules; an unprobed
 provider alone is not an admission refusal. A launch still probes availability
 and rechecks current evidence before starting.
-- Why: the fallback plan is decided once and visible.
+- Why (default): the fallback plan is decided once and visible.
 - Test: `crates/routing/src/tests/selection.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
   `crates/routing/src/fallback.rs::tests::switching_requires_safe_outcome_and_every_guard`;
   `crates/routing/src/tests/availability.rs::availability_access_and_scoped_quota_are_independent_gates`;
@@ -153,7 +153,7 @@ checks still apply; unavailable candidates fall back to the ordinary route. An e
 and `--task-kind` into task context; template submission copies them into graph
 context. Graph authors can set the same fields. Missing context does not match.
 
-- Why: a reviewed outcome can guide later route selection without extending
+- Why (default): a reviewed outcome can guide later route selection without extending
   authority or making an indefinite policy change.
 - Test: `crates/routing/src/tests/preferences.rs::model_choice_selects_only_eligible_pool_members_before_expiry`,
   `crates/routing/src/tests/preferences.rs::model_choice_outside_route_obeys_restrictions`,
@@ -170,7 +170,7 @@ zero disables the check. Unknown allowances are refused when the floor is set.
 Refusals identify the model, allowance or unknown status, and the setting.
 Zen is a separate account and is unaffected. The floor is independent of
 quota calibration and pacing.
-- Why: protect the shared Go plan from low-allowance models regardless of
+- Why (default): protect the shared Go plan from low-allowance models regardless of
   selection path.
 - Test: `crates/routing/src/catalog.rs::go_allowance_tests::go_allowance_floor_handles_limits_unknown_and_zen`,
   `crates/cli/src/route/tests_2.rs::go_floor_gates_explicit_pool_and_fallback_dispatch`
@@ -189,7 +189,7 @@ bound at the limit still excludes the member. Route explanation reports the
 setting and its source. Exhaustion, authentication and quota limits still exclude members.
 Configuration and the operational limits are
 in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-calibration).
-- Why: selection and launch admission use the same scoped quota evidence.
+- Why (default): selection and launch admission use the same scoped quota evidence.
 - Test: `crates/quota/src/calibration.rs::tests::calibration_takes_maximum_and_expires_even_with_cached_ledger`
 - Owner: `crates/quota/src/calibration.rs`, `crates/routing/src/resolve.rs`
 
@@ -197,7 +197,7 @@ in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-cali
 
 A confidential request admits only models whose catalogue row says they do
 neither train on nor retain prompts; price does not affect eligibility. Fast or priority service is never enabled.
-- Why: prompts carry private code; cost is not a privacy signal.
+- Why (default): prompts carry private code; cost is not a privacy signal.
 - Test: `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
 - Owner: `crates/routing/src/`
 
@@ -221,7 +221,7 @@ Unconstrained panels perform no extra draws and retain their existing expansion.
 
 Adapter family is a routing declaration, separate from the verified protocol
 evidence required for family assurance below.
-- Why: a panel can meet a family floor without pinning all its lenses to one model.
+- Why (default): a panel can meet a family floor without pinning all its lenses to one model.
 - Test: `crates/routing/src/review.rs::tests::family_floors_keep_shape_minimum_and_record_matching_legs`;
   `crates/routing/src/review.rs::tests::required_lens_family_counts_towards_panel_minimum_and_refuses_with_reason`;
   `crates/routing/src/review.rs::tests::unsatisfied_panel_family_reports_count_and_candidate_exclusions`;
@@ -236,7 +236,7 @@ A model family is established only by provider protocol evidence verified
 against the catalogue revision, never inferred from spelling, a broker name or the
 requested ID. Decoders read documented event positions and never search
 tool or subagent output for the answering identity.
-- Why: cross-family review is an assurance claim and must not be forgeable
+- Why (default): cross-family review is an assurance claim and must not be forgeable
   by output text.
 - Test: `crates/routing/src/tests/alternatives.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
   `crates/providers/src/tests_adapter_results.rs::synthetic_and_api_error_messages_cannot_change_answering_identity`
@@ -248,7 +248,7 @@ tool or subagent output for the answering identity.
 `providers::REGISTRY` share. Dispatch probes only the adapters that its route, pool
 and fallbacks name. Tier preference is guidance owned by the orchestrate
 skill; it never waives authority, confinement or assurance gates.
-- Why: one closed list keeps every surface agreeing; routing grants no
+- Why (default): one closed list keeps every surface agreeing; routing grants no
   authority.
 - Test: `crates/cli/src/install.rs::adapter_specs_cover_config_routing_and_cli_names`;
   `crates/routing/src/tests/availability.rs::probe_adapters_include_only_requested_routes_pools_and_fallbacks`
@@ -262,7 +262,7 @@ Providers never signal a process or publish completion. Structured errors
 outrank claimed success, provider prose about quota asserts nothing, and
 malformed or oversized frames fail closed. Session continuation binds the exact
 adapter, session, account, host, model and controls.
-- Why: a provider's text must not decide an outcome or switch identity.
+- Why (default): a provider's text must not decide an outcome or switch identity.
 - Test: `crates/providers/src/tests_stream_outcomes.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`;
   `crates/providers/src/tests_stream_outcomes.rs::continuation_preserves_session_and_rejects_changed_identity_and_grants`
 - Owner: `crates/providers/src/`
@@ -284,7 +284,7 @@ protected checkouts.
 Agy’s selected native keychain mechanism permits its client and IPC in both
 account modes; see [authentication diagnosis](../runbooks/agy-authentication.md).
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
-- Why: the launch spec carries credentials and authority.
+- Why (default): the launch spec carries credentials and authority.
 - Test: `crates/providers/src/tests_accounts_and_limits.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;
   `crates/providers/src/tests_lane_toolchains.rs::agy_runs_in_a_private_home_that_links_only_the_login_keychain`;
   `crates/providers/src/tests_lane_toolchains.rs::agy_isolated_account_links_its_own_keychain_and_grants_only_that_path`
@@ -301,7 +301,7 @@ lanes, read-only Agy lanes can run system programs with the lane's existing
 network access, so read roots must not hold anything the lane may not see.
 A denied empty result fails the attempt. Terminal diagnostics must not quote
 provider-controlled denial contents; retained captures preserve the evidence.
-- Why: headless permission prompts otherwise deny read-only commands, and a
+- Why (default): headless permission prompts otherwise deny read-only commands, and a
   remaining denial must not be mistaken for an empty response.
 - Test: `crates/providers/src/tests_launch_access.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
   `crates/providers/src/tests_launch_access.rs::agy_writers_exec_what_codex_writers_exec`;
@@ -321,7 +321,7 @@ Shell-capable Claude lanes receive only the access token through a pipe,
 use an empty private config directory, scrub child environments and deny
 keychain reads. Claude still holds the
 token and has outbound HTTPS, so isolation is incomplete.
-- Why: credential writes belong to the user's own sign-in flow.
+- Why (default): credential writes belong to the user's own sign-in flow.
 - Test: `crates/providers/src/tests_account_identity.rs::claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token`;
   `crates/providers/src/tests_account_identity.rs::claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token`;
   `crates/providers/src/tests_accounts_and_limits.rs::claude_writer_shell_has_private_config_and_rust_tools`
@@ -338,7 +338,7 @@ attribution. Probes run in a fresh 0700 directory under the host state root;
 failing to create one is a host fault, not an identity change.
 Version-probe refusals report termination, timeout and stdout truncation, or
 identify empty output, without quoting captured contents.
-- Why: misattribution would spend or expose the wrong account; a transient
+- Why (default): misattribution would spend or expose the wrong account; a transient
   version-probe failure needs an actionable diagnostic without output disclosure.
 - Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
   `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`;
@@ -353,7 +353,7 @@ Credentials are never copied between identity directories. Quota
 credentials stay in memory and are never logged, written, put on argv or
 passed in a child environment; linked credential files are rejected, and usage calls pass the
 header to `curl --config -` on stdin.
-- Why: the user decides which account pays, and a probe must not leak.
+- Why (default): the user decides which account pays, and a probe must not leak.
 - Test: `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`;
   `tests/quota.rs::disabled_modes_never_read_auth_or_invoke_external_tools`.
   No test asserts tokens are absent from curl argv and environment, or that
@@ -365,7 +365,7 @@ header to `curl --config -` on stdin.
 A quota credential read records the actor, the exact credential source, the
 purpose and the expiry before it reads, and retains only the non-secret
 authority reference.
-- Why: a read of a credential must be attributable without keeping the secret.
+- Why (default): a read of a credential must be attributable without keeping the secret.
 - Test: none (gap); `CredentialAuthority` covers lane dispatch only.
 - Owner: `crates/providers/src/quota_live.rs`
 
@@ -403,7 +403,7 @@ freshly reloaded records immediately before launch, so a refusal written after
 resolution still prevents it. Invalid evidence excludes only the account it
 belongs to (`invalid_account_evidence`) and fails admission; absent evidence is
 not proof of readiness. Cooldown stays a selection preference, never a block.
-- Why: one probe outage or model limit must not take a provider offline.
+- Why (default): one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
   `crates/routing/src/tests/alternatives.rs::stale_availability_is_selectable_but_current_account_wins`;
   `crates/quota/src/admission.rs::independent_pool_reset_and_refusal_scope`;
@@ -426,7 +426,7 @@ A refresh reserves a claim, releases the lock, runs, then commits only
 against the matching revision, so stale completions are discarded. A tick never
 sleeps, runs at most three probes, each with a deadline and a 1 MiB bound, within a
 55 s budget, and config cannot raise those limits.
-- Why: the menu bar ticks unattended and concurrently.
+- Why (default): the menu bar ticks unattended and concurrently.
 - Test: `crates/quota/src/schedule.rs::competing_claims_and_stale_completions_cannot_overwrite`;
   `tests/quota.rs::configuration_cannot_raise_probe_limits_and_publication_failure_is_io`
 - Owner: `crates/quota/src/schedule.rs`
@@ -448,7 +448,7 @@ In that environment Fabric refuses coordination mutations
 graph submission, subtree stop and graph reads cross the attempt-bound host
 relay. `status`, `output` and `output --trace` select the calling graph or its
 children; journals and credentials stay on the host.
-- Why: a lane must not move shared tasks, claims or leases.
+- Why (default): a lane must not move shared tasks, claims or leases.
 - Test: `crates/providers/src/lane.rs::lane_mcp_entries_have_attempt_unique_agent_labels`
 - Owner: `crates/providers/src/lane.rs`
 
@@ -469,7 +469,7 @@ refusal carries a safe cause and a repair the caller can act on.
 The host binds admission to the calling attempt and its requester rather than
 trusting a lane-written record. A child can select a different adapter and
 account for independent review, within the user's authority envelope.
-- Why: cross-family delegation must not expose trusted host journals or make
+- Why (default): cross-family delegation must not expose trusted host journals or make
   lane-controlled identity authoritative.
 - Test: `src/fabric/interface.rs::tests::child_launch_crosses_the_lane_transport_and_provisions_writer_fanout`;
   `crates/fabric-runtime/src/graph/relay_tests.rs::rich_child_attempt_controls_define_replay_identity_and_reach_the_launch`;
@@ -481,7 +481,7 @@ account for independent review, within the user's authority envelope.
 Parent settlement closes attached children; detached subtrees remain independent.
 A targeted child stop preserves its parent and siblings. Cancellation and its
 pending effects survive checkpoint reload.
-- Why: an attached child must not outlive completed work, while explicitly
+- Why (default): an attached child must not outlive completed work, while explicitly
   detached work retains its own lifecycle.
 - Test: `crates/fabric-runtime/src/graph/relay_tests.rs::successful_parent_closes_attached_children_but_not_detached_children`;
   `crates/fabric-runtime/src/graph/relay_tests.rs::stopping_selected_child_preserves_parent_and_sibling`;
@@ -510,7 +510,7 @@ config, hooks, info and linked admin metadata stay read-only throughout their
 subtrees. The host imports the pinned result through Git receive quarantine
 and publishes the real branch itself; lane configuration never becomes host
 configuration.
-- Why: a lane-chosen Git or helper would run with host authority.
+- Why (default): a lane-chosen Git or helper would run with host authority.
 - Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
   `crates/confinement/src/utility.rs::executable_pin_keeps_the_locator_and_follows_a_swapped_target`;
   `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::host_write_paths_reach_writers_only`

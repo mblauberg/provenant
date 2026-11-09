@@ -698,6 +698,28 @@ mod graph_writer_admission_tests {
 #[cfg(test)]
 mod graph_review_tests {
     #[test]
+    fn review_identity_requires_read_only_and_recognises_behaviour()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphNode, is_review_node};
+        for role in [None, Some("lens"), Some("lens.correctness"), Some("review.verify"), Some("plan.review")] {
+            for behaviour in [None, Some("lens"), Some("verify"), Some("synthesis"), Some("plan")] {
+                for access in ["read_only", "worktree_write"] {
+                    let node: GraphNode = serde_json::from_value(serde_json::json!({
+                        "id":"expanded--r0--lens", "access":access, "role":role,
+                        "review_behaviour":behaviour, "prompt":"Review",
+                        "route":{"alias":"senior"}
+                    }))?;
+                    let expected = access == "read_only"
+                        && (matches!(role, Some("lens" | "lens.correctness" | "review.verify"))
+                            || matches!(behaviour, Some("lens" | "verify" | "synthesis")));
+                    assert_eq!(is_review_node(&node), expected, "{access} {role:?} {behaviour:?}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn expanded_review_roles_include_lenses_verification_and_synthesis()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::{config::GraphLimits, graph::GraphDocument};
@@ -2785,7 +2807,7 @@ mod provisioned_writer_submission_tests {
             } else {
                 serde_json::from_value(serde_json::json!({"preset":"light"}))?
             };
-            let node = graph::NodeInput {
+            let node = graph::NodeInput { review_launch: false,
                 require_skill_location: false, settlement_retries: Some(1),
                 prior_attempts: &[], family_peers: &[],
                 context: provenant_records::run::WorkContext {

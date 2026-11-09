@@ -828,8 +828,11 @@ fn bundled_template_expansions_match_golden() {
         std::fs::write(path, &actual).unwrap();
     }
     assert_eq!(
-        actual,
-        include_str!("../../assets/template-expansions.json")
+        serde_json::from_str::<serde_json::Value>(&actual).unwrap(),
+        serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../assets/template-expansions.json"
+        ))
+        .unwrap()
     );
 }
 

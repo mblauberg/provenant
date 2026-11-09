@@ -23,6 +23,8 @@ pub enum AttemptOutcome {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
+    /// A local refusal before provider launch, retaining its safe typed cause.
+    PreparationRefused(provenant_records::run::TerminalCause),
     DeadlineExceeded,
 }
 

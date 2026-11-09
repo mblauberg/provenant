@@ -72,6 +72,18 @@ impl From<&str> for ReadFailure {
     }
 }
 
+impl From<provenant_fabric_runtime::coordination::facade::FacadeError> for ReadFailure {
+    fn from(error: provenant_fabric_runtime::coordination::facade::FacadeError) -> Self {
+        Self {
+            retry: matches!(
+                error,
+                provenant_fabric_runtime::coordination::facade::FacadeError::Busy
+            ),
+            message: error.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Snapshot {
     terminal: bool,
@@ -168,11 +180,7 @@ impl Snapshot {
                 })
             }
             Target::Graph(id) | Target::Auto(id) => {
-                let rows =
-                    crate::fabric::read_status_rows(id, edge).map_err(|error| ReadFailure {
-                        retry: false,
-                        message: error.to_string(),
-                    })?;
+                let rows = crate::fabric::read_status_rows(id, edge).map_err(ReadFailure::from)?;
                 let Some(rows) = rows else {
                     if matches!(target, Target::Auto(_)) {
                         return Self::read(
@@ -504,6 +512,15 @@ fn write_event(event: &Value, json: bool) -> Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+    #[test]
+    fn busy_graph_read_is_retried_while_other_targets_run() {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        let busy = ReadFailure::from(FacadeError::Busy);
+        assert!(busy.retry);
+        assert!(!ReadFailure::from(FacadeError::NotFound).retry);
+        assert_ne!(wait_exit(false, false), 0);
+    }
+
     #[test]
     fn refusal_targets_are_terminal_failures_when_observed() {
         assert!(

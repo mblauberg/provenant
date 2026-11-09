@@ -252,8 +252,6 @@ impl RunStore {
                 .transpose()
         });
         result.digest = digest.to_string();
-        result.source_truncated =
-            artifact.bytes > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
         Ok(result)
     }
 

@@ -928,13 +928,10 @@ pub(crate) fn graph_review_node(
     document: &provenant_fabric_runtime::graph::GraphDocument,
     id: &str,
 ) -> bool {
-    document.nodes.iter().any(|node| {
-        node.id == id
-            && node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-            && node.role.as_deref().is_some_and(|role| {
-                role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
-            })
-    })
+    document
+        .nodes
+        .iter()
+        .any(|node| node.id == id && provenant_fabric_runtime::graph::is_review_node(node))
 }
 
 pub(crate) fn writer_source_identity_matches(
@@ -2864,13 +2861,13 @@ impl BoundGraphOwner<'_> {
             } else {
                 None
             };
-            let review_subject_missing = provenant_fabric_runtime::graph::FileJournal::execution(
+            let execution = provenant_fabric_runtime::graph::FileJournal::execution(
                 &self.factory.context.roots.state,
                 self.factory.context.identity.project,
                 &key.graph_id,
             )
-            .map_err(graph_journal_error)?
-            .is_some_and(|execution| {
+            .map_err(graph_journal_error)?;
+            let review_subject_missing = execution.as_ref().is_some_and(|execution| {
                 execution
                     .document
                     .extra
@@ -2878,17 +2875,10 @@ impl BoundGraphOwner<'_> {
                     .and_then(|v| v.as_bool())
                     == Some(true)
             });
-            let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
-                provenant_fabric_runtime::graph::FileJournal::execution(
-                    &self.factory.context.roots.state,
-                    self.factory.context.identity.project,
-                    &key.graph_id,
-                )
-                .map_err(graph_journal_error)?
-                .and_then(|execution| execution.review_base)
-            } else {
-                None
-            };
+            let review_launch = node.review_launch;
+            let review_base = execution
+                .as_ref()
+                .and_then(|execution| execution.review_base);
             // Writer separation is mandatory; sibling diversity remains a preference.
             let enforced = node.require_distinct && !excluded_families.is_empty();
             let mut avoided_families = excluded_families;
@@ -2921,7 +2911,8 @@ impl BoundGraphOwner<'_> {
             } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                 && source_commit.is_some()
             {
-                node.review_base
+                let base = node
+                    .review_base
                     .map(str::to_owned)
                     // A review base recorded with the graph execution comes next,
                     // then the integration base.
@@ -2930,9 +2921,21 @@ impl BoundGraphOwner<'_> {
                         self.integration_base
                             .and_then(|bases| bases.integration)
                             .map(|base| base.to_string())
-                    })
-                    // Preserve the prior fallback without requiring origin/HEAD.
-                    .or_else(|| source_commit.map(str::to_owned))
+                    });
+                if review_launch {
+                    let directory = worktree.map_or_else(
+                        || self.factory.cwd.clone(),
+                        |path| self.factory.cwd.join(path),
+                    );
+                    Some(self.factory.review_comparison_base(
+                        &directory,
+                        base.as_deref(),
+                        source_commit.ok_or(FacadeError::StateCorrupt)?,
+                    )?)
+                } else {
+                    // Ordinary source readers retain their source-commit fallback.
+                    base.or_else(|| source_commit.map(str::to_owned))
+                }
             } else if foreign_writer {
                 source_commit.map(str::to_owned)
             } else {
@@ -3477,6 +3480,15 @@ impl BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
+                let preparation_cause = match &attempt.state {
+                    AttemptState::Terminal { extra, .. } => {
+                        extra.get("terminal_cause").cloned().and_then(|value| {
+                            serde_json::from_value::<provenant_records::run::TerminalCause>(value)
+                                .ok()
+                        })
+                    }
+                    _ => None,
+                };
                 let (result, result_warning) =
                     if attempt.result.is_some() || outcome == Outcome::Succeeded {
                         let captured = if remote {
@@ -3497,9 +3509,6 @@ impl BoundGraphOwner<'_> {
                                     // Output pages prove the redacted stream. Graph evidence
                                     // still identifies the peer's sealed original artifact.
                                     result.digest = artifact.digest.to_string();
-                                    result.source_truncated = artifact.bytes
-                                    > provenant_records::result_capture::ResultCapture::HEAD_BYTES
-                                        as u64;
                                 }
                                 (Some(Box::new(result)), None)
                             }
@@ -3516,6 +3525,21 @@ impl BoundGraphOwner<'_> {
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
                         AttemptOutcome::OtherFailure
+                    } else if !launched
+                        && outcome == Outcome::Rejected
+                        && attempt.preparation_failure.is_none_or(|failure| {
+                            failure == provenant_records::run::PreparationFailure::AdapterUnavailable
+                        })
+                        && let Some(cause) = preparation_cause
+                        && !matches!(
+                            cause,
+                            provenant_records::run::TerminalCause::PreparationRefused
+                                | provenant_records::run::TerminalCause::CommandUnavailable
+                        )
+                    {
+                        // The fallback classification describes route policy,
+                        // not the cause (for example an unregistered account).
+                        AttemptOutcome::PreparationRefused(cause)
                     } else if let Some(failure) = attempt.preparation_failure {
                         match failure {
                             provenant_records::run::PreparationFailure::AuthRequired => {
@@ -3557,9 +3581,10 @@ impl BoundGraphOwner<'_> {
                                 AttemptOutcome::DeadlineExceeded
                             }
                             Outcome::TimedOut => AttemptOutcome::OtherFailure,
-                            // A route refused before launch leaves the next route free to try.
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-                            Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
+                            Outcome::Rejected if !launched => AttemptOutcome::PreparationRefused(
+                                preparation_cause.unwrap_or(provenant_records::run::TerminalCause::PreparationRefused),
+                            ),
                             Outcome::ReviewRequired if matches!(
                                 &attempt.state,
                                 AttemptState::Terminal { extra, .. }
@@ -3799,6 +3824,259 @@ mod cloud_refusal_tests {
 #[cfg(test)]
 mod journal_error_tests {
     #[test]
+    fn graph_review_uses_merge_base_of_advanced_named_ref() -> Result<(), Box<dyn std::error::Error>>
+    {
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::graph_review_uses_merge_base_of_advanced_named_ref",
+        )? {
+            return Ok(());
+        }
+        for scenario in ["node-base", "graph-base", "behaviour"] {
+            review_launch_fixture(scenario)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_graph_review_range_does_not_launch_a_lens() -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::empty_graph_review_range_does_not_launch_a_lens",
+        )? {
+            return Ok(());
+        }
+        for scenario in ["same-head", "ancestor", "no-base"] {
+            review_launch_fixture(scenario)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn repaired_subject_review_launches_with_integration_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::repaired_subject_review_launches_with_integration_base",
+        )? {
+            return Ok(());
+        }
+        review_launch_fixture("repair")
+    }
+
+    #[test]
+    fn repair_loop_composite_review_uses_merge_base_and_refuses_empty_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::repair_loop_composite_review_uses_merge_base_and_refuses_empty_range",
+        )? {
+            return Ok(());
+        }
+        for scenario in ["expanded", "expanded-empty"] {
+            review_launch_fixture(scenario)?;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)] // The custom worktree driver includes this module without libtest.
+    fn review_launch_fixture(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
+            }
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let fork = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "subject"])?;
+        if scenario == "repair" {
+            crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "repair subject"])?;
+        }
+        let subject = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let target_start = if matches!(scenario, "ancestor" | "expanded-empty") {
+            &subject
+        } else {
+            &fork
+        };
+        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", target_start])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "advanced target"])?;
+        let tip = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut document = serde_json::json!({
+            "schema_version":2,"graph_id":format!("review-launch-{scenario}"),
+            "nodes":[{"id":"review","role":"lens.correctness-spec","prompt":"Review subject",
+                "access":"read_only","route":{"alias":"senior"},"attempt":{"preset":"light"},
+                "source":{"type":"commit","commit":subject}}]
+        });
+        let graph_base = scenario == "graph-base" || scenario == "behaviour";
+        if graph_base {
+            document["review_base"] = serde_json::json!("review-target");
+        } else if !matches!(scenario, "repair" | "no-base") {
+            document["nodes"][0]["review_base"] = serde_json::json!(if scenario == "same-head" {
+                subject.as_str()
+            } else {
+                "review-target"
+            });
+        }
+        if scenario == "behaviour" {
+            document["nodes"][0]
+                .as_object_mut()
+                .ok_or("node")?
+                .remove("role");
+            document["nodes"][0]["review_behaviour"] = serde_json::json!("lens");
+        }
+        if scenario.starts_with("expanded") {
+            let review = document["nodes"][0].clone();
+            document["nodes"] = serde_json::json!([{
+                "id":"repair", "kind":"loop", "access":"read_only",
+                "loop":{"review_repair":true,"max_rounds":1,"until":"accepted","body":[
+                    {"id":"panel","kind":"composite","access":"read_only",
+                        "composite":{"nodes":[review],
+                            "exports":[{"node":"review","outputs":["verdict"]}]}},
+                    {"id":"accepted","kind":"gate","access":"read_only",
+                        "depends_on":["panel"],"inputs":[{"node":"panel","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}
+            }]);
+        }
+        let document: graph::GraphDocument = serde_json::from_value(document)?;
+        let integration = (scenario == "repair").then(|| fork.parse()).transpose()?;
+        let bound = BoundGraphBases {
+            integration,
+            review: graph_base.then(|| tip.parse()).transpose()?,
+        };
+        // Real admission performs the upgrade preflight before binding a pending graph.
+        crate::install::cutover_pending_guard(&factory.context.roots.state)?;
+        let mut journal = graph::FileJournal::open(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            review_base: bound.review,
+            integration_base: integration,
+            directory: factory.cwd.clone(),
+            extra: Default::default(),
+            document: document.clone(),
+        })?;
+        let mut owner = BoundGraphOwner {
+            writer_launch_budget: None,
+            admission_timeout: None,
+            factory: &factory,
+            repo_facts: Default::default(),
+            launch_warnings: Vec::new(),
+            integration_base: Some(bound),
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let result = provenant_cli::run::with_deferred_provider_launch(|| {
+            graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &factory.context.config.graph.limits,
+                &factory.context.config.graph.budget,
+            )
+        });
+        let checkpoint = journal.load(&document.graph_id)?.ok_or("checkpoint")?;
+        let review = checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "review" || node.id == "repair--r1--panel--review")
+            .ok_or("review checkpoint")?;
+        if matches!(
+            scenario,
+            "same-head" | "ancestor" | "no-base" | "expanded-empty"
+        ) {
+            // Equal bound inputs fail in the scheduler; derived empty ranges are
+            // invalid-input refusals from the launch owner.
+            if scenario == "same-head" {
+                assert_eq!(
+                    review.advance_error_code.as_deref(),
+                    Some("review_empty_range"),
+                    "{scenario}: {result:?} {checkpoint:?}"
+                );
+            } else {
+                assert_eq!(
+                    review.advance_error_code.as_deref(),
+                    Some("launch_refused"),
+                    "{scenario}: {result:?} {checkpoint:?}"
+                );
+                assert_eq!(
+                    review.advance_owner_code.as_deref(),
+                    Some("invalid_input"),
+                    "{scenario}: {result:?} {checkpoint:?}"
+                );
+            }
+            assert!(
+                review
+                    .attempts
+                    .iter()
+                    .all(|attempt| attempt.attempt_ref.is_none()),
+                "{scenario}: lens launched"
+            );
+            return Ok(());
+        }
+        let run = result?;
+        let reference = review
+            .attempts
+            .iter()
+            .find_map(|attempt| attempt.attempt_ref.as_deref())
+            .ok_or_else(|| format!("no sealed review: {run:?}"))?;
+        let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
+        let binary = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = binary.store(&cancel)?;
+        let call = binary.call(&cancel);
+        let record = store.record(id.parse()?, &call)?;
+        let request = store.request(record.run_id, &call)?;
+        let task = request.tasks.first().ok_or("review task")?;
+        assert_eq!(task.base_ref.as_deref(), Some(fork.as_str()), "{scenario}");
+        assert_eq!(task.head.as_deref(), Some(subject.as_str()), "{scenario}");
+        // The checkpoint keeps the bound ref tip, never the derived comparison base.
+        if !graph_base && scenario != "repair" {
+            assert_eq!(review.review_base.as_deref(), Some(tip.as_str()));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn child_directory_preserves_scratch_and_refuses_state_and_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
@@ -3891,13 +4169,9 @@ mod journal_error_tests {
             .ok_or("deadline")?;
         owner.provision_writer_worktree(".worktrees/later", "later", source.trim())?;
         let budget = owner.writer_launch_budget.ok_or("budget")?;
-        let directory = Directory::open_anchor(
-            &rig.state
-                .join("worktrees")
-                .join(factory.context.identity.project.to_string()),
-        )?;
+        let directory = Directory::open_anchor(&rig.project.join(".git"))?;
         let held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
             LockMode::Exclusive,
             WaitBudget::nonblocking(factory.clock.mono_now()),
             &cancel,
@@ -3974,6 +4248,7 @@ mod journal_error_tests {
             route_index: 0,
         };
         let node = |prompt| graph::NodeInput {
+            review_launch: false,
             require_skill_location: false,
             settlement_retries: Some(1),
             prior_attempts: &[],
@@ -4285,8 +4560,6 @@ fn capture_graph_output(
             if result.digest != digest.to_string() {
                 return Err(FacadeError::StateCorrupt);
             }
-            result.source_truncated =
-                offset > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
             result.handoff = result.handoff.and_then(|handoff| {
                 handoff
                     .map(|handoff| {

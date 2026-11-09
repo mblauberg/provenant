@@ -10,7 +10,10 @@ fn review(name: &str, id: &str) -> GraphNode {
 fn finding() -> Value {
     json!({"id":"F1","severity":"high","file":"a.rs","line":1,
             "summary":"The failing path is reachable","status":"open",
-            "evidence":"Input x reaches the panic","proposed_fix":"Handle x"})
+            "evidence":"Input x reaches the panic","proposed_fix":"Handle x",
+            "trigger":{"sequence":"Invoke the default operation with x","reach":"default_path","observed":true},
+            "triage":{"decision":"confirmed","reason":"Input x reproduces the failure","worth_fixing":true,
+                "root_cause":"unchecked input x","blocking_class":"default_path_defect","shared_flaw":false}})
 }
 
 fn answer(findings: Value, verdict: &str) -> String {
@@ -73,6 +76,8 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                     }
                     let mut note = finding();
                     note["severity"] = json!("low");
+                    note["triage"]["worth_fixing"] = json!(false);
+                    note["triage"]["blocking_class"] = json!("none");
                     observations.push_back(terminal_with_result(
                         AttemptOutcome::Succeeded,
                         &answer(json!([note]), "VERDICT: PASS"),
@@ -630,6 +635,26 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     }
 
     #[test]
+    fn lens_pass_conflicts_with_untriaged_boundary_and_default_path_findings() {
+        for class in ["boundary", "data_loss", "none"] {
+            let mut item = finding();
+            item.as_object_mut().unwrap().remove("triage");
+            item["class"] = json!(class);
+            if class != "none" {
+                item.as_object_mut().unwrap().remove("trigger");
+            }
+            let document = graph(vec![review("review.tests", "review")]);
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([terminal_with_result(AttemptOutcome::DeclaredStop,
+                    &answer(json!([item]), "VERDICT: PASS"))]),
+                ..Default::default()
+            };
+            let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+            assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("review_verdict_conflict"), "{class}");
+        }
+    }
+
+    #[test]
     fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
         let mut accepted = finding();
         accepted["disposition"] = json!("accepted");
@@ -821,9 +846,9 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
                 let mut entry = finding();
                 entry["id"] = json!(format!("F{i}"));
                 entry["evidence"] =
-                    json!("A realistic code path reaches an unchecked state. ".repeat(20));
+                    json!("A realistic code path reaches an unchecked state. ".repeat(18));
                 entry["proposed_fix"] =
-                    json!("Validate the state before dispatch and preserve the error. ".repeat(15));
+                    json!("Validate the state before dispatch and preserve the error. ".repeat(12));
                 entry
             })
             .collect();

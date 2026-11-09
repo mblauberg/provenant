@@ -59,6 +59,21 @@ mod admission_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
+
+/// Review identity follows the launched node, including runtime expansions.
+/// `plan.review` frames the subject rather than reviewing it.
+pub fn is_review_node(node: &GraphNode) -> bool {
+    node.access == AccessMode::ReadOnly
+        && (node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+        }) || matches!(
+            node.extra
+                .get("review_behaviour")
+                .and_then(serde_json::Value::as_str),
+            Some("lens" | "verify" | "synthesis")
+        ))
+}
+
 pub(crate) use next_attempt::*;
 pub use observation::*;
 use outputs::*;
@@ -682,6 +697,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip)]
+    review_launch: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_continue_no_work: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1764,11 +1781,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         .map_err(|e| e.to_string())?;
                                     let panel = owner.resolve_repair_panel(document, &commit)?;
                                     let single = panel.slots.len() == 1;
+                                    // Repair input needs checked dispositions even for
+                                    // a single lens. Reuse the existing synthesis step.
                                     let topology = format!(
-                                        "f{}-v{}-s{}",
+                                        "f{}-v{}-s1",
                                         u8::from(panel.frame && !single),
                                         u8::from(panel.verifiers > 0 && !single),
-                                        u8::from(panel.synthesis && !single)
                                     );
                                     let verifier_ids = if single {
                                         Vec::new()
@@ -2310,6 +2328,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             break;
                         }
                     }
+                    if node.access == AccessMode::ReadOnly && template::review_node(node) {
+                        let progress = &checkpoint.nodes[node_index];
+                        let base = progress
+                            .review_base
+                            .as_ref()
+                            .or(checkpoint.bound_review_base.as_ref());
+                        if base
+                            .zip(progress.source_commit.as_ref())
+                            .is_some_and(|(base, head)| base == head)
+                        {
+                            transitions::fail_with(
+                                &mut checkpoint.nodes[node_index],
+                                "review_empty_range",
+                                "review range is empty; select a subject with changes".into(),
+                            );
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
+                    }
                     let mut integration_valid = true;
                     for expected in
                         transitions::integration_expectations(node_index, &plan, &checkpoint)
@@ -2681,6 +2718,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        review_launch: node.review_launch,
                         require_skill_location: node.require_skill_location,
                         settlement_retries,
                         prior_attempts: &prior_attempts,

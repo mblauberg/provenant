@@ -430,3 +430,27 @@ fn older_install_receipt_defaults_state_format_version() -> TestResult {
     assert_eq!(receipt.state_format_version, STATE_FORMAT_VERSION);
     Ok(())
 }
+
+#[test]
+fn receipt_without_changed_paths_and_with_repo_id_loads() -> TestResult {
+    let mut value = receipt();
+    value["subject"] = json!({"kind":"pr","repository":ID,"number":1,"head":GIT_OID});
+    let decoded: workflow::DeliveryReceipt = serde_json::from_value(value.clone())?;
+    assert!(decoded.risk().changed_paths().is_empty());
+    assert!(
+        matches!(decoded.subject(), workflow::Subject::Pr { repository, .. }
+        if repository.to_string() == ID)
+    );
+    assert_eq!(serde_json::to_value(decoded)?, value);
+    Ok(())
+}
+
+#[test]
+fn recorded_changed_paths_survive_round_trip() -> TestResult {
+    let mut value = risk();
+    value["changed_paths"] = json!(["src/auth.rs"]);
+    let decoded: workflow::RiskRecord = serde_json::from_value(value.clone())?;
+    assert_eq!(decoded.changed_paths(), &["src/auth.rs"]);
+    assert_eq!(serde_json::to_value(decoded)?, value);
+    Ok(())
+}

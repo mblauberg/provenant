@@ -124,7 +124,7 @@ Usage totals contain a
 known sum and a missing count per token category; they describe observed nodes,
 not an estimate of unseen work. Provider-internal children are not inferred.
 
-- Why: nested work must remain visible without inventing edges or complete totals.
+- Why (default): nested work must remain visible without inventing edges or complete totals.
 - Test: `crates/cli/src/console/tree.rs::host_tree_preserves_lineage_detail_and_usage`
 - Owner: `crates/cli/src/console/tree.rs`, `crates/run/src/board.rs`
 
@@ -161,7 +161,7 @@ owns payload and cursor encoding; [indexed reader](../../tools/front-door/crates
 owns selection and generation. A 100-row full-board page must meet p95 ≤1 second with at least 100,000
 retained attempts. That full-board target has not been verified on a real host.
 
-- Why: an active board must remain pageable while work changes, without blob
+- Why (default): an active board must remain pageable while work changes, without blob
   scans, invented usage or one damaged ancillary checkpoint hiding other lanes.
 - Test: `crates/cli/src/console/board.rs::board_paging_end_to_end`;
   `crates/run/src/board.rs::board_paging_snapshot_and_metadata`;
@@ -208,7 +208,7 @@ scan budgets and pagination.
 `help`, `--version` and `root` resolve no checkout, open no database, start
 no thread, probe no provider and create no state; the MCP server starts only through `fabric mcp`. There are no aliases or abbreviated options; unknown,
 duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
-- Why: scripts call these constantly, and an alias can turn a typo into a
+- Why (default): scripts call these constantly, and an alias can turn a typo into a
   different authority.
 - Test: `tests/parser.rs::help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf`;
   `crates/cli/src/lib.rs::byte_paths_survive_clap_without_text_conversion`
@@ -219,7 +219,7 @@ duplicate or conflicting options fail with exit 2, and paths stay raw bytes.
 An ambiguous target fails and lists candidates rather than picking the newest.
 CLI and Fabric submissions share one typed request model. Manifest validation
 rejects conflicting task settings rather than silently choosing a source.
-- Why: cancel and resume act on exactly one attempt, and one request shape
+- Why (default): cancel and resume act on exactly one attempt, and one request shape
   serves CLI and MCP.
 - Test: `crates/run/src/service.rs::bare_target_resolves_attempts_and_unambiguous_runs`
 - Owner: `crates/run/src/service.rs`, `crates/cli/src/run.rs`
@@ -239,7 +239,7 @@ it never invents an uncommitted-work exemption.
 Output resolves the requested attempt on its owning host. Reads are bounded,
 and a clamped tail reports its effective bound. The generated
 [complete CLI reference](../reference/cli-all.md) owns target syntax and read limits.
-- Why: a chair can inspect a precise attempt without copying a full target or
+- Why (default): a chair can inspect a precise attempt without copying a full target or
   opening a shell on its host.
 - Test: `crates/cli/src/run/tests_access.rs::paged_output_never_splits_a_character`;
   `src/fabric/unified.rs::peer_output_follows_host_qualified_subtree_attempts`
@@ -261,7 +261,7 @@ of the route projection. The
 [receipt renderer](../../tools/front-door/crates/cli/src/run.rs) owns field and
 text encoding.
 
-- Why: chairs can cite grep-able provenance without calling a writer a reviewer
+- Why (default): chairs can cite grep-able provenance without calling a writer a reviewer
   or guessing provider defaults.
 - Test: `tests/graph_provider.rs::receipt_output_resolves_run_task_and_attempt`;
   `tests/graph_provider.rs::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
@@ -273,7 +273,7 @@ text encoding.
 
 Route lookup resolves only a named route or an unambiguous catalogue model.
 Unknown or ambiguous names report candidates and examples.
-- Why: interactive route lookup should explain how to select a specific match.
+- Why (default): interactive route lookup should explain how to select a specific match.
 - Test: `tests/route.rs`
 - Owner: `crates/cli/src/route.rs`
 
@@ -291,7 +291,7 @@ owns exit mapping: success/waiting 0, failure/refusal 1, invalid input 2,
 internal error 3, unavailable 4, pending 5, timeout 124 and cancellation 130.
 The versioned JSON envelope carries command, status, data, warnings and error;
 unknown facts remain null and commands never silently truncate machine results.
-- Why: a result must be whole or absent, and a lane must not forge terminal
+- Why (default): a result must be whole or absent, and a lane must not forge terminal
   output.
 - Test: `crates/cli/src/render.rs::oversize_is_rejected_before_any_stdout_and_lf_counts`;
   `tests/checks.rs::cursors_recheck_all_inputs_and_later_pages_keep_findings_exit`;
@@ -329,7 +329,7 @@ with unknown custody remains refused until custody is checked.
 A stale selected-account availability observation emits `STALE_READINESS` as
 a warning and is re-probed once. A healthy recheck keeps the selected route
 and its fallback receipt; account and quota guards still apply.
-- Why: agents and tests act on the code, and a reworded message must break
+- Why (default): agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;
   `crates/cli/src/lib.rs::help_all_lists_each_error_code_once_with_its_meaning`
@@ -341,7 +341,7 @@ Every wait has an explicit budget. A lane needing input can satisfy a wait.
 Neither expiry nor cancelling a wait stops the work. The generated
 [CLI](../reference/cli-all.md) and [MCP](../reference/mcp-tools.md) references
 own the accepted bounds.
-- Why: an impatient reader must never kill a healthy lane.
+- Why (default): an impatient reader must never kill a healthy lane.
 - Test: `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`;
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
 - Owner: `crates/cli/src/lib.rs`
@@ -367,7 +367,7 @@ previously observed running lanes that have moved off the page. Reads consume
 the remaining budget, including child termination and reap time. A zero-budget
 wait still makes its first bounded read. Failed or incomplete bounded scans
 refuse rather than silently omitting lanes.
-- Why: a stale settlement must never wake a chair that waits for newer work,
+- Why (default): a stale settlement must never wake a chair that waits for newer work,
   and selecting by session removes hand-copied ID lists.
 - Test: `crates/cli/src/run/watch.rs::a_settled_older_attempt_never_satisfies_a_wait_on_a_newer_one`;
   `crates/cli/src/run/watch.rs::a_named_attempt_counts_whenever_it_settled`;
@@ -381,7 +381,7 @@ A lane watch uses the same selection rules as a wait and emits each observed
 state transition once. Event lines contain stable identifiers rather than free
 text and are flushed immediately. Newly dispatched lanes join the watch.
 The final event distinguishes settlement from timeout.
-- Why: a chair must be told when work settles without polling for it.
+- Why (default): a chair must be told when work settles without polling for it.
 - Test: `crates/cli/src/run/watch.rs::watch_emits_each_state_once_and_ends_when_all_settle`;
   `crates/cli/src/run/watch.rs::watch_times_out_with_pending_lanes_and_names_the_host`
 - Owner: `crates/cli/src/run/watch.rs`, `src/lib.rs`
@@ -401,7 +401,7 @@ captures the current head. Reports retain the full verified object ID.
 `pr watch` and `land` need at least one passing check (the rest passing or
 skipped), refuse a head change during verification and fail closed on
 incomplete evidence.
-- Why: a merge must land exactly the head that CI verified.
+- Why (default): a merge must land exactly the head that CI verified.
 - Test: `tests/pr.rs::land_refuses_head_changes_before_and_after_checks`;
   `tests/pr.rs::land_refuses_unpassed_missing_and_malformed_checks`
 - Owner: `src/pr.rs`
@@ -469,7 +469,7 @@ before the merge changes nothing. After it, each step refuses and reports
 instead of forcing. A successful merge exits 0 with `merged: true`; incomplete
 cleanup adds `cleanup_pending: true` and keeps each refused step's reason.
 Retrying an already-merged PR bypasses CI and merge and retries safe cleanup.
-- Why: a landing is four routine steps, and none of them may widen what was
+- Why (default): a landing is four routine steps, and none of them may widen what was
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;
   `src/pr_land_tests.rs::pr_land_prunes_the_selected_merged_worktree`;
@@ -498,7 +498,7 @@ The generated [complete CLI reference](../reference/cli-all.md) owns invocation 
 `chair switch` single-quotes each handoff argument and writes apostrophes
 and backslashes as double-quoted characters, so `sh`, `bash`, `zsh` and `fish` read
 them literally.
-- Why: a path or session ID must never become shell syntax.
+- Why (default): a path or session ID must never become shell syntax.
 - Test: `src/chair.rs::chair_quote_encodes_apostrophes_and_backslashes`;
   `src/chair.rs::chair_command_and_hook_run_the_same_in_every_shell`
 - Owner: `src/chair.rs`
@@ -510,7 +510,7 @@ installer; hook stdout carries only the protocol response and no hook
 launches a provider. The pre-tool-use guard reads at most 1 MiB in one
 second; oversized, malformed, unreadable or timed-out input is denied, and if the
 denial cannot be written it exits 2. It never echoes or persists input.
-- Why: a guard that allows on error is no guard.
+- Why (default): a guard that allows on error is no guard.
 - Test: `tests/hooks.rs::unreadable_and_stalled_input_cannot_allow_bash`;
   `tests/hooks.rs::denial_write_failure_uses_recorded_exit_two_fallback`
 - Owner: `crates/cli/src/hooks.rs`, `src/hooks.rs`
@@ -535,7 +535,7 @@ conflict-marker check is advisory and `[domains.run] push_conflict_markers =
 false` turns it off; the other refusals remain. It identifies the default
 branch from the remote's advertisement, refuses when any inspection fails,
 disables inherited redirects and never fetches.
-- Why: the last local guard before shared history changes.
+- Why (default): the last local guard before shared history changes.
 - Test: `tests/hooks.rs::pre_push_refuses_non_fast_forward_to_remote_default_alias`;
   `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
 - Owner: `src/hooks.rs`
@@ -550,7 +550,7 @@ the project and that this hook created (both ownership records present, equal
 and naming the path; a later commit does not matter), never passes `--discard`, and treats any owner refusal (dirty,
 live writer, primary) as a failure that leaves the worktree. Both exit 2 with
 a bounded stderr cause on refusal.
-- Why: a worktree Claude creates must have an owner from the start, and a
+- Why (default): a worktree Claude creates must have an owner from the start, and a
   hook must not widen what removal may delete, so a clean tree a person made
   is never removed on Claude's say-so.
 - Test: `tests/hooks_session.rs::worktree_hooks_create_and_remove_through_the_worktree_owner`;
@@ -576,7 +576,7 @@ path and rerun the fixture unit test with `PROVENANT_BLESS_RELEASE_FIXTURES=1`; 
 the digests for listed paths. Path and symlink checks remain active for
 listed paths, and commit metadata checks are unaffected. Changes to this
 allowlist require review.
-- Why: a release scan that passes on missing evidence would publish secrets.
+- Why (default): a release scan that passes on missing evidence would publish secrets.
 - Test: `tests/checks.rs::release_ignores_grafts_and_rejects_missing_ancestry_evidence`;
   `tests/checks.rs::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`;
   `crates/cli/src/check/release.rs::reviewed_literal_is_suppressed_but_other_line_at_same_path_is_reported`;
