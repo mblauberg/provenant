@@ -93,7 +93,7 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     match error.admission.clone() {
         Some(admission) => FacadeError::graph_admission(admission),
         None => match error.parameter.clone() {
-            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(Box::new(refusal))),
+            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(refusal)),
             None => graph_input_reason(error),
         },
     }
@@ -2188,7 +2188,10 @@ mod tests {
             detail.contains("template task has no parameter bogus"),
             "{detail}"
         );
-        assert!(detail.contains("accepted parameters:"), "{detail}");
+        assert!(
+            detail.contains("template task takes no parameters"),
+            "{detail}"
+        );
         let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
         assert_eq!(restored.diagnostic(), diagnostic);
         Ok(())

@@ -392,15 +392,13 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
     use crate::coordination::facade::FacadeError;
     struct ContendedOwner {
         phase: u8,
-        failed: bool,
         calls: usize,
         now: provenant_core::WallTime,
     }
     impl ContendedOwner {
         fn contend(&mut self, phase: u8) -> Result<(), FacadeError> {
             self.calls += 1;
-            if self.phase == phase && !self.failed {
-                self.failed = true;
+            if self.phase == phase && self.now < at(5) {
                 return Err(FacadeError::WriterLockBusy);
             }
             Ok(())
@@ -453,7 +451,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         }
         let mut document = graph(vec![writer]);
         document.schema_version = 2;
-        let mut owner = ContendedOwner { phase, failed: false, calls: 0, now: at(0) };
+        let mut owner = ContendedOwner { phase, calls: 0, now: at(0) };
         let mut journal = MemoryJournal::default();
         let first = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);

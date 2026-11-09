@@ -246,8 +246,8 @@ impl TemplateParameter {
     }
 }
 
-/// A supplied parameter that a template cannot bind. Every name it carries is
-/// either declared by the template or an identifier, so it can be disclosed.
+/// A supplied parameter that a template cannot bind. Names and shape descriptions
+/// remain untrusted and must be redacted before disclosure.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParameterRefusal {
     /// The graph node whose `with` failed, when it is known.
@@ -275,6 +275,35 @@ pub enum ParameterFault {
         key: String,
         expected: String,
     },
+}
+
+impl ParameterRefusal {
+    pub(crate) fn redacted(&self) -> Self {
+        let clean = |text: &str| provenant_confinement::redact::bounded_line(text, 4096);
+        let mut safe = self.clone();
+        safe.node = safe.node.as_deref().map(clean);
+        safe.template = clean(&safe.template);
+        match &mut safe.fault {
+            ParameterFault::NotTable => {}
+            ParameterFault::Unknown {
+                key,
+                accepted,
+                suggestion,
+            } => {
+                *key = key.as_deref().map(clean);
+                for name in accepted {
+                    *name = clean(name);
+                }
+                *suggestion = suggestion.as_deref().map(clean);
+            }
+            ParameterFault::Missing { key } => *key = clean(key),
+            ParameterFault::Shape { key, expected } => {
+                *key = clean(key);
+                *expected = clean(expected);
+            }
+        }
+        safe
+    }
 }
 
 impl std::fmt::Display for ParameterRefusal {

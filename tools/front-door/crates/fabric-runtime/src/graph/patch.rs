@@ -176,7 +176,7 @@ pub struct PatchError {
     /// failure reads the same through every entry path.
     pub admission: Option<AdmissionError>,
     /// The supplied parameter a template refused, when compilation failed on one.
-    pub parameter: Option<ParameterRefusal>,
+    pub parameter: Option<Box<ParameterRefusal>>,
 }
 
 impl PatchError {
@@ -205,7 +205,7 @@ impl From<CompileError> for PatchError {
         match error {
             CompileError::Message(message) => Self::invalid(message),
             CompileError::Parameter(refusal) => Self {
-                parameter: Some(refusal.clone()),
+                parameter: Some(Box::new(refusal.clone())),
                 ..Self::invalid(refusal.to_string())
             },
         }

@@ -354,12 +354,21 @@ pub fn serve_with_read(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 journal.save(&checkpoint).map_err(journal_error)?;
+                // Reserve journal persistence and response delivery within the
+                // confirmed caller deadline, as the edit path does.
+                let now = clock.mono_now();
+                let remaining = budget.remaining(now).as_micros();
+                let reserve = 1_000_000.min(remaining / 2);
+                let provisioning_budget = WaitBudget::up_to(
+                    now,
+                    provenant_core::DurationMicros::from_micros(remaining - reserve),
+                );
                 if let Some(error) = recover_provisioning(
                     context,
                     &mut journal,
                     &mut checkpoint,
                     std::slice::from_ref(&receipt.node),
-                    budget,
+                    provisioning_budget,
                     cancel,
                 )? {
                     return Err(error);

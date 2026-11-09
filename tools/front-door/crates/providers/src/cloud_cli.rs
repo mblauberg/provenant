@@ -14,6 +14,12 @@ const REFUSAL: &str = "\u{1e}cloud-refusal:";
 
 pub trait CloudCli {
     fn run(&mut self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>;
+    /// Only a completed merge-base exit 1 proves non-ancestry. Transport
+    /// failures leave the remote job unresolved for a later observation.
+    fn is_ancestor(&mut self, commit: &str, head: &str) -> Result<bool, String> {
+        self.run("git", &["merge-base", "--is-ancestor", commit, head], None)
+            .map(|_| true)
+    }
     /// Submit errors are uncertain unless the transport proves a refusal.
     fn submit(
         &mut self,
@@ -99,6 +105,21 @@ impl CloudCli for InstalledCloudCli<'_> {
             stdin,
         )
     }
+    fn is_ancestor(&mut self, commit: &str, head: &str) -> Result<bool, String> {
+        let argv = ["git", "merge-base", "--is-ancestor", commit, head]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let output = self.capture("git", argv, None)?;
+        match output.outcome.termination {
+            Termination::Exit(0) => Ok(true),
+            Termination::Exit(1) => Ok(false),
+            other => Err(format!(
+                "git merge-base failed ({other:?}): {}",
+                failure_excerpt(&output.stderr)
+            )),
+        }
+    }
     fn submit(
         &mut self,
         program: &str,
@@ -137,13 +158,12 @@ impl InstalledCloudCli<'_> {
     ) -> Result<String, String> {
         self.exec_inner(program, argv, stdin, false)
     }
-    fn exec_inner(
+    fn capture(
         &self,
         program: &str,
         argv: Vec<OsString>,
         stdin: Option<&str>,
-        submission: bool,
-    ) -> Result<String, String> {
+    ) -> Result<provenant_os::exec::TextOutcome, String> {
         let mut options = ExecOptions::new(&argv, &self.cwd, self.timeout);
         options.process_group = true;
         options.stdin = stdin.map(str::as_bytes);
@@ -159,6 +179,16 @@ impl InstalledCloudCli<'_> {
         {
             return Err(format!("{program} returned incomplete output or timed out"));
         }
+        Ok(output)
+    }
+    fn exec_inner(
+        &self,
+        program: &str,
+        argv: Vec<OsString>,
+        stdin: Option<&str>,
+        submission: bool,
+    ) -> Result<String, String> {
+        let output = self.capture(program, argv, stdin)?;
         if output.outcome.termination != Termination::Exit(0) {
             let text = if output.stderr.trim().is_empty() {
                 &output.stdout
@@ -410,11 +440,9 @@ fn fetch<C: CloudCli>(cli: &mut C, reference: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// True when the job's starting commit is in the pushed head's history. A
-/// failed check, including Git's "not an ancestor" exit, is not proof.
-fn descends<C: CloudCli>(cli: &mut C, commit: &str, head: &str) -> bool {
-    cli.run("git", &["merge-base", "--is-ancestor", commit, head], None)
-        .is_ok()
+/// Distinguish proven non-ancestry from an incomplete ancestry observation.
+fn descends<C: CloudCli>(cli: &mut C, commit: &str, head: &str) -> Result<bool, String> {
+    cli.is_ancestor(commit, head)
 }
 
 /// Confirm a writer's reported push on the remote: the named branch exists,
@@ -459,7 +487,7 @@ pub fn verify_push<C: CloudCli>(
         None => return Ok(Some(format!("origin has no branch {branch}"))),
     }
     fetch(cli, &reference)?;
-    if !descends(cli, &job.commit, head) {
+    if !descends(cli, &job.commit, head)? {
         return Ok(Some(format!(
             "pushed head {head} does not descend from commit {}",
             job.commit
@@ -606,7 +634,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
             // The remote ref, not the job's report, names the branch and head.
             result.branch = Some(branch.to_owned());
             result.head = Some(oid.to_owned());
-            if job.check(&result).is_err() || !descends(&mut self.cli, &job.commit, oid) {
+            if job.check(&result).is_err() || !descends(&mut self.cli, &job.commit, oid)? {
                 continue;
             }
             if job.work_branch.is_none() {
@@ -1061,7 +1089,20 @@ mod adapter_tests {
             calls: Vec::new(),
         };
         result.branch = Some("lane/cloud".into());
-        assert!(refused(&mut unrelated, &result).contains("does not descend"));
+        assert_eq!(
+            verify_push(&mut unrelated, &job, &result),
+            Err("git failed: ".into())
+        );
+        assert_eq!(
+            settle_writer(&mut unrelated, &job, result.clone()),
+            Err("git failed: ".into())
+        );
+        assert_eq!(job.state, RemoteState::Running);
+        unrelated.routes[2].1 = Ok(String::new());
+        assert!(matches!(
+            settle_writer(&mut unrelated, &job, result),
+            Ok(RemoteState::Finished { .. })
+        ));
     }
     #[test]
     fn cloud_codex_recovers_lost_submit_response_without_retry() {
@@ -1145,6 +1186,65 @@ mod adapter_tests {
         assert!(adapter.observe(&wrong).is_err());
     }
     const CAPTURED: &str = "\u{1b}[>4m\u{1b}]0;claude\u{7}\u{1b}[?25lCreated cloud session: Fix the thing\r\nView: https://claude.ai/code/session_01ABC?from=cli&m=0\r\nResume with: claude --teleport session_01ABC\r\n\u{1b}[?25h";
+    #[test]
+    fn ancestry_requires_complete_exit_zero_or_one() {
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
+        struct FakeExec(Result<ExecOutcome, &'static str>);
+        impl Executor for FakeExec {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                self.0.clone().map_err(|operation| ExecError::Io {
+                    operation,
+                    source: std::io::ErrorKind::Other.into(),
+                })
+            }
+        }
+        let complete = |termination| ExecOutcome {
+            termination,
+            stdout: CapturedStream::default(),
+            stderr: CapturedStream::default(),
+            timed_out: false,
+            cancelled: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            elapsed_micros: 0,
+        };
+        let mut cases = vec![
+            (Ok(complete(Termination::Exit(0))), Some(true)),
+            (Ok(complete(Termination::Exit(1))), Some(false)),
+            (Ok(complete(Termination::Exit(128))), None),
+            (Ok(complete(Termination::Signal(9))), None),
+            (Err("spawn"), None),
+            (Err("read"), None),
+        ];
+        for flag in 0..8 {
+            let mut output = complete(Termination::Exit(1));
+            match flag {
+                0 => output.timed_out = true,
+                1 => output.cancelled = true,
+                2 => output.drain_truncated = true,
+                3 => output.overflow_stopped = true,
+                4 => output.stdout.truncated = true,
+                5 => output.stderr.truncated = true,
+                6 => output.stdout.read_failed = true,
+                _ => output.stderr.read_failed = true,
+            }
+            cases.push((Ok(output), None));
+        }
+        for (output, expected) in cases {
+            let executor = FakeExec(output);
+            let mut cli = InstalledCloudCli {
+                executor: &executor,
+                cwd: ".".into(),
+                timeout: Duration::from_secs(1),
+            };
+            let observed = descends(&mut cli, &"a".repeat(40), &"b".repeat(40));
+            match expected {
+                Some(value) => assert_eq!(observed, Ok(value)),
+                None => assert!(observed.is_err(), "{observed:?}"),
+            }
+        }
+    }
+
     #[test]
     fn cloud_submission_classifies_only_complete_nonzero_refusals() {
         use provenant_os::exec::{

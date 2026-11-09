@@ -354,6 +354,7 @@ impl InvalidInputDetail {
                 limit: *limit,
             },
             Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
+            Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.redacted())),
             other => other.clone(),
         }
     }
@@ -373,7 +374,7 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::GraphReason(_) => Some("graph input could not be processed".into()),
-            Self::Parameter(refusal) => Some(refusal.to_string()),
+            Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
@@ -773,7 +774,7 @@ impl FacadeError {
                     .next("inspect the graph definition and template fields");
             }
             Self::InvalidInput { detail: Some(InvalidInputDetail::Parameter(refusal)) } => {
-                projected = projected.detail(refusal.to_string())
+                projected = projected.detail(refusal.redacted().to_string())
                     .next("pass only the accepted template parameters, each with a value of the shape shown, and retry");
             }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
@@ -1638,6 +1639,40 @@ mod diagnostic_tests {
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
         );
+    }
+
+    #[test]
+    fn parameter_refusal_redacts_every_string_before_disclosure() {
+        use crate::graph::template::{ParameterFault, ParameterRefusal};
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        for fault in [
+            ParameterFault::NotTable,
+            ParameterFault::Unknown {
+                key: Some(secret.into()),
+                accepted: vec!["brief".into(), secret.into()],
+                suggestion: Some(secret.into()),
+            },
+            ParameterFault::Missing { key: secret.into() },
+            ParameterFault::Shape {
+                key: secret.into(),
+                expected: secret.into(),
+            },
+        ] {
+            let error = FacadeError::invalid(super::InvalidInputDetail::Parameter(Box::new(
+                ParameterRefusal {
+                    node: Some(secret.into()),
+                    template: secret.into(),
+                    fault,
+                },
+            )));
+            let diagnostic = error.diagnostic();
+            assert!(!error.to_string().contains(secret));
+            assert!(!serde_json::to_string(&diagnostic).unwrap().contains(secret));
+            let wire = serde_json::to_string(&error).unwrap();
+            assert!(!wire.contains(secret), "{wire}");
+            let restored: FacadeError = serde_json::from_str(&wire).unwrap();
+            assert_eq!(restored.diagnostic(), diagnostic);
+        }
     }
 
     #[test]
