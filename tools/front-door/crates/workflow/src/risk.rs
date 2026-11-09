@@ -35,7 +35,24 @@ pub fn assess(
     approval: Option<&ChairDowngrade>,
     changed_paths: &[String],
 ) -> Result<RiskRecord, RiskError> {
-    let derived = minimum(&factors, policy);
+    let review = provenant_routing::ReviewConfig::default();
+    let boundary = changed_paths.iter().find_map(|path| {
+        let floor = review.path_floors(std::slice::from_ref(path));
+        match floor.tier.as_deref() {
+            Some("terminal") => Some((path, RiskTier::Terminal)),
+            Some("crucial") => Some((path, RiskTier::Crucial)),
+            _ => None,
+        }
+    });
+    let derived = std::cmp::max(
+        minimum(&factors, policy),
+        boundary.map_or(RiskTier::Routine, |(_, floor)| floor),
+    );
+    if tier < derived
+        && let Some((path, _)) = boundary
+    {
+        return Err(RiskError::BoundaryPath(path.clone()));
+    }
     if (tier < RiskTier::Crucial && factors.critical_surface == CriticalSurface::AuthSecurity)
         || (tier < RiskTier::Terminal && factors.external_effects == ExternalEffects::Irreversible)
     {
@@ -53,18 +70,6 @@ pub fn assess(
             })
         {
             return Err(RiskError::InvalidPaths);
-        }
-        let review = provenant_routing::ReviewConfig::default();
-        for path in changed_paths {
-            if matches!(
-                review
-                    .path_floors(std::slice::from_ref(path))
-                    .tier
-                    .as_deref(),
-                Some("crucial" | "terminal")
-            ) {
-                return Err(RiskError::BoundaryPath(path.clone()));
-            }
         }
         Some(approval.clone())
     } else {
@@ -280,6 +285,18 @@ mod approval_tests {
                 Err(RiskError::BoundaryPath(path.into()))
             );
         }
+        let mut routine = factors.clone();
+        routine.oracle_quality = OracleQuality::Strong;
+        assert_eq!(
+            assess(
+                routine,
+                RiskTier::Routine,
+                &RiskPolicy::default(),
+                None,
+                &["src/credentials/store.rs".into()]
+            ),
+            Err(RiskError::BoundaryPath("src/credentials/store.rs".into()))
+        );
         for paths in [vec![], vec!["../credentials/store.rs".into()]] {
             assert_eq!(
                 assess(
