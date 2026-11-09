@@ -1,4 +1,6 @@
 # Agy authentication in lanes
+Owner: provenant
+Anchor: tools/front-door/crates/providers/src/agy.rs
 
 Agy uses the operating system's native keyring for silent sign-in. The
 [vendor authentication guide](https://antigravity.google/docs/install/#local-silent-keyring-sign-in)

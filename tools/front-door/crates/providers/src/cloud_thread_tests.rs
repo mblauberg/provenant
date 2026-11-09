@@ -344,27 +344,27 @@ fn cloud_thread_in_progress_turn_settles_on_its_final_answer() {
         "text": report().to_string(),
         "phase": {"string": "MESSAGE_PHASE_STRING_COMMENTARY"}
     }}});
-    let mut adapter = adapter(status("TURN_STATUS_IN_PROGRESS", vec![commentary]).to_string());
-    assert_eq!(adapter.observe(&job()).unwrap(), RemoteState::Running);
-    let mut adapter = adapter(
+    let mut cloud = adapter(status("TURN_STATUS_IN_PROGRESS", vec![commentary]).to_string());
+    assert_eq!(cloud.observe(&job()).unwrap(), RemoteState::Running);
+    let mut cloud = adapter(
         status(
             "TURN_STATUS_IN_PROGRESS",
             vec![final_answer(format!("Done.\n```json\n{}\n```", report()))],
         )
         .to_string(),
     );
-    let result = finished(&mut adapter, &job());
+    let result = finished(&mut cloud, &job());
     assert_eq!(result.observed_model.as_deref(), Some("observed-model"));
     let mut stale = report();
     stale["nonce"] = json!("old-nonce");
-    let mut adapter = adapter(
+    let mut cloud = adapter(
         status(
             "TURN_STATUS_IN_PROGRESS",
             vec![final_answer(stale.to_string())],
         )
         .to_string(),
     );
-    assert_eq!(adapter.observe(&job()).unwrap(), RemoteState::Running);
+    assert_eq!(cloud.observe(&job()).unwrap(), RemoteState::Running);
 }
 
 #[test]
@@ -377,21 +377,21 @@ fn cloud_thread_writer_settles_only_on_a_verified_push() {
     pushed["head"] = json!(head);
     // The fixture answers every command with the status, so ls-remote output
     // is unreadable: that is an observation error, never a settlement.
-    let mut adapter =
+    let mut cloud =
         adapter(status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string());
-    assert!(adapter.observe(&writer).is_err());
+    assert!(cloud.observe(&writer).is_err());
     pushed["branch"] = json!("main");
-    let mut adapter =
+    let mut cloud =
         adapter(status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string());
-    let RemoteState::Failed { detail } = adapter.observe(&writer).unwrap() else {
+    let RemoteState::Failed { detail } = cloud.observe(&writer).unwrap() else {
         panic!("a push to another branch must not settle as finished")
     };
     assert!(detail.contains("push not verified"), "{detail}");
     let mut missing = report();
     missing["branch"] = json!("lane/cloud");
-    let mut adapter =
+    let mut cloud =
         adapter(status("TURN_STATUS_COMPLETED", vec![agent(missing.to_string())]).to_string());
-    let RemoteState::Finished { result } = adapter.observe(&job()).unwrap() else {
+    let RemoteState::Finished { result } = cloud.observe(&job()).unwrap() else {
         panic!("a verification job needs no push")
     };
     assert!(!writer.check(&result).unwrap().passed);

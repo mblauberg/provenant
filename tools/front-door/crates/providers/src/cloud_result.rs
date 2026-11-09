@@ -109,14 +109,14 @@ mod tests {
     fn cloud_diff_reads_result_file_beside_other_changes() {
         let diff = "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exit_status\":0,\"tests_run\":[\"test\"],\"tests_failed\":[],\"log_location\":\"log\",\"observed_model\":null}\n";
         let result = result_from_diff(diff).unwrap();
+        let changed = result_from_diff(&(diff.to_owned() + "diff --git a/other b/other\nindex 1234567..7654321 100644\n--- a/other\n+++ b/other\n@@ -1 +1 @@\n-old\n+new\n")).unwrap();
+        assert_eq!(changed, result);
         assert!(
             result
                 .check("job", "nonce", &"a".repeat(40), "model")
                 .unwrap()
                 .passed
         );
-        let changed = result_from_diff(&(diff.to_owned() + "diff --git a/other b/other\nindex 1234567..7654321 100644\n--- a/other\n+++ b/other\n@@ -1 +1 @@\n-old\n+new\n")).unwrap();
-        assert_eq!(changed, result);
         assert!(
             result_from_diff(&diff.replace("--- /dev/null", "--- a/.provenant-cloud-result.json"))
                 .is_err()
