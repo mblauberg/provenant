@@ -1241,7 +1241,7 @@ mod tests {
                 exact("/usr/bin/grep")
             ]
         );
-        // No shell toolchain leaks into a read-only lane.
+        // No writer toolchain leaks into a read-only lane.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
         assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
         assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));

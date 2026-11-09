@@ -53,13 +53,15 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             .runtime_reads
             .contains(&crate::launch::subtree(home.join(".cargo")))
     );
-    // Read-only lanes deny bash, so they get no toolchain: only the search
-    // binaries OpenCode's grep and glob tools execute.
+    // Read-only lanes get system shell utilities for progress updates, plus
+    // search and guarded Git. They still receive no writer toolchain.
     let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let spec = prepare(&home, &plan)?;
     assert_eq!(
         spec.profile.spec.tool_exec_roots,
         [
+            crate::launch::subtree("/bin"),
+            crate::launch::subtree("/usr/bin"),
             crate::launch::exact(
                 plan.permissions()
                     .private_state
