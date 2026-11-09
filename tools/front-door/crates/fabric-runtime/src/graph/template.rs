@@ -1136,6 +1136,34 @@ impl<'a> Compiler<'a> {
                 true,
             )?;
         }
+        // A constrained direct review uses the same host-resolved panel as an
+        // explicit fan-out. Keep ordinary leaf reviews unchanged, and do not
+        // expand the individual lens copies a second time.
+        if !object.contains_key("over")
+            && object.get("use").and_then(Value::as_str) == Some("review")
+            && self.resolvers.contains_key("review-family-resolution")
+            && !bindings.contains_key(ITEM)
+        {
+            let mut panel = object.clone();
+            let with = panel
+                .entry("with")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if with.is_null() {
+                *with = Value::Object(Map::new());
+            }
+            let with = with
+                .as_object_mut()
+                .ok_or("`with` must be a table of template parameters")?;
+            with.insert("lens".into(), Value::String("${item}".into()));
+            with.entry("advice")
+                .or_insert_with(|| serde_json::json!({"resolver": "review-advice-${item}"}));
+            return self.lower_over(
+                &panel,
+                &Value::String("@review-panel".into()),
+                bindings,
+                stack,
+            );
+        }
         if let Some(over) = object.get("over") {
             return self.lower_over(object, &interpolate(over, bindings)?, bindings, stack);
         }

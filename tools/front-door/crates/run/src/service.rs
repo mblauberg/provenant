@@ -582,6 +582,26 @@ impl<'a> Service<'a> {
     }
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {
+        let extra = match &route {
+            RequestedRoute::Adapter { extra, .. }
+            | RequestedRoute::Model { extra, .. }
+            | RequestedRoute::Named { extra, .. }
+            | RequestedRoute::Review { extra, .. } => extra,
+        };
+        if let Some(family) = extra.get("required_family")
+            && family.as_str().is_none_or(str::is_empty)
+        {
+            return Err(input_error(
+                ErrorKind::Invalid,
+                "required_family must name a provider family",
+            ));
+        }
+        let family_extra = |extra: provenant_records::ExtraFields| {
+            extra
+                .into_iter()
+                .filter(|(key, _)| key == "required_family")
+                .collect()
+        };
         match route {
             RequestedRoute::Adapter {
                 provider,
@@ -603,7 +623,7 @@ impl<'a> Service<'a> {
                 provider,
                 model,
                 effort,
-                ..
+                extra,
             } => {
                 if provider.is_empty() || model.is_empty() || provider.contains('/') {
                     return Err(input_error(ErrorKind::Invalid, "invalid model route"));
@@ -619,19 +639,21 @@ impl<'a> Service<'a> {
                     None => format!("{provider}/{model}"),
                 };
                 Ok(RequestedRoute::Model {
-                    extra: Default::default(),
+                    extra: family_extra(extra),
                     provider,
                     model,
                     effort,
                 })
             }
-            RequestedRoute::Named { name, effort, .. } if !name.is_empty() => {
-                Ok(RequestedRoute::Named {
-                    extra: Default::default(),
-                    name,
-                    effort,
-                })
-            }
+            RequestedRoute::Named {
+                name,
+                effort,
+                extra,
+            } if !name.is_empty() => Ok(RequestedRoute::Named {
+                extra: family_extra(extra),
+                name,
+                effort,
+            }),
             RequestedRoute::Review {
                 name,
                 effort,
@@ -639,9 +661,9 @@ impl<'a> Service<'a> {
                 distinct_families,
                 preferred_families,
                 require_distinct,
-                ..
+                extra,
             } if !name.is_empty() => Ok(RequestedRoute::Review {
-                extra: Default::default(),
+                extra: family_extra(extra),
                 name,
                 effort,
                 excluded_families,

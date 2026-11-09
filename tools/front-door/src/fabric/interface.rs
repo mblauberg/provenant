@@ -525,6 +525,14 @@ impl Factory {
         &self,
         document: Option<&Value>,
     ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
+        self.launch_resolvers_for_tier(document, None)
+    }
+
+    fn launch_resolvers_for_tier(
+        &self,
+        document: Option<&Value>,
+        tier: Option<&Value>,
+    ) -> Result<BTreeMap<String, Vec<String>>, FacadeError> {
         let config = provenant_config::read_with_domains(
             &self.context.roots,
             &provenant_cli::domains::SECTIONS,
@@ -533,18 +541,26 @@ impl Factory {
         // Resolver selection needs review context, before template nodes compile.
         let mut resolver_document =
             json!({"schema_version":2,"graph_id":"launch-resolvers","nodes":[]});
-        for field in ["review", "context"] {
+        for field in ["review", "context", "exclude"] {
             if let Some(value) = document.and_then(|document| document.get(field)) {
                 resolver_document[field] = value.clone();
             }
         }
+        if let Some(tier) = tier.filter(|tier| !tier.is_null()) {
+            resolver_document["review_tier_override"] = tier.clone();
+        }
         let document: GraphDocument = serde_json::from_value(resolver_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        provenant_cli::fabric::graph_relay::launch_resolvers(
+        provenant_cli::fabric::graph_relay::launch_resolvers_at_roots(
+            &self.context.roots,
             &config.domains.routing.review,
             &document,
         )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })
+        .map_err(|reason| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason,
+        })
     }
 
     pub(crate) fn relay_document(
@@ -1093,7 +1109,13 @@ impl Factory {
             inline["lane-document"] = template;
         }
         let library = self.template_library(Some(&inline))?;
-        let resolver = self.launch_resolvers(raw)?;
+        let resolver = self.launch_resolvers_for_tier(
+            raw,
+            input
+                .get("tier")
+                .filter(|tier| !tier.is_null())
+                .or_else(|| raw.and_then(|document| document.get("tier"))),
+        )?;
         let context = PatchContext {
             library: &library,
             resolvers: &resolver,
@@ -1976,8 +1998,34 @@ fn override_tier(
                 | provenant_fabric_runtime::graph::NodeKind::Land
         )
     ) {
-        node.route = Some(route.clone());
-        node.routes = None;
+        let constraints: Vec<_> = node
+            .route
+            .iter()
+            .chain(node.routes.iter().flatten())
+            .map(|existing| existing.extra.get("required_family").cloned())
+            .collect();
+        let replace = |family: Option<&Value>| {
+            let mut replacement = route.clone();
+            if let Some(family) = family {
+                replacement
+                    .extra
+                    .insert("required_family".into(), family.clone());
+            }
+            replacement
+        };
+        if constraints.windows(2).any(|pair| pair[0] != pair[1]) {
+            // Keep different requirements on their original alternatives.
+            node.routes = Some(
+                constraints
+                    .iter()
+                    .map(|family| replace(family.as_ref()))
+                    .collect(),
+            );
+            node.route = None;
+        } else {
+            node.route = Some(replace(constraints.first().and_then(Option::as_ref)));
+            node.routes = None;
+        }
     }
     if let Some(fallback) = node.plan.as_mut().and_then(|plan| plan.fallback.as_mut()) {
         for child in &mut fallback.nodes {
@@ -1997,6 +2045,27 @@ fn add(row: &mut Value, key: &str, value: u64) {
     reason = "the custom worktree driver omits libtest functions"
 )]
 mod tests {
+    #[test]
+    fn tier_override_preserves_leaf_family_constraints() {
+        use provenant_fabric_runtime::graph::{GraphNode, GraphRoute};
+        let override_route: GraphRoute = serde_json::from_value(json!({"alias":"senior"})).unwrap();
+        for fields in [
+            json!({"route":{"alias":"junior", "required_family":"openai"}}),
+            json!({"routes":[{"alias":"junior", "required_family":"openai"},{"alias":"principal", "required_family":"openai"}]}),
+        ] {
+            let mut value = json!({"id":"read", "access":"read_only", "prompt":"review"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let mut node: GraphNode = serde_json::from_value(value).unwrap();
+            super::override_tier(&mut node, &override_route);
+            let route = node.route.unwrap();
+            assert_eq!(route.alias.as_deref(), Some("senior"));
+            assert_eq!(route.extra.get("required_family"), Some(&json!("openai")));
+        }
+    }
+
     #[test]
     fn decode_errors_name_schema_paths_without_keys_or_values() -> Result<()> {
         use provenant_fabric_runtime::graph::GraphDocument;
@@ -4282,6 +4351,79 @@ mod tests {
         assert_eq!(all["groups"][0]["cache_read_share"], 0.75);
         assert_eq!(all["groups"][0]["queue_time_ms"], 1500);
         assert_eq!(all["groups"][0]["outcomes"]["timed_out"], 1);
+        Ok(())
+    }
+    #[test]
+    fn review_explain_applies_family_floor_to_launched_legs_and_reports_exclusions() -> Result {
+        let rig = crate::worktree_tests::repository()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let family = provenant_records::AdapterSpec::get("codex")
+            .ok_or("adapter")?
+            .family;
+        let input = json!({
+            "op": "run", "explain": true,
+            "document": {
+                "use": "review", "brief": "Review required family coverage",
+                "review": {
+                    "shape": "standard", "minimum_family_counts": {(family): 2},
+                    "lenses": [
+                        {"name": "correctness", "tier": "senior"},
+                        {"name": "tests", "tier": "senior"}
+                    ]
+                }
+            }
+        });
+        let response = factory.graph_document(input.clone(), budget, &cancel)?;
+        let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        let record: provenant_routing::PanelResolution = serde_json::from_str(
+            document.extra["template_resolvers"]["review-family-resolution"][0]
+                .as_str()
+                .ok_or("family resolution")?,
+        )?;
+        assert_eq!(
+            record
+                .slots
+                .iter()
+                .filter(|slot| slot.satisfied_family.as_deref() == Some(family))
+                .count(),
+            2
+        );
+        let expanded = document.expanded(&factory.context.config.graph.limits)?;
+        let constrained = expanded
+            .nodes
+            .iter()
+            .filter(|node| {
+                let routes: Vec<_> = node
+                    .routes
+                    .as_ref()
+                    .map(|routes| routes.iter().collect())
+                    .unwrap_or_else(|| node.route.iter().collect());
+                !routes.is_empty()
+                    && routes.iter().all(|route| {
+                        route.extra.get("required_family").and_then(Value::as_str) == Some(family)
+                    })
+            })
+            .count();
+        assert_eq!(
+            constrained, 2,
+            "the actual review legs must retain their required family"
+        );
+        let mut refused = input;
+        refused["document"]["exclude"] = json!(["codex"]);
+        let error = factory
+            .graph_document(refused, budget, &cancel)
+            .unwrap_err();
+        let FacadeError::DispatchRefused { reason, .. } = error else {
+            return Err(format!("expected family refusal, received {error:?}").into());
+        };
+        assert!(reason.contains(family), "{reason}");
+        assert!(reason.contains("count 2"), "{reason}");
+        assert!(
+            reason.contains("excluded by") && reason.contains("codex"),
+            "{reason}"
+        );
         Ok(())
     }
 }

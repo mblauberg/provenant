@@ -62,6 +62,49 @@ The `deliver` composite binds implementation, CI, bounded repair, independent
 review and landing to one integrated head. Check every external action against
 the authority envelope; a template grants no publication or promotion authority.
 
+## Required provider families
+
+A review panel can require a minimum number of lenses from a provider family
+while keeping its route pools. Put the constraint in the run document's
+`[review.minimum_family_counts]` table; a named lens can also set
+`required_family`:
+
+```toml
+use = "review"
+brief = "Review the pinned change."
+[with]
+subject = "HEAD"
+review_base = "main"
+
+[review.minimum_family_counts]
+openai = 2
+
+[[review.lenses]]
+name = "correctness-spec"
+required_family = "openai"
+
+[[review.lenses]]
+name = "tests"
+
+[[review.lenses]]
+name = "design-fit-reuse"
+```
+
+Run `provenant run --file review.toml --explain` before submitting the same
+file without `--explain`. Selection checks each lens's pool against the normal
+eligibility rules, then assigns enough eligible legs to each required family.
+The named lens counts towards the panel minimum. Configured review shapes can
+set the same `minimum_family_counts` table; a request can raise a shape's
+minimum but cannot lower it.
+
+An impossible requirement refuses the launch with the family, required count
+and candidate exclusion reasons. The explanation and retained template
+resolvers include `review-family-resolution`, whose slots record
+`satisfied_family` for the legs assigned to satisfy the constraint. These
+families are adapter registry data used for selection; they do not certify
+provider protocol evidence for review assurance. Reviews without a family
+constraint keep their existing selection and expansion.
+
 ## Review results
 
 Review templates enforce findings, verification, synthesis dispositions and a

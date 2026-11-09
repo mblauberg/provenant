@@ -240,8 +240,12 @@ pub fn serve_with_read(
             let config =
                 provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
                     .map_err(|error| refused("invalid_config", error.to_string()))?;
-            let resolvers = launch_resolvers(&config.domains.routing.review, &document)
-                .map_err(|error| refused("invalid_review", error))?;
+            let resolvers = launch_resolvers_at_roots(
+                &context.roots,
+                &config.domains.routing.review,
+                &document,
+            )
+            .map_err(|error| refused("invalid_review", error))?;
             let patch_context = PatchContext {
                 journal: None,
                 library: &library,
@@ -400,8 +404,12 @@ pub fn serve_with_read(
             let config =
                 provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
                     .map_err(|error| refused("invalid_config", error.to_string()))?;
-            let resolvers = launch_resolvers(&config.domains.routing.review, &document)
-                .map_err(|error| refused("invalid_review", error))?;
+            let resolvers = launch_resolvers_at_roots(
+                &context.roots,
+                &config.domains.routing.review,
+                &document,
+            )
+            .map_err(|error| refused("invalid_review", error))?;
             // The ID selects this graph; prepare checks each skip/replace target
             // against the calling parent's subtree, with the planner exemption.
             let admitted = provenant_fabric_runtime::graph::patch::admit_patch(
@@ -874,6 +882,42 @@ pub fn launch_resolvers(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    launch_resolvers_with(review, document, |_, family| {
+        Err(format!(
+            "required provider family {}: route eligibility context unavailable",
+            family.unwrap_or("unknown")
+        ))
+    })
+}
+
+/// Resolve family-constrained panels against host eligibility before expansion.
+pub fn launch_resolvers_at_roots(
+    roots: &provenant_core::Roots,
+    review: &provenant_routing::ReviewConfig,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    let exclude: Vec<String> = document
+        .extra
+        .get("exclude")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    launch_resolvers_with(review, document, |slot, family| {
+        crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
+    })
+}
+
+fn launch_resolvers_with(
+    review: &provenant_routing::ReviewConfig,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    eligible: impl FnMut(&provenant_routing::ResolvedSlot, Option<&str>) -> Result<String, String>,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let mut request: provenant_routing::ReviewRequest = document
         .extra
         .get("review")
@@ -886,7 +930,19 @@ pub fn launch_resolvers(
         request.risk_tier = request.risk_tier.or_else(|| context.risk_tier.clone());
         request.kind = request.kind.or_else(|| context.task_kind.clone());
     }
-    let panel = review.resolve_panel(&request, None, &[], false)?;
+    let mut panel = review.resolve_panel(&request, None, &[], false)?;
+    if (!panel.minimum_family_counts.is_empty()
+        || panel
+            .slots
+            .iter()
+            .any(|slot| slot.required_family.is_some()))
+        && let Some(tier) = document.extra.get("review_tier_override")
+    {
+        for slot in &mut panel.slots {
+            slot.tier = tier.clone();
+        }
+    }
+    panel.resolve_families(eligible)?;
     let mut resolvers = std::collections::BTreeMap::new();
     let single = panel.slots.len() == 1;
     let frame = !single && panel.frame;
@@ -924,10 +980,34 @@ pub fn launch_resolvers(
         };
         resolvers.insert(format!("review-advice-{lens}"), vec![advice.into()]);
     }
+    if !panel.minimum_family_counts.is_empty()
+        || panel
+            .slots
+            .iter()
+            .any(|slot| slot.required_family.is_some())
+    {
+        resolvers.insert(
+            "review-family-resolution".into(),
+            vec![serde_json::to_string(&panel).map_err(|error| error.to_string())?],
+        );
+    }
     let mut lenses = Vec::with_capacity(panel.slots.len());
     let mut routes = Vec::with_capacity(panel.slots.len());
     for slot in panel.slots {
-        let (key, route) = tier_route(&slot.lens, &slot.tier, None, true)?;
+        let (key, mut route) = tier_route(&slot.lens, &slot.tier, None, true)?;
+        if let Some(family) = slot
+            .satisfied_family
+            .as_ref()
+            .or(slot.required_family.as_ref())
+        {
+            if let Some(routes) = route.as_array_mut() {
+                for route in routes {
+                    route["required_family"] = json!(family);
+                }
+            } else {
+                route["required_family"] = json!(family);
+            }
+        }
         let mut fields = serde_json::Map::new();
         fields.insert(key.into(), route);
         routes.push(serde_json::to_string(&fields).map_err(|error| error.to_string())?);
@@ -2891,5 +2971,145 @@ mod panel_tests {
             },
         )
         .expect("relay resolvers expand the complete review composite");
+    }
+    #[test]
+    fn review_family_constraints_use_eligible_pools_and_survive_template_expansion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_routing::{
+            Catalogue, RouteChoice, RouteName, RouteRequest, RoutingConfig, RoutingContext,
+        };
+        let catalogue = Catalogue::bundled()?;
+        let config = RoutingConfig::default();
+        let family = provenant_records::AdapterSpec::get("codex")
+            .ok_or("adapter")?
+            .family;
+        let named_family = provenant_records::AdapterSpec::get("claude")
+            .ok_or("adapter")?
+            .family;
+        let availability: Vec<_> = ["codex", "claude"]
+            .into_iter()
+            .map(|adapter| provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: adapter.into(),
+                executable: format!("/fixture/{adapter}"),
+                version: "fixture".into(),
+                last_update: None,
+                fixture_ref: "test".into(),
+                catalogue_revision: catalogue.revision.clone(),
+                account_key: Some("fixture-account".into()),
+                observed_models: vec!["test".into()],
+                observed_unix_seconds: 80,
+                expires_unix_seconds: 120,
+            })
+            .collect();
+        let access = ["codex", "claude"].map(|adapter| provenant_routing::AccessContext {
+            adapter,
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        });
+        let context = RoutingContext {
+            policy_account_hint: None,
+            choice_context: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: provenant_providers::REGISTRY,
+            availability: &availability,
+            quota: &[],
+            capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
+            readiness: None,
+            access: &access,
+            now: provenant_core::WallTime::from_micros(100_000_000)?,
+            host: "family-fixture",
+        };
+        let document = serde_json::from_value(json!({
+            "schema_version": 1, "graph_id": "family-panel",
+            "nodes": [{"id": "anchor", "access": "read_only", "prompt": "Task", "route": {"alias": "senior"}}],
+            "review": {
+                "shape": "standard", "minimum_family_counts": {(family): 2},
+                "lenses": [
+                    {"name": "correctness", "tier": "senior"},
+                    {"name": "tests", "tier": "senior"},
+                    {"name": "contract", "tier": "senior", "required_family": named_family}
+                ]
+            }
+        }))?;
+        let resolvers = launch_resolvers_with(&config.review, &document, |slot, required| {
+            let result = provenant_routing::resolve_for_account_with_seed_excluding_family(
+                &RouteRequest {
+                    intent: Default::default(),
+                    choice: RouteChoice::NamedRoute(
+                        RouteName::parse(slot.tier.as_str().unwrap()).unwrap(),
+                    ),
+                    effort: None,
+                    confidential: false,
+                    fallback: provenant_routing::Fallback::None,
+                },
+                &context,
+                None,
+                "family-panel",
+                0,
+                &[],
+                &[],
+                required,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(provenant_records::AdapterSpec::get(&result.adapter)
+                .unwrap()
+                .family
+                .to_owned())
+        })?;
+        let record: provenant_routing::PanelResolution =
+            serde_json::from_str(&resolvers["review-family-resolution"][0])?;
+        assert_eq!(
+            record
+                .slots
+                .iter()
+                .filter(|slot| slot.satisfied_family.as_deref() == Some(family))
+                .count(),
+            2
+        );
+        assert_eq!(
+            record.slots[2].satisfied_family.as_deref(),
+            Some(named_family)
+        );
+        let library = TemplateLibrary::bundled();
+        let compiled = provenant_fabric_runtime::graph::template::Compiler {
+            library: &library,
+            resolvers: &resolvers,
+        }
+        .compile(&json!({
+            "id": "review", "use": "review", "over": "@review-panel", "with": {"lens": "${item}"}
+        }))?;
+        for (member, slot) in compiled
+            .composite
+            .ok_or("panel")?
+            .nodes
+            .iter()
+            .zip(&record.slots)
+        {
+            let wire = serde_json::to_value(member)?;
+            let routes = wire
+                .get("routes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_else(|| vec![wire["route"].clone()]);
+            assert!(!routes.is_empty());
+            for route in routes {
+                assert_eq!(
+                    route["required_family"].as_str(),
+                    slot.satisfied_family.as_deref()
+                );
+            }
+        }
+        let refused = launch_resolvers_with(&config.review, &document, |_, _| {
+            Err("candidate account unavailable; excluded by policy".into())
+        })
+        .unwrap_err();
+        assert!(refused.contains(named_family));
+        assert!(refused.contains("count 1"));
+        assert!(refused.contains("candidate account unavailable; excluded by policy"));
+        Ok(())
     }
 }

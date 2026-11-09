@@ -112,6 +112,9 @@ pub fn tier_is_set(tier: &serde_json::Value) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewLens {
     pub name: String,
+    /// Hard provider-family requirement, enforced when eligible routes are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_family: Option<String>,
     /// The risk tag that must be present for the lens to run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
@@ -123,6 +126,9 @@ pub struct ReviewLens {
 /// configured lens order and risk-tag lenses.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRequest {
+    /// Minimum number of selected lenses assigned to each provider family.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub minimum_family_counts: BTreeMap<String, usize>,
     /// Explicit shape; the risk floor can still raise it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
@@ -143,6 +149,11 @@ pub struct ReviewRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSlot {
     pub lens: String,
+    /// Actual family selected to satisfy a hard panel or lens constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub satisfied_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_family: Option<String>,
     /// A pool name, an exact `ADAPTER/ID[@effort]` or a route table, as given
     /// or taken from the shape.
     pub tier: serde_json::Value,
@@ -164,6 +175,8 @@ pub struct OmittedLens {
 /// The result of resolving a review panel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanelResolution {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub minimum_family_counts: BTreeMap<String, usize>,
     pub shape: String,
     pub source: String,
     pub frame: bool,
@@ -171,6 +184,124 @@ pub struct PanelResolution {
     pub synthesis: ReviewSynthesis,
     pub slots: Vec<ResolvedSlot>,
     pub omitted: Vec<OmittedLens>,
+}
+
+impl PanelResolution {
+    /// Assign hard family requirements using the ordinary eligible route resolver.
+    /// The callback probes a slot without launching it. Unconstrained panels do
+    /// not probe or alter any route, preserving ordinary pool selection.
+    pub fn resolve_families(
+        &mut self,
+        mut eligible: impl FnMut(&ResolvedSlot, Option<&str>) -> Result<String, String>,
+    ) -> Result<(), String> {
+        if self.minimum_family_counts.is_empty()
+            && self.slots.iter().all(|slot| slot.required_family.is_none())
+        {
+            return Ok(());
+        }
+        for slot in &mut self.slots {
+            slot.satisfied_family = None;
+        }
+        let mut selected = vec![None; self.slots.len()];
+        let mut fixed_counts = BTreeMap::<String, usize>::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            if let Some(family) = &slot.required_family {
+                let actual = eligible(slot, Some(family)).map_err(|reason| {
+                    format!("required provider family {family}: count 1 for lens {} cannot be met: {reason}", slot.lens)
+                })?;
+                if actual != *family {
+                    return Err(format!(
+                        "required provider family {family}: count 1 for lens {} cannot be met: resolver returned family {actual}",
+                        slot.lens
+                    ));
+                }
+                selected[index] = Some(family.clone());
+                *fixed_counts.entry(family.clone()).or_default() += 1;
+            }
+        }
+        let mut demands = Vec::new();
+        let mut edges = Vec::new();
+        let mut exclusions = Vec::new();
+        for (family, count) in &self.minimum_family_counts {
+            let remaining = count.saturating_sub(*fixed_counts.get(family).unwrap_or(&0));
+            if remaining == 0 {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            let mut reasons = Vec::new();
+            for (index, slot) in self.slots.iter().enumerate() {
+                if let Some(fixed) = &selected[index] {
+                    reasons.push(format!("{}: requires family {fixed}", slot.lens));
+                    continue;
+                }
+                match eligible(slot, Some(family)) {
+                    Ok(actual) if actual == *family => candidates.push(index),
+                    Ok(actual) => {
+                        reasons.push(format!("{}: resolver returned family {actual}", slot.lens))
+                    }
+                    Err(reason) => reasons.push(format!("{}: {reason}", slot.lens)),
+                }
+            }
+            if demands.len().saturating_add(remaining) > self.slots.len() {
+                return Err(format!(
+                    "required provider family {family}: count {count} cannot be met by {} lenses; exclusions: {}",
+                    self.slots.len(),
+                    reasons.join("; ")
+                ));
+            }
+            for _ in 0..remaining {
+                demands.push(family.clone());
+                edges.push(candidates.clone());
+                exclusions.push(reasons.clone());
+            }
+        }
+        fn assign(
+            demand: usize,
+            edges: &[Vec<usize>],
+            owners: &mut [Option<usize>],
+            seen: &mut [bool],
+        ) -> bool {
+            for &slot in &edges[demand] {
+                if seen[slot] {
+                    continue;
+                }
+                seen[slot] = true;
+                if owners[slot].is_none_or(|previous| assign(previous, edges, owners, seen)) {
+                    owners[slot] = Some(demand);
+                    return true;
+                }
+            }
+            false
+        }
+        let mut owners = vec![None; self.slots.len()];
+        for (demand, family) in demands.iter().enumerate() {
+            if !assign(
+                demand,
+                &edges,
+                &mut owners,
+                &mut vec![false; self.slots.len()],
+            ) {
+                let count = self.minimum_family_counts[family];
+                let reasons = if exclusions[demand].is_empty() {
+                    "eligible lenses are needed by other required family counts".to_owned()
+                } else {
+                    exclusions[demand].join("; ")
+                };
+                return Err(format!(
+                    "required provider family {family}: count {count} cannot be met; exclusions: {reasons}"
+                ));
+            }
+        }
+        for (index, owner) in owners.iter().enumerate() {
+            if let Some(demand) = owner {
+                selected[index] = Some(demands[*demand].clone());
+            }
+        }
+        for (slot, family) in self.slots.iter_mut().zip(selected) {
+            slot.satisfied_family = family;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +451,9 @@ impl ReviewSize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewShape {
+    /// Optional hard family floors, applied to the selected lenses.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub minimum_family_counts: BTreeMap<String, usize>,
     pub reviewers: Vec<ReviewReviewer>,
     #[serde(default = "default_frame")]
     pub frame: bool,
@@ -767,6 +901,25 @@ impl ReviewConfig {
         fn text(value: &Option<String>) -> Option<&str> {
             value.as_deref().filter(|text| !text.is_empty())
         }
+        if request.minimum_family_counts.len() > 64
+            || request
+                .minimum_family_counts
+                .iter()
+                .any(|(family, count)| !identifier(family) || *count > 64)
+        {
+            return Err("review minimum_family_counts requires at most 64 named families with counts up to 64".into());
+        }
+        if let Some(lens) = request.lenses.iter().find(|lens| {
+            lens.required_family
+                .as_ref()
+                .is_some_and(|family| !identifier(family))
+        }) {
+            return Err(format!(
+                "required provider family {}: count 1 for lens {} has an invalid family identifier",
+                lens.required_family.as_deref().unwrap_or_default(),
+                lens.name
+            ));
+        }
         let size = text(&request.size);
         if let Some(size) = size
             && !["small", "medium", "large"].contains(&size)
@@ -813,6 +966,7 @@ impl ReviewConfig {
         let caller_supplied = !request.lenses.is_empty();
         let lens = |name: &str, when: &str| ReviewLens {
             name: name.to_owned(),
+            required_family: None,
             when: (!when.is_empty()).then(|| when.to_owned()),
             tier: serde_json::Value::Null,
         };
@@ -909,6 +1063,8 @@ impl ReviewConfig {
                 });
                 slots.push(ResolvedSlot {
                     lens: item.name,
+                    satisfied_family: None,
+                    required_family: item.required_family,
                     tier: item.tier,
                     group_index,
                     distinct_families: false,
@@ -946,12 +1102,20 @@ impl ReviewConfig {
             };
             slots.push(ResolvedSlot {
                 lens: item.name,
+                satisfied_family: None,
+                required_family: item.required_family,
                 tier: serde_json::json!(pool),
                 group_index,
                 distinct_families,
             });
         }
+        let mut minimum_family_counts = selected.shape.minimum_family_counts.clone();
+        for (family, count) in &request.minimum_family_counts {
+            let minimum = minimum_family_counts.entry(family.clone()).or_default();
+            *minimum = (*minimum).max(*count);
+        }
         Ok(PanelResolution {
+            minimum_family_counts,
             shape: selected.name.to_owned(),
             source: selected.source.to_owned(),
             frame: selected.shape.frame,
@@ -981,6 +1145,14 @@ impl ReviewConfig {
             let prefix = format!("review.shapes.{name}");
             if !identifier(name) {
                 error(prefix.clone(), "selector");
+            }
+            if shape.minimum_family_counts.len() > 64
+                || shape
+                    .minimum_family_counts
+                    .iter()
+                    .any(|(family, count)| !identifier(family) || *count > 64)
+            {
+                error(format!("{prefix}.minimum_family_counts"), "range");
             }
             if shape.reviewers.is_empty() || shape.reviewers.len() > 32 {
                 error(format!("{prefix}.reviewers"), "limit");
@@ -1457,6 +1629,7 @@ mod tests {
                 .into_iter()
                 .map(|name| ReviewLens {
                     name: name.into(),
+                    required_family: None,
                     when: None,
                     tier: serde_json::Value::Null,
                 })
@@ -1491,6 +1664,7 @@ mod tests {
         let review = ReviewConfig::default();
         let lens = |name: &str| ReviewLens {
             name: name.into(),
+            required_family: None,
             when: None,
             tier: serde_json::Value::Null,
         };
@@ -1702,6 +1876,7 @@ mod tests {
     fn explicit_shape_lenses_survive_and_are_not_repeated() {
         let mut review = ReviewConfig::default();
         let shape = ReviewShape {
+            minimum_family_counts: BTreeMap::new(),
             reviewers: vec![
                 ReviewReviewer {
                     pool: "junior".into(),
@@ -2059,6 +2234,7 @@ mod tests {
     fn request_lens(name: &str, tier: serde_json::Value) -> ReviewLens {
         ReviewLens {
             name: name.into(),
+            required_family: None,
             when: None,
             tier,
         }
@@ -2210,5 +2386,107 @@ mod tests {
         assert_eq!(lenses, ["correctness-spec", "tests", "simplicity"]);
         assert!(panel.slots.iter().all(|s| s.distinct_families));
         assert!(panel.omitted.is_empty());
+    }
+    #[test]
+    fn family_floors_keep_shape_minimum_and_record_matching_legs() {
+        let mut review = ReviewConfig::default();
+        review
+            .shapes
+            .get_mut("standard")
+            .unwrap()
+            .minimum_family_counts = BTreeMap::from([("alpha".into(), 2)]);
+        let request = ReviewRequest {
+            shape: Some("standard".into()),
+            minimum_family_counts: BTreeMap::from([("alpha".into(), 1), ("beta".into(), 1)]),
+            lenses: ["correctness", "tests", "design"]
+                .map(|name| request_lens(name, serde_json::Value::Null))
+                .to_vec(),
+            ..Default::default()
+        };
+        let mut panel = review.resolve_panel(&request, None, &[], false).unwrap();
+        assert_eq!(panel.minimum_family_counts["alpha"], 2);
+        // Correctness can serve either family; the other lenses can only serve
+        // alpha. A greedy first assignment would leave beta unsatisfied.
+        panel
+            .resolve_families(|slot, family| {
+                let family = family.unwrap();
+                if slot.lens == "correctness" || family == "alpha" {
+                    Ok(family.into())
+                } else {
+                    Err("pool has no member of this family".into())
+                }
+            })
+            .unwrap();
+        assert_eq!(panel.slots[0].satisfied_family.as_deref(), Some("beta"));
+        assert_eq!(panel.slots[1].satisfied_family.as_deref(), Some("alpha"));
+        assert_eq!(panel.slots[2].satisfied_family.as_deref(), Some("alpha"));
+        let recorded = serde_json::to_value(&panel).unwrap();
+        assert_eq!(recorded["slots"][0]["satisfied_family"], "beta");
+    }
+
+    #[test]
+    fn required_lens_family_counts_towards_panel_minimum_and_refuses_with_reason() {
+        let mut lens = request_lens("tests", serde_json::json!("senior"));
+        lens.required_family = Some("alpha".into());
+        let mut panel = resolve(&ReviewRequest {
+            shape: Some("quick".into()),
+            minimum_family_counts: BTreeMap::from([("alpha".into(), 1)]),
+            lenses: vec![lens],
+            ..Default::default()
+        });
+        let mut probes = 0;
+        panel
+            .resolve_families(|slot, family| {
+                probes += 1;
+                assert_eq!(slot.lens, "tests");
+                assert_eq!(family, Some("alpha"));
+                Ok("alpha".into())
+            })
+            .unwrap();
+        assert_eq!(probes, 1);
+        assert_eq!(panel.slots[0].required_family.as_deref(), Some("alpha"));
+        assert_eq!(panel.slots[0].satisfied_family.as_deref(), Some("alpha"));
+        let error = panel
+            .resolve_families(|_, _| Err("account excluded by policy".into()))
+            .unwrap_err();
+        assert!(error.contains("family alpha"));
+        assert!(error.contains("count 1"));
+        assert!(error.contains("tests"));
+        assert!(error.contains("account excluded by policy"));
+    }
+
+    #[test]
+    fn unsatisfied_panel_family_reports_count_and_candidate_exclusions() {
+        let mut panel = resolve(&ReviewRequest {
+            minimum_family_counts: BTreeMap::from([("alpha".into(), 2)]),
+            ..Default::default()
+        });
+        let error = panel
+            .resolve_families(|slot, _| Err(format!("{} account unavailable", slot.lens)))
+            .unwrap_err();
+        assert!(error.contains("family alpha"));
+        assert!(error.contains("count 2"));
+        assert!(error.contains("account unavailable"));
+        assert!(
+            panel
+                .slots
+                .iter()
+                .all(|slot| slot.satisfied_family.is_none())
+        );
+    }
+
+    #[test]
+    fn unconstrained_panel_never_probes_or_changes_routes() {
+        let mut panel = resolve(&ReviewRequest::default());
+        let before = serde_json::to_value(&panel).unwrap();
+        panel
+            .resolve_families(|_, _| -> Result<String, String> {
+                panic!("unconstrained reviews must retain ordinary route selection")
+            })
+            .unwrap();
+        assert_eq!(serde_json::to_value(&panel).unwrap(), before);
+        assert!(before.get("minimum_family_counts").is_none());
+        assert!(before["slots"][0].get("required_family").is_none());
+        assert!(before["slots"][0].get("satisfied_family").is_none());
     }
 }

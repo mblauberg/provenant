@@ -127,6 +127,8 @@ pub struct SkillLocation {
 pub struct AdapterSpec {
     pub id: Harness,
     pub name: &'static str,
+    /// Provider family used by declared route constraints.
+    pub family: &'static str,
     pub binary: &'static str,
     pub skills: Option<SkillLocation>,
     /// Home-relative installation roots that can supply linked skills.
@@ -372,6 +374,7 @@ const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
 adapter_specs! { $;
     Claude [] (claude: 1) {
         name: "claude",
+        family: "anthropic",
         binary: "claude",
         skills: Some(SkillLocation {
             environment: None,
@@ -449,6 +452,7 @@ adapter_specs! { $;
     },
     Codex [] (codex: 0) {
         name: "codex",
+        family: "openai",
         binary: "codex",
         skills: Some(SkillLocation {
             environment: None,
@@ -530,6 +534,7 @@ adapter_specs! { $;
     },
     Cursor [] (cursor: 2) {
         name: "cursor",
+        family: "cursor",
         binary: "cursor-agent",
         skills: Some(SkillLocation {
             environment: None,
@@ -610,6 +615,7 @@ adapter_specs! { $;
     },
     Agy [] (agy: 3) {
         name: "agy",
+        family: "google",
         binary: "agy",
         skills: Some(SkillLocation {
             environment: None,
@@ -694,6 +700,7 @@ adapter_specs! { $;
     },
     Opencode [] (opencode: 4) {
         name: "opencode",
+        family: "opencode",
         binary: "opencode",
         skills: Some(SkillLocation {
             environment: Some("XDG_CONFIG_HOME"),
@@ -776,6 +783,7 @@ adapter_specs! { $;
     },
     Command [] (command: 5) {
         name: "command",
+        family: "command",
         binary: "",
         skills: None,
         skill_install_roots: &[],
@@ -851,6 +859,7 @@ adapter_specs! { $;
     // decoding, accounts and confinement remain owned by that provider.
     HostNative [serde(rename = "host-native")] () {
         name: "host-native",
+        family: "host-native",
         binary: "",
         skills: None,
         skill_install_roots: &[],
@@ -925,6 +934,7 @@ adapter_specs! { $;
     #[cfg(feature = "registry-fixture")]
     FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
+        family: "fixture",
         binary: "fixture-provider",
         skills: None,
         skill_install_roots: &[],
