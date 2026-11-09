@@ -15,7 +15,7 @@ use std::{
 };
 
 pub(crate) fn guidance() -> &'static str {
-    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. Keep the handoff current as work progresses, writing JSON atomically to the handoff.json path supplied below, outside the commit set. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). Use done only when the brief is finished. Use blocked when you need a change or decision you cannot make yourself. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). Use done only when the brief is finished. Use blocked when you need a change or decision you cannot make yourself. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
 }
 
 impl RunStore {
@@ -177,11 +177,11 @@ pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with
 
 /// The text placed before a lane's task: model policy, the build-slot rule for
 /// writers only, the handoff file, then the reading rule.
-pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: &Path) -> String {
+pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: Option<&Path>) -> String {
     format!(
         "{model_guidance}\n{}{}{READING_GUIDANCE}",
         if writer { BUILD_SLOT_GUIDANCE } else { "" },
-        handoff_progress_guidance(handoff)
+        handoff.map(handoff_progress_guidance).unwrap_or_default()
     )
 }
 
@@ -202,12 +202,13 @@ mod tests {
     #[test]
     fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
-        let writer = lane_preamble("Model policy.", true, handoff);
+        let writer = lane_preamble("Model policy.", true, Some(handoff));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
-        let reader = lane_preamble("Model policy.", false, handoff);
+        let reader = lane_preamble("Model policy.", false, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
+        assert!(!lane_preamble("Model policy.", false, None).contains("handoff.json"));
         assert!(writer.contains("locate before you read"));
         assert!(reader.contains("locate before you read"));
     }
@@ -235,6 +236,84 @@ mod tests {
             path: AbsolutePath::new(candidate)?,
             scope: PathScope::Subtree,
         }];
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_plan_progress_is_collected_at_settlement() -> TestResult {
+        use provenant_confinement::{
+            ConfinedPlan, PlanRequest,
+            permissions::{AccessMode, NetworkAccess, PathGrant, PlanPermissions, ProviderProfile},
+            plan::{CodexPolicy, ExtensionPolicy},
+        };
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        assert!(input.request.tasks[0].access.write_roots.is_empty());
+        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
+        let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
+        let base = store.context.state_root.as_path().join(format!(
+            "runs/{}/attempts/{}",
+            record.run_id, record.attempt_id
+        ));
+        let subtree = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: provenant_core::WorkScope::Project(store.context.project_id),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                policy: None,
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: subtree(base.join("tmp/candidate-0")),
+                private_state: Some(subtree(base.join("provider-state/candidate-0"))),
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+        })?;
+        let profile = ProviderProfile {
+            spec: Default::default(),
+            observations: Default::default(),
+        };
+        record.write_grants = provenant_confinement::write_grants(plan.permissions(), &profile)
+            .into_iter()
+            .map(|grant| {
+                Ok(WriteGrantRecord {
+                    extra: Default::default(),
+                    source: grant.source,
+                    path: AbsolutePath::new(&grant.path)?,
+                    scope: grant.scope,
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let bytes = snapshot("stopped_early");
+        seal(&candidate, "handoff.json", &bytes, HANDOFF_BYTES as u64)?;
+        let expected = Handoff::from_json(&bytes)?;
+        assert_eq!(
+            store.progress_handoff(&attempt, &record)?,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            store.capture_handoff(&attempt, &record, &decoded())?,
+            Some(expected.clone())
+        );
+        assert_eq!(store.handoff(&record)?, Some(expected));
         Ok(())
     }
 

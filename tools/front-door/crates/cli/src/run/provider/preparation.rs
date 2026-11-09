@@ -2718,12 +2718,44 @@ pub(super) fn prepare_candidates(
         } else {
             text
         };
+        let mut request = match confinement_request(
+            project_id,
+            ConfinementRoots {
+                host_roots: Some(roots),
+                cwd: &cwd,
+                home: &home,
+                state: roots.state.as_path(),
+                credential_roots: &credential_roots,
+                github_roots: &github_roots,
+                protected_worktrees: &protected_worktrees,
+                scratch,
+                private_state,
+                assets,
+                prompt_file: None,
+            },
+            writer.as_ref(),
+            &task.access,
+            &host_writes,
+            adapter.id(),
+            publishing_gh.is_some(),
+        )
+        .map_err(PlanCheckError::from)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                reason_boundaries.insert(reasons.len(), error.boundary_class());
+                reasons.push(error.skipped(&label));
+                continue;
+            }
+        };
+        let handoff = private_state.join("handoff.json");
+        let writable_handoff = handoff_writable(&request.permissions);
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
                 &model_policy.guidance(),
                 writer.is_some(),
-                &private_state.join("handoff.json")
+                writable_handoff.then_some(handoff.as_path())
             )
         );
         let prompt = match launch_prompt(
@@ -2749,29 +2781,26 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        let (mut plan, observed_head, repository, worktree_gitdir) = match confinement_request(
-            project_id,
-            ConfinementRoots {
-                host_roots: Some(roots),
-                cwd: &cwd,
-                home: &home,
-                state: roots.state.as_path(),
-                credential_roots: &credential_roots,
-                github_roots: &github_roots,
-                protected_worktrees: &protected_worktrees,
-                scratch,
-                private_state,
-                assets,
-                prompt_file: prompt.file(),
-            },
-            writer.as_ref(),
-            &task.access,
-            &host_writes,
-            adapter.id(),
-            publishing_gh.is_some(),
-        )
-        .map_err(PlanCheckError::from)
-        .and_then(|request| match writer.as_ref() {
+        // Only the spilled prompt path was unknown when the request was built.
+        // Add its exact read grant without recomputing host policy and Git roots.
+        if let Some(path) = prompt.file() {
+            let grant = PathGrant {
+                path: path.to_owned(),
+                scope: PathScope::Exact,
+            };
+            if let Some(policy) = request.permissions.policy.as_mut()
+                && let Err(error) = policy
+                    .mandatory_mut()
+                    .add_state_read(grant.clone())
+                    .map_err(PlanCheckError::from)
+            {
+                reason_boundaries.insert(reasons.len(), error.boundary_class());
+                reasons.push(error.skipped(&label));
+                continue;
+            }
+            request.permissions.read_roots.push(grant);
+        }
+        let planned = match writer.as_ref() {
             Some(writer) => ConfinedPlan::new(request)
                 .map(|plan| {
                     (
@@ -2805,7 +2834,8 @@ pub(super) fn prepare_candidates(
                 }
                 Ok(planned)
             }),
-        }) {
+        };
+        let (mut plan, observed_head, repository, worktree_gitdir) = match planned {
             Ok(planned) => planned,
             Err(error) => {
                 reason_boundaries.insert(reasons.len(), error.boundary_class());

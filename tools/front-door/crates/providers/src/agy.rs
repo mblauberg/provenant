@@ -365,6 +365,10 @@ fn prepare(
     }
     argv.push("--dangerously-skip-permissions".into());
     if access == Access::ReadOnly {
+        // Keep the candidate's progress directory in the native workspace too.
+        if let Some(private) = &plan.private_state {
+            argv.extend(["--add-dir".into(), private.path.as_os_str().to_owned()]);
+        }
         if let Some(user_skills) = &user_skills {
             // The skill loader reports paths through the private home link.
             argv.extend([

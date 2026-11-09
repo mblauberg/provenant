@@ -691,8 +691,9 @@ has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
 JSON is bounded to 12288 bytes, the note and each list entry to 4096 bytes,
 and each list to 64 non-empty strings.
 
-The lane atomically updates `handoff.json` in its granted private provider
-state as it works. This path is outside the worktree and commit set. At
+The launch prompt instructs a lane to atomically update `handoff.json` in its
+private provider state when the plan has a private-state grant. The update is
+best effort; a provider may refuse it. This path is outside the worktree and commit set. At
 settlement the host saves the valid final fence as the attempt's immutable
 `handoff.json`. If the provider dies without a final fence, the host reads
 progress only from the exact private-state grant of the applied candidate.
