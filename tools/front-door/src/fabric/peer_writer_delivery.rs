@@ -2,6 +2,52 @@
 use super::*;
 
 #[test]
+fn completion_gc_retries_busy_collection_and_requeued_exhausted_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::peer_writer_delivery::completion_gc_retries_busy_collection_and_requeued_exhausted_request")? {
+        return Ok(());
+    }
+    let fixture = SettlementFixture::resumed()?;
+    settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    let requests = fixture.roots.state.as_path().join("gc/completions");
+    let request_path = std::fs::read_dir(&requests)?.next().ok_or("queued request")??.path();
+    let request = std::fs::read_to_string(&request_path)?;
+    let name = request_path.file_name().ok_or("request name")?;
+    let retry_path = fixture.roots.state.as_path().join("gc/completion-retries").join(name);
+    let retry = std::fs::read(&retry_path)?;
+    let lock = crate::worktrees::collection_lock(&fixture.roots)?;
+    let old_wait = gc_cleanup::COLLECTION_WAIT_SECONDS.replace(0);
+    let result = gc_cleanup::run(&request, &FreeWorkers);
+    gc_cleanup::COLLECTION_WAIT_SECONDS.set(old_wait);
+    result?;
+    assert!(request_path.exists(), "busy collection must retain its request");
+    assert!(fixture.worktree.exists());
+    assert_eq!(std::fs::read(&retry_path)?, retry, "worker must preserve durable backoff");
+    gc_cleanup::retry_pending(fixture.roots.state.as_path(), &fixture.rig.home)?;
+    assert_eq!(std::fs::read(&retry_path)?, retry, "host tick must honour backoff");
+    drop(lock);
+    gc_cleanup::run(&request, &FreeWorkers)?;
+    assert!(!fixture.worktree.exists(), "later pass must clean the lane");
+    assert!(!request_path.exists());
+    assert!(!retry_path.exists());
+
+    // Recreate the crash window after exhaustion deleted the request but
+    // before deleting its capped retry. Requeue before a host sweep occurs.
+    let exhausted = fixture.roots.state.as_path().join("gc/completion-exhausted");
+    std::fs::create_dir_all(&exhausted)?;
+    std::fs::write(exhausted.join(name), &request)?;
+    std::fs::write(&retry_path, br#"{"attempts":5,"next_at":0}"#)?;
+    // The test harness may refuse detached spawning, after recording dispatch.
+    let _ = gc_cleanup::queue(&fixture.settled, &fixture.roots, None);
+    assert_eq!(std::fs::read_to_string(&request_path)?, request);
+    let retry: serde_json::Value = serde_json::from_slice(&std::fs::read(&retry_path)?)?;
+    assert_eq!(retry["attempts"], 1, "identical requeue must get a fresh budget");
+    assert!(retry["next_at"].as_u64().ok_or("backoff")? > 0);
+    assert_eq!(std::fs::read_to_string(exhausted.join(name))?, request);
+    Ok(())
+}
+
+#[test]
 fn settlement_defers_adopted_writer_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test("fabric::peer_tests::peer_writer_delivery::settlement_defers_adopted_writer_cleanup")?

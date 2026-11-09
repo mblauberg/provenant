@@ -34,7 +34,10 @@ fn now_seconds() -> Result<u64, Box<dyn std::error::Error>> {
 }
 
 fn final_receipt(receipt: &serde_json::Value) -> bool {
-    if receipt["retryable"] == true || receipt["reason"] == crate::worktrees::COLLECTION_BUSY {
+    if receipt["cleanup_deferred"] == true
+        || receipt["retryable"] == true
+        || receipt["reason"] == crate::worktrees::COLLECTION_BUSY
+    {
         return false;
     }
     if receipt["state"] == "retained" {
@@ -58,27 +61,21 @@ pub(crate) fn queue(
     let request = serde_json::to_string(&(request, delivery))?;
     let directory =
         provenant_config::private_directory(&roots.state.as_path().join("gc/completions"), true)?;
-    directory.atomic_write(
-        request_name(&request).as_ref(),
-        "completion",
-        request.as_bytes(),
-        provenant_os::fs::PublishMode::Replace,
-    )?;
-    // Settlement touches only this request. Queue enumeration belongs to the
-    // host tick, never to the synchronous settlement path.
     let retries = provenant_config::private_directory(
         &roots.state.as_path().join("gc/completion-retries"),
         true,
     )?;
-    let _dispatch = match retries.try_lock(
-        "dispatch.lock".as_ref(),
-        provenant_os::fs::LockMode::Exclusive,
-    ) {
-        Ok(lock) => lock,
-        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
+    // Publish and reconcile under the same lock as exhaustion and final removal.
+    // Otherwise a new identical request could inherit a crashed worker's budget.
+    let _dispatch = dispatch_lock(&retries)?;
     let name = request_name(&request);
+    reconcile_orphan(&directory, &retries, name.as_ref())?;
+    directory.atomic_write(
+        name.as_ref(),
+        "completion",
+        request.as_bytes(),
+        provenant_os::fs::PublishMode::Replace,
+    )?;
     let mut retry = match retries.read_bounded(name.as_ref(), 1024) {
         Ok(bytes) => serde_json::from_slice::<Retry>(&bytes)?,
         Err(error) if error.is_not_found() => Retry::default(),
@@ -117,13 +114,39 @@ fn dispatch(
     spawn(request, home)
 }
 
+fn dispatch_lock(
+    retries: &provenant_os::fs::Directory,
+) -> Result<provenant_os::fs::LockGuard, Box<dyn std::error::Error>> {
+    let clock = SystemClock;
+    Ok(retries.lock(
+        "dispatch.lock".as_ref(),
+        provenant_os::fs::LockMode::Exclusive,
+        WaitBudget::cli(clock.mono_now(), 120)?,
+        &CancelToken::new(),
+        &clock,
+    )?)
+}
+
+fn reconcile_orphan(
+    requests: &provenant_os::fs::Directory,
+    retries: &provenant_os::fs::Directory,
+    name: &std::ffi::OsStr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match requests.read_bounded(name, 64 * 1024) {
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => match retries.unlink(name) {
+            Ok(()) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        },
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 /// Retry only due transient work, with a bounded batch and durable backoff.
 pub(crate) fn retry_pending(state: &Path, home: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = match provenant_os::fs::Directory::open_anchor(&state.join("gc/completions")) {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
+    let directory = provenant_config::private_directory(&state.join("gc/completions"), true)?;
     let metadata = provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
     let _dispatch = match metadata.try_lock(
         "dispatch.lock".as_ref(),
@@ -133,6 +156,15 @@ pub(crate) fn retry_pending(state: &Path, home: &Path) -> Result<(), Box<dyn std
         Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    for entry in metadata.entries()? {
+        let name = entry?;
+        if Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext == "json")
+        {
+            reconcile_orphan(&directory, &metadata, &name)?;
+        }
+    }
     let now = now_seconds()?;
     let mut dispatched = 0;
     for entry in directory.entries()? {
@@ -225,20 +257,23 @@ pub(crate) fn run(
     let store = provenant_run::RunStore::open(&context, &call)?;
     // A later explicit delivery may supersede an earlier final retention.
     // Finality belongs to this request, not every request for the attempt.
-    collect_owned_worktree(&settled, &roots, workers, delivery.as_ref())?;
+    if collect_outcome(&settled, &roots, workers, delivery.as_ref())? == CollectionOutcome::Busy {
+        return Ok(());
+    }
     if store
         .worktree_settlement(settled.attempt_id, &call)?
         .is_some_and(|receipt| final_receipt(&receipt))
     {
+        let retries = provenant_config::private_directory(
+            &roots.state.as_path().join("gc/completion-retries"),
+            true,
+        )?;
+        let _dispatch = dispatch_lock(&retries)?;
         match directory.unlink(request_name(request).as_ref()) {
             Ok(()) => {}
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
-        let retries = provenant_config::private_directory(
-            &roots.state.as_path().join("gc/completion-retries"),
-            true,
-        )?;
         match retries.unlink(request_name(request).as_ref()) {
             Ok(()) => {}
             Err(error) if error.is_not_found() => {}
@@ -248,12 +283,34 @@ pub(crate) fn run(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn collect_owned_worktree(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    collect_outcome(settled, roots, workers, delivery_override).map(|_| ())
+}
+
+// Keep lock-contention regression tests deterministic without a two-minute sleep.
+#[cfg(test)]
+thread_local! {
+    pub(super) static COLLECTION_WAIT_SECONDS: std::cell::Cell<u64> = const { std::cell::Cell::new(120) };
+}
+
+#[derive(PartialEq, Eq)]
+enum CollectionOutcome {
+    Finished,
+    Busy,
+}
+
+fn collect_outcome(
+    settled: &provenant_run::HolderContext,
+    roots: &provenant_core::Roots,
+    workers: &dyn WorkerObserver,
+    delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
+) -> Result<CollectionOutcome, Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
     let cancel = CancelToken::new();
@@ -278,7 +335,7 @@ pub(crate) fn collect_owned_worktree(
                 "schema_version":1, "state":"retained", "reason":"attempt is not terminal", "retryable":true
             }),
         )?;
-        return Ok(());
+        return Ok(CollectionOutcome::Finished);
     }
     let task = store
         .request(record.run_id, &call)?
@@ -294,7 +351,7 @@ pub(crate) fn collect_owned_worktree(
                 "schema_version":1, "state":"retained", "reason":"task has no writer"
             }),
         )?;
-        return Ok(());
+        return Ok(CollectionOutcome::Finished);
     };
     // Recover an interrupted prune before classifying an absent worktree.
     let prior = store.worktree_settlement(record.attempt_id, &call)?;
@@ -309,7 +366,7 @@ pub(crate) fn collect_owned_worktree(
                         "reason":"worktree already removed"
                     }),
                 )?;
-                return Ok(());
+                return Ok(CollectionOutcome::Finished);
             }
             Err(error) => return Err(error.into()),
             Ok(_) => {}
@@ -333,7 +390,7 @@ pub(crate) fn collect_owned_worktree(
                 record.attempt_id,
                 &serde_json::json!({"schema_version":1,"state":"retained","worktree":writer.worktree,"reason":reason}),
             )?;
-            return Ok(());
+            return Ok(CollectionOutcome::Finished);
         }
     }
     let facts = store.repo_facts();
@@ -386,20 +443,24 @@ pub(crate) fn collect_owned_worktree(
     if !lane_owned {
         tracking_ref_warning = None;
     }
-    let _collection = match crate::worktrees::collection_lock_for(roots, Some(120)) {
+    #[cfg(test)]
+    let collection_wait = COLLECTION_WAIT_SECONDS.get();
+    #[cfg(not(test))]
+    let collection_wait = 120;
+    let _collection = match crate::worktrees::collection_lock_for(roots, Some(collection_wait)) {
         Ok(lock) => lock,
         // A long-running collector still owns the pass. Leave a visible
         // receipt rather than skipping silently; replay ignores retained ones.
         Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
-            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY});
+            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY, "retryable":true});
             // Never replace a receipt that already settled or began pruning.
             if store
                 .worktree_settlement(record.attempt_id, &call)?
-                .is_none()
+                .is_none_or(|receipt| receipt["cleanup_deferred"] == true)
             {
                 record_worktree_settlement(&store, record.attempt_id, &receipt)?;
             }
-            return Ok(());
+            return Ok(CollectionOutcome::Busy);
         }
         Err(error) => return Err(error.into()),
     };
@@ -646,7 +707,7 @@ pub(crate) fn collect_owned_worktree(
                                 "reason":"worktree is not a Provenant-created lane", "cleanup_complete":true
                             }),
                         )?;
-                        return Ok(());
+                        return Ok(CollectionOutcome::Finished);
                     }
                 };
                 let warning = collection_error.take();
@@ -766,7 +827,7 @@ pub(crate) fn collect_owned_worktree(
     // The Git mutation has its own 120-second bound. Start a fresh storage
     // budget after it so a completed prune can always publish its receipt.
     record_worktree_settlement(&store, record.attempt_id, &receipt)?;
-    Ok(())
+    Ok(CollectionOutcome::Finished)
 }
 
 #[cfg(test)]
@@ -800,6 +861,7 @@ mod tests {
     #[test]
     fn transient_receipts_remain_pending() {
         for receipt in [
+            json!({"state": "retained", "reason": "worktree cleanup queued for completion GC", "cleanup_deferred": true}),
             json!({"state": "retained", "reason": crate::worktrees::COLLECTION_BUSY}),
             json!({"state": "retained", "reason": "attempt is not terminal", "retryable": true}),
             json!({"state": "retained", "reason": "", "cleanup_warning": "unknown failure"}),
@@ -814,6 +876,48 @@ mod tests {
         }
         assert!(final_receipt(&json!({"state": "pruned"})));
         assert!(final_receipt(&json!({"cleanup_complete": true})));
+    }
+
+    #[test]
+    fn retry_tick_removes_orphan_from_interrupted_exhaustion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let state = temporary.path();
+        let retries =
+            provenant_config::private_directory(&state.join("gc/completion-retries"), true)?;
+        let name = request_name("interrupted exhaustion");
+        retries.atomic_write(
+            name.as_ref(),
+            "fixture",
+            &serde_json::to_vec(&Retry {
+                attempts: 5,
+                next_at: 0,
+            })?,
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        let exhausted =
+            provenant_config::private_directory(&state.join("gc/completion-exhausted"), true)?;
+        exhausted.atomic_write(
+            name.as_ref(),
+            "fixture",
+            b"interrupted exhaustion",
+            provenant_os::fs::PublishMode::Replace,
+        )?;
+        // Crash after the request delete, before the retry delete; even a
+        // missing active queue directory must not prevent reconciliation.
+        retry_pending(state, &state.join("must-not-spawn"))?;
+        assert!(
+            retries
+                .read_bounded(name.as_ref(), 1024)
+                .unwrap_err()
+                .is_not_found()
+        );
+        assert_eq!(
+            exhausted.read_bounded(name.as_ref(), 1024)?,
+            b"interrupted exhaustion"
+        );
+        retry_pending(state, &state.join("must-not-spawn"))?;
+        Ok(())
     }
 
     #[test]
