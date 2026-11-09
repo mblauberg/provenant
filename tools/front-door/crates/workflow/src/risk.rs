@@ -54,6 +54,15 @@ pub fn assess(
     approval: Option<&ChairDowngrade>,
     changed_paths: &[String],
 ) -> Result<RiskRecord, RiskError> {
+    if changed_paths.iter().any(|path| {
+        provenant_core::RelativePath::parse(path).is_err()
+            || path.contains('\\')
+            || path
+                .split('/')
+                .any(|part| part == "." || part == ".." || part.is_empty())
+    }) {
+        return Err(RiskError::InvalidPaths);
+    }
     let review = provenant_routing::ReviewConfig::default();
     let boundary = changed_paths
         .iter()
@@ -93,15 +102,7 @@ pub fn assess(
     }
     let downgrade_approval = if tier < derived {
         let approval = approval.ok_or(RiskError::ApprovalRequired)?;
-        if changed_paths.is_empty()
-            || changed_paths.iter().any(|path| {
-                provenant_core::RelativePath::parse(path).is_err()
-                    || path.contains('\\')
-                    || path
-                        .split('/')
-                        .any(|part| part == "." || part == ".." || part.is_empty())
-            })
-        {
+        if changed_paths.is_empty() {
             return Err(RiskError::InvalidPaths);
         }
         Some(approval.clone())
