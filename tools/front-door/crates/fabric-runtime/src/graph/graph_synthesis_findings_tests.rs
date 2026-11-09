@@ -430,7 +430,9 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             AttemptOutcome::Succeeded,
             &findings_text(&format!("{},{}", qualified, qualified.replace("F1", "F2"))),
         )]);
-        let long_file = "a".repeat(80);
+        // Leave room for trigger evidence under each verifier's findings cap;
+        // 640 copies still exceed the synthesis projection's compaction cap.
+        let long_file = "a".repeat(16);
         let verifier_entry = entry(",\"propagates\":\"seed:F1\",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"").replace("a.rs", &long_file);
         let mut verifier_entry: serde_json::Value = serde_json::from_str(&verifier_entry).unwrap();
         verifier_entry["trigger"] = trigger.clone();
