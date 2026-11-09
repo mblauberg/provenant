@@ -624,6 +624,21 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
 fn malformed_lens_is_corrected_once_without_repeating_siblings() {
     for corrected in [true, false] {
         let document = panel("f0-v0-s0");
+        let (plan, _) = validate_plan(&document).unwrap();
+        let lens = plan
+            .nodes
+            .iter()
+            .find(|node| node.extra.get("review_lens") == Some(&json!("correctness")))
+            .unwrap();
+        let lenses = plan
+            .nodes
+            .iter()
+            .find(|node| {
+                node.composite.as_ref().is_some_and(|spec| {
+                    spec.exports.iter().any(|export| export.node == lens.id)
+                })
+            })
+            .unwrap();
         let mut owner = FakeOwner {
             observations: [
                 terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
@@ -659,7 +674,7 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
             .iter()
             .find(|node| !node.previous_attempts.is_empty())
             .unwrap();
-        assert_eq!(retried.id, "panel--lenses--correctness");
+        assert_eq!(retried.id, lens.id);
         assert_eq!(
             retried.state,
             if corrected {
@@ -683,7 +698,7 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
                 .count(),
             2
         );
-        for id in ["panel", "panel--lenses"] {
+        for id in ["panel", lenses.id.as_str()] {
             let composite = run
                 .checkpoint
                 .nodes
@@ -697,7 +712,7 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
                 .checkpoint
                 .nodes
                 .iter()
-                .find(|node| node.id == "panel--lenses")
+                .find(|node| node.id == lenses.id)
                 .unwrap();
             assert!(
                 lenses
@@ -706,7 +721,7 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
                     .unwrap()
                     .warnings
                     .iter()
-                    .any(|warning| warning.starts_with("unavailable panel--lenses--correctness:"))
+                    .any(|warning| warning.starts_with(&format!("unavailable {}:", lens.id)))
             );
         }
         let output = run
@@ -841,7 +856,12 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
         };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        let boundary = &run.checkpoint.nodes[0];
+        let boundary = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel")
+            .unwrap();
         assert_eq!(
             boundary.advance_error_code.as_deref(),
             Some("coverage_below_minimum")
@@ -866,6 +886,11 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
 fn correction_admission_failure_is_fenced_and_panel_proceeds() {
     let document = panel("f0-v0-s0");
     let (plan, _) = validate_plan(&document).unwrap();
+    let lens = plan
+        .nodes
+        .iter()
+        .find(|node| node.extra.get("review_lens") == Some(&json!("correctness")))
+        .unwrap();
     let limits = crate::config::GraphLimits {
         node_prompt_bytes: plan
             .nodes
@@ -899,7 +924,7 @@ fn correction_admission_failure_is_fenced_and_panel_proceeds() {
         .checkpoint
         .nodes
         .iter()
-        .find(|node| node.id == "panel--lenses--correctness")
+        .find(|node| node.id == lens.id)
         .unwrap();
     assert_eq!(lens.state, NodeState::Failed);
     assert!(lens.extra.contains_key("review_verdict_correction_refused"));

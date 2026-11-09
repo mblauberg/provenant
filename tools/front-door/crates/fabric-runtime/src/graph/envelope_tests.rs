@@ -41,6 +41,7 @@ fn mixed() -> GraphDocument {
                 {"id":"council", "kind":"composite", "access":"read_only", "depends_on":["writer"],
                  "source":{"type":"node","node":"writer"}, "composite":{"nodes":[
                     {"id":"lens", "access":"read_only", "prompt":"review the repair",
+                     "review_behaviour":"lens", "review_lens":"correctness",
                      "route":{"alias":"senior"}, "depends_on":["writer"],
                      "source":{"type":"node","node":"writer"}}
                  ], "exports":[{"node":"lens","outputs":["result","verdict","findings"]}]}},
@@ -59,8 +60,8 @@ fn planned(document: &GraphDocument) -> PlannedGraph {
     validate_flat_plan(&expanded, &limits).unwrap().0
 }
 
-/// Findings that fill `FINDINGS_BYTES`, the most `make_outputs` keeps.
-fn findings() -> Vec<Finding> {
+/// Findings that fill the node's canonical-byte allowance.
+fn findings(cap: usize) -> Vec<Finding> {
     let finding = |summary: String| Finding {
         extra: Default::default(),
         id: "F1".into(),
@@ -73,13 +74,13 @@ fn findings() -> Vec<Finding> {
         reason: None,
     };
     let mut findings = vec![finding(String::new()); MAX_FINDINGS];
-    let spare = FINDINGS_BYTES - canonical_len(&findings);
+    let spare = cap - canonical_len(&findings);
     findings[0].summary = "x".repeat(spare);
-    assert_eq!(canonical_len(&findings), FINDINGS_BYTES);
+    assert_eq!(canonical_len(&findings), cap);
     findings
 }
 
-fn filled_outputs(composite: bool, writer: bool) -> NodeOutputs {
+fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
     let text = "\u{1}".repeat(RESULT_EXCERPT_BYTES * 2);
     let mut capture = crate::result_capture::ResultCapture::new(None);
     capture.push(text.as_bytes());
@@ -93,11 +94,19 @@ fn filled_outputs(composite: bool, writer: bool) -> NodeOutputs {
     outputs.extra.insert(review::PARTIAL.into(), true.into());
     outputs.verdict = Some(worst(OUTPUT_FIELD_BYTES));
     outputs.verdict_error = Some("verdict malformed, repeated or not final".into());
-    outputs.findings = findings();
-    if writer {
+    let cap = if node.dispositions.is_empty()
+        && node.composite.is_none()
+        && !node.inputs.iter().any(|input| input.outputs.contains(&OutputKind::Findings))
+    {
+        FINDINGS_BYTES
+    } else {
+        DISPOSITION_FINDINGS_BYTES
+    };
+    outputs.findings = findings(cap);
+    if plans::writer(node) {
         outputs.warnings.push(worst(WARNING_BYTES));
     }
-    if composite && let Some(result) = &mut outputs.result {
+    if node.composite.is_some() && let Some(result) = &mut outputs.result {
         result.excerpt = worst(COMPOSITE_EXCERPT_BYTES);
     }
     assert!(outputs.warnings.len() <= MAX_WARNINGS);
@@ -220,7 +229,11 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| {
             let boundary = node.condition.is_some() || node.loop_body.is_some();
             NodeProgress {
-                extra: Default::default(),
+                extra: if template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens) {
+                    [(review::CORRECTION_REFUSED.into(), worst(MAX_ADVANCE_ERROR_BYTES).into())].into()
+                } else {
+                    Default::default()
+                },
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
@@ -306,7 +319,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 outputs: Some(if boundary {
                     gate_outputs(false)
                 } else {
-                    filled_outputs(node.composite.is_some(), plans::writer(node))
+                    filled_outputs(node)
                 }),
                 previous_attempts: Vec::new(),
                 attempts: node

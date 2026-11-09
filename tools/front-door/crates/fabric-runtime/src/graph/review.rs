@@ -1,7 +1,7 @@
 //! Deterministic contract for review template results and coverage.
 use super::*;
 
-const CORRECTION_REFUSED: &str = "review_verdict_correction_refused";
+pub(super) const CORRECTION_REFUSED: &str = "review_verdict_correction_refused";
 
 pub(super) const PARTIAL: &str = "review_partial";
 

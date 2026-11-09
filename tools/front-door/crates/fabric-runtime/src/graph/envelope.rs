@@ -337,6 +337,13 @@ fn node_bound(
         launch_retry: None,
         last_launch_retry: None,
     };
+    // A refused automatic verdict correction retains its bounded admission error.
+    let correction = template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens);
+    if correction {
+        skeleton
+            .extra
+            .insert(review::CORRECTION_REFUSED.into(), String::new().into());
+    }
     // Only a repair acceptance gate can retain a measured growth cache.
     // Ordinary agent nodes may still report risk assessments in their output.
     if repair_gate {
@@ -367,7 +374,8 @@ fn node_bound(
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
-        + MAX_ADVANCE_ERROR_BYTES; // advance error
+        + MAX_ADVANCE_ERROR_BYTES // advance error
+        + if correction { MAX_ADVANCE_ERROR_BYTES } else { 0 };
     if node
         .plan
         .as_ref()
