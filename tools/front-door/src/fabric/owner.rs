@@ -3160,13 +3160,10 @@ impl BoundGraphOwner<'_> {
                         self.network,
                     )?;
                 }
-                // Shared isolation reads the live checkout, so a pinned source
-                // view is not built: the snapshot step is skipped.
+                // Every pinned reader resolves and verifies its source, including
+                // shared readers that may be able to skip the immutable view.
                 if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     && source_commit.is_some()
-                    && !node
-                        .attempt
-                        .is_some_and(|spec| spec.effective_isolation() == "shared")
                 {
                     grants.source_root = {
                         let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
@@ -3213,9 +3210,30 @@ impl BoundGraphOwner<'_> {
                             });
                         }
                         grants.source_identity = Some(source_identity);
-                        // A preset may lower its source worktree to a read root.
-                        // The immutable view replaces those live-source grants.
-                        grants.read_roots.retain(|root| !root.starts_with(&source));
+                        // A verdict's pin must describe the tree being read. Failed
+                        // or incomplete Git observations conservatively use a snapshot.
+                        grants.source_live = node
+                            .attempt
+                            .is_some_and(|spec| spec.effective_isolation() == "shared")
+                            && self
+                                .repair_git(&source, &["rev-parse", "--verify", "HEAD"])
+                                .is_ok_and(|head| Some(head.trim()) == source_commit)
+                            && self
+                                .repair_git(
+                                    &source,
+                                    &[
+                                        "status",
+                                        "--porcelain=v1",
+                                        "--untracked-files=all",
+                                        "--ignored",
+                                    ],
+                                )
+                                .is_ok_and(|status| status.is_empty());
+                        if !grants.source_live {
+                            // A preset may lower its source worktree to a read root.
+                            // The immutable view replaces those live-source grants.
+                            grants.read_roots.retain(|root| !root.starts_with(&source));
+                        }
                         Some(source)
                     };
                 }

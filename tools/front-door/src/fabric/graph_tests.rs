@@ -2731,6 +2731,98 @@ mod provisioned_writer_submission_tests {
         writer_continuation_fixture(true, false)
     }
 
+    #[test]
+    fn light_reader_pinned_to_writer_binds_live_or_snapshot_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test(
+            "fabric::provisioned_writer_submission_tests::light_reader_pinned_to_writer_binds_live_or_snapshot_source",
+        )? {
+            return Ok(());
+        }
+        for condition in ["clean", "moved", "dirty", "untracked"] {
+            let rig = crate::worktree_tests::repository()?;
+            crate::worktree_tests::git(&rig, &["worktree", "add", "-qb", "reader-source", ".worktrees/reader-source"])?;
+            let source = rig.project.join(".worktrees/reader-source");
+            std::fs::write(source.join("subject.txt"), "pinned writer content\n")?;
+            crate::worktree_tests::git(&rig, &["-C", source.to_str().ok_or("source")?, "add", "subject.txt"])?;
+            crate::worktree_tests::git(&rig, &["-C", source.to_str().ok_or("source")?, "commit", "-qm", "writer subject"])?;
+            let head = crate::worktree_tests::git(&rig, &["-C", source.to_str().ok_or("source")?, "rev-parse", "HEAD"])?;
+            if condition == "moved" || condition == "dirty" {
+                std::fs::write(source.join("subject.txt"), "later content\n")?;
+            }
+            if condition == "moved" {
+                crate::worktree_tests::git(&rig, &["-C", source.to_str().ok_or("source")?, "commit", "-qam", "later writer head"])?;
+            }
+            if condition == "untracked" {
+                std::fs::write(source.join("untracked.txt"), "later content\n")?;
+            }
+            let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+            let factory = Factory {
+                context: Context::open(roots, &rig.home, &rig.project)?,
+                project_attribution: false,
+                clock: SystemClock,
+                backoff: ThreadPause,
+                executor: SystemExecutor::new(1)?,
+                home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+                host_launch: None, mcp_project: None, workers: &Free,
+            };
+            let cancel = CancelToken::new();
+            let mut owner = BoundGraphOwner {
+                writer_launch_budget: None, admission_timeout: None,
+                launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
+                integration_base: None, integration_branch: None, network: None,
+                capability_overrides: Default::default(), exclude: Vec::new(),
+                budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+                cancel: &cancel, prices: None, tick: false,
+            };
+            use graph::AttemptOwner;
+            let key = graph::AttemptKey {
+                extra: Default::default(), graph_id: "light-reader-source".into(),
+                node_id: "reader".into(), route_index: 0,
+            };
+            let spec = serde_json::from_value(serde_json::json!({"preset":"light"}))?;
+            let node = graph::NodeInput {
+                require_skill_location: false, settlement_retries: Some(1),
+                prior_attempts: &[], family_peers: &[],
+                context: provenant_records::run::WorkContext {
+                    graph_id: Some(key.graph_id.clone()), node_id: Some(key.node_id.clone()),
+                    ..Default::default()
+                },
+                read_roots: &[], attachments: &[], capabilities: None, capability_sources: None,
+                attempt: Some(&spec), distinct_from_attempts: &[], require_distinct: false,
+                source_commit: Some(&head), review_base: None, title: "reader",
+                prompt: "review the pinned writer", required_verdict: None,
+                deadline_seconds: None, inputs_dir: None,
+            };
+            let route = serde_json::from_value(serde_json::json!({"alias":"senior"}))?;
+            let actor = owner.actor();
+            let replay = graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: None, launch_actor: &actor };
+            // The graph supplies its writer's bound checkout separately from the
+            // read-only node definition. Seal through the real submission owner.
+            let observation = provenant_cli::run::with_deferred_provider_launch(|| {
+                owner.observe_or_start(&key, node, &route, graph::AccessMode::ReadOnly,
+                    source.to_str(), replay)
+            })?;
+            let graph::AttemptObservation::Pending { attempt_ref: Some(reference), .. } = observation else {
+                return Err(format!("{condition}: expected sealed attempt: {observation:?}").into());
+            };
+            let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
+            let binary = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
+            let store = binary.store(&cancel)?;
+            let call = binary.call(&cancel);
+            let record = store.record(id.parse()?, &call)?;
+            let request = store.request(record.run_id, &call)?;
+            let task = request.tasks.first().ok_or("sealed reader")?;
+            assert_eq!(task.head.as_deref(), Some(head.as_str()), "{condition}");
+            assert_eq!(task.access.source_root.as_deref(), Some(source.as_path()), "{condition}");
+            assert!(task.access.source_identity.is_some(), "{condition}");
+            assert_eq!(task.access.source_live, condition == "clean", "{condition}");
+            assert!(task.writer.is_none(), "{condition}");
+        }
+        Ok(())
+    }
+
     fn writer_continuation_fixture(
         foreign: bool,
         quota: bool,
