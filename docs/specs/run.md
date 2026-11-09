@@ -1362,8 +1362,10 @@ a gitlink with a `.git` marker still reports unknown and requires review
 because status could follow lane-controlled nested filters.
 The private Git admin directory holds `provenant-owner.json` as a bounded,
 atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
-pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
-owner label. `load_owner` and `save_owner` require a verified linked worktree.
+pinned base OID, host, creation time, origin (`lane` or `adopted`), optional
+owner label and an optional `reference` link to the branch's generation in the
+ref ledger. `load_owner` and `save_owner` require a verified linked worktree.
+An owner without `reference` has an unobserved branch.
 
 A continuation may reuse a saved lane-owned worktree only when its recorded
 owner attempt is terminal. Records predating the saved `owner` field retain
@@ -1418,6 +1420,42 @@ branch may race and produce a warning.
   `tools/front-door/src/fabric.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
 
+## Ref ownership and the landed check
+
+The ref ledger lives in host state at `<state>/worktrees/<project>/refs/`, one
+bounded atomic `RefRecord` per endpoint and full ref, shared by every writer
+for the repository. A record holds the repository's project ID, the endpoint
+(`local`, or `remote` with the remote name and push URL from the bound delivery
+endpoint), the full ref, a generation, the origin (`created` or `adopted`), the
+tip it saw, the time and optional attempt and operation IDs. Worktree creation
+records a branch it made as created and an existing branch as adopted, under
+the registry lock; a graph's local integration branch is recorded the same
+way. A delivered push records its remote branch as created when the remote
+did not have it, otherwise adopted. Integration targets are never claimed.
+Every creation or adoption is a new generation, so a ref recreated at the
+same commit never inherits an earlier proof. An adoption that finds the ref
+still at the recorded tip, or an attempt replaying its own observation, keeps
+the current generation. A ref with no record is unobserved and retained. A
+failed record write is a warning, never a creation failure.
+
+One landed check, `worktrees::landed`, decides whether a commit has landed. It
+is landed when it is an ancestor of the freshly read target tip, or when a
+chain of integration receipts carries it there: each delivered head contains
+the previous link, each receipt delivers the ref the previous one integrated
+into, each integration commit is the delivered head, a merge of the previous
+tip and the head, or a single commit on the previous tip, and the chain ends at
+the authorised root, which contains the last integration commit. A rewritten
+target, a missing commit or any broken link is unproven, which retains. Tree
+and patch-id equality are never evidence. Named and merged removal, GC, owned
+lane pruning and delivery's already-integrated test all use it.
+- Why: cleanup may only remove refs Provenant made, and only once their work
+  is proven to have landed.
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`;
+  `crates/confinement/src/worktrees/landed.rs::tests`;
+  `crates/run/src/git_context.rs::recorded_local_branch_is_created_once_then_adopted`.
+- Owner: `crates/confinement/src/worktrees/refs.rs`,
+  `crates/confinement/src/worktrees/landed.rs`
+
 ## Delivery modes and settled pickup
 
 A template delivery setting resolves to the existing
@@ -1467,6 +1505,11 @@ so pickup cannot merge a refused loop round. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
 receipt head. Delivery persists a
 keyed host pickup receipt separately from the immutable terminal record.
+A delivered receipt carries `integration`: the bound remote name (empty for a
+local target), the bound push URL, the full destination ref, `previous` (the
+tip delivery leased or found, absent when the push created the ref) and
+`integrated` (the tip read back after the update). Receipts without it leave
+the destination unobserved.
 Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.

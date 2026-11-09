@@ -708,6 +708,7 @@ fn retained_lane_settlement_collects_only_its_output_and_cache()
         state: provenant_run::WriterDeliveryState::NotAttempted {
             extra: Default::default(),
         },
+        integration: None,
     };
     let collection = crate::worktrees::collection_lock(&fixture.roots)?;
     settle_owned_worktree(

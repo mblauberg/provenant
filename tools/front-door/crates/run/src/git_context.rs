@@ -464,9 +464,59 @@ pub fn ensure_local_branch(
     branch: &str,
     start: Option<&str>,
 ) -> Result<bool> {
+    ensure_local_branch_tip(git, cwd, branch, start).map(|(created, _)| created)
+}
+
+/// `ensure_local_branch`, then record the branch in the repository's shared
+/// ref ledger: created when this call made it, adopted when it already
+/// existed. Returns whether it was created. A failed record leaves the ref
+/// unobserved, which retains it, and is returned as a warning.
+pub fn ensure_recorded_local_branch(
+    git: &Path,
+    cwd: &Path,
+    branch: &str,
+    start: Option<&str>,
+    ledger: &provenant_confinement::worktrees::RefLedger,
+    call: &crate::Request<'_>,
+) -> Result<(bool, Option<String>)> {
+    use provenant_confinement::worktrees::{RefEndpoint, RefObservation, RefOrigin};
+    let (created, tip) = ensure_local_branch_tip(git, cwd, branch, start)?;
+    let warning = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
+        ledger.record(
+            RefObservation {
+                endpoint: RefEndpoint::Local,
+                reference: provenant_confinement::repo::GitRefName::branch(branch)?,
+                origin: if created {
+                    RefOrigin::Created
+                } else {
+                    RefOrigin::Adopted
+                },
+                tip: provenant_core::GitOid::parse(&tip)?,
+                recorded_at: call.clock.wall_now()?,
+                attempt_id: None,
+                operation_id: None,
+            },
+            call.clock,
+            call.cancel,
+        )?;
+        Ok(())
+    })()
+    .err()
+    .map(|error| {
+        format!("could not record ownership of {branch}: {error}; it is retained as unobserved")
+    });
+    Ok((created, warning))
+}
+
+fn ensure_local_branch_tip(
+    git: &Path,
+    cwd: &Path,
+    branch: &str,
+    start: Option<&str>,
+) -> Result<(bool, String)> {
     let reference = format!("refs/heads/{branch}");
-    if resolve_git_base(git, cwd, &reference).is_ok() {
-        return Ok(false);
+    if let Ok(tip) = resolve_git_base(git, cwd, &reference) {
+        return Ok((false, tip));
     }
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
     let env = repository_environment(&executor, git, cwd)
@@ -490,7 +540,7 @@ pub fn ensure_local_branch(
         256,
         &env,
     )?;
-    Ok(true)
+    Ok((true, oid))
 }
 
 /// A fetch moves objects, so it gets longer than the metadata reads.
@@ -1292,6 +1342,55 @@ mod tests {
             ensure_local_branch(&binary, &root, "bad..name", None),
             Err(RunError::InvalidBase(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_local_branch_is_created_once_then_adopted() -> TestResult {
+        use provenant_confinement::worktrees::{RefEndpoint, RefLedger, RefOrigin};
+        let HistoryFixture {
+            _temp,
+            root,
+            binary,
+            executor,
+            ..
+        } = small_history()?;
+        let state_root = tempfile::tempdir()?;
+        let state = state_root.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let project = provenant_core::ProjectId::from_bytes([4; 16]);
+        let ledger = RefLedger::open(&state, project)?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let reference = provenant_confinement::repo::GitRefName::branch("batch/graph")?;
+        let (created, warning) =
+            ensure_recorded_local_branch(&binary, &root, "batch/graph", None, &ledger, &call)?;
+        assert!(created && warning.is_none(), "{warning:?}");
+        let first = ledger
+            .load(&RefEndpoint::Local, &reference)?
+            .ok_or("no record")?;
+        assert_eq!(first.origin, RefOrigin::Created);
+        assert_eq!(first.repository, project);
+        // A second graph reusing the branch, since moved, found it; it did
+        // not make it.
+        git(
+            &executor,
+            &binary,
+            &root,
+            &["branch", "-f", "batch/graph", "HEAD^"],
+        )?;
+        let (created, _) =
+            ensure_recorded_local_branch(&binary, &root, "batch/graph", None, &ledger, &call)?;
+        assert!(!created);
+        let second = ledger
+            .load(&RefEndpoint::Local, &reference)?
+            .ok_or("no record")?;
+        assert_eq!(second.origin, RefOrigin::Adopted);
+        assert_eq!(second.generation, first.generation + 1);
         Ok(())
     }
 

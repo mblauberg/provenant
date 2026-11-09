@@ -156,7 +156,9 @@ impl RefLedger {
     /// record when the ref still holds the commit that record names: nothing
     /// observable distinguishes it from the generation already recorded.
     /// Otherwise an adoption replaces it, so a later created proof is never
-    /// inherited by a ref someone else replaced.
+    /// inherited by a ref someone else replaced. An attempt replaying its own
+    /// observation, such as a sealed delivery receipt read again, is the same
+    /// generation rather than a recreation.
     pub fn record(
         &self,
         observation: RefObservation,
@@ -183,9 +185,12 @@ impl RefLedger {
                 other => other.into(),
             })?;
         let current = self.load(&observation.endpoint, &observation.reference)?;
-        if observation.origin == RefOrigin::Adopted
-            && let Some(current) = current.as_ref()
+        if let Some(current) = current.as_ref()
             && current.tip == observation.tip
+            && (observation.origin == RefOrigin::Adopted
+                || observation.attempt_id.is_some()
+                    && current.attempt_id == observation.attempt_id
+                    && current.origin == observation.origin)
         {
             return Ok(current.clone());
         }

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 const ID: &str = "11111111111111111111111111111111";
 const NOW: &str = "2026-10-29T00:00:00.000000Z";
+const GIT_OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn digest() -> String {
     format!("sha256:{}", "ab".repeat(32))
@@ -141,6 +142,14 @@ fn writer_delivery_record() -> Value {
     json!({"schema_version":1,"remote":"origin","branch":"work","head":null,
         "review_acceptance":review_acceptance(),"state":{"state":"delivered","pull_request":null}})
 }
+fn writer_integration() -> Value {
+    json!({"remote":"upstream","push_url":"https://example.test/repo.git",
+        "target":"refs/heads/work","previous":null,"integrated":GIT_OID})
+}
+fn integrated_delivery_record() -> Value {
+    json!({"schema_version":1,"remote":"upstream","branch":"work","head":GIT_OID,
+        "state":{"state":"delivered","pull_request":null},"integration":writer_integration()})
+}
 fn skipped_route() -> Value {
     json!({"route":"codex/other","kind":"unavailable","detail":"unavailable"})
 }
@@ -243,6 +252,8 @@ cases! {
     writer_delivery_request_preserves_digest: run::WriterDeliveryRequest => writer_delivery_request();
     writer_review_acceptance_preserves_digest: run::WriterReviewAcceptance => review_acceptance();
     writer_delivery_record_preserves_digest: run::WriterDeliveryReceipt => writer_delivery_record();
+    integrated_delivery_record_preserves_digest: run::WriterDeliveryReceipt => integrated_delivery_record();
+    writer_integration_preserves_digest: run::WriterIntegration => writer_integration();
     delivered_state_preserves_digest: run::WriterDeliveryState => json!({"state":"delivered","pull_request":"https://example.test/pr/1"});
     no_new_commits_state_preserves_digest: run::WriterDeliveryState => json!({"state":"no_new_commits"});
     not_attempted_state_preserves_digest: run::WriterDeliveryState => json!({"state":"not_attempted"});

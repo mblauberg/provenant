@@ -152,6 +152,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Interrupted,
                     },
+                    integration: None,
                 })?,
                 RECORD_LIMIT,
             )?;
@@ -190,6 +191,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Push,
                     },
+                    integration: None,
                 })?,
                 RECORD_LIMIT,
             )?;

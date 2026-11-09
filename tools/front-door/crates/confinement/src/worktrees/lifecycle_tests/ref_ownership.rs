@@ -132,19 +132,19 @@ fn cooperating_writers_share_one_ledger_per_repository() -> Result<(), Box<dyn E
     let reference = GitRefName::branch("lane/pushed")?;
     // A second writer opens the same ledger from the state root alone.
     let other = RefLedger::open(fixture._temp.path(), test.binding.project_id())?;
-    other.record(
-        RefObservation {
-            endpoint: endpoint.clone(),
-            reference: reference.clone(),
-            origin: RefOrigin::Created,
-            tip: fixture.head()?,
-            recorded_at: test.clock.wall_now()?,
-            attempt_id: None,
-            operation_id: None,
-        },
-        &test.clock,
-        &cancel(),
-    )?;
+    let observation = RefObservation {
+        endpoint: endpoint.clone(),
+        reference: reference.clone(),
+        origin: RefOrigin::Created,
+        tip: fixture.head()?,
+        recorded_at: test.clock.wall_now()?,
+        attempt_id: Some(AttemptId::from_bytes([9; 16])),
+        operation_id: None,
+    };
+    let first = other.record(observation.clone(), &test.clock, &cancel())?;
+    // The same attempt replaying its sealed receipt is not a recreation.
+    let replay = other.record(observation, &test.clock, &cancel())?;
+    assert_eq!(replay, first);
     let seen = RefLedger::for_context(&context)?
         .load(&endpoint, &reference)?
         .ok_or("record not shared")?;

@@ -518,6 +518,30 @@ pub struct WriterDeliveryReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_acceptance: Option<WriterReviewAcceptance>,
     pub state: WriterDeliveryState,
+    /// The destination ref's tips around a delivered push or integration.
+    /// Absent on receipts that did not publish, and on older receipts, whose
+    /// destinations are then unobserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<WriterIntegration>,
+}
+
+/// The ref delivery changed, read back from the endpoint the host bound at
+/// launch. `previous` is the tip delivery leased or found; it is absent when
+/// delivery created the ref. `integrated` is the tip read back after the
+/// update: the delivered head, or the merge commit integration made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterIntegration {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    /// The bound remote name, or empty for a ref in the local repository.
+    pub remote: String,
+    /// The bound push URL; absent for a local ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_url: Option<String>,
+    /// Full destination ref, such as `refs/heads/main`.
+    pub target: String,
+    pub previous: Option<GitOid>,
+    pub integrated: GitOid,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
