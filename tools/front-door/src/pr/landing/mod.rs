@@ -78,7 +78,8 @@ pub mod split;
 /// prints the policy and sources without requiring pull request numbers.
 pub struct Options {
     pub numbers: Vec<u64>,
-    pub head: Option<provenant_core::GitOid>,
+    /// Any object name that resolves to one commit; resolved before landing.
+    pub head: Option<String>,
     pub wait: Option<u64>,
     pub poll: Option<u64>,
     pub explain: bool,
@@ -368,9 +369,14 @@ fn run_inner(
             use std::io::Write;
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
+        let head = options
+            .head
+            .as_deref()
+            .map(|name| super::git::Git::new()?.resolve_commit(&resolved.project, name))
+            .transpose()?;
         return Ok(super::land::run(
             options.numbers[0],
-            options.head,
+            head,
             options.wait,
             options.poll,
             false,

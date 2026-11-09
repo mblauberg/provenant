@@ -1597,9 +1597,14 @@ mod tests {
                 panic!("land command");
             };
             assert_eq!(numbers, [1953]);
-            assert_eq!(head.map(|head| head.to_string()), Some(sha));
+            assert_eq!(head, Some(sha));
         }
-        invalid(&["land", "1953", "--head", "abc"]);
+        // A short or symbolic name parses; landing resolves it against the repository.
+        let inv = valid(&["land", "1953", "--head", "abc1234"]);
+        let Command::Land { head, .. } = inv.command else {
+            panic!("land command");
+        };
+        assert_eq!(head.as_deref(), Some("abc1234"));
         let mut model = command_model();
         let Some(land) = model.find_subcommand_mut("land") else {
             panic!("land grammar");
