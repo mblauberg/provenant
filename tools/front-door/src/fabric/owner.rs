@@ -2758,7 +2758,14 @@ impl BoundGraphOwner<'_> {
                         }
                     })?;
             }
-            let delivery = if let Some(mode) = replay.delivery {
+            // A node that sets receipts to none (the `light` preset) gets no
+            // delivery destination, so no delivery receipt is produced.
+            let delivery = if node
+                .attempt
+                .is_some_and(|spec| spec.effective_receipts() == "none")
+            {
+                None
+            } else if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
                     let writer = provenant_run::resolve_writer(
                         self.factory.context.roots.state.as_path(),
@@ -3015,6 +3022,10 @@ impl BoundGraphOwner<'_> {
                     if let Some(scope) = node.attempt.and_then(|a| a.local_cargo.as_deref()) {
                         knobs.push(format!("lanes.local_cargo={scope}"));
                     }
+                    // Isolation, supervision and receipts, from the node or its preset.
+                    if let Some(spec) = node.attempt {
+                        knobs.extend(spec.lane_knobs());
+                    }
                     if !exclude.is_empty() {
                         knobs.push(format!(
                             "routing.graph_exclude={}",
@@ -3155,8 +3166,13 @@ impl BoundGraphOwner<'_> {
                         self.network,
                     )?;
                 }
+                // Shared isolation reads the live checkout, so a pinned source
+                // view is not built: the snapshot step is skipped.
                 if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     && source_commit.is_some()
+                    && !node
+                        .attempt
+                        .is_some_and(|spec| spec.effective_isolation() == "shared")
                 {
                     grants.source_root = {
                         let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);

@@ -215,9 +215,81 @@ pub struct AttemptSpec {
     /// inherits the run's and the host's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_cargo: Option<String>,
+    /// Bundled lane preset applied to this node: `light`. Fills the settings
+    /// below that the node leaves unset; an explicit setting always wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// `private` (default) gives a pinned read-only lane an immutable source
+    /// view; `shared` reads the live checkout. Writers keep their one
+    /// worktree, so `shared` is refused on a writer node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    /// `standard` (default) or `minimal` supervision of the lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision: Option<String>,
+    /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipts: Option<String>,
 }
 
+/// The `light` preset: no private source view, minimal supervision and no
+/// delivery receipt. Secret redaction and object integrity are not settings,
+/// so no preset can lower them.
+pub const LIGHT_PRESET: &str = "light";
+
 impl AttemptSpec {
+    /// Whether the preset name is one this build bundles.
+    pub fn preset_known(&self) -> bool {
+        self.preset.as_deref().is_none_or(|name| name == LIGHT_PRESET)
+    }
+
+    fn preset_default(&self, light: &'static str) -> Option<&str> {
+        (self.preset.as_deref() == Some(LIGHT_PRESET)).then_some(light)
+    }
+
+    /// Effective isolation after the preset: `private` or `shared`.
+    pub fn effective_isolation(&self) -> &str {
+        self.isolation
+            .as_deref()
+            .or(self.preset_default("shared"))
+            .unwrap_or("private")
+    }
+
+    /// Effective supervision after the preset: `standard` or `minimal`.
+    pub fn effective_supervision(&self) -> &str {
+        self.supervision
+            .as_deref()
+            .or(self.preset_default("minimal"))
+            .unwrap_or("standard")
+    }
+
+    /// Effective receipts after the preset: `delivery` or `none`.
+    pub fn effective_receipts(&self) -> &str {
+        self.receipts
+            .as_deref()
+            .or(self.preset_default("none"))
+            .unwrap_or("delivery")
+    }
+
+    /// `name=value` knob overrides for the settings this node sets or inherits
+    /// from its preset.
+    pub fn lane_knobs(&self) -> Vec<String> {
+        let mut knobs = Vec::new();
+        if self.effective_isolation() != "private" {
+            knobs.push(format!("lanes.isolation={}", self.effective_isolation()));
+        }
+        if self.effective_supervision() != "standard" {
+            knobs.push(format!(
+                "lanes.supervision={}",
+                self.effective_supervision()
+            ));
+        }
+        if self.effective_receipts() != "delivery" {
+            knobs.push(format!("lanes.receipts={}", self.effective_receipts()));
+        }
+        knobs
+    }
+
     pub fn is_empty(&self) -> bool {
         self.host.is_none()
             && self.directory.is_none()
@@ -230,6 +302,10 @@ impl AttemptSpec {
             && !self.build_heavy
             && self.write_roots.is_empty()
             && self.local_cargo.is_none()
+            && self.preset.is_none()
+            && self.isolation.is_none()
+            && self.supervision.is_none()
+            && self.receipts.is_none()
     }
 }
 
