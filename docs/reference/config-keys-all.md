@@ -427,6 +427,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."` |
 | `type` | `"bool"` |
 
+## `lanes.isolation`
+
+| Field | Value |
+|---|---|
+| `default` | `"private"` |
+| `effect` | `"Whether a pinned read-only lane gets an immutable source view (private) or reads the live checkout (shared, no snapshot). Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with &#96;attempt.isolation&#96; or the &#96;light&#96; preset (&#96;attempt.preset&#96;), or per run with --knob."` |
+| `reader` | `"tools/front-door/src/fabric/owner.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."` |
+| `type` | `"enum"` |
+| `values` | `["private", "shared"]` |
+
 ## `lanes.launch_retry_first_seconds`
 
 | Field | Value |
@@ -539,6 +551,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"On (default) gives every networked lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper. false keeps publishing with the chair through host-side delivery."` |
 | `type` | `"bool"` |
 
+## `lanes.receipts`
+
+| Field | Value |
+|---|---|
+| `default` | `"delivery"` |
+| `effect` | `"none withholds the delivery destination, so the node produces no delivery receipt. Set per graph node with &#96;attempt.receipts&#96; or the &#96;light&#96; preset."` |
+| `reader` | `"tools/front-door/src/fabric/owner.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"none suits read-only or scratch work; nothing is published or recorded as delivered."` |
+| `type` | `"enum"` |
+| `values` | `["delivery", "none"]` |
+
 ## `lanes.silence_seconds`
 
 | Field | Value |
@@ -564,6 +588,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `status` | `"wired"` |
 | `trade_off` | `"Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."` |
 | `type` | `"int"` |
+
+## `lanes.supervision`
+
+| Field | Value |
+|---|---|
+| `default` | `"standard"` |
+| `effect` | `"minimal marks a silent provider only after the longest silence interval (one hour) instead of lanes.silence_seconds. Set per graph node with &#96;attempt.supervision&#96; or the &#96;light&#96; preset."` |
+| `reader` | `"tools/front-door/crates/run/src/launch.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"minimal reports a stalled lane later; deadlines, custody and confinement are unchanged."` |
+| `type` | `"enum"` |
+| `values` | `["standard", "minimal"]` |
 
 ## `routing.allow_unknown_partial_headroom`
 
