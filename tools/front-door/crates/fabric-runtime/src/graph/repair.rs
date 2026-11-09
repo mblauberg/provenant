@@ -49,6 +49,58 @@ fn approved(outputs: &NodeOutputs) -> bool {
             == Some(provenant_records::workflow::ReviewVerdict::Approve)
 }
 
+/// No eligible work must not launch an empty repair. A negative or incomplete
+/// verdict still needs judgement and must not become a successful clean start.
+fn no_repair_work(
+    node: &PlannedNode,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let latest_failed_round = checkpoint
+        .nodes
+        .iter()
+        .filter_map(|progress| {
+            let round = progress.round.as_ref()?;
+            (round.loop_id == node.id && round.until && progress.state == NodeState::Failed)
+                .then_some(round.round)
+        })
+        .max();
+    let latest_review = latest_failed_round.and_then(|round| {
+        checkpoint
+            .nodes
+            .iter()
+            .filter(|progress| {
+                progress.round.as_ref().is_some_and(|member| {
+                    member.loop_id == node.id
+                        && member.round == round
+                        && matches!(member.node_id.as_str(), "synthesis" | "check")
+                })
+            })
+            .max_by_key(|progress| {
+                progress
+                    .round
+                    .as_ref()
+                    .map(|member| member.node_id == "synthesis")
+            })
+            .and_then(|progress| {
+                panel_outputs(checkpoint, &progress.id).or(progress.outputs.as_ref())
+            })
+    });
+    let outputs = latest_review.map_or_else(
+        || initial_outputs(node, checkpoint, positions),
+        |output| vec![output],
+    );
+    !outputs.is_empty()
+        && outputs.iter().all(|output| {
+            output.findings_available == Some(true)
+                && output.verdict_error.is_none()
+                && output
+                    .findings
+                    .iter()
+                    .all(|finding| finding.triage().is_some() && !blocking(finding))
+        })
+}
+
 pub(super) fn blocking(finding: &Finding) -> bool {
     if finding.spec_defect()
         || matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
@@ -527,7 +579,7 @@ pub(super) fn inactive_round(
     if !is_repair(owner) {
         return false;
     }
-    if clean_start(owner, checkpoint, positions) {
+    if clean_start(owner, checkpoint, positions) || no_repair_work(owner, checkpoint, positions) {
         return true;
     }
     if escalation(owner, checkpoint, positions).is_none() {

@@ -1963,6 +1963,26 @@ fn clean_initial_review_starts_no_repair_attempt() {
 }
 
 #[test]
+fn rejected_only_fail_requests_judgement_without_an_empty_writer() {
+    let document = review_repair_document();
+    let eligible = repair_finding(false);
+    let rejected = eligible.replace("\"decision\":\"confirmed\"", "\"decision\":\"rejected\"");
+    for (reports, calls) in [
+        (vec![rejected.as_str(), "principal judgement"], 2),
+        (vec![eligible.as_str(), "fixed", rejected.as_str(), "principal judgement"], 4),
+    ] {
+        let mut owner = repair_reviews(&reports);
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(owner.calls.len(), calls);
+        assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+        let repair = run.checkpoint.nodes.iter().find(|node| node.id == "repair").unwrap();
+        assert_eq!(repair.state, NodeState::Failed);
+        assert_eq!(repair.outputs.as_ref().unwrap().findings.len(), 1);
+        assert_eq!(repair.outputs.as_ref().unwrap().findings[0].triage().unwrap().decision, "rejected");
+    }
+}
+
+#[test]
 fn recurring_review_finding_escalates_before_second_repair() {
     let document = review_repair_document();
     let finding = repair_finding(false);
