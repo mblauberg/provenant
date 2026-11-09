@@ -113,7 +113,9 @@
       ],
       "expected": {
         "primary_skill": "retrospect",
-        "companion_skills": []
+        "companion_skills": [
+          "tracker"
+        ]
       }
     },
     {
