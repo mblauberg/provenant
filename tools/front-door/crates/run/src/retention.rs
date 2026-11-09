@@ -459,8 +459,8 @@ impl RunStore {
             Err(error) if missing_directory(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        if crate::settlement::abandoned(&attempt, Self::scope(&record))?.is_some()
-            || crate::holder::object_import_refused(&attempt, Self::scope(&record))?.is_some()
+        if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some()
+            || crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some()
         {
             return Ok(None);
         }
@@ -472,7 +472,7 @@ impl RunStore {
             Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error.into()),
         };
-        match provenant_supervisor::custody::reservation_present(&attempt, Self::scope(&record)) {
+        match provenant_supervisor::custody::reservation_present(&attempt, Self::scope(record)) {
             Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
             Ok(false) => {}
             Err(error) => return Err(error.into()),
