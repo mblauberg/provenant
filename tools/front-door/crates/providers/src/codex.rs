@@ -266,17 +266,28 @@ struct Usage {
     cache_write_input_tokens: Option<u64>,
     output_tokens: u64,
 }
+/// The host's wall time in its own zone, which Codex uses for a named reset.
+fn local_now() -> Option<jiff::Zoned> {
+    use provenant_core::Clock;
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    Some(
+        jiff::Timestamp::from_second(now)
+            .ok()?
+            .to_zoned(jiff::tz::TimeZone::system()),
+    )
+}
+
 /// Codex's spent plan allowance, read only for the limit and its reset.
 /// `You've hit your usage limit.` spends the whole account; a limit that
 /// names a model (`usage limit for <model>`) holds that model only.
-fn usage_limit(message: &str, now: &jiff::Zoned) -> Option<E> {
+fn usage_limit(message: &str, now: Option<&jiff::Zoned>) -> Option<E> {
     let lower = message.to_ascii_lowercase();
     let at = lower.find("hit your usage limit")?;
     let account_wide = !lower[at..].starts_with("hit your usage limit for ");
     Some(E::QuotaLimited {
         message: message.to_owned(),
         pool: account_wide.then(|| provenant_quota::ACCOUNT_ROUTE.to_owned()),
-        resets_in_seconds: usage_limit_reset(&lower, now),
+        resets_in_seconds: now.and_then(|now| usage_limit_reset(&lower, now)),
     })
 }
 
@@ -398,7 +409,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 E::TransientError
             } else if model_refusal(&message) {
                 E::ModelUnavailable { message }
-            } else if let Some(limited) = usage_limit(&message, &jiff::Zoned::now()) {
+            } else if let Some(limited) = usage_limit(&message, local_now().as_ref()) {
                 limited
             } else if lower.contains("too many requests") || lower.contains("status: 429") {
                 E::RateLimited { message }
@@ -424,8 +435,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 if refused.is_some() {
                     return refused;
                 }
-                let now = jiff::Zoned::now();
-                if let Some(limited) = message().and_then(|message| usage_limit(&message, &now)) {
+                if let Some(limited) =
+                    message().and_then(|message| usage_limit(&message, local_now().as_ref()))
+                {
                     return Some(limited);
                 }
                 match error.get("codex_error_info")?.as_str()? {
@@ -494,7 +506,7 @@ mod usage_limit_tests {
             pool,
             resets_in_seconds,
             ..
-        }) = usage_limit(plan, &now)
+        }) = usage_limit(plan, Some(&now))
         else {
             panic!("a usage limit is typed");
         };
@@ -515,7 +527,7 @@ mod usage_limit_tests {
         ] {
             assert!(
                 matches!(
-                    usage_limit(text, &now),
+                    usage_limit(text, Some(&now)),
                     Some(E::QuotaLimited { resets_in_seconds, .. }) if resets_in_seconds == reset
                 ),
                 "{text}"
@@ -528,14 +540,14 @@ mod usage_limit_tests {
         let now = at("2026-11-10T12:00:00+00:00[UTC]");
         let text = "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 3:05 PM.";
         assert!(matches!(
-            usage_limit(text, &now),
+            usage_limit(text, Some(&now)),
             Some(E::QuotaLimited {
                 pool: None,
                 resets_in_seconds: Some(11_100),
                 ..
             })
         ));
-        assert!(usage_limit("stream disconnected before completion", &now).is_none());
+        assert!(usage_limit("stream disconnected before completion", Some(&now)).is_none());
     }
 }
 
