@@ -75,6 +75,31 @@ fn completion_queue_publishes_promptly_while_dispatch_is_contended()
 }
 
 #[test]
+fn settlement_queue_failure_does_not_claim_cleanup_was_queued()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::peer_writer_delivery::settlement_queue_failure_does_not_claim_cleanup_was_queued")? {
+        return Ok(());
+    }
+    let fixture = SettlementFixture::resumed()?;
+    let gc = fixture.roots.state.as_path().join("gc");
+    std::fs::create_dir_all(&gc)?;
+    std::fs::write(gc.join("completions"), b"block queue")?;
+    settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+    let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?;
+    assert!(receipt.as_ref().is_none_or(|value| value["cleanup_deferred"] != true));
+    assert!(fixture.worktree.exists());
+    std::fs::remove_file(gc.join("completions"))?;
+    // A retry publishes intent and records the deferred receipt.
+    settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    assert_eq!(fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("receipt")?["cleanup_deferred"], true);
+    assert_eq!(std::fs::read_dir(gc.join("completions"))?.count(), 1);
+    Ok(())
+}
+
+#[test]
 fn settlement_defers_adopted_writer_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test("fabric::peer_tests::peer_writer_delivery::settlement_defers_adopted_writer_cleanup")?

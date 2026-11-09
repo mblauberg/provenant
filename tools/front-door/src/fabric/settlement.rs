@@ -347,23 +347,22 @@ pub(crate) fn settle_owned_worktree(
         .or(record.delivery.as_ref());
     let reason = settlement_retention_reason(&record.state, task.deliver.is_some(), delivery)
         .unwrap_or("worktree cleanup queued for completion GC");
-    record_worktree_settlement(
-        &store,
-        record.attempt_id,
-        &serde_json::json!({
-            "schema_version":1,
-            "state":"retained",
-            "worktree":writer.worktree,
-            "reason":reason,
-            "cleanup_deferred":true,
-        }),
-    )?;
-    if let Err(error) = super::gc_cleanup::queue(settled, roots, delivery_override) {
-        let mut receipt = store
-            .worktree_settlement(record.attempt_id, &call)?
-            .ok_or("cleanup intent missing")?;
-        receipt["cleanup_warning"] = serde_json::json!(error.to_string());
-        record_worktree_settlement(&store, record.attempt_id, &receipt)?;
+    // Hold the request lock until the receipt is written so a worker cannot
+    // finish and have its final receipt overwritten by this deferred one.
+    match super::gc_cleanup::queue(settled, roots, delivery_override) {
+        Ok(Some(_lock)) => record_worktree_settlement(
+            &store,
+            record.attempt_id,
+            &serde_json::json!({
+                "schema_version":1,
+                "state":"retained",
+                "worktree":writer.worktree,
+                "reason":reason,
+                "cleanup_deferred":true,
+            }),
+        )?,
+        Ok(None) => {} // The current worker owns the receipt.
+        Err(error) => eprintln!("could not queue completion GC: {error}"),
     }
     Ok(())
 }

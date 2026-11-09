@@ -93,7 +93,7 @@ pub(crate) fn queue(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
     delivery: Option<&provenant_run::WriterDeliveryReceipt>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<provenant_os::fs::LockGuard>, Box<dyn std::error::Error>> {
     let mut request = settled.clone();
     request.launch = None;
     request.sealed = None;
@@ -101,7 +101,9 @@ pub(crate) fn queue(
     let request = serde_json::to_string(&(request, delivery))?;
     let directory =
         provenant_config::private_directory(&roots.state.as_path().join("gc/completions"), true)?;
-    publish(&directory, &request)
+    let lock = claim(roots.state.as_path(), request_name(&request).as_ref())?;
+    publish(&directory, &request)?;
+    Ok(lock)
 }
 
 fn publish(
@@ -236,49 +238,70 @@ fn retry_pending_with(
             names.insert(std::ffi::OsString::from(name));
         }
     }
+    let mut first_error = None;
     for name in names {
-        let Some(worker) = claim(state, &name)? else {
-            continue;
-        };
-        let Some(mut record) = load_claimed(&directory, &name)? else {
-            continue;
-        };
-        if now < record.retry.next_at {
-            continue;
-        }
-        if record.retry.attempts >= 5 {
-            exhaust(&directory, state, &name)?;
-            continue;
-        }
-        // Reserve dispatch durably before spawning. A dead child is retried
-        // after this bounded delay; OS locks disappear when a worker dies.
-        record.retry.attempts += 1;
-        record.retry.next_at = now.saturating_add(600 * (1_u64 << (record.retry.attempts - 1)));
-        record.retry.last_cause = Some("worker dispatched; completion not yet confirmed".into());
-        record.save(&directory, &claimed_name(&name))?;
-        let reservation = serde_json::to_vec(&record)?;
-        drop(worker);
-        if let Err(error) = dispatch(&serde_json::to_string(&record)?) {
-            // Preserve the actual failure if this reservation still owns the
-            // claimed record. A worker or another tick may already have moved it.
-            if let Some(_claim) = claim(state, &name)? {
-                match directory.read_bounded(&claimed_name(&name), 128 * 1024) {
-                    Ok(bytes) if bytes == reservation => {
-                        record.retry.last_cause = Some(error.to_string());
-                        record.save(&directory, &claimed_name(&name))?;
+        let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
+            let Some(worker) = claim(state, &name)? else {
+                return Ok(false);
+            };
+            let Some(mut record) = load_claimed(&directory, &name)? else {
+                return Ok(false);
+            };
+            if now < record.retry.next_at {
+                return Ok(false);
+            }
+            if record.retry.attempts >= 5 {
+                exhaust(&directory, state, &name)?;
+                return Ok(false);
+            }
+            // Reserve dispatch durably before spawning. A dead child is retried
+            // after this bounded delay; OS locks disappear when a worker dies.
+            record.retry.attempts += 1;
+            record.retry.next_at = now.saturating_add(600 * (1_u64 << (record.retry.attempts - 1)));
+            record.retry.last_cause =
+                Some("worker dispatched; completion not yet confirmed".into());
+            record.save(&directory, &claimed_name(&name))?;
+            let reservation = serde_json::to_vec(&record)?;
+            drop(worker);
+            dispatched += 1;
+            if let Err(error) = dispatch(&serde_json::to_string(&record)?) {
+                // Preserve the actual failure if this reservation still owns the
+                // claimed record. A worker or another tick may already have moved it.
+                if let Some(_claim) = claim(state, &name)? {
+                    match directory.read_bounded(&claimed_name(&name), 128 * 1024) {
+                        Ok(bytes) if bytes == reservation => {
+                            record.retry.last_cause = Some(error.to_string());
+                            record.save(&directory, &claimed_name(&name))?;
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.is_not_found() => {}
+                        Err(error) => return Err(error.into()),
                     }
-                    Ok(_) => {}
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(error.into()),
+                }
+                return Err(error);
+            }
+            Ok(true)
+        })();
+        match result {
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!(
+                    "completion GC request {} failed: {error}",
+                    name.to_string_lossy()
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
         }
-        dispatched += 1;
         if dispatched == 4 {
             break;
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn run(
@@ -954,8 +977,7 @@ mod tests {
         };
         record.save(&requests, name.as_ref())?;
         let bytes = requests.read_bounded(name.as_ref(), 4096)?;
-        // Crash immediately before the rename: the entire exhausted record is
-        // still pending. Repeated host ticks complete this transition once.
+        // Repeated ticks archive the exhausted record only once.
         for _ in 0..2 {
             retry_pending_with(state, |_| panic!("exhausted work must not dispatch"))?;
             assert!(!state.join("gc/completions").join(&name).exists());
@@ -964,8 +986,7 @@ mod tests {
                 bytes
             );
         }
-        // Crash immediately after rename (before any later operation): there
-        // is no retry sidecar to reconcile and identical intent gets a new budget.
+        // Requeueing identical intent after exhaustion starts a fresh budget.
         publish(&requests, request)?;
         let fresh = Completion::decode(&requests.read_bounded(name.as_ref(), 4096)?)?;
         assert_eq!(fresh.request, request);
@@ -1064,6 +1085,36 @@ mod tests {
                 .attempts,
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_first_record_does_not_block_later_dispatch() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temporary = tempfile::tempdir()?;
+        let state = temporary.path();
+        let requests = provenant_config::private_directory(&state.join("gc/completions"), true)?;
+        let failed = Completion {
+            request: "first".into(),
+            retry: Retry {
+                attempts: 5,
+                ..Retry::default()
+            },
+        };
+        failed.save(&requests, "a.json".as_ref())?;
+        std::fs::create_dir_all(state.join("gc/completion-exhausted/a.json"))?;
+        let later = Completion {
+            request: "later".into(),
+            retry: Retry::default(),
+        };
+        later.save(&requests, "b.json".as_ref())?;
+        let mut dispatched = Vec::new();
+        let result = retry_pending_with(state, |request| {
+            dispatched.push(Completion::decode(request.as_bytes())?.request);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(dispatched, ["later"]);
         Ok(())
     }
 
