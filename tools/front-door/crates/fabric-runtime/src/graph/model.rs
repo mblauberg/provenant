@@ -79,8 +79,8 @@ pub struct GraphDocument {
     pub nodes: Vec<GraphNode>,
 }
 
-/// Exactly one of `model`, `alias` and `name` selects a route. A named
-/// model-less entry requires `adapter`, as does a model route.
+/// Selects `model`, then `name`, then `alias`. A named model-less entry
+/// requires `adapter`, as does a model route.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRoute {
     #[serde(flatten)]
