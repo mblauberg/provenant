@@ -613,8 +613,14 @@ mod tests {
             )
             .unwrap(),
         );
-        let path = base.join(format!("fabric/graphs/{project}/graph-old-pending-fixture.json"));
-        std::fs::write(&path, include_bytes!("../../../../tests/fixtures/install/old-pending-checkpoint.json")).unwrap();
+        let path = base.join(format!(
+            "fabric/graphs/{project}/graph-old-pending-fixture.json"
+        ));
+        std::fs::write(
+            &path,
+            include_bytes!("../../../../tests/fixtures/install/old-pending-checkpoint.json"),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         // Also add an unreadable file.
