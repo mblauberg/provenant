@@ -3565,14 +3565,23 @@ impl BoundGraphOwner<'_> {
                                 AttemptState::Terminal { extra, .. }
                                     if extra.get("terminal_cause") == Some(&serde_json::json!(provenant_records::run::TerminalCause::StoppedNoWork))
                             ) => AttemptOutcome::StoppedNoWork,
-                            Outcome::ReviewRequired
-                                if attempt.partial_signals.as_slice() == [provenant_records::run::PartialSignal::DeclaredStop] =>
+                            // A declared stop is one fact whether or not the
+                            // writer left uncommitted edits; the graph restarts
+                            // it on the retained worktree.
+                            Outcome::ReviewRequired | Outcome::Uncommitted
+                                if attempt.partial_signals.contains(&provenant_records::run::PartialSignal::DeclaredStop)
+                                    && attempt.partial_signals.iter().all(|signal| matches!(
+                                        signal,
+                                        provenant_records::run::PartialSignal::DeclaredStop
+                                            | provenant_records::run::PartialSignal::UncommittedWork
+                                    )) =>
                             {
                                 AttemptOutcome::DeclaredStop
                             }
                             Outcome::Failed => AttemptOutcome::TaskFailed,
                             Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
-                            // Uncommitted edits need the chair, so the node fails without fallback.
+                            // Uncommitted edits without a declared stop need the
+                            // chair, so the node fails without fallback.
                             Outcome::Uncommitted => AttemptOutcome::OtherFailure,
                             _ => AttemptOutcome::OtherFailure,
                         }

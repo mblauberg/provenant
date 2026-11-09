@@ -610,9 +610,10 @@ writers. In a composite, `continues` follows the same local-name rules as
 - Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/fabric.rs`,
   `crates/run/src/delivery.rs`
 
-### Writers that stop without work
+### Writers that stop before finishing
 
-A `worktree_write` node with a host-recorded `stopped_no_work` outcome
+A `worktree_write` node whose attempt declared a stop, with a host-recorded
+`stopped_no_work` outcome or a declared stop with commits or uncommitted edits,
 fails with code `stopped_no_work`; it never satisfies acceptance. Unless
 `auto_continue_no_work = false`, the scheduler retries the node once in its
 existing worktree, retaining its write authority and prior attempt. The retry

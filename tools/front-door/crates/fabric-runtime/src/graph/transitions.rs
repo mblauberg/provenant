@@ -390,26 +390,27 @@ pub(super) fn apply_attempt_observation(
                     AttemptOutcome::TaskFailed
                 } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
                     AttemptOutcome::Succeeded
-                } else if outcome == AttemptOutcome::DeclaredStop
-                    && !warned
-                    && launched
-                    && plans::writer(node)
-                    && result
-                        .as_ref()
-                        .is_some_and(|capture| plans::handoff(capture).ok().flatten().is_some())
-                {
-                    // A typed unfinished writer handoff is settled work whose
-                    // continuation must be admitted (or returned to the chair).
-                    AttemptOutcome::Succeeded
                 } else if !warned
                     && launched
                     && node.access == AccessMode::WorktreeWrite
-                    && outcome == AttemptOutcome::StoppedNoWork
+                    && matches!(
+                        outcome,
+                        AttemptOutcome::StoppedNoWork | AttemptOutcome::DeclaredStop
+                    )
                 {
+                    // One rule for every writer stop, committed, clean or with
+                    // uncommitted edits: restart in place on the retained
+                    // worktree, or return to the chair (see `no_work`).
                     progress.advance_error_code = Some("stopped_no_work".into());
-                    progress.advance_error =
-                        Some("writer stopped with no work: no new commit".into());
-                    AttemptOutcome::StoppedNoWork
+                    progress.advance_error = Some(
+                        if outcome == AttemptOutcome::StoppedNoWork {
+                            "writer stopped with no work: no new commit"
+                        } else {
+                            "writer stopped before finishing"
+                        }
+                        .into(),
+                    );
+                    outcome
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
                     AttemptOutcome::OtherFailure
                 } else if outcome == AttemptOutcome::Succeeded

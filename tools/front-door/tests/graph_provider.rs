@@ -621,14 +621,17 @@ fn fixture() -> Result {
                 std::env::current_dir()?.as_os_str().as_encoded_bytes(),
             )?;
         }
-        let committed = std::process::Command::new("/bin/sh")
-            .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: continue original brief'"])
-            .output()?;
-        assert!(
-            committed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&committed.stderr)
-        );
+        // A dirty stop is the usual one: edits left uncommitted in the worktree.
+        if continuing || !prompt.contains("fixture dirty stop") {
+            let committed = std::process::Command::new("/bin/sh")
+                .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: continue original brief'"])
+                .output()?;
+            assert!(
+                committed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
         let status = if continuing { "done" } else { "stopped_early" };
         format!(
             "```handoff\n{}\n```",
@@ -3324,11 +3327,12 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for (resume, fresh, alternative) in [
-        (false, true, true),
-        (true, false, true),
-        (true, true, true),
-        (false, true, false),
+    for (resume, fresh, alternative, dirty) in [
+        (false, true, true, false),
+        (true, false, true, false),
+        (true, true, true, false),
+        (false, true, false, false),
+        (false, true, true, true),
     ] {
         let rig = policy_codex_fixture()?;
         let cleanup = rig.process_cleanup();
@@ -3365,10 +3369,12 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             None,
         )?;
         assert_eq!(code(&out), 0, "{out:?}");
-        let prompt = if fresh {
-            "fixture policy continuation fixture fresh continuation"
-        } else {
-            "fixture policy continuation"
+        let prompt = match (fresh, dirty) {
+            (true, true) => {
+                "fixture policy continuation fixture fresh continuation fixture dirty stop"
+            }
+            (true, false) => "fixture policy continuation fixture fresh continuation",
+            _ => "fixture policy continuation",
         };
         let lane = run_graph_provider_with_wait(
             &rig,
@@ -3387,10 +3393,10 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
         assert_eq!(
             lane["state"],
-            if resume {
-                "succeeded"
-            } else {
-                "review_required"
+            match (resume, dirty) {
+                (true, _) => "succeeded",
+                (false, false) => "review_required",
+                (false, true) => "uncommitted",
             },
             "{lane}\nprovider stderr: {}",
             fs::read_to_string(attempt_dir.join("stderr.log")).unwrap_or_default()
@@ -3413,6 +3419,33 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             .map(|raw| serde_json::from_slice::<provenant_run::AttemptRecord>(raw))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         assert_eq!(attempts.len(), 2);
+        if dirty {
+            // The stopped writer committed nothing; its retained edit reached
+            // the fresh successor, which committed it with the rest.
+            assert!(matches!(
+                attempts[0].state,
+                provenant_records::run::AttemptState::Terminal {
+                    outcome: provenant_records::run::Outcome::Uncommitted,
+                    ..
+                }
+            ));
+            let out = rig.execute(
+                &git,
+                &[
+                    "-C",
+                    tree.to_str().ok_or("tree")?,
+                    "show",
+                    "--name-only",
+                    "--format=",
+                    "HEAD",
+                ],
+                None,
+            )?;
+            assert!(
+                String::from_utf8_lossy(&out.stdout.bytes).contains("auto-worktree.txt"),
+                "{out:?}"
+            );
+        }
         if resume {
             assert_eq!(attempts[0].run_id, attempts[1].run_id);
             assert_eq!(attempts[0].superseded_by, Some(attempts[1].attempt_id));

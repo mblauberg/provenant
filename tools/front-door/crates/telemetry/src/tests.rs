@@ -1448,6 +1448,22 @@ fn pool_preferences_and_fallbacks_are_not_hash_comparisons() {
     receipt.total_weight = 0;
     assert!(!crate::route_outcomes::hash_assigned(&receipt));
     receipt.total_weight = 100;
+    // A standing configuration exclusion shapes every draw alike; a graph
+    // restart's exclusion of its predecessor's model makes the draw conditional.
+    receipt.extra.insert(
+        "considered_exclusions".into(),
+        json!(["source=config selector=model p/old"]),
+    );
+    assert!(crate::route_outcomes::hash_assigned(&receipt));
+    receipt.extra.insert(
+        "considered_exclusions".into(),
+        json!([
+            "source=config selector=model p/old",
+            "source=graph selector=model p/n"
+        ]),
+    );
+    assert!(!crate::route_outcomes::hash_assigned(&receipt));
+    receipt.extra.remove("considered_exclusions");
     receipt.redraws.push(
         serde_json::from_value(
             json!({"rejected_pick":"p/n", "roll":0, "total_weight":100, "reason":"refused"}),

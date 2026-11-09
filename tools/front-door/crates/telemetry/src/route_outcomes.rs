@@ -33,8 +33,23 @@ pub struct Row {
 
 /// A pool receipt can also describe a preference override or availability
 /// fallback. Only the original weighted hash draw supports this comparison.
+/// A draw shaped by a per-dispatch exclusion (a graph restart excluding its
+/// predecessors' models, or a caller's flag) depends on what happened before,
+/// so it is observational. Only standing configuration exclusions, which shape
+/// every draw alike, keep it hash-assigned. Receipts record `selection_rule`
+/// and `considered_exclusions` together, so a receipt without the rule is
+/// already observational rather than guessed.
 pub fn hash_assigned(selection: &provenant_records::RouteSelectionReceipt) -> bool {
-    selection.total_weight > 0
+    let unconditional = match selection.extra.get("considered_exclusions") {
+        None => true,
+        Some(serde_json::Value::Array(rules)) => rules.iter().all(|rule| {
+            rule.as_str()
+                .is_some_and(|rule| rule.starts_with("source=config "))
+        }),
+        Some(_) => false,
+    };
+    unconditional
+        && selection.total_weight > 0
         && selection.redraws.is_empty()
         && selection
             .extra

@@ -26,7 +26,10 @@ all measured attempt cost or time, including failures, by complete successes.
 A successful settlement with a partial-completion signal is not a complete
 success. Missing measurements and ratios with no successes remain unknown.
 Only an original weighted pool draw is marked `hash_assigned_pool`; exact
-routes, preference overrides and conditional redraws are observational.
+routes, preference overrides and conditional redraws are observational. A draw
+whose receipt lists a graph or flag exclusion in `considered_exclusions`, such
+as a graph restart excluding its predecessors' models, depends on the earlier
+attempt and is observational too; standing configuration exclusions are not.
 - Test: `crates/telemetry/src/tests.rs::route_outcomes_report_success_cost_time_access_effort_and_assignment`;
   `crates/telemetry/src/tests.rs::route_outcomes_zero_success_and_unknown_cost_remain_unknown`;
   `crates/telemetry/src/tests.rs::pool_preferences_and_fallbacks_are_not_hash_comparisons`;
