@@ -482,8 +482,8 @@ pub(crate) mod peer_tests {
         ];
         let fixture_home = tempfile::tempdir()?;
         let isolate_home = name
-            .ends_with("explicit_writer_refreshes_tracking_ref_while_collection_is_busy")
-            || name.ends_with("adopted_writer_refresh_failure_does_not_change_receipt");
+            .ends_with("explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy")
+            || name.ends_with("settlement_defers_adopted_writer_cleanup");
         let mut environment: Vec<_> = std::env::vars_os()
             .filter(|(key, _)| {
                 !removed.iter().any(|name| key == name) && !(isolate_home && key == "HOME")

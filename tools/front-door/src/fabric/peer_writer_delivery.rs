@@ -2,9 +2,9 @@
 use super::*;
 
 #[test]
-fn adopted_writer_refresh_failure_does_not_change_receipt()
+fn settlement_defers_adopted_writer_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::adopted_writer_refresh_failure_does_not_change_receipt")?
+    if host_test("fabric::peer_tests::peer_writer_delivery::settlement_defers_adopted_writer_cleanup")?
     {
         return Ok(());
     }
@@ -38,29 +38,21 @@ fn adopted_writer_refresh_failure_does_not_change_receipt()
         cancel: &cancel,
     };
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    assert!(
-        fixture
-            .store
-            .worktree_settlement(fixture.settled.attempt_id, &call)?
-            .is_none()
-    );
-    let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":fixture.worktree, "reason":"existing reason"});
-    record_worktree_settlement(&fixture.store, fixture.settled.attempt_id, &receipt)?;
+    let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+        .ok_or("deferred receipt")?;
+    assert_eq!(receipt["state"], "retained");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    assert!(fixture.worktree.exists());
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    assert_eq!(
-        fixture
-            .store
-            .worktree_settlement(fixture.settled.attempt_id, &call)?,
-        Some(receipt)
-    );
+    assert_eq!(fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?, Some(receipt));
     Ok(())
 }
 
 #[test]
-fn settlement_records_tracking_ref_failure_without_failing_lane()
+fn settlement_defers_tracking_ref_refresh()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_writer_delivery::settlement_records_tracking_ref_failure_without_failing_lane",
+        "fabric::peer_tests::peer_writer_delivery::settlement_defers_tracking_ref_refresh",
     )? {
         return Ok(());
     }
@@ -83,8 +75,9 @@ fn settlement_records_tracking_ref_failure_without_failing_lane()
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("settlement")?;
-    assert!(receipt["tracking_ref_warning"].is_string(), "{receipt}");
-    assert_eq!(receipt["state"], "pruned", "{receipt}");
+    assert!(receipt["tracking_ref_warning"].is_null(), "{receipt}");
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true);
     Ok(())
 }
 
@@ -159,8 +152,9 @@ fn resumed_lane_settlement_ignores_terminal_graph()
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("missing resumed settlement receipt")?;
-    assert_eq!(receipt["state"], "pruned", "{receipt}");
-    assert!(!fixture.worktree.exists());
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    assert!(fixture.worktree.exists());
     assert!(
         fixture
             .rig
@@ -176,9 +170,9 @@ fn resumed_lane_settlement_ignores_terminal_graph()
 }
 
 #[test]
-fn resumed_lane_settlement_prunes_and_records_its_receipt()
+fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
 -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_prunes_and_records_its_receipt")?
+    if host_test("fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_defers_cleanup_and_records_its_receipt")?
     {
         return Ok(());
     }
@@ -200,8 +194,9 @@ fn resumed_lane_settlement_prunes_and_records_its_receipt()
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("missing resumed settlement receipt")?;
-    assert_eq!(receipt["state"], "pruned", "{receipt}");
-    assert!(!fixture.worktree.exists());
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    assert!(fixture.worktree.exists());
     assert!(
         fixture
             .rig
