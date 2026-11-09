@@ -42,12 +42,13 @@ pub(super) fn partial_inputs(
 /// Keep evidence from an invalid review reply without counting it as coverage.
 /// This does not export failed writers or provider failures as review evidence.
 pub(super) fn retained_findings(node: &PlannedNode, progress: &NodeProgress) -> bool {
-    template::review_behaviour(node).is_some()
-        && progress.state == NodeState::Failed
-        && progress
-            .attempts
-            .last()
-            .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))
+    progress.state == NodeState::Failed
+        && ((node.composite.is_some() && progress.outputs.as_ref().is_some_and(partial))
+            || (template::review_behaviour(node).is_some()
+                && progress
+                    .attempts
+                    .last()
+                    .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))))
         && progress
             .outputs
             .as_ref()
@@ -155,4 +156,74 @@ pub(super) fn contract_error(
         ));
     }
     None
+}
+
+/// A malformed verdict gets one isolated, checkpointed correction. Expansion
+/// history survives resets and restarts, so it is also the retry fence.
+pub(super) fn correct_verdict(
+    document: &GraphDocument,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    limits: &crate::config::GraphLimits,
+) -> Result<Option<GraphCheckpoint>, PatchError> {
+    if checkpoint.cancelled || checkpoint.pause_reason.is_some() {
+        return Ok(None);
+    }
+    let Some((index, node)) = plan.nodes.iter().enumerate().find(|(index, node)| {
+        template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
+            && checkpoint.nodes[*index].state == NodeState::Failed
+            && checkpoint.nodes[*index].advance_error_code.as_deref()
+                == Some("review_verdict_invalid")
+            && !checkpoint
+                .expansions
+                .iter()
+                .filter_map(|expansion| expansion.patch.as_ref())
+                .any(|patch| {
+                    patch.reason.as_deref()
+                        == Some(format!("correct review verdict {}", node.id).as_str())
+                })
+    }) else {
+        return Ok(None);
+    };
+    let mut next = checkpoint.clone();
+    let brief = format!(
+        "{}\n\nThe previous reply had an invalid final verdict. Return the findings and end with exactly one final line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow. This is the only automatic verdict correction.",
+        node.prompt
+    );
+    patch::correct_review_verdict(
+        &mut LiveGraph {
+            document,
+            checkpoint: &mut next,
+        },
+        &node.id,
+        &brief,
+        &PatchContext {
+            library: &TemplateLibrary::bundled(),
+            resolvers: &Default::default(),
+            limits,
+            scan: &patch::scan_for_secrets,
+            journal: None,
+        },
+    )?;
+    transitions::retain_automatic_retry_accounting(
+        &checkpoint.nodes[index],
+        &mut next.nodes[index],
+    );
+    Ok(Some(next))
+}
+
+/// Review evidence can cross several aggregation boundaries.
+pub(super) fn composite_review(
+    spec: &CompositeSpec,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    spec.exports.iter().any(|export| {
+        let node = &plan.nodes[positions[&export.node]];
+        template::review_behaviour(node).is_some()
+            || node
+                .composite
+                .as_ref()
+                .is_some_and(|spec| composite_review(spec, plan, positions))
+    })
 }

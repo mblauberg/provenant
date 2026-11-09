@@ -339,7 +339,7 @@ pub(super) fn apply_attempt_observation(
                                     .or_else(|| {
                                         (!overflow_ids.is_empty() && result.as_ref().is_none_or(|capture| !capture.disposition_proof.matches(&overflow_ids, &proof_dispositions))).then(|| (
                                             "disposition_overflow_incomplete",
-                                            format!("all {} findings from truncated composites need exactly one DISPOSITION line with an allowed disposition and non-empty reason", overflow_ids.len()),
+                                            format!("all {} findings from truncated composites need exactly one DISPOSITION line with an allowed disposition and non-empty reason; composite limits are {MAX_FINDINGS} entries or {DISPOSITION_FINDINGS_BYTES} canonical bytes: read the staged full member results and emit a line for every finding", overflow_ids.len()),
                                         ))
                                     })
                                     .or_else(|| {

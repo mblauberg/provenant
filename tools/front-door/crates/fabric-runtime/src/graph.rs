@@ -1471,7 +1471,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
-        if let Some(next) = no_work::continue_stopped(document, &plan, &checkpoint, limits)
+        if let Some(next) = review::correct_verdict(document, &plan, &checkpoint, limits)
+            .and_then(|next| match next {
+                Some(next) => Ok(Some(next)),
+                None => no_work::continue_stopped(document, &plan, &checkpoint, limits),
+            })
             .map_err(|error| GraphError::Refused(error.to_string()))?
         {
             let next_expanded = plans::expand(document, &next.extensions, &next.expansions, limits)
@@ -2967,7 +2971,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     resume = false;
                     continue 'schedule;
                 }
-                if no_work::eligible(node, &checkpoint.nodes[node_index], &checkpoint) {
+                if checkpoint.nodes[node_index].advance_error_code.as_deref()
+                    == Some("review_verdict_invalid")
+                    || no_work::eligible(node, &checkpoint.nodes[node_index], &checkpoint)
+                {
                     resume = false;
                     continue 'schedule;
                 }

@@ -390,7 +390,7 @@
                 observations: [terminal_with_result(
                     AttemptOutcome::Succeeded,
                     &answer(json!([]), verdict),
-                )]
+                ), terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict))]
                 .into(),
                 ..Default::default()
             };
@@ -400,7 +400,7 @@
             let progress = &run.checkpoint.nodes[0];
             assert_eq!(progress.state, NodeState::Failed, "{verdict}");
             assert_eq!(
-                progress.attempts[0].outcome,
+                progress.attempts.last().unwrap().outcome,
                 Some(AttemptOutcome::TaskFailed)
             );
             assert_eq!(
@@ -604,10 +604,184 @@
                 } else {
                     assert_eq!(progress.state, NodeState::Succeeded);
                     assert_eq!(
-                        progress.attempts[0].outcome,
+                        progress.attempts.last().unwrap().outcome,
                         Some(AttemptOutcome::Succeeded)
                     );
                 }
             }
         }
     }
+
+#[test]
+fn malformed_lens_is_corrected_once_without_repeating_siblings() {
+    for corrected in [true, false] {
+        let document = panel("f0-v0-s0");
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(
+                        json!([finding()]),
+                        if corrected { "VERDICT: FAIL" } else { "" },
+                    ),
+                ),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([]), "VERDICT: PASS"),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(owner.observations.is_empty());
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .filter(|node| !node.previous_attempts.is_empty())
+                .count(),
+            1
+        );
+        assert!(
+            owner
+                .prompts
+                .iter()
+                .any(|prompt| prompt.contains("only automatic verdict correction"))
+        );
+        let output = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap();
+        assert!(!output.findings.is_empty());
+        assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+#[test]
+fn realistic_aggregate_findings_do_not_require_overflow_proof() {
+    for count in 5..=8 {
+        let document = panel("f0-v1-s0");
+        let entries: Vec<_> = (0..count)
+            .map(|i| {
+                let mut entry = finding();
+                entry["id"] = json!(format!("F{i}"));
+                entry["evidence"] =
+                    json!("A realistic code path reaches an unchecked state. ".repeat(20));
+                entry["proposed_fix"] =
+                    json!("Validate the state before dispatch and preserve the error. ".repeat(15));
+                entry
+            })
+            .collect();
+        let typed: Vec<Finding> = entries
+            .iter()
+            .cloned()
+            .map(|entry| serde_json::from_value(entry).unwrap())
+            .collect();
+        assert!(canonical_len(&typed) > FINDINGS_BYTES);
+        let decisions: Vec<_> = (0..count).map(|i| json!({"id":format!("F{i}"),"verification":"upheld","reason":"Reproduced in the source"})).collect();
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!(entries[..count / 2]), "VERDICT: FAIL"),
+                ),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!(entries[count / 2..]), "VERDICT: FAIL"),
+                ),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!(decisions), "VERDICT: FAIL"),
+                ),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!(decisions), "VERDICT: FAIL"),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(owner.observations.is_empty());
+        assert!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .all(|node| node.advance_error_code.is_none()),
+            "{count}: {:?}",
+            run.checkpoint.nodes
+        );
+        let output = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap();
+        assert_eq!(output.findings.len(), count);
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+#[test]
+fn below_minimum_review_keeps_returned_findings_on_replay() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"below-review-minimum","nodes":[{
+            "id":"panel","kind":"composite","access":"read_only","composite":{"min_successful":1,"nodes":[{
+                "id":"lenses","kind":"composite","access":"read_only",
+                "composite":{"min_successful":2,"reduce_verdict":true,
+                    "nodes":[review("review.tests","good"),review("review.correctness","missing")],
+                    "exports":[{"node":"good","outputs":["findings","result"]},{"node":"missing","outputs":["findings","result"]}]}
+            }],"exports":[{"node":"lenses","outputs":["findings","result"]}]}
+        }]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+            terminal(AttemptOutcome::AdapterUnavailable),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let boundary = &run.checkpoint.nodes[0];
+    assert_eq!(
+        boundary.advance_error_code.as_deref(),
+        Some("coverage_below_minimum")
+    );
+    let output = boundary.outputs.as_ref().unwrap();
+    assert_eq!(output.findings.len(), 1);
+    assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}

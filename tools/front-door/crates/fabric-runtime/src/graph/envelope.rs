@@ -474,7 +474,13 @@ fn node_bound(
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
             + 64
-            + if node.dispositions.is_empty() {
+            + if node.dispositions.is_empty()
+                && node.composite.is_none()
+                && !node
+                    .inputs
+                    .iter()
+                    .any(|input| input.outputs.contains(&OutputKind::Findings))
+            {
                 FINDINGS_BYTES
             } else {
                 DISPOSITION_FINDINGS_BYTES

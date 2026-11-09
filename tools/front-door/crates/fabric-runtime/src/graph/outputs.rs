@@ -233,7 +233,7 @@ pub(super) fn retain_synthesis_findings(outputs: &mut NodeOutputs, upstream: &[F
     for finding in missing {
         outputs.findings.push(finding);
         if outputs.findings.len() > MAX_FINDINGS
-            || canonical_len(&outputs.findings) > FINDINGS_BYTES
+            || canonical_len(&outputs.findings) > DISPOSITION_FINDINGS_BYTES
         {
             outputs.findings.pop();
             dropped += 1;

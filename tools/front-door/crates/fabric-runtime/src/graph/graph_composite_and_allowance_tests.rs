@@ -173,8 +173,8 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                  "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["result","findings"]}]}
             ]
         })).unwrap();
-        let count = if long { 8 } else { 20 };
-        let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(800)} else {"s".into()},"status":"open"})).collect();
+        let count = 20;
+        let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(200)} else {"s".into()},"status":"open"})).collect();
         let text = format!(
             "```findings\n{}\n```",
             serde_json::json!({"schema_version":1,"findings":entries})
@@ -231,9 +231,12 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
         ));
         let outputs = composite.outputs.as_ref().unwrap();
         assert_eq!(outputs.findings_available, Some(false));
+        let notices = outputs.warnings.join(" ");
+        assert!(notices.contains(&format!("limits: {MAX_FINDINGS} entries")));
+        assert!(notices.contains("DISPOSITION lines for every finding"));
         assert!(outputs.findings.len() < 2 * count);
         assert!(outputs.findings.len() <= MAX_FINDINGS);
-        assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+        assert!(canonical_len(&outputs.findings) <= DISPOSITION_FINDINGS_BYTES);
         assert!(
             outputs.warnings[0]
                 .contains(&format!("{} dropped", 2 * count - outputs.findings.len()))
