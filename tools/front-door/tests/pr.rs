@@ -615,12 +615,22 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         vec!["pr", "land", "1668", "--head", "abc"],
         vec!["pr", "land", "0", "--head", HEAD],
         vec!["land", "0"],
-        vec!["land", "1668", "--head", "abc"],
+        vec!["land", "1668", "--head"],
         vec!["pr", "watch", "0"],
         vec!["pr", "watch", "--admin"],
     ] {
         assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
     }
+    assert!(!rig.project.join("gh-calls").exists());
+    // A short name is valid syntax; it fails when it names no commit here.
+    let output = rig.command(&["land", "1668", "--head", "abc"])?;
+    assert_eq!(code(&output), 1, "{output:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(text.contains("cannot resolve --head abc"), "{text}");
     assert!(!rig.project.join("gh-calls").exists());
     Ok(())
 }

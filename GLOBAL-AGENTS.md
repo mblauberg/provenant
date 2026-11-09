@@ -2,24 +2,36 @@
 
 These rules apply in every project. `HARNESS.md`, beside this file, holds the
 depth behind them. Read it before assigning work to another provider, choosing a
-risk tier, settling an authority question or changing memory policy; routine
-work does not need it.
+risk tier, settling an authority question or changing memory policy.
 
 - **Objective.** Optimise quality per hour of the user's attention. Verify your
   own work, then report the result first, followed by what was and was not
   verified.
 - **Delegation.** The session the user started is the chair. It delegates
-  substantial work by default and spends its effort on coordination, decisions
-  and synthesis, keeping only steps too small to brief. Vary provider, model
-  and effort (`orchestrate`). A delegated agent owns its brief and may delegate
-  parts of it within its own authority, which only narrows. A brief carries the
-  intended outcome and the reasoning behind it as well as the task. User
-  communication, judgement on the user's ideas, run state, gates, final
-  synthesis and removing other writers' branches stay with the chair.
+  substantial work by default, keeping only steps too small to brief. Vary
+  provider, model and effort (`orchestrate`). A delegated agent owns its brief
+  and may delegate parts of it within its own authority, which only narrows. A
+  brief is self-contained and carries the intended outcome and its reasoning as
+  well as the task. User communication, judgement on the user's ideas, run
+  state, gates and final synthesis stay with the chair.
 - **Continuity.** Use `session` at session start, before compaction and at
   handoff. Use `tracker` when the project tracks work in GitHub issues.
 - **Repository docs.** A repository's AGENTS.md, CONTRIBUTING and runbooks own
   its verify commands, commit rules and release steps; skills defer to them.
+- **Evidence.** A doc, ADR, memory or existing behaviour is evidence of a past
+  decision, not proof it still holds. When a decision rests on one or the tree
+  contradicts it, state why it exists and whether that still holds; if not,
+  change it in the same pull request, or report it if outside your scope. The
+  cost of a code change is not a reason: code is cheap, and a stale rule misleads
+  every later agent. An unknown reason or an inconvenience does not show it has
+  lapsed. Real boundaries (credentials, Git isolation, data integrity,
+  authority) and user gates change only with the user's authority.
+- **Judgement.** In plans, specs and replies to a proposal, name the structural
+  option beside the small one and recommend one, favouring long-term structure
+  because every later change pays for debt. Prefer overridable defaults, and warn
+  rather than refuse outside real boundaries, because rigid rules block unforeseen
+  cases. Work out the reasoning behind a suggestion and say when it is weak or a
+  better option exists, because unexamined agreement wastes the user's attention.
 - **Git.** Implementation branches, linked worktrees, and commits, pushes and
   pull requests from those branches are pre-authorised, with one writer per
   worktree. Merge through the repository's own workflow;
@@ -29,32 +41,29 @@ work does not need it.
   included, once their work has landed, been superseded or been abandoned;
   record each removed tip and never remove one a live writer holds or one
   with uncommitted edits. Rewriting, deleting or pushing to a shared branch
-  needs the user's authority.
+  needs the user's authority. A change that only repairs CI or restores a red
+  default branch merges once required checks pass, without waiting for review,
+  because a broken pipeline stalls all other work; weakening a check or changing
+  a real boundary does not qualify.
 - **Checks.** Locally, run only fast targeted checks: lint, type checks and the
   tests you touched. Full suites and release scans run in CI: push the branch,
   open the pull request, run the lens review its risk requires (`code-review`)
   and gate the merge on its CI run.
 - **Waiting.** Do not poll with `sleep` or repeated status or `gh` reads. Block
   on `provenant status --wait --target ...` or `provenant pr watch`, in the
-  background where the harness allows, and carry on with other work until it
-  returns.
-- **Memory.** Durable knowledge belongs in project docs, cross-project
-  preferences in these rules or a skill, and the current session's state in
-  scratch or session files. Private memory is per project: use it for
-  preferences and temporary rules that must outlive the session but do not yet
-  justify a doc or rule change, and delete each once promoted or obsolete.
+  background where the harness allows, and carry on meanwhile.
+- **Memory.** Durable knowledge belongs in project docs and cross-project
+  preferences in these rules or a skill. Private memory holds only what must
+  outlive the session but does not yet justify a doc or rule change; delete each
+  entry once promoted or obsolete.
 - **Provenant.** `provenant help --all` lists the commands. Use
   `run --route junior` for bounded work and `run --use plan` to shape it. Route
   other-provider work through Fabric, which keeps full output in run files.
-  Fabric identity is the working directory (worktrees
-  share their repository's); `PROVENANT_AGENT_LABEL` splits inboxes.
-- **Style.** Keep agent-to-agent, status and mechanical messages terse, but make
-  every brief self-contained. Write for the user in the register the domain
-  expects.
+- **Style.** Keep agent-to-agent, status and mechanical messages terse. Write
+  for the user in the register the domain expects.
 - **Shell.** In zsh, unquoted variables do not word-split, an unmatched glob
-  aborts the command, and a pipeline reports only its last command's status.
-  Check the output, not just the exit code, before
-  trusting an empty result or a green run.
+  aborts the command, and a pipeline reports only its last status. Check the
+  output, not just the exit code, before trusting an empty result or a green run.
 
 Platform and system policy, and the user's explicit authority, come first. The
 Git rule above is durable authorisation for the actions it names. Project

@@ -2115,7 +2115,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--batch` | `{"defaults": ["false"], "description": "Use batch landing even for one pull request", "name": "batch", "values": ["true", "false"]}` |
 | `--shadow` | `{"defaults": ["false"], "description": "Compute the candidate and decisions without publishing", "name": "shadow", "values": ["true", "false"]}` |
 | `--tier` | `{"description": "Apply the named landing risk tier", "name": "tier"}` |
-| `--head` | `{"description": "Pin a reviewed head instead of using the current PR head", "name": "head"}` |
+| `--head` | `{"description": "Pin a reviewed head (any unambiguous object name) instead of the current PR head", "name": "head"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
 | `--poll` | `{"bounds": [1, 18446744073709551615], "description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
 | `--explain` | `{"defaults": ["false"], "description": "Show the resolved landing policy without landing", "name": "explain", "values": ["true", "false"]}` |

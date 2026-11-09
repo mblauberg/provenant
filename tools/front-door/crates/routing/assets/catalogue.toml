@@ -165,8 +165,14 @@ senior = [
     # Provisional pending local trial evidence.
     { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 1, efforts = [] },
     { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },
-    { model = "codex/gpt-6.1-sol", weight = 4, effort = "medium", efforts = ["low", "medium", "high"] },
-    { model = "codex/gpt-6.1-terra", weight = 4, effort = "high", efforts = ["low", "medium", "high"] },
+    # Writer work stopped early more often and cost more per success on terra at
+    # high effort than on the other routes, while terra at low or medium effort and
+    # on read-only work did well. A hash-assigned pool makes that a fair comparison.
+    # Terra stays here at low or medium effort; its weight moved to codex sol, which
+    # the codex provider paces to spend, since Claude quota is the scarcer one.
+    # An exact `codex/gpt-6.1-terra@high` route still works for read-only work.
+    { model = "codex/gpt-6.1-sol", weight = 6, effort = "medium", efforts = ["low", "medium", "high"] },
+    { model = "codex/gpt-6.1-terra", weight = 2, effort = "medium", efforts = ["low", "medium"] },
     { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
     { model = "agy/gemini-3.8-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
     { model = "agy/claude-opus-4-6-thinking", weight = 1, efforts = [] },

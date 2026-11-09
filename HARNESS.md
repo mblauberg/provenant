@@ -17,13 +17,18 @@ started is the chair: it owns authority, communication with the user, run state,
 gates and the final synthesis. The chair delegates substantial work by default,
 using native sub-agents and the other primary, and coordinates rather than
 implements, keeping only steps too small to brief. A brief carries the intended
-outcome and the reasoning behind it as well as the task, and judgement on the
-user's ideas stays with the chair. A delegated agent may delegate within its
+outcome and the reasoning behind it as well as the task. Judgement on the
+user's ideas stays with the chair: its plans and replies to a proposal name the
+structural option beside the small one, recommend one and say when an idea is
+weak or a better one exists, because agreement alone adds nothing the user
+lacked. A delegated agent may delegate within its
 brief through a child of the same graph, and its authority only narrows. It
 counts as an author of its children's output for review. Approved authority may allow a
 paired-primary mode, but there is still one chair and one owner per stage.
 
 Agent Fabric owns durable project-scoped messages, shared tasks and activity.
+Fabric identity is the working directory (worktrees share their repository's);
+`PROVENANT_AGENT_LABEL` splits inboxes.
 Its thin MCP run front door delegates to the same orchestration
 owners that run the provider CLIs directly; it does not implement provider
 mechanics itself. Coordination that must return an answer uses a correlated
@@ -89,7 +94,7 @@ project may name its own landing gate as acceptance.
 ## Risk, authority, routing and memory
 
 `scope` emits the minimum risk tier (`routine`, `substantial`, `crucial` or
-`terminal`) from the compiled factor floors below, together with
+`terminal`) from the factor floors below, together with
 machine-readable authority covering paths, actions, disclosure, secrets,
 deployment, irreversible actions, expiry and the approver. Delegation can only
 narrow that authority. Host access, credentials and subscriptions never grant
@@ -100,10 +105,8 @@ follow the repository's own workflow.
 
 | Factor | `routine` | `substantial` | `crucial` | `terminal` |
 |---|---|---|---|---|
-| Blast radius | local | multi-module | shared-system | production |
 | Reversibility | easy | moderate | hard | irreversible |
 | Data sensitivity | public, internal |  | confidential | regulated |
-| Migration | none | reversible | stateful | destructive |
 | Oracle quality | strong | mixed | weak |  |
 | External effects | none |  | reversible | irreversible |
 | Critical surface | none | public-contract | auth-security, privacy, financial, legal, build-release-gate | life-safety |
@@ -159,12 +162,12 @@ and budget. Unknown paths are at least
 | Floor | Required coverage |
 |---|---|
 | Security and credentials; lane Git, credentials, object integrity and authority gates | `crucial`; correctness and security or the relevant boundary lens |
-| CI, build, release and review policy | `crucial`; correctness and tests or operations |
+| Release, publish, deploy and auto-merge workflows; ownership of who can land | `crucial`; correctness and the relevant boundary lens |
 | Public contracts, including CLI, configuration and graph schemas | `substantial`; correctness and contract |
 
-Inspect both sides of renames. Changed tests require a tests lens. The planner
-may raise these floors, never lower them. A lens is a named question; choose
-other lenses for the actual risks, including concurrency, data and design.
+Inspect both sides of renames. Changed tests require a tests lens. A lens is a
+named question; choose other lenses for the actual risks, including
+concurrency, data and design.
 Review integration heads with the full mixed panel before landing.
 
 | Tier | Minimum reviewers other than the author |
@@ -216,8 +219,9 @@ current exact-head requirements.
 A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
 lenses that raised them, checking closure and relevant tests. After three repair
 cycles, or a concrete design concern, a read-only principal scopes a redesign
-with root constraint, options, trade-offs, migration implications, a smallest
-viable slice and acceptance evidence. A redesign within approved
+with root constraint, options, trade-offs, migration implications, the
+structural fix compared with the small one, a recommendation and acceptance
+evidence. A redesign within approved
 scope proceeds and the owner is notified asynchronously; changed scope or a
 one-way door waits for the owner. Review grants no release authority.
 

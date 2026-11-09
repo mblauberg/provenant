@@ -238,6 +238,12 @@ merges without waiting for the user. Forge-required checks stay mandatory.
 Before merging a substantial software change, confirm its delivery receipt
 (`provenant workflow receipt show <id>`) is current.
 
+A change that only repairs CI or restores a red `main` is a hotfix: an agent
+merges it as soon as `ci-status` is green on its head, without the planned
+review, so one breakage does not stall every other pull request. A change that
+skips or weakens a check, or touches a path on a crucial review floor, is not a
+hotfix and takes its normal review.
+
 `ci-status` is the single required check: the aggregate job at the end of
 [`ci.yml`](../../.github/workflows/ci.yml) succeeds only when every job it needs
 succeeded or was path-skipped. "CI is green" means exactly that context. The

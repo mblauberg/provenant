@@ -2,8 +2,8 @@
 
 Use when a scope needs a design the implementer can follow without asking.
 
-Propose the smallest design that meets the acceptance criteria. Reuse existing
-modules before adding new ones. Name:
+Compare the structural design with the smallest one that meets the acceptance
+criteria and recommend one. Reuse existing modules before adding new ones. Name:
 - The change in each touched module and why it belongs there.
 - Interfaces and data shapes that cross a boundary, pinned exactly.
 - Seams left for coming work, without building it.

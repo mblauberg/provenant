@@ -436,7 +436,7 @@ fn review_floor_policy_can_be_overridden_and_extended() -> Result<(), Box<dyn st
         "schema_version=1\n[domains.routing.review.floors.security]\ntier='routine'\nlenses=[]\n[domains.routing.review.floors.custom]\npaths=['**/special/**']\ntier='crucial'\nlenses=['reliability']\n",
     )??;
     let review = &config.domains.routing.review;
-    let security = review.path_floors(&["src/credentials.rs".into()]);
+    let security = review.path_floors(&["src/credentials/store.rs".into()]);
     assert_eq!(security.tier, None);
     let custom = review.path_floors(&["src/special/a.rs".into()]);
     assert_eq!(custom.tier.as_deref(), Some("crucial"));

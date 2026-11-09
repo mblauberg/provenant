@@ -20,7 +20,8 @@ work. Use `run --route junior` for a bounded continuation, or `run --use plan`
 when its shape needs changing; `orchestrate` owns composites.
 
 Read repository branches, checks and state paths in `AGENTS.md`,
-`CONTRIBUTING` and runbooks.
+`CONTRIBUTING` and runbooks. Keep orientation reads narrow and send broad code
+reading to a read-only lane, as `orchestrate` describes.
 
 ## Continue toward the goal
 
