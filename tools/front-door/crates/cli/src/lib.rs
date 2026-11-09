@@ -1945,6 +1945,16 @@ mod tests {
                 "--wait",
                 "provenant status --wait=30m",
             ),
+            (
+                vec!["--project", "/path with spaces", "status", "--wait=5h"],
+                "--wait",
+                "provenant --project '/path with spaces' status --wait=30m",
+            ),
+            (
+                vec!["status", "--wait=5h", "--bogus"],
+                "--bogus",
+                "provenant status",
+            ),
             (vec!["land"], "numbers", "provenant land"),
             (vec!["output"], "attempt", "provenant output"),
             (vec!["stop"], "id", "provenant stop ID"),
