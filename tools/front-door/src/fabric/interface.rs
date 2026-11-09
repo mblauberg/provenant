@@ -102,6 +102,7 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
 pub(super) fn relay_error(error: ServiceError) -> FacadeError {
     match error {
         ServiceError::Facade(error) => error,
+        ServiceError::Mutation { source, .. } => relay_error(*source),
         ServiceError::Cli { code, .. } if code == "UPGRADE_DRAIN_REQUIRED" => {
             FacadeError::GraphRelayRefused {
                 refusal_code: code,
@@ -110,7 +111,7 @@ pub(super) fn relay_error(error: ServiceError) -> FacadeError {
         }
         error => FacadeError::GraphRelayRefused {
             refusal_code: error.code().to_owned(),
-            detail: Some(InvalidInputDetail::graph_reason(error)),
+            detail: Some(InvalidInputDetail::OperationFailed),
         },
     }
 }

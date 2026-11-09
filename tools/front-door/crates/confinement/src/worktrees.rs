@@ -197,6 +197,11 @@ pub enum WorktreeError {
     Primary,
     #[error("worktree Git output is malformed or incomplete")]
     InvalidOutput,
+    #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
+    MutationFailed {
+        operation: GitMutationOperation,
+        lock_failure: bool,
+    },
     #[error("worktree was created but registration publication is unconfirmed")]
     RegistrationUnconfirmed,
     #[error("worktree identity changed during the operation")]
@@ -224,6 +229,22 @@ pub enum WorktreeError {
     PathWire(#[from] PathWireError),
 }
 
+/// Closed operation names: no Git output, arguments or host paths are disclosed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum GitMutationOperation {
+    #[error("git merge --ff-only")]
+    FastForward,
+    #[error("git worktree add")]
+    WorktreeAdd,
+    #[error("git worktree remove")]
+    WorktreeRemove,
+    #[error("git config")]
+    SetBranchConfig,
+    #[error("git update-ref --delete")]
+    DeleteRef,
+}
+
 /// Stable machine cause for worktree admission transitions. Presentation may
 /// change; lifecycle callers must branch on this value rather than refusal text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +266,17 @@ fn dirty_suffix(paths: &str) -> String {
 }
 
 impl WorktreeError {
+    pub fn mutation_failure(&self) -> Option<(GitMutationOperation, bool)> {
+        match self {
+            Self::MutationFailed {
+                operation,
+                lock_failure,
+            } => Some((*operation, *lock_failure)),
+            Self::CreateFailed { cause, .. } => cause.mutation_failure(),
+            _ => None,
+        }
+    }
+
     /// Returns a typed retry-relevant cause without making the error retryable
     /// by itself. The caller still owns deadlines and transition policy.
     pub fn admission_cause(&self) -> Option<AdmissionCause> {

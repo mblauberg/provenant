@@ -829,6 +829,13 @@ pub(super) fn execute_mutation(
     // A failed or timed-out mutation may still have changed repository state.
     let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
+    let operation = match &mutation {
+        GitMutation::FastForward { .. } => GitMutationOperation::FastForward,
+        GitMutation::WorktreeAdd { .. } => GitMutationOperation::WorktreeAdd,
+        GitMutation::WorktreeRemove { .. } => GitMutationOperation::WorktreeRemove,
+        GitMutation::SetBranchConfig { .. } => GitMutationOperation::SetBranchConfig,
+        GitMutation::DeleteRef { .. } => GitMutationOperation::DeleteRef,
+    };
     let outcome = execute_git_mutation(
         context.executor,
         context.repo,
@@ -838,7 +845,17 @@ pub(super) fn execute_mutation(
         cancel,
     )?;
     if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::InvalidOutput);
+        // Classify bounded captured stderr, then discard it. Paths, config
+        // values and credentials in Git's prose must never become error facts.
+        let stderr = String::from_utf8_lossy(&outcome.stderr.bytes).to_ascii_lowercase();
+        let lock_failure = stderr.contains("cannot lock")
+            || stderr.contains("could not lock")
+            || stderr.contains("unable to create") && stderr.contains(".lock")
+            || stderr.contains("unable to lock");
+        return Err(WorktreeError::MutationFailed {
+            operation,
+            lock_failure,
+        });
     }
     Ok(())
 }
