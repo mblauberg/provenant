@@ -254,13 +254,7 @@ pub struct ParameterRefusal {
     pub node: Option<String>,
     pub template: String,
     pub fault: ParameterFault,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example: Option<Box<ParameterExample>>,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ParameterExample(String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -279,6 +273,8 @@ pub enum ParameterFault {
         key: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        example: Option<String>,
     },
     Shape {
         key: String,
@@ -288,7 +284,10 @@ pub enum ParameterFault {
 
 impl ParameterRefusal {
     pub fn example(&self) -> Option<String> {
-        self.example.as_ref().map(|example| example.0.clone())
+        match &self.fault {
+            ParameterFault::Missing { example, .. } => example.clone(),
+            _ => None,
+        }
     }
 
     pub(crate) fn redacted(&self) -> Self {
@@ -296,10 +295,6 @@ impl ParameterRefusal {
         let mut safe = self.clone();
         safe.node = safe.node.as_deref().map(clean);
         safe.template = clean(&safe.template);
-        safe.example = safe
-            .example
-            .as_deref()
-            .map(|value| Box::new(ParameterExample(clean(&value.0))));
         match &mut safe.fault {
             ParameterFault::NotTable => {}
             ParameterFault::Unknown {
@@ -313,7 +308,8 @@ impl ParameterRefusal {
                 }
                 *suggestion = suggestion.as_deref().map(clean);
             }
-            ParameterFault::Missing { key, keys } => {
+            ParameterFault::Missing { key, keys, example } => {
+                *example = example.as_deref().map(clean);
                 *key = clean(key);
                 for name in keys {
                     *name = clean(name);
@@ -404,7 +400,7 @@ impl std::fmt::Display for ParameterRefusal {
                     None => Ok(()),
                 }
             }
-            ParameterFault::Missing { key, keys } => {
+            ParameterFault::Missing { key, keys, example } => {
                 let list = if keys.is_empty() {
                     std::slice::from_ref(key)
                 } else {
@@ -419,8 +415,8 @@ impl std::fmt::Display for ParameterRefusal {
                 } else {
                     write!(f, "template {template} requires parameter {}", list[0])?;
                 }
-                if let Some(example) = &self.example {
-                    write!(f, "; example: {}", example.0)?;
+                if let Some(example) = example {
+                    write!(f, "; example: {example}")?;
                 }
                 Ok(())
             }
@@ -830,7 +826,6 @@ impl Template {
             node: None,
             template: name.to_owned(),
             fault,
-            example: None,
         };
         let supplied = match supplied {
             Value::Null => Map::new(),
@@ -857,9 +852,11 @@ impl Template {
         if !missing.is_empty() {
             let key = missing[0].clone();
             let example = template_example(name, &self.parameters, &supplied, &missing);
-            let mut refusal = refuse(ParameterFault::Missing { key, keys: missing });
-            refusal.example = example.map(|value| Box::new(ParameterExample(value)));
-            return Err(refusal);
+            return Err(refuse(ParameterFault::Missing {
+                key,
+                keys: missing,
+                example,
+            }));
         }
         let mut effective = Map::new();
         for (key, parameter) in &self.parameters {

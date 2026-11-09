@@ -1663,6 +1663,7 @@ mod diagnostic_tests {
             ParameterFault::Missing {
                 key: secret.into(),
                 keys: vec![secret.into()],
+                example: None,
             },
             ParameterFault::Shape {
                 key: secret.into(),
@@ -1674,7 +1675,6 @@ mod diagnostic_tests {
                     node: Some(secret.into()),
                     template: secret.into(),
                     fault,
-                    example: None,
                 },
             )));
             let diagnostic = error.diagnostic();
