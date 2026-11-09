@@ -63,9 +63,9 @@ fn idle_lane_walks_only_at_the_full_backstop() {
 
 #[test]
 fn journal_retry_is_prompt_and_does_not_require_a_census() {
-    assert!(!super::journal_retry_due(99, 0, true));
-    assert!(super::journal_retry_due(100, 0, true));
-    assert!(!super::journal_retry_due(100, 0, false));
+    assert!(!super::tracking_publication_due(99, Some(0), true));
+    assert!(super::tracking_publication_due(100, Some(0), true));
+    assert!(!super::tracking_publication_due(100, Some(0), false));
     assert!(!super::census_turn_due(100, Some(0), Some(0), false));
 }
 
@@ -1700,4 +1700,18 @@ fn profile_handoff_requires_the_verified_file_and_matching_command()
         .is_some()
     );
     Ok(())
+}
+
+#[test]
+fn tracking_batches_fork_churn_but_publishes_initial_state_immediately() {
+    let mut last = None;
+    let mut publications = Vec::new();
+    for now in (0..3_000).step_by(100) {
+        if super::tracking_publication_due(now, last, false) {
+            publications.push(now);
+            last = Some(now);
+        }
+    }
+    assert_eq!(publications, [0, 1_000, 2_000]);
+    assert!(super::tracking_publication_due(2_100, last, true));
 }

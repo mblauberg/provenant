@@ -30,6 +30,7 @@ pub(crate) struct ReactorEvent {
     pub(crate) cancel_watch_failed: bool,
     pub(crate) process_changed: bool,
     pub(crate) process_overflow: bool,
+    pub(crate) io_ready: bool,
 }
 
 pub(crate) struct GuardianReactor;
@@ -50,7 +51,7 @@ impl GuardianReactor {
 
     pub(crate) fn wait(
         &mut self,
-        _watches: &[Watch<'_>],
+        _watches: &[Option<Watch<'_>>],
         _timeout: Duration,
     ) -> io::Result<ReactorEvent> {
         Err(unsupported())
@@ -88,7 +89,7 @@ impl ProviderGroup {
         match self.never {}
     }
 
-    pub(crate) fn watches(&self) -> Vec<Watch<'_>> {
+    pub(crate) fn watches(&self) -> [Option<Watch<'_>>; 3] {
         match self.never {}
     }
 

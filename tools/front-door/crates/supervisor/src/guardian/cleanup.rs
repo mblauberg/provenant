@@ -23,6 +23,10 @@ fn live_or_full(
 }
 
 impl Driver<'_> {
+    pub(super) fn holder_reports_no_live_children(&self) -> bool {
+        host_allows_escapee_stop(self.holder, &self.holder_context)
+    }
+
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
         self.reservation.omitted_descendants = self.tracked.len().saturating_sub(128) as u64;
@@ -361,10 +365,9 @@ impl Driver<'_> {
         self.protected
             .retain(|identity| identity_still_possible(&census, identity));
         self.descendant_stop_allowed = !registry_unknown;
-        self.escapee_stop_allowed = (registry_listed || self.registry.is_none())
-            && self.holder.is_none_or(|holder| {
-                matches!(holder.has_live_children(&self.holder_context), Ok(false))
-            });
+        // Census establishes process history, not graph signal authority. Read
+        // graph evidence only at a signalling decision, after submissions stop.
+        self.escapee_stop_allowed = registry_listed || self.registry.is_none();
         if full {
             self.reservation.census_incomplete = !census.is_complete();
         }
@@ -623,7 +626,10 @@ impl Driver<'_> {
                 }
             }
             #[cfg(target_os = "macos")]
-            if self.escapee_stop_allowed {
+            if self.escapee_stop_allowed
+                && !marked.is_empty()
+                && self.holder_reports_no_live_children()
+            {
                 for delivery in child.stop_marked(escalation, &marked) {
                     self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
                 }
@@ -638,6 +644,12 @@ impl Driver<'_> {
             );
         }
     }
+}
+
+/// Unknown host graph state refuses escapee signals. This is intentionally
+/// separate from census: an ordinary history walk must not reopen graph state.
+pub(super) fn host_allows_escapee_stop(holder: Option<&dyn Holder>, context: &[u8]) -> bool {
+    holder.is_none_or(|holder| matches!(holder.has_live_children(context), Ok(false)))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -736,6 +748,46 @@ mod live_census_tests {
     use super::*;
     use crate::census::{Census, CensusError, ObservationIssue, ProcessObservation};
     use std::cell::Cell;
+
+    struct GraphHolder {
+        live: Option<bool>,
+        reads: Cell<usize>,
+    }
+    impl Holder for GraphHolder {
+        fn admit(&self, _: &[u8], _: &Directory) -> Result<()> {
+            Ok(())
+        }
+        fn terminal(
+            &self,
+            _: &[u8],
+            _: &Directory,
+            _: &ExitObservation,
+            _: &crate::custody::Recovery,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn has_live_children(&self, context: &[u8]) -> Result<bool> {
+            assert_eq!(context, b"attempt");
+            self.reads.set(self.reads.get() + 1);
+            self.live.ok_or(CustodyError::InvalidRecord)
+        }
+    }
+
+    #[test]
+    fn escapee_signal_requires_current_clear_host_graph_evidence() {
+        assert!(host_allows_escapee_stop(None, b"attempt"));
+        for live in [Some(false), Some(true), None] {
+            let holder = GraphHolder {
+                live,
+                reads: Cell::new(0),
+            };
+            assert_eq!(
+                host_allows_escapee_stop(Some(&holder), b"attempt"),
+                live == Some(false)
+            );
+            assert_eq!(holder.reads.get(), 1);
+        }
+    }
 
     struct Observer {
         mode: u8,

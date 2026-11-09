@@ -1955,7 +1955,7 @@ impl RunStore {
         // the already-filtered capture. Seal only a filtered rendering.
         // A filter failure withholds the result instead of blocking settlement
         // forever: the lane fails with a fixed placeholder and stays terminal.
-        let (result, result_redaction_failed) =
+        let (mut result, result_redaction_failed) =
             match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
                 Ok(safe) => match String::from_utf8(safe) {
                     Ok(text) => (text, false),
@@ -1963,6 +1963,13 @@ impl RunStore {
                 },
                 Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
             };
+        if task.writer.is_some()
+            && task.deliver.is_none()
+            && task.profile.knobs.get("lanes.receipts") == Some(&serde_json::json!("none"))
+        {
+            decoded.complete &= result.len() + UNDELIVERED_NOTICE.len() <= RESULT_LIMIT as usize;
+            result = undelivered_writer_result(&result);
+        }
         let redaction_failed = result_redaction_failed || session_redaction_failed;
         if redaction_failed {
             // A redaction failure fails a lane that would otherwise succeed. A
@@ -2278,6 +2285,18 @@ fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
     });
     text.push_str(&format!("```handoff\n{handoff}\n```"));
     text
+}
+
+const UNDELIVERED_NOTICE: &str = "No delivery was requested; this work has not been delivered.\n\n";
+
+fn undelivered_writer_result(result: &str) -> String {
+    let mut end = result
+        .len()
+        .min(RESULT_LIMIT as usize - UNDELIVERED_NOTICE.len());
+    while !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{UNDELIVERED_NOTICE}{}", &result[..end])
 }
 
 pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";

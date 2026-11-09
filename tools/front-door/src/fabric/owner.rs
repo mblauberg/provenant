@@ -2758,6 +2758,7 @@ impl BoundGraphOwner<'_> {
                         }
                     })?;
             }
+            // Delivery is a writer obligation independent of the receipt preset.
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
                     let writer = provenant_run::resolve_writer(
@@ -3015,6 +3016,10 @@ impl BoundGraphOwner<'_> {
                     if let Some(scope) = node.attempt.and_then(|a| a.local_cargo.as_deref()) {
                         knobs.push(format!("lanes.local_cargo={scope}"));
                     }
+                    // Isolation, supervision and receipts, from the node or its preset.
+                    if let Some(spec) = node.attempt {
+                        knobs.extend(spec.lane_knobs());
+                    }
                     if !exclude.is_empty() {
                         knobs.push(format!(
                             "routing.graph_exclude={}",
@@ -3155,6 +3160,7 @@ impl BoundGraphOwner<'_> {
                         self.network,
                     )?;
                 }
+                // Every pinned reader resolves and verifies its snapshot source.
                 if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     && source_commit.is_some()
                 {
@@ -3203,8 +3209,8 @@ impl BoundGraphOwner<'_> {
                             });
                         }
                         grants.source_identity = Some(source_identity);
-                        // A preset may lower its source worktree to a read root.
-                        // The immutable view replaces those live-source grants.
+                        grants.source_live = false;
+                        // The immutable view replaces live-source grants.
                         grants.read_roots.retain(|root| !root.starts_with(&source));
                         Some(source)
                     };

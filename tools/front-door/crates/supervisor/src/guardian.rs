@@ -52,9 +52,17 @@ const CENSUS_INTERVAL_MS: u64 = 100;
 const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
 const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
 const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
+const TRACKING_INTERVAL_MS: u64 = 1_000;
 
-fn journal_retry_due(now: u64, last_attempt: u64, failed: bool) -> bool {
-    failed && now.saturating_sub(last_attempt) >= JOURNAL_RETRY_INTERVAL_MS
+fn tracking_publication_due(now: u64, last_attempt: Option<u64>, failed: bool) -> bool {
+    last_attempt.is_none_or(|last| {
+        now.saturating_sub(last)
+            >= if failed {
+                JOURNAL_RETRY_INTERVAL_MS
+            } else {
+                TRACKING_INTERVAL_MS
+            }
+    })
 }
 
 fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
@@ -699,8 +707,8 @@ struct Driver<'a> {
     protected: std::collections::BTreeSet<ProcessIdentity>,
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
-    /// A stop aimed at one exact sandbox escapee is safe this tick: the registry
-    /// is absent or readable, and the host reports no live graph children.
+    /// The registry permits an exact sandbox escapee stop this tick.
+    /// The host graph-child check is deferred until a control action needs it.
     /// Unproven registered owners stay protected. Independent of
     /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
@@ -1071,10 +1079,13 @@ impl Driver<'_> {
         let mut reactor_warning_recorded = false;
         let mut process_watch_unavailable = false;
         let mut census_retry = false;
-        let mut last_journal_attempt_ms = 0;
+        let mut last_journal_attempt_ms = None;
         let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
+        // Try once at launch, then only after readiness. A failed reactor
+        // retains the former nonblocking IO fallback.
+        let mut io_ready = true;
         loop {
             let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             // WNOWAIT always runs before cancellation, signals or deadlines.
@@ -1106,8 +1117,12 @@ impl Driver<'_> {
                     );
                 }
             }
-            out.read(&mut child.stdout);
-            err.read(&mut child.stderr);
+            // Exit can race a timer-only wake. Keep the final drain even
+            // when the last poll saw no bytes, including a zero flush budget.
+            if io_ready || exit.is_some() {
+                out.read(&mut child.stdout);
+                err.read(&mut child.stderr);
+            }
             let stdout_bytes = out.outcome().total_bytes;
             let stderr_bytes = err.outcome().total_bytes;
             let output_progress =
@@ -1139,7 +1154,7 @@ impl Driver<'_> {
             } else {
                 false
             };
-            if let Some(stdin) = child.stdin.as_mut() {
+            if io_ready && let Some(stdin) = child.stdin.as_mut() {
                 if input_offset == input.len() {
                     child.stdin = None;
                 } else {
@@ -1528,7 +1543,9 @@ impl Driver<'_> {
                     if disk_paused
                         && exit.is_none()
                         && stop_reason.is_none()
-                        && (self.descendant_stop_allowed || self.escapee_stop_allowed)
+                        && (self.descendant_stop_allowed
+                            || (self.escapee_stop_allowed
+                                && self.holder_reports_no_live_children()))
                         && let Some(provider) = self.reservation.provider.as_ref()
                     {
                         let spared = self
@@ -1554,12 +1571,12 @@ impl Driver<'_> {
                     );
                     census_warning_active = true;
                 }
+            }
+            if tracking_publication_due(now, last_journal_attempt_ms, self.journal_warning_active) {
+                // Batch live history writes; cleanup still flushes synchronously.
+                // Custody and the full census remain authoritative during this window.
                 self.persist_tracking(&mut warnings, &mut omitted_warnings);
-                last_journal_attempt_ms = now;
-            } else if journal_retry_due(now, last_journal_attempt_ms, self.journal_warning_active) {
-                // Retry the last tracking state without an expensive census.
-                self.persist_tracking(&mut warnings, &mut omitted_warnings);
-                last_journal_attempt_ms = now;
+                last_journal_attempt_ms = Some(now);
             }
             // Process checkpoint durability is independent of census cadence.
             if last_observation_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000) {
@@ -1586,7 +1603,7 @@ impl Driver<'_> {
                 }
                 let disk_paused = disk_paused && exit.is_none() && stop_reason.is_none();
                 let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms(), disk_paused);
-                let observed = Observed {
+                let mut observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
                     guardian: &self.guardian,
@@ -1597,7 +1614,7 @@ impl Driver<'_> {
                     stderr_bytes: err.outcome().total_bytes,
                     last_output_ms,
                     last_output_at,
-                    observed_at: wall_now(),
+                    observed_at: None,
                     last_progress_ms: state.last_progress_ms(),
                     silent: silent_for_ms.is_some(),
                     silent_for_ms,
@@ -1607,9 +1624,14 @@ impl Driver<'_> {
                     publication_pending: false,
                 };
                 let system_publisher = SystemExitPublisher;
-                let checkpoint =
+                // Compare facts without the observation timestamp. Quiet lanes
+                // keep their last observation rather than flushing a heartbeat.
+                let facts =
                     serde_json::to_vec(&observed).map_err(|_| CustodyError::InvalidRecord)?;
-                if last_checkpoint.as_ref() != Some(&checkpoint) {
+                if last_checkpoint.as_ref() != Some(&facts) {
+                    observed.observed_at = wall_now();
+                    let checkpoint =
+                        serde_json::to_vec(&observed).map_err(|_| CustodyError::InvalidRecord)?;
                     if self
                         .exit_publisher
                         .unwrap_or(&system_publisher)
@@ -1623,7 +1645,7 @@ impl Driver<'_> {
                             "process observation publication failed",
                         );
                     } else {
-                        last_checkpoint = Some(checkpoint);
+                        last_checkpoint = Some(facts);
                     }
                 }
                 last_observation_ms = Some(now);
@@ -1680,12 +1702,14 @@ impl Driver<'_> {
             if self.journal_warning_active {
                 wait_ms = wait_ms.min(
                     last_journal_attempt_ms
+                        .unwrap_or(wait_now)
                         .saturating_add(JOURNAL_RETRY_INTERVAL_MS)
                         .saturating_sub(wait_now),
                 );
             }
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
                 Ok(event) => {
+                    io_ready = event.io_ready;
                     cancel_pending |= event.cancel_changed;
                     cancel_watched &= !event.cancel_watch_failed;
                     signal_pending |= event.supervisor_signal;
@@ -1701,6 +1725,7 @@ impl Driver<'_> {
                     cancel_watched = false;
                     census_event_failed = true;
                     census_reactor_failed = true;
+                    io_ready = true;
                     provenant_os::sys::wait_pause(Duration::from_millis(CENSUS_INTERVAL_MS));
                     if !reactor_warning_recorded {
                         warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");

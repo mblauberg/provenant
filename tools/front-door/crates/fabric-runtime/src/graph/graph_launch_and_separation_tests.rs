@@ -790,3 +790,24 @@ fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
     assert_eq!(separation.outcome, SeparationOutcome::Unavailable);
     assert_eq!(separation.applied, None);
 }
+
+#[test]
+fn light_preset_is_per_node_and_explicit_settings_override_it() {
+    let light: AttemptSpec = serde_json::from_value(serde_json::json!({"preset":"light"})).unwrap();
+    assert!(light.preset_known());
+    assert_eq!(light.effective_isolation(), "shared");
+    assert_eq!(light.effective_supervision(), "minimal");
+    assert_eq!(light.effective_receipts(), "none");
+    let custom: AttemptSpec = serde_json::from_value(serde_json::json!({
+        "preset":"light", "isolation":"private", "supervision":"standard", "receipts":"delivery"
+    })).unwrap();
+    assert_eq!(custom.effective_isolation(), "private");
+    assert_eq!(custom.effective_supervision(), "standard");
+    assert_eq!(custom.effective_receipts(), "delivery");
+    let default = AttemptSpec::default();
+    assert_eq!(default.effective_isolation(), "private");
+    assert_eq!(default.effective_supervision(), "standard");
+    assert_eq!(default.effective_receipts(), "delivery");
+    let unknown: AttemptSpec = serde_json::from_value(serde_json::json!({"preset":"future"})).unwrap();
+    assert!(!unknown.preset_known());
+}
