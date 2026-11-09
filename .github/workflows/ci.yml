@@ -89,6 +89,9 @@ jobs:
           "$RUNNER_TEMP/harness-venv/bin/python" scripts/check-harness
           "$RUNNER_TEMP/harness-venv/bin/python" scripts/test-check-harness
 
+      - name: Test retrospective analysis
+        run: python3 -m unittest discover -s skills/retrospect/scripts/tests -v
+
       - name: Check generated contract reference
         run: scripts/generate-reference --check
       - name: Require documentation inventory and resolvable evidence
