@@ -241,7 +241,7 @@ Before merging a substantial software change, confirm its delivery receipt
 A change that only repairs CI or restores a red `main` is a hotfix: an agent
 merges it as soon as `ci-status` is green on its head, without the planned
 review, so one breakage does not stall every other pull request. A change that
-skips or weakens a check, or touches a release or credential path, is not a
+skips or weakens a check, or touches a path on a crucial review floor, is not a
 hotfix and takes its normal review.
 
 `ci-status` is the single required check: the aggregate job at the end of

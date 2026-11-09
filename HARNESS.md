@@ -162,7 +162,7 @@ and budget. Unknown paths are at least
 | Floor | Required coverage |
 |---|---|
 | Security and credentials; lane Git, credentials, object integrity and authority gates | `crucial`; correctness and security or the relevant boundary lens |
-| CI, build, release and review policy | `crucial`; correctness and tests or operations |
+| Release, publish, deploy and auto-merge workflows; ownership of who can land | `crucial`; correctness and the relevant boundary lens |
 | Public contracts, including CLI, configuration and graph schemas | `substantial`; correctness and contract |
 
 Inspect both sides of renames. Changed tests require a tests lens. A lens is a
