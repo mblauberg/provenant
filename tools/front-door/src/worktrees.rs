@@ -1916,7 +1916,7 @@ mod gc_preview_tests {
         let workers = worktrees::SystemWorkerObserver;
         // Establish the pre-existing project binding and state directories,
         // as they would exist before upgrading to repository locking.
-        with_context(
+        with_context_using_facts(
             &roots,
             &rig.home,
             &rig.project,
