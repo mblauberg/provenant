@@ -83,7 +83,10 @@ configuration snapshots; exclusive holders add or remove worktrees or write
 configuration and retain the lock across the snapshots those writes depend on.
 When writer custody is already held, blocking acquisition follows `writer.lock`
 then the repository lock. A repository holder may only try a writer lock without
-waiting, so the opposite direction cannot create a blocking cycle. Slow census,
+waiting, so the opposite direction cannot create a blocking cycle. Removal
+prepares regenerable output and refreshes its census under writer custody before
+taking the repository lock for final rechecks, Git removal and ref settlement.
+Slow census,
 network discovery and provider execution run without the repository lock; a
 final custody recheck may run under the mutation owner. The lock inode stays in
 place for the repository's lifetime.

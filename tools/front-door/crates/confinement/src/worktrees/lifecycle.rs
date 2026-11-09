@@ -894,8 +894,11 @@ pub(super) struct RemovedTree {
 /// How `remove_tree_when` meets the repository lock.
 #[derive(Clone, Copy)]
 pub(super) enum Repository<'a> {
-    /// The caller holds it throughout, as ordinary removal does.
+    /// The caller holds it throughout.
     Held,
+    /// Ordinary removal refreshes the census before locking, then rechecks
+    /// ownership under the repository lock.
+    Remove,
     /// Output is deleted under writer custody alone. The lock is taken for the
     /// final registration recheck and the Git mutation, and returned with the
     /// tree. `lanes` is the cheap fence rechecked under it.
@@ -998,7 +1001,7 @@ pub(super) fn remove_tree(
         cancel,
         &|| Ok(()),
         Some(output),
-        Repository::Held,
+        Repository::Remove,
     )
 }
 
@@ -1039,7 +1042,7 @@ pub(super) fn remove_tree_when(
             &settings.keep,
             cancel,
         )?;
-        if matches!(repository, Repository::Held) {
+        if matches!(repository, Repository::Held | Repository::Remove) {
             refresh_census_under_custody(context, &canonical)?;
         }
     }
@@ -1047,7 +1050,7 @@ pub(super) fn remove_tree_when(
     // eligibility before removing the tree while writer exclusion is held.
     let repository_guard = match repository {
         Repository::Held => None,
-        Repository::Acquire { .. } => {
+        Repository::Acquire { .. } | Repository::Remove => {
             // Any slow census happens before the repository lock is taken.
             if prepared {
                 eligible()?;
@@ -1055,13 +1058,14 @@ pub(super) fn remove_tree_when(
             Some(repository_lock(context, LockMode::Exclusive, cancel)?)
         }
     };
+    context.repo.revalidate()?;
     tree_unchanged(
         &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
     let fenced = match repository {
-        Repository::Held => {
+        Repository::Held | Repository::Remove => {
             eligible()?;
             true
         }
@@ -1440,7 +1444,7 @@ pub(super) fn remove_merged_candidate(
         }
     };
     // Held until the ref is settled, so the writer lock covers the deletion.
-    let _held = match entry {
+    let mut held = match entry {
         None => None,
         Some(entry) => {
             if entry.head != tip {
@@ -1454,8 +1458,7 @@ pub(super) fn remove_merged_candidate(
             match remove_tree(context, entry, tip, cancel, output) {
                 Ok(removed) => {
                     outcome.removed.push(removed.info.clone());
-                    detached.push(removed);
-                    Some(())
+                    Some(removed)
                 }
                 Err(error) => {
                     retain(outcome, branch, retain_reason(&error));
@@ -1464,7 +1467,19 @@ pub(super) fn remove_merged_candidate(
             }
         }
     };
-    settle_branch(context, branch, tip, disposition, cancel, outcome)
+    // A branch without a worktree still needs exclusion for ref settlement.
+    let repository = if held.is_none() {
+        Some(repository_lock(context, LockMode::Exclusive, cancel)?)
+    } else {
+        None
+    };
+    let result = settle_branch(context, branch, tip, disposition, cancel, outcome);
+    drop(repository);
+    if let Some(mut removed) = held.take() {
+        removed.repository = None;
+        detached.push(removed);
+    }
+    result
 }
 
 /// The integration branch the primary checkout is on, pinned to its tip. A
@@ -1557,7 +1572,6 @@ fn remove_with_owner(
     operation: Option<&provenant_core::OperationId>,
 ) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
-    let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let mut detached = Vec::new();
     let result = (|| {
         context.repo.revalidate()?;
@@ -1597,7 +1611,7 @@ fn remove_with_owner(
                         cancel,
                         &eligible,
                         Some(output),
-                        Repository::Held,
+                        Repository::Remove,
                     )
                 };
                 // `remove_tree` rechecks this tip under the worktree lock, so
@@ -1613,8 +1627,9 @@ fn remove_with_owner(
                     if !discard && !landed::landed_on(context, tip, &target, cancel)? {
                         return Err(WorktreeError::DetachedUnmerged { head: tip });
                     }
-                    let removed = remove_named()?;
+                    let mut removed = remove_named()?;
                     outcome.removed.push(removed.info.clone());
+                    removed.repository = None;
                     detached.push(removed);
                     return Ok(outcome);
                 };
@@ -1633,10 +1648,13 @@ fn remove_with_owner(
                     cancel,
                 );
                 // A dirty or live worktree fails here, before any branch changes.
-                let removed = remove_named()?;
+                let mut removed = remove_named()?;
                 outcome.removed.push(removed.info.clone());
+                let settled =
+                    settle_branch(context, branch, tip, disposition, cancel, &mut outcome);
+                removed.repository = None;
                 detached.push(removed);
-                settle_branch(context, branch, tip, disposition, cancel, &mut outcome)?;
+                settled?;
             }
             WorktreeRemove::Merged { integration, scope } => {
                 let (integration, integration_tip) =
@@ -1698,7 +1716,6 @@ fn remove_with_owner(
         }
         Ok(outcome)
     })();
-    drop(repository);
     for removed in detached {
         if let Some(cache) = removed.lane_cache.as_deref()
             && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache)
