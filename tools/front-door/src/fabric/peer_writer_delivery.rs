@@ -89,7 +89,11 @@ fn settlement_queue_failure_does_not_claim_cleanup_was_queued()
     let cancel = CancelToken::new();
     let call = provenant_run::Request { clock: &clock, cancel: &cancel };
     let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?;
-    assert!(receipt.as_ref().is_none_or(|value| value["cleanup_deferred"] != true));
+    let receipt = receipt.ok_or("failure receipt")?;
+    assert_eq!(receipt["state"], "retained");
+    assert_eq!(receipt["retryable"], true);
+    assert!(receipt["cleanup_warning"].as_str().is_some_and(|warning| !warning.is_empty()));
+    assert!(receipt.get("cleanup_deferred").is_none());
     assert!(fixture.worktree.exists());
     std::fs::remove_file(gc.join("completions"))?;
     // A retry publishes intent and records the deferred receipt.

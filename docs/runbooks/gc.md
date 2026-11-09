@@ -135,8 +135,10 @@ removal, capped at five seconds. Applied full and pressure sweeps share
 Manual `gc --pressure` prints a notice when the project is transient or no
 eligible data is in scope; JSON exposes the reason as `notice`.
 
-Fabric settlement records `cleanup_deferred = true` and atomically publishes a
-completion request without waiting on any dispatch or collection lock. The host
+Fabric settlement atomically publishes a completion request under a non-blocking
+per-request lock. It records `cleanup_deferred = true` when it holds the lock;
+otherwise the lock holder owns the receipt. A queue failure records a retryable
+retained receipt with a warning. The host
 tick dispatches a detached worker to collect its worktree, declared output and
 Cargo caches. Settlement fetches no refs and walks no payload trees. The worker retains
 all ownership, continuation, terminal-state, live-writer, landing-proof and

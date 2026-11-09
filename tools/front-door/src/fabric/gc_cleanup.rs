@@ -114,7 +114,7 @@ fn publish(
         request: request.to_owned(),
         retry: Retry::default(),
     };
-    // No lock, spawn or network operation belongs on the settlement path.
+    // Settlement takes only a non-blocking per-request lock; it does not spawn or use the network.
     // Workers only mutate a claimed record. Requeue can therefore publish fresh
     // intent even while an earlier generation is finishing or exhausting.
     match directory.atomic_write(
