@@ -108,19 +108,6 @@ Exceptions are host-derived typed grants, never optional configuration:
    objects and the checkout's `.git` marker remain immutable; the verified host
    object database is only a read-only alternate. Host import and delivery retain
    object-integrity, custody and expected-ref checks.
-6. **Agent history.** A declared read root that is exactly a provider's history
-   directory (`~/.claude/projects`, `~/.codex/sessions`,
-   `~/.codex/archived_sessions`) or a path beneath it is excepted from the
-   credential-store read denial, so a retrospective lane can read transcripts.
-   The exception is read and clone only: no write, exec or refresh, and no
-   credential-named path below it. The store's credential files, settings and
-   `~/.claude.json` stay denied, as does everything when a profile denies
-   credential access. The declaration is the owner's: a `--read-root`, or a
-   graph node's `read_roots`, which Fabric confines to the host's
-   `allowed_read_roots`. A lane cannot grant it to itself or widen it, because
-   the shape is fixed in `validation.rs#is_agent_history_root`. History can echo
-   secrets that tools printed; session scrubbing at settlement is the only
-   mitigation.
 
 The renderer excludes only verified exception paths and operations from parent
 denials, without reopening siblings. It explicitly protects ancestors against

@@ -1120,19 +1120,6 @@ fn push_boundaries(
         .cloned()
         .collect();
     credential_reads.extend(packages.iter().cloned());
-    // A declared agent-history root is read-only: it joins the read exception
-    // but never the exec, write or refresh lists, and the stores' credential
-    // files beside it stay denied. A profile that denies credential access
-    // admits no exception at all.
-    credential_reads.extend(
-        reads
-            .iter()
-            .filter(|_| !profile.spec.deny_credential_access)
-            .filter(|grant| {
-                is_agent_history_root(&grant.path) && validate_read_exec_grant(grant).is_ok()
-            })
-            .cloned(),
-    );
     if gh {
         for root in mandatory.github() {
             push_rule(source, "allow", "file-read*", &root.path, root.scope)?;

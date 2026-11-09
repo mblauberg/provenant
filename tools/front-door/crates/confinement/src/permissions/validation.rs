@@ -425,10 +425,7 @@ pub fn refuses_lane_root(path: &Path, read: bool, home: Option<&Path>) -> bool {
 /// The grant-level form of [`refuses_lane_root`], honouring an exact grant's
 /// narrower reach.
 pub(super) fn refuses_credential_grant(grant: &PathGrant, read: bool) -> bool {
-    if read
-        && (is_codex_standalone_package(&grant.path) || is_agent_history_root(&grant.path))
-        && !encloses_credential_root(grant)
-    {
+    if read && is_codex_standalone_package(&grant.path) && !encloses_credential_root(grant) {
         return false;
     }
     is_credential_root(&grant.path) || encloses_credential_root(grant)
@@ -514,34 +511,6 @@ pub fn is_codex_standalone_package(path: &Path) -> bool {
         && *packages == OsStr::new("packages")
         && *standalone == OsStr::new("standalone")
         && *releases == OsStr::new("releases")
-        && !is_credential_root(&below.iter().collect::<PathBuf>())
-}
-
-/// Exactly a provider's session-history directory or a path beneath it:
-/// `<home>/.claude/projects`, `<home>/.codex/sessions` or
-/// `<home>/.codex/archived_sessions`, where `<home>` is `/Users/<name>` or
-/// `/home/<name>`. These hold transcripts, not credentials, but sit inside
-/// credential stores: neither `~/.claude`, `~/.codex` nor any sibling (auth,
-/// config, settings, keychains) matches, and nothing credential-named may
-/// appear below the history directory. A read grant of such a root is the
-/// typed history exception of ADR 0040; it never confers write or exec.
-pub fn is_agent_history_root(path: &Path) -> bool {
-    let normal: Vec<&OsStr> = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value),
-            _ => None,
-        })
-        .collect();
-    let [root, _user, store, history, below @ ..] = normal.as_slice() else {
-        return false;
-    };
-    (*root == OsStr::new("Users") || *root == OsStr::new("home"))
-        && matches!(
-            (store.to_str(), history.to_str()),
-            (Some(".claude"), Some("projects"))
-                | (Some(".codex"), Some("sessions" | "archived_sessions"))
-        )
         && !is_credential_root(&below.iter().collect::<PathBuf>())
 }
 
