@@ -70,10 +70,9 @@ fn codex_attempt_usage(
     usage
         .extra
         .insert("per_attempt".into(), serde_json::Value::Bool(true));
-    usage.extra.insert(
-        "session_total".into(),
-        serde_json::to_value(total).expect("usage serializes"),
-    );
+    if let Ok(value) = serde_json::to_value(total) {
+        usage.extra.insert("session_total".into(), value);
+    }
 }
 
 #[cfg(test)]
