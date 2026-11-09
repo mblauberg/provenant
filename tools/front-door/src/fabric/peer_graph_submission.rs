@@ -640,10 +640,10 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn retained_lane_settlement_collects_only_its_output_and_cache()
+fn retained_lane_settlement_leaves_output_and_cache_for_gc()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_graph_submission::retained_lane_settlement_collects_only_its_output_and_cache",
+        "fabric::peer_tests::peer_graph_submission::retained_lane_settlement_leaves_output_and_cache_for_gc",
     )? {
         return Ok(());
     }
@@ -730,7 +730,7 @@ fn retained_lane_settlement_collects_only_its_output_and_cache()
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("missing busy settlement receipt")?;
     assert_eq!(busy["state"], "retained", "{busy}");
-    assert_eq!(busy["reason"], crate::worktrees::COLLECTION_BUSY);
+    assert_eq!(busy["cleanup_deferred"], true);
     drop(collection);
     let state = provenant_os::fs::Directory::open_anchor(
         &fixture
@@ -766,8 +766,8 @@ fn retained_lane_settlement_collects_only_its_output_and_cache()
             Some(&delivery),
         )?;
         assert!(fixture.worktree.exists());
-        assert!(!fixture.worktree.join("build/artifact").exists());
-        assert!(!cache.exists(), "settled lane cache survived");
+        assert!(fixture.worktree.join("build/artifact").exists());
+        assert!(cache.exists(), "settlement must defer cache removal");
         assert_eq!(
             std::fs::read_to_string(fixture.worktree.join("saved/keep"))?,
             "keep"
@@ -782,10 +782,10 @@ fn retained_lane_settlement_collects_only_its_output_and_cache()
 }
 
 #[test]
-fn explicit_writer_refreshes_tracking_ref_while_collection_is_busy()
+fn explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_graph_submission::explicit_writer_refreshes_tracking_ref_while_collection_is_busy",
+        "fabric::peer_tests::peer_graph_submission::explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy",
     )? {
         return Ok(());
     }
@@ -836,7 +836,7 @@ fn explicit_writer_refreshes_tracking_ref_while_collection_is_busy()
         &["rev-parse", "--verify", "refs/remotes/origin/resumed-lane"],
         None,
     )?;
-    assert_eq!(crate::worktree_tests::support::code(&output), 0);
+    assert_ne!(crate::worktree_tests::support::code(&output), 0);
     drop(collection);
     Ok(())
 }

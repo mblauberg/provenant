@@ -1424,32 +1424,18 @@ persistent exclusion slots; registry reservation records do not gate admission.
 Ownership metadata only controls lane lifecycle cleanup.
 Per-attempt supervisor evidence still controls recovery of launched work.
 
-Owned lane settlement may prune its own clean checkout only after success
-without requested delivery, or after successful delivery, and when its exact
-recorded head is reachable from the pinned delivered ref or its creation base.
-Local branch deletion additionally requires proof of landed integration;
-pushes and open PRs retain local branches. Settlement rechecks ownership, terminal state, absent live lanes,
-registration, writer custody, Git sequencer state and head under the existing
-removal locks. Resumed attempts may settle a worktree whose owner is in their
-recorded continuation lineage, using the same bounded ancestry proof as resume.
+Owned lane settlement records a retention reason and `cleanup_deferred: true`
+in `worktree-settlement.json` beside the attempt result. Settlement cleanup
+performs no network operations and does not recursively inspect or remove
+worktrees, ignored output or Cargo caches. Manual and scheduled GC own that
+work and enforce ownership, terminal state, live-writer exclusion, keep paths
+and landed proof. Legacy completed removal receipts remain replayable; an
+interrupted pruning intent whose checkout is gone replays as pruned.
+Graph writers without explicit delivery retain their continuation reason.
 For an explicitly selected worktree, launch seals its owner under writer custody.
 A continuation accepts that unchanged owner even when it names an earlier lane;
 a changed owner is refused. Existing snapshots without an owner retain the
 conservative lineage check. Custody still excludes live writers.
-Ignored output uses GC's existing declared-regenerable walker
-and keep paths. Only the project's declared regenerable output may be removed;
-other ignored files retain the tree. Other worktrees keep the existing
-GC/removal policy. A host lifecycle receipt records intent before removal,
-then pruning or the retention reason in `worktree-settlement.json` beside the
-attempt result. An interrupted intent whose checkout is gone replays as pruned.
-At settlement the host best-effort refreshes the exact `origin` tracking ref
-for every writer with a branch, including explicit and adopted worktrees,
-before any prune upstream pin. The bounded fetch runs outside the collection
-lock and does not affect the lane outcome. A missing `origin` or remote branch
-is silently skipped. Other failures may add a fixed, redacted
-`tracking_ref_warning` to a lane-owned settlement receipt; they never create
-or change an adopted worktree's receipt. Concurrent refreshes of the same
-branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/confinement/src/worktrees.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
   `crates/cli/src/run.rs::tests::run_in_linked_worktree_requires_explicit_target`;
@@ -1459,10 +1445,9 @@ branch may race and produce a warning.
   `crates/confinement/src/worktrees.rs::create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
-  `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
-  `tools/front-door/src/fabric.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
-  `tools/front-door/src/fabric.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
-  `tools/front-door/src/fabric.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
+  `tools/front-door/src/fabric.rs::settlement_defers_tracking_ref_refresh`;
+  `tools/front-door/src/fabric.rs::explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy`;
+  `tools/front-door/src/fabric.rs::settlement_defers_adopted_writer_cleanup`.
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
 
 ## Ref ownership and the landed check

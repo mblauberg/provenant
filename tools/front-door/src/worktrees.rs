@@ -769,7 +769,11 @@ fn gc_project(
         roots,
         home,
         project,
-        MUTATION_TIMEOUT,
+        if read_only {
+            Duration::from_secs(2)
+        } else {
+            MUTATION_TIMEOUT
+        },
         workers,
         facts,
         read_only,
@@ -1042,7 +1046,7 @@ pub(crate) fn event_collection_lock(
     collection_lock_for(roots, Some(EVENT_LOCK_WAIT_SECS))
 }
 
-fn collection_lock_for(
+pub(crate) fn collection_lock_for(
     roots: &provenant_core::Roots,
     wait_secs: Option<u64>,
 ) -> Result<provenant_os::fs::LockGuard, Error> {
@@ -1189,14 +1193,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &roots,
             &home,
             &project.path,
-            MUTATION_TIMEOUT,
+            if command.dry_run {
+                Duration::from_secs(2)
+            } else {
+                MUTATION_TIMEOUT
+            },
             workers,
             &facts,
             command.dry_run,
             |context, cancel| {
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
-                let (upstream, upstream_error) = if command.pressure {
+                let (upstream, upstream_error) = if command.pressure || command.dry_run {
                     (None, None)
                 } else {
                     match crate::gc_support::fetch_default(context, cancel) {
@@ -1311,6 +1319,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
+        max_total_bytes: Some(
+            config
+                .gc
+                .lane_cargo_cache_max_bytes()
+                .map_err(Error::DiskSpace)?,
+        ),
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
@@ -1367,25 +1381,33 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .unwrap_or(0)
         .max(free_floor);
     let seed_policy = &config.domains.fabric.lanes.cargo_seed;
-    let seed_collection = provenant_run::target_seed_gc::collect(
-        roots.state.as_path(),
-        seed_policy.max_generations,
-        seed_policy.max_bytes,
-        command.dry_run,
-    );
+    let seed_collection = if command.dry_run {
+        Ok(Default::default())
+    } else {
+        provenant_run::target_seed_gc::collect(
+            roots.state.as_path(),
+            seed_policy.max_generations,
+            seed_policy.max_bytes,
+            false,
+        )
+    };
     // Lane build output goes last among collections: it is the largest, and
     // the sweep holds host admission while it removes.
     let build_settings = config.domains.fabric.lanes.build_settings();
-    let build_collection = provenant_run::build_dir_gc::collect(
-        roots.state.as_path(),
-        &home,
-        provenant_run::build_dir_gc::Limits {
-            max_bytes: build_settings.build_dir_cap(),
-            free_floor,
-            grace_seconds: build_settings.build_dir_grace_seconds(),
-        },
-        command.dry_run,
-    );
+    let build_collection = if command.dry_run {
+        Ok(Default::default())
+    } else {
+        provenant_run::build_dir_gc::collect(
+            roots.state.as_path(),
+            &home,
+            provenant_run::build_dir_gc::Limits {
+                max_bytes: build_settings.build_dir_cap(),
+                free_floor,
+                grace_seconds: build_settings.build_dir_grace_seconds(),
+            },
+            false,
+        )
+    };
     // Observe after every collection class, including a partially failed sweep.
     let mut alerts =
         crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
@@ -1417,18 +1439,22 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             ));
         }
     };
-    let notice = (command.pressure
-        && report.removed.is_empty()
-        && build_dirs.removed.is_empty()
-        && provider_state.removed.is_empty()
-        && provider_state.attempt_tmp.is_empty()
-        && provider_state.attempt_logs.is_empty()
-        && provider_state.expired_events == 0
-        && provider_state.errors.is_empty()
-        && worktree_cleanup
-            .iter()
-            .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
-    .then(|| "pressure collection: no eligible data in scope".into());
+    let notice = if command.dry_run {
+        Some("bounded preview: upstream refresh, worktree removal, target seed and build-profile surveys deferred to applied GC".into())
+    } else {
+        (command.pressure
+            && report.removed.is_empty()
+            && build_dirs.removed.is_empty()
+            && provider_state.removed.is_empty()
+            && provider_state.attempt_tmp.is_empty()
+            && provider_state.attempt_logs.is_empty()
+            && provider_state.expired_events == 0
+            && provider_state.errors.is_empty()
+            && worktree_cleanup
+                .iter()
+                .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
+        .then(|| "pressure collection: no eligible data in scope".into())
+    };
     // Full GC visits all session logs, including those belonging to projects
     // that are no longer registered. Pressure GC stays within its short budget.
     let chair_logs = if command.pressure {

@@ -3,6 +3,70 @@ use super::*;
 use provenant_os::fs::{FileKind, PayloadTree, entry_names, temporary_name};
 use std::collections::HashSet;
 
+/// One budget covers every output candidate in a preview. Applied collection
+/// continues to use the full proof before mutation.
+struct PreviewWalk {
+    started: std::time::Instant,
+    remaining: std::cell::Cell<usize>,
+    enabled: bool,
+}
+
+impl PreviewWalk {
+    #[allow(clippy::disallowed_methods)]
+    fn new(enabled: bool) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            remaining: std::cell::Cell::new(20_000),
+            enabled,
+        }
+    }
+
+    fn step(&self) -> Result<(), FsError> {
+        if self.enabled {
+            let remaining = self.remaining.get();
+            if remaining == 0 || self.started.elapsed() >= std::time::Duration::from_millis(500) {
+                return Err(FsError::EntryLimit { limit: 20_000 });
+            }
+            self.remaining.set(remaining - 1);
+        }
+        Ok(())
+    }
+
+    fn newest(
+        &self,
+        directory: &Directory,
+        depth: usize,
+        repositories: bool,
+    ) -> Result<i128, FsError> {
+        self.step()?;
+        if depth >= 64 {
+            return Err(FsError::EntryLimit { limit: 64 });
+        }
+        if repositories && contains_repository(directory)? {
+            return Err(FsError::RaceRefused {
+                name: ".git".into(),
+            });
+        }
+        let mut newest = directory.metadata()?.modified_ns;
+        for name in entry_names(directory, if self.enabled { 20_000 } else { 100_000 })? {
+            self.step()?;
+            if name == ".git" {
+                continue;
+            }
+            let metadata = directory.metadata_at(&name, false)?;
+            newest = newest.max(metadata.modified_ns);
+            if metadata.kind == FileKind::Directory {
+                newest = newest.max(self.newest(
+                    &directory.open_verified_directory(&name)?,
+                    depth + 1,
+                    repositories,
+                )?);
+            }
+        }
+        Ok(newest)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct WorktreeGcPolicy<'a> {
     pub upstream: Option<GitOid>,
@@ -101,8 +165,17 @@ fn collect_impl(
         keep: policy.keep.to_vec(),
         ..Default::default()
     };
+    let preview_walk = PreviewWalk::new(policy.dry_run);
     for lane in lanes {
         if lane.path == primary {
+            continue;
+        }
+        if policy.dry_run && preview_walk.step().is_err() {
+            report.output.push(OutputEntry {
+                path: lane.path.clone(),
+                removed: false,
+                reason: "preview traversal budget reached; retained".into(),
+            });
             continue;
         }
         // An unknown writer does not make ignored output disposable. Require
@@ -132,6 +205,7 @@ fn collect_impl(
                 policy,
                 cancel,
                 &mut report.idle_output,
+                &preview_walk,
             );
             match result {
                 Err(error) => report.idle_output.push(OutputEntry {
@@ -207,6 +281,7 @@ fn collect_impl(
                 &settings,
                 cancel,
                 &mut report.worktrees,
+                &preview_walk,
             ) {
                 Ok(Some(info)) if policy.dry_run => {
                     report.worktrees.removed.push(info);
@@ -309,6 +384,7 @@ fn collect_impl(
                     &protected,
                     output,
                     0,
+                    &preview_walk,
                 )?;
                 Ok(())
             };
@@ -420,6 +496,7 @@ fn collect_impl(
 }
 
 #[allow(clippy::disallowed_methods)] // Bound this filesystem walk in real time.
+#[allow(clippy::too_many_arguments)]
 fn prune_unknown_output(
     context: &WorktreeContext<'_>,
     preview_entries: &[GitWorktree],
@@ -428,6 +505,7 @@ fn prune_unknown_output(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
     output: &mut Vec<OutputEntry>,
+    preview_walk: &PreviewWalk,
 ) -> Result<(), WorktreeError> {
     if !(policy.no_live_lanes)(&lane.path) {
         return Err(WorktreeError::UnknownWriter);
@@ -457,12 +535,16 @@ fn prune_unknown_output(
     }
     let repo = locked.verified.repo();
     if policy.written_before_ns != i128::MAX {
-        let mut newest = newest_worktree(
-            repo.root_dir(),
-            0,
-            &mut 1_000_000,
-            std::time::Instant::now(),
-        )?;
+        let mut newest = if policy.dry_run {
+            preview_walk.newest(repo.root_dir(), 0, false)?
+        } else {
+            newest_worktree(
+                repo.root_dir(),
+                0,
+                &mut 1_000_000,
+                std::time::Instant::now(),
+            )?
+        };
         // Index-only operations also count as worktree activity.
         for name in ["index", "HEAD"] {
             match repo.private_dir().metadata_at(OsStr::new(name), false) {
@@ -487,6 +569,7 @@ fn prune_unknown_output(
         &protected,
         output,
         0,
+        preview_walk,
     )?;
     Ok(())
 }
@@ -689,7 +772,9 @@ fn clean_after_preview(
     root: &Path,
     output: &[OutputEntry],
     cancel: &CancelToken,
+    preview_walk: &PreviewWalk,
 ) -> Result<bool, WorktreeError> {
+    preview_walk.step()?;
     let status = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
     if exit_code(&status)? != 0 {
         return Err(WorktreeError::UnknownWriter);
@@ -734,7 +819,7 @@ fn clean_after_preview(
             }
             directory = directory.open_verified_directory(component.as_os_str())?;
         }
-        if !preview_directory_removed(&directory, &absolute, &planned, 0)? {
+        if !preview_directory_removed(&directory, &absolute, &planned, 0, preview_walk)? {
             return Ok(false);
         }
     }
@@ -746,14 +831,24 @@ fn preview_directory_removed(
     path: &Path,
     planned: &HashSet<PathBuf>,
     depth: usize,
+    preview_walk: &PreviewWalk,
 ) -> Result<bool, FsError> {
+    preview_walk.step()?;
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
     if contains_repository(directory)? {
         return Ok(false);
     }
-    for name in entry_names(directory, 100_000)? {
+    for name in entry_names(
+        directory,
+        if preview_walk.enabled {
+            20_000
+        } else {
+            100_000
+        },
+    )? {
+        preview_walk.step()?;
         let child = path.join(&name);
         if planned.contains(&child) {
             continue;
@@ -766,6 +861,7 @@ fn preview_directory_removed(
             &child,
             planned,
             depth + 1,
+            preview_walk,
         )? {
             return Ok(false);
         }
@@ -773,6 +869,7 @@ fn preview_directory_removed(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_output(
     directory: &Directory,
     root: &Path,
@@ -781,11 +878,21 @@ fn walk_output(
     protected: &ProtectedPaths,
     report: &mut Vec<OutputEntry>,
     depth: usize,
+    preview_walk: &PreviewWalk,
 ) -> Result<(), FsError> {
+    preview_walk.step()?;
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
-    for name in entry_names(directory, 100_000)? {
+    for name in entry_names(
+        directory,
+        if preview_walk.enabled {
+            20_000
+        } else {
+            100_000
+        },
+    )? {
+        preview_walk.step()?;
         if name == ".git" || name == WORKTREE_ROOT {
             continue;
         }
@@ -811,10 +918,19 @@ fn walk_output(
                     .ancestors()
                     .any(|ancestor| protected.ignored.contains(ancestor))
             {
-                prune_output(directory, &name, policy)?;
+                prune_output(directory, &name, policy, preview_walk)?;
                 Ok(true)
             } else {
-                walk_output(&child, root, &path, policy, protected, report, depth + 1)?;
+                walk_output(
+                    &child,
+                    root,
+                    &path,
+                    policy,
+                    protected,
+                    report,
+                    depth + 1,
+                    preview_walk,
+                )?;
                 Ok(false)
             }
         };
@@ -927,13 +1043,20 @@ fn prune_output(
     parent: &Directory,
     name: &OsStr,
     policy: &WorktreeGcPolicy<'_>,
+    preview_walk: &PreviewWalk,
 ) -> Result<(), FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
-    check_output_before(&directory, policy.written_before_ns)?;
     if policy.dry_run {
+        let newest = preview_walk.newest(&directory, 0, true)?;
+        if newest >= policy.written_before_ns {
+            return Err(FsError::RaceRefused {
+                name: "recent output".into(),
+            });
+        }
         return Ok(());
     }
+    check_output_before(&directory, policy.written_before_ns)?;
     let staging_name = temporary_name()?;
     parent.mkdir(&staging_name, 0o700)?;
     let staging = parent.open_verified_directory(&staging_name)?;
@@ -1026,6 +1149,7 @@ fn prepare_removal_before(
         foreign_merged_clean: false,
     };
     let mut output = Vec::new();
+    let preview_walk = PreviewWalk::new(preview_only);
     walk_output(
         repo.root_dir(),
         repo.root_path(),
@@ -1034,8 +1158,16 @@ fn prepare_removal_before(
         &protected,
         &mut output,
         0,
+        &preview_walk,
     )?;
-    if !clean_after_preview(context, repo, repo.root_path(), &output, cancel)? {
+    if !clean_after_preview(
+        context,
+        repo,
+        repo.root_path(),
+        &output,
+        cancel,
+        &preview_walk,
+    )? {
         let status = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
         let planned: Vec<_> = output
             .iter()
@@ -1069,6 +1201,7 @@ fn prepare_removal_before(
         &protected,
         &mut output,
         0,
+        &preview_walk,
     )?;
     Ok(())
 }
@@ -1147,6 +1280,7 @@ fn collect_foreign(
     settings: &provenant_config::ProjectGcSettings,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
+    preview_walk: &PreviewWalk,
 ) -> Result<Option<WorktreeInfo>, WorktreeError> {
     if !(policy.no_live_lanes)(&lane.path) {
         return Err(WorktreeError::UnknownWriter);
@@ -1171,6 +1305,7 @@ fn collect_foreign(
             branch,
             policy,
             cancel,
+            preview_walk,
         )?;
         if info.dirty == WorktreeCondition::Unknown {
             info.dirty = observed;
@@ -1209,6 +1344,7 @@ fn preview_foreign(
     branch: &GitRefName,
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
+    preview_walk: &PreviewWalk,
 ) -> Result<WorktreeCondition, WorktreeError> {
     let verified = verify_probed_worktree(context, &lane.path, cancel)?;
     // A missing slot means no writer has ever held this tree.
@@ -1246,8 +1382,16 @@ fn preview_foreign(
         &protected,
         &mut output,
         0,
+        preview_walk,
     )?;
-    if !clean_after_preview(context, verified.repo(), &lane.path, &output, cancel)? {
+    if !clean_after_preview(
+        context,
+        verified.repo(),
+        &lane.path,
+        &output,
+        cancel,
+        preview_walk,
+    )? {
         return Err(WorktreeError::Dirty(String::new()));
     }
     recheck()?;
@@ -1260,6 +1404,28 @@ fn preview_foreign(
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_budget_is_shared_and_refuses_incomplete_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        std::fs::create_dir(fixture.path().join("target"))?;
+        std::fs::write(fixture.path().join("target/keep"), b"payload")?;
+        let root = Directory::open_anchor(fixture.path())?;
+        let target = root.open_verified_directory(OsStr::new("target"))?;
+        let budget = PreviewWalk::new(true);
+        budget.remaining.set(1);
+        assert!(matches!(
+            budget.newest(&target, 0, true),
+            Err(FsError::EntryLimit { .. })
+        ));
+        assert!(budget.newest(&root, 0, true).is_err());
+        assert_eq!(
+            std::fs::read(fixture.path().join("target/keep"))?,
+            b"payload"
+        );
+        Ok(())
+    }
 
     #[test]
     fn removal_checks_nested_repositories_without_idle_cap()

@@ -197,7 +197,23 @@ impl RunStore {
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut report = ProviderStateGc::default();
+        let mut temporary_sizes = provenant_os::disk::DiskReport::with_walk_budget(
+            self.context.state_root.as_path().into(),
+            0,
+            10_000,
+            std::time::Duration::from_millis(500),
+        );
+        #[allow(clippy::disallowed_methods)] // Bound read-only maintenance in real time.
+        let preview_started = std::time::Instant::now();
         for (id, run, project, raw) in rows {
+            if dry_run && preview_started.elapsed() >= std::time::Duration::from_secs(1) {
+                report.kept.push(ProviderStateIssue {
+                    path: self.context.state_root.as_path().into(),
+                    reason: "preview budget reached; remaining attempts require an applied GC pass"
+                        .into(),
+                });
+                break;
+            }
             if projects.is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
             {
                 continue;
@@ -245,7 +261,13 @@ impl RunStore {
                 if age >= DAY_MICROS && !uncertain_loss {
                     let temporary = path.with_file_name("tmp");
                     let collection = (|| -> Result<()> {
-                        collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
+                        collect_temporary(
+                            &attempt,
+                            &temporary,
+                            dry_run,
+                            &mut report,
+                            &mut temporary_sizes,
+                        )?;
                         let pending_writer_cleanup = if record.provider_launched == Some(false)
                             && matches!(
                                 record.state,
@@ -999,6 +1021,7 @@ fn collect_temporary(
     path: &std::path::Path,
     dry_run: bool,
     report: &mut ProviderStateGc,
+    preview_sizes: &mut provenant_os::disk::DiskReport,
 ) -> Result<()> {
     let name = OsStr::new("tmp");
     match attempt.metadata_at(name, false) {
@@ -1013,9 +1036,17 @@ fn collect_temporary(
         Err(error) => return Err(error.into()),
     }
     let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
-    restore_owned_temporary_directories(attempt, name);
+    let measured = if dry_run {
+        // A preview must not repair permissions or restart its walk budget for
+        // each attempt. Size errors are explicit lower bounds only.
+        preview_sizes.entries.clear();
+        preview_sizes
+    } else {
+        restore_owned_temporary_directories(attempt, name);
+        &mut measured
+    };
     measured.measure_at("attempt_tmp", attempt, name, path);
-    for error in measured.errors {
+    for error in measured.errors.drain(..) {
         report.errors.push(ProviderStateIssue {
             path: error.path,
             reason: format!("temporary size estimate incomplete: {}", error.reason),
@@ -1079,7 +1110,17 @@ pub(crate) fn prune_caches(
     for name in &candidates {
         let candidate = subdir(&state, name, false)?;
         let provider = candidate_provider(&candidate, || {
-            candidate_provider_fallback(&candidate, record, candidates.len())
+            if dry_run {
+                // Legacy multi-candidate session discovery is a recursive
+                // migration proof. Keep it for an applied collection.
+                record
+                    .applied_route
+                    .as_ref()
+                    .and_then(|route| route.provider.as_deref())
+                    .filter(|_| candidates.len() == 1)
+            } else {
+                candidate_provider_fallback(&candidate, record, candidates.len())
+            }
         })?;
         let first = report.removed.len();
         let removal = (|| -> Result<()> {
@@ -2168,6 +2209,33 @@ mod tests {
                 .attempt_tmp
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn temporary_preview_preserves_directory_permissions() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir()?;
+        let temporary = fixture.path().join("tmp");
+        std::fs::create_dir(&temporary)?;
+        std::fs::write(temporary.join("keep"), b"diagnostics")?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o500))?;
+        let attempt = Directory::open_anchor(fixture.path())?;
+        let mut report = ProviderStateGc::default();
+        let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+            fixture.path().into(),
+            0,
+            100,
+            std::time::Duration::from_secs(1),
+        );
+        collect_temporary(&attempt, &temporary, true, &mut report, &mut sizes)?;
+        assert_eq!(
+            std::fs::metadata(&temporary)?.permissions().mode() & 0o777,
+            0o500
+        );
+        assert_eq!(std::fs::read(temporary.join("keep"))?, b"diagnostics");
+        assert_eq!(report.attempt_tmp.len(), 1);
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o700))?;
         Ok(())
     }
 

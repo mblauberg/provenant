@@ -536,6 +536,11 @@ fn tick(
         provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
     let clock = SystemClock;
     let now = clock.wall_now()?;
+    let completion_cleanup = Task::run("completion_cleanup", || {
+        crate::fabric::gc_cleanup::retry_pending(resolved.roots.state.as_path(), &resolved.home)
+            .map(|()| "queued")
+            .map_err(|error| error.to_string())
+    });
     let graphs =
         crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
             advanced: 0,
@@ -607,6 +612,7 @@ fn tick(
         steward::run(&config.domains.steward, &resolved, workers),
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
+        completion_cleanup,
     ];
     Ok(Tick { graphs, tasks })
 }

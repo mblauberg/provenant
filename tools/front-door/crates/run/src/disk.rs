@@ -220,6 +220,13 @@ fn scan_runs(
 }
 
 fn entries(directory: &Directory, path: &Path, report: &mut DiskReport) -> Vec<OsString> {
+    if report.traversal_exhausted() {
+        report.error(
+            path,
+            "inventory traversal budget reached; totals are lower bounds",
+        );
+        return vec![];
+    }
     let entries = match directory.entries() {
         Ok(entries) => entries,
         Err(error) => {
@@ -228,7 +235,11 @@ fn entries(directory: &Directory, path: &Path, report: &mut DiskReport) -> Vec<O
         }
     };
     let mut names = vec![];
-    for entry in entries {
+    for entry in entries.take(20_001) {
+        if names.len() == 20_000 {
+            report.error(path, "inventory directory entry budget reached");
+            break;
+        }
         match entry {
             Ok(name) => names.push(name),
             Err(error) => report.error(path, error.to_string()),

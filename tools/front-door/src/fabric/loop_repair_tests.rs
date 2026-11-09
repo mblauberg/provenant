@@ -371,8 +371,8 @@ fn loop_corrupt_unrelated_checkpoint_does_not_fail_ordinary_settlement()
             .store
             .worktree_settlement(fixture.settled.attempt_id, &call)?
             .ok_or("receipt")?["state"],
-        "pruned"
+        "retained"
     );
-    assert!(!fixture.worktree.exists());
+    assert!(fixture.worktree.exists());
     Ok(())
 }

@@ -164,7 +164,12 @@ fn collect_resolved(
         .find(|path| path.is_dir())
         .ok_or("missing volume")?;
     let volume = Directory::open_anchor(volume_path)?;
-    let mut report = DiskReport::new(volume_path.into(), volume.available_bytes()?);
+    let mut report = DiskReport::with_walk_budget(
+        volume_path.into(),
+        volume.available_bytes()?,
+        50_000,
+        Duration::from_secs(2),
+    );
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let mut policy = CacheGcPolicy {
@@ -173,6 +178,7 @@ fn collect_resolved(
         ),
         dry_run: true,
         free_floor_bytes: None,
+        max_total_bytes: None,
         protected_owners: Default::default(),
         project_owners: Default::default(),
         selected_only: false,

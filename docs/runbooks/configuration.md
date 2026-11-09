@@ -477,26 +477,22 @@ and neither is one written after the sweep measured it. These directories still
 count toward the cap and are reported as `recent`. Set the grace to 0 to turn
 the protection off. The grace protects only recently written directories: a test or run binary that runs longer than the grace without writing under `target/` is unprotected unless a Cargo lock is still held.
 
-Collection runs on three events:
+Collection runs on these events:
 
-- when a lane settles;
 - when lane admission finds free space below `gc.free_floor`, at most about
   once a minute while the lane waits;
 - in `provenant gc`, including the scheduled sweep, `--pressure` and
-  `--dry-run`, which previews without taking the lock.
+  applied sweeps. `--dry-run` defers the build-profile survey.
 
 The walk that measures the caches takes no lock, and a sweep that finds the cap
 and the floor already met stops there. Only removal holds the host admission
 lock, so no lane is admitted mid-removal; it probes each candidate again under
-that lock. A settling lane waits at most 5 seconds for it.
+that lock. Admission collection waits at most 5 seconds for it.
 
-Settlement does not walk the caches every time. It walks only when free space is
-below `gc.free_floor`, when the last walk is older than
-`build_dir_survey_interval_seconds` (5 minutes by default), or when that walk
-found the total within 10% of the cap. The last result is kept in the state
-root, and a settlement that finds another walk running skips. `provenant gc`
-always walks. While free space stays below the floor, each settlement walks,
-because reclaiming is the point.
+Fabric settlement does not survey or collect build output. Manual and scheduled
+GC perform those surveys; previews defer them and report that omission in
+`notice`. The legacy `build_dir_survey_interval_seconds` setting remains readable
+for existing configurations.
 
 `provenant gc` reports the directories removed or reclaimable, the bytes
 reclaimed, how many bytes of lane build output remain and how many directories
@@ -802,13 +798,13 @@ bounds the reclaimable payload under `runs/`: provider state and history,
 scratch, and captures beyond their 64 KiB tails. When accounted bytes exceed the
 cap, [GC](gc.md#bound-run-payload-bytes) evicts the oldest eligible payloads
 until the total is at 75% of it. The daily tick measures sizes in the
-background; settlement collection reads that ledger and walks nothing.
+background; GC previews read that ledger without refreshing sizes.
 The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
 results, exit evidence, recorded digests and small captures survive. The same
 rule applies inside child stores, whose databases and retained evidence stay.
 GC reports `provider_state.attempt_logs`; disk reports measure `attempt_logs`.
 `gc.schedule = false` disables scheduled retention sweeps and admission
-collection; settlement pressure collection and landing cleanup still run.
+collection; manual GC and landing cleanup remain available.
 
 `[cleanup] unlanded_days = 14` (1 to 3650) is how long a ref Provenant
 created stays when it has not landed, counted from when the ref ledger
@@ -823,6 +819,7 @@ schedule = true
 idle_days = 7
 graph_checkpoint_days = 90
 # free_floor = "100G"
+lane_cargo_cache_max = "32G"
 # alert_below = "150G"
 
 # Use the project ID from `provenant fabric identity`.
@@ -839,6 +836,14 @@ scheduled collections. The host tick continues to serve graph deadlines.
 configured number of days after their last save (default 90, range 1 to 3650).
 Pending graphs and graphs with open asks or observations remain available.
 Older reports can show a missing checkpoint for a collected graph.
+`gc.lane_cargo_cache_max` caps all marked lane Cargo caches under
+`~/Library/Caches/provenant-lane-cargo` (default `32G`, using the size syntax
+below). GC evicts oldest eligible caches first after ordinary orphan and idle
+collection. Protected and foreign caches count towards the total but remain;
+live writers and unknown writer custody can keep it above the cap. Applied GC
+reports the remaining total in `data.total_bytes_after`; bounded preview
+samples are lower bounds when `data.bytes_estimated` is true.
+
 `gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
 of 50 GiB. Set it to override that floor. GC requests additional cache
 collection until available disk space reaches the floor, after the usual
@@ -938,7 +943,7 @@ and does not require reinstalling the agent.
 ## Disk pressure
 
 `gc.free_floor` is the floor for dispatch admission, running build pauses and
-settlement pressure collection. Its default is max(10% of the state volume,
+pressure collection. Its default is max(10% of the state volume,
 50 GiB). Below it, each active lane's supervisor pauses build processes proven
 to belong to that lane. It resumes them at the same floor, and before lane
 cleanup. The provider itself, other users' builds and nested lane owners are

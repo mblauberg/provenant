@@ -126,26 +126,37 @@ tombstone.
 
 On macOS, the installed default-state host tick runs every 60 seconds and
 collects when its persisted daily deadline is due.
-`[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
-cache pruning remain available. See
+`[gc] schedule = false` disables scheduled sweeps; manual GC remains available. See
 [configuration](configuration.md#lane-cache-collection) for tick installation
 and logs. Other installations can schedule `provenant tick` explicitly.
 
-Writer admission and lane settlement use pressure collection without network
-fetches or worktree removal. Each caps its single attempt at five seconds
-and rechecks every output volume once. Applied full and pressure sweeps share
+Writer admission uses pressure collection without network fetches or worktree
+removal, capped at five seconds. Applied full and pressure sweeps share
 `<state>/gc/collection.lock`; a busy collector is skipped, not queued.
-Manual `gc --pressure` prints a notice when the project
-is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
-Lane settlement collects that lane's declared ignored output and Cargo cache,
-including when its worktree is retained for delivery pickup. Successful
-settlement, delivery integration and `land` also prune eligible worktrees
-and their caches through the existing custody checks. These event passes share
-the collection lock, apply no idle delay and leave foreign worktrees alone.
-Kept files, live writers and reservations still prevent removal. A busy
-collector skips settlement collection; the daily backstop retries eligible
-data. Provider-cache and temporary cleanup at settlement remain scoped to
-their owner. `gc.schedule = false` leaves settlement and landing cleanup enabled.
+Manual `gc --pressure` prints a notice when the project is transient or no
+eligible data is in scope; JSON exposes the reason as `notice`.
+
+Fabric settlement records `cleanup_deferred = true` and immediately queues a
+detached completion GC worker to collect its worktree, declared output and Cargo
+caches. Settlement fetches no refs and walks no payload trees. The worker retains
+all ownership, continuation, terminal-state, live-writer, landing-proof and
+expected-tip lease checks. Durable requests under `<state>/gc/completions/`
+survive interruption; each host tick retries them independently of the daily
+GC deadline and `gc.schedule`. A busy worker waits up to 120 seconds for collection
+custody before leaving its request for retry. `land` retains its explicit cleanup.
+Kept files, live writers and reservations still prevent removal.
+
+`gc --dry-run` uses the existing run-size ledger and shared bounded filesystem
+samples. It does not refresh upstream refs or survey build profiles and target
+seeds; `notice` identifies these deferred surveys. Incomplete cache sizes set
+`data.bytes_estimated = true`, and an incomplete newest-write observation
+cannot mark a cache idle. Applied GC obtains the full proof before deletion.
+
+`gc.lane_cargo_cache_max` bounds the total lane Cargo cache at 32 GiB by default.
+After orphan and idle collection, GC evicts remaining eligible caches oldest
+first. It counts live and foreign caches towards the total while retaining them;
+`data.total_bytes_after` may therefore exceed the cap. Existing worktrees need
+writer exclusion before detachment; unknown custody retains the cache.
 
 ## Remove finished lanes' refs
 
@@ -173,7 +184,7 @@ remote-tracking ref. It needs no action from you.
 - Remote names and push URLs come from the delivery endpoint recorded with
   each ref, never from a default remote name.
 
-On settlement, `prune_owned` removes the lane's worktree and, for an
+In completion GC, `prune_owned` removes the lane's worktree and, for an
 integrated lane, its created local branch; an integrated lane's own created
 remote branch goes when the integration receipt proves it landed. A pushed
 lane is not landed at settlement; its refs go on the first full `gc` pass
@@ -220,6 +231,5 @@ or missing custody hierarchy returns an observation error without initialising
 it. Scheduled previews list such roots in `unobserved_projects`.
 
 Default GC output shows aggregate counts and exceptions. Use `--json` for the
-full removal and retention records. Settlement runs one bounded pressure pass
-when any output volume is below `gc.free_floor`; the daily sweep retries
+full removal and retention records. Completion GC runs promptly after settlement; the daily sweep also retries
 eligible data left by a busy or interrupted pass.

@@ -830,6 +830,18 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
             }
         }
+        Command::Internal(provenant_cli::Internal::LaneCleanup { request }) => {
+            match fabric::gc_cleanup::run(&request, process.workers()) {
+                Ok(()) => 0,
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "LANE_CLEANUP",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Internal(provenant_cli::Internal::TickGc) => {
             tick::gc_worker(globals, process.workers())
         }
