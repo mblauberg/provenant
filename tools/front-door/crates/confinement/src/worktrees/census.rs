@@ -785,7 +785,6 @@ impl WorkerObserver for SystemWorkerObserver {
             policy.exclude_ancestors,
             &policy.entries,
             Some(keep_going),
-            true,
         );
         keep_going().then_some((evidence.states, evidence.details))
     }
@@ -810,7 +809,6 @@ impl WorkerObserver for SystemWorkerObserver {
             policy.exclude_ancestors,
             &policy.entries,
             Some(keep_going),
-            false,
         );
         keep_going().then_some((evidence.states, evidence.details))
     }
@@ -920,6 +918,9 @@ pub(super) fn system_worker_roots_with_taints(
 
 pub(super) struct PolicyCwdObserver<'a>(pub(super) &'a [CensusIgnoreEntry]);
 impl CwdObserver for PolicyCwdObserver<'_> {
+    fn process_uids(&self, pid: i64) -> Option<provenant_os::pid::ProcessUids> {
+        SystemCwdObserver.process_uids(pid)
+    }
     fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
         SystemCwdObserver.occupancy(pid)
     }
@@ -971,7 +972,7 @@ fn system_worker_evidence(
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
 ) -> WorkerEvidence {
-    system_worker_evidence_while(roots, ancestors, entries, None, false)
+    system_worker_evidence_while(roots, ancestors, entries, None)
 }
 
 fn system_worker_evidence_while(
@@ -979,7 +980,6 @@ fn system_worker_evidence_while(
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
     keep_going: Option<&dyn Fn() -> bool>,
-    strict_occupancy: bool,
 ) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
         let detail = process_detail(
@@ -1023,7 +1023,7 @@ fn system_worker_evidence_while(
         &current,
         ancestors,
         &mut |_, _| {},
-        (keep_going, strict_occupancy),
+        keep_going,
     );
     WorkerEvidence {
         states,
@@ -1173,7 +1173,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
         current,
         ancestors,
         unplaceable,
-        (None, false),
+        None,
     )
 }
 
@@ -1184,7 +1184,7 @@ pub(super) fn observe_worker_holders_while(
     current: &ProcessFact,
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
-    (keep_going, strict_occupancy): (Option<&dyn Fn() -> bool>, bool),
+    keep_going: Option<&dyn Fn() -> bool>,
 ) -> WorkerHolderAudit {
     let within_budget = || keep_going.is_none_or(|check| check());
     let mut states: BTreeMap<_, _> = roots
@@ -1242,8 +1242,8 @@ pub(super) fn observe_worker_holders_while(
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
-    // unknown. Current credentials and permissions cannot disprove a retained
-    // cwd, including one acquired before a permission or credential change.
+    // unknown. Foreign system credentials are an explicit host trust policy,
+    // not proof against a privileged process retaining a user cwd.
     for (&pid, &issue) in census.unknown_pids() {
         if !within_budget() {
             return (states, holders, details, taints);
@@ -1281,7 +1281,6 @@ pub(super) fn observe_worker_holders_while(
             child = parent;
         }
     }
-    let mut excused_gap_detail = None;
     // An incomplete census must not hide positively observed live workers.
     for fact in census.facts() {
         if !within_budget() {
@@ -1297,19 +1296,16 @@ pub(super) fn observe_worker_holders_while(
         if cwd_observer.kernel_thread(pid) && same_process(observer.observe(pid)) {
             continue;
         }
+        let uids_before = cwd_observer.process_uids(pid);
         let mut cwd = observe_same_process(observer, cwd_observer, fact);
         let mut occupancy_gap = None;
         if !matches!(cwd, NativeCwd::Gone) {
-            let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(excusal)
-                if excusal_applies(excusal, roots));
             let before = observer.observe(pid);
-            let occupancy = keep_going.map_or_else(
-                || cwd_observer.occupancy(pid),
-                |check| cwd_observer.occupancy_while(pid, check),
-            );
+            let occupancy = cwd_observer.occupancy_with_retries_while(pid, &within_budget);
             if !within_budget() {
                 return (states, holders, details, taints);
             }
+            let uids_after = cwd_observer.process_uids(pid);
             let after = observer.observe(pid);
             // A process that exited during the occupancy query (absent, or a
             // zombie of the same identity) now holds no cwd or open file, even
@@ -1332,6 +1328,32 @@ pub(super) fn observe_worker_holders_while(
                 ProcessObservation::Present(process) if process.identity != fact.identity
             );
             let stable = same_process(before) && same_process(after);
+            if uids_before != uids_after && !matches!(cwd, NativeCwd::Path(_)) {
+                cwd = NativeCwd::Unknown("credentials changed during the census".into());
+            }
+            let foreign_uids = uids_before.filter(|uids| {
+                stable
+                    && Some(*uids) == uids_after
+                    && excusal_applies(
+                        &provenant_os::pid::UnreadablePolicyExcusal { uids: *uids },
+                        roots,
+                    )
+                    && matches!(
+                        cwd,
+                        NativeCwd::Path(_)
+                            | NativeCwd::PolicyExcluded(_)
+                            | NativeCwd::PolicyRejected(_)
+                    )
+            });
+            let foreign_system = foreign_uids.is_some();
+            // Still inspect and place every positive path. Only missing evidence
+            // is scoped out; a root-owned process inside a worktree is live.
+            if let Some(uids) = foreign_uids
+                && matches!(cwd, NativeCwd::PolicyRejected(_))
+            {
+                cwd =
+                    NativeCwd::PolicyExcluded(provenant_os::pid::UnreadablePolicyExcusal { uids });
+            }
             if pid_reused {
                 // Do not let observations from the listed process classify a
                 // different process that reused its PID during the census.
@@ -1433,7 +1455,7 @@ pub(super) fn observe_worker_holders_while(
             }
             if !stable {
                 occupancy_gap = Some(provenant_os::pid::OccupancyGap::Churn);
-            } else if !occupancy.complete && (!policy_exception || strict_occupancy) {
+            } else if !occupancy.complete && !foreign_system {
                 occupancy_gap = Some(
                     occupancy
                         .gap
@@ -1441,9 +1463,6 @@ pub(super) fn observe_worker_holders_while(
                 );
             }
         }
-        // Set by the cwd arms below: what the narrowing rules may rely on.
-        let mut cwd_outside = false;
-        let mut setuid_excused = false;
         match cwd {
             NativeCwd::Gone => {}
             NativeCwd::PolicyExcluded(excusal) => {
@@ -1467,33 +1486,25 @@ pub(super) fn observe_worker_holders_while(
                 }
             }
             NativeCwd::PolicyRejected(failure) => {
-                // A setuid image on the sealed system volume has its cwd
-                // refused by its own privilege transition (login, for one).
-                // Its user-owned descendants are separate census entries.
-                setuid_excused = cwd_observer
-                    .sealed_system_image(pid)
-                    .is_some_and(|image| image.setuid_transition);
-                if !setuid_excused {
-                    unplaceable(Some(pid), failure.builtin_condition);
-                    let condition = failure.condition;
-                    record_unknown_all_with_taint(
-                        &mut states,
-                        &mut details,
-                        &mut taints,
-                        &process_detail(
-                            cwd_observer,
-                            pid,
-                            &if failure.configurable {
-                                format!(
-                                    "cwd unreadable; policy_condition={condition}; configure confinement.census_ignore_unreadable with this canonical path and team_id"
-                                )
-                            } else {
-                                format!("cwd unreadable; policy_condition={condition}")
-                            },
-                        ),
-                        TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
-                    );
-                }
+                unplaceable(Some(pid), failure.builtin_condition);
+                let condition = failure.condition;
+                record_unknown_all_with_taint(
+                    &mut states,
+                    &mut details,
+                    &mut taints,
+                    &process_detail(
+                        cwd_observer,
+                        pid,
+                        &if failure.configurable {
+                            format!(
+                                "cwd unreadable; policy_condition={condition}; configure confinement.census_ignore_unreadable with this canonical path and team_id"
+                            )
+                        } else {
+                            format!("cwd unreadable; policy_condition={condition}")
+                        },
+                    ),
+                    TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
+                );
             }
             NativeCwd::Unknown(category) => {
                 let condition = if category.starts_with("cwd ") {
@@ -1527,7 +1538,6 @@ pub(super) fn observe_worker_holders_while(
                             Some("actual cwd EPERM required (directory identity placement failed)"),
                         );
                     }
-                    cwd_outside = placed.is_empty() && !placement_failed;
                     for (root, state) in &states {
                         if state.is_unknown() {
                             details.entry(root.clone()).or_insert_with(|| {
@@ -1580,38 +1590,17 @@ pub(super) fn observe_worker_holders_while(
             }
         }
         if let Some(gap) = occupancy_gap {
-            use provenant_os::pid::OccupancyGap;
-            let descriptor_gap = matches!(
-                gap,
-                OccupancyGap::DescriptorsDenied
-                    | OccupancyGap::DescriptorsUnavailable
-                    | OccupancyGap::Churn
-                    | OccupancyGap::LimitExceeded
+            record_unknown_all_with_taint(
+                &mut states,
+                &mut details,
+                &mut taints,
+                &process_detail(
+                    cwd_observer,
+                    pid,
+                    &format!("occupancy incomplete: {}", gap.describe()),
+                ),
+                TaintCause::Uncertainty(UncertaintyReason::OccupancyIncomplete),
             );
-            let excused = (cwd_outside && descriptor_gap)
-                || (setuid_excused && gap == OccupancyGap::DescriptorsDenied);
-            if excused {
-                excused_gap_detail.get_or_insert_with(|| {
-                    process_detail(
-                        cwd_observer,
-                        pid,
-                        &format!("occupancy incomplete (excused): {}", gap.describe()),
-                    )
-                });
-            }
-            if !excused || strict_occupancy {
-                record_unknown_all_with_taint(
-                    &mut states,
-                    &mut details,
-                    &mut taints,
-                    &process_detail(
-                        cwd_observer,
-                        pid,
-                        &format!("occupancy incomplete: {}", gap.describe()),
-                    ),
-                    TaintCause::Uncertainty(UncertaintyReason::OccupancyIncomplete),
-                );
-            }
         }
     }
     if !census.listing_is_complete() {
@@ -1625,13 +1614,6 @@ pub(super) fn observe_worker_holders_while(
         );
     }
     attach_worker_evidence(&mut states, &holders, &details);
-    if let Some(detail) = excused_gap_detail {
-        for root in states.keys() {
-            details
-                .entry(root.clone())
-                .or_insert_with(|| detail.clone());
-        }
-    }
     (states, holders, details, taints)
 }
 

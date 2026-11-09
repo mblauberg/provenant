@@ -230,6 +230,12 @@ impl CensusIgnoreEntry {
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
+    /// All kernel credentials, read together. Missing evidence never excludes
+    /// a process from a caller's writer cohort.
+    fn process_uids(&self, _pid: i64) -> Option<ProcessUids> {
+        None
+    }
+
     /// Unimplemented observers must not accidentally prove non-occupancy.
     fn occupancy(&self, _pid: i64) -> OccupancyObservation {
         OccupancyObservation::default()
@@ -246,6 +252,19 @@ pub trait CwdObserver: Send + Sync {
         } else {
             OccupancyObservation::default()
         }
+    }
+
+    /// Retry transient gaps within the caller's budget, retaining every path
+    /// found on earlier attempts as positive occupancy evidence.
+    fn occupancy_with_retries_while(
+        &self,
+        pid: i64,
+        keep_going: &dyn Fn() -> bool,
+    ) -> OccupancyObservation {
+        crate::sys::pid::occupancy_with_retries_while(
+            || self.occupancy_while(pid, keep_going),
+            keep_going,
+        )
     }
 
     /// Executable image of the process, if known.
@@ -282,6 +301,11 @@ pub trait CwdObserver: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
+    fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::process_uids(pid)
+    }
+
     fn occupancy(&self, pid: i64) -> OccupancyObservation {
         let Some(pid) = i32::try_from(pid).ok().filter(|pid| *pid > 0) else {
             return OccupancyObservation::default();
@@ -342,6 +366,18 @@ impl CwdObserver for SystemCwdObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn kernel_credentials_are_complete_and_invalid_pids_supply_no_evidence() {
+        let uids = SystemCwdObserver
+            .process_uids(i64::from(std::process::id()))
+            .unwrap();
+        assert_eq!(uids.effective, crate::fs::effective_uid());
+        for pid in [0, -1, i64::MAX] {
+            assert_eq!(SystemCwdObserver.process_uids(pid), None);
+        }
+    }
 
     #[test]
     fn all_three_uids_must_be_system_accounts_and_foreign_to_the_owner() {

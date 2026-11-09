@@ -95,10 +95,16 @@ confined macOS lane: a sandboxed process cannot exec a setuid image. Use
 
 ## Unreadable process census exceptions
 
-Land cleanup refuses an incomplete process census and reports the first
-unlisted daemon with its pid, path, uids, code-signing flags and team
-identifier. The host owner may accept specific signed executables that the
-built-in macOS daemon policy cannot exclude:
+Land cleanup refuses an incomplete census for possible writers. Stable foreign
+system credentials now scope out unrelated system-process gaps without an
+executable listing; positive occupancy still keeps the worktree. The
+[census policy](../specs/supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence)
+owns that trust assumption and the cases that remain closed.
+
+The host-only signed-image listing remains a fallback when direct credential
+evidence is unavailable. A refusal that reaches this image policy reports its
+pid, path, uids, code-signing flags and team identifier. The host owner may
+accept specific signed executables through that fallback:
 
 ```toml
 [knobs]

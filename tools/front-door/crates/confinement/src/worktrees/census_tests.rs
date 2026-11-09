@@ -815,6 +815,10 @@ impl ProcessObserver for InjectedCensus {
 }
 
 impl CwdObserver for InjectedCensus {
+    fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+        self.platform_uids.get(&pid).copied()
+    }
+
     fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
         provenant_os::pid::OccupancyObservation {
             paths: vec![],
@@ -1773,6 +1777,10 @@ fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
         denied: bool,
     }
     impl CwdObserver for Listed {
+        fn process_uids(&self, _: i64) -> Option<ProcessUids> {
+            Some(test_uids(self.uid))
+        }
+
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             if self.denied {
                 Ok(CwdObservation::PermissionDenied)
@@ -2255,6 +2263,244 @@ fn nested_worker_protects_all_containing_worktrees() -> Result<(), Box<dyn Error
     Ok(())
 }
 
+mod writer_cohort {
+    use super::*;
+    use provenant_os::pid::{OccupancyGap, OccupancyObservation};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Observations {
+        cwd: CwdObservation,
+        uids: Vec<Option<ProcessUids>>,
+        credential_reads: AtomicUsize,
+        occupancy: Vec<OccupancyObservation>,
+        attempts: AtomicUsize,
+    }
+    impl CwdObserver for Observations {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(self.cwd.clone())
+        }
+        fn process_uids(&self, _: i64) -> Option<ProcessUids> {
+            let index = self.credential_reads.fetch_add(1, Ordering::SeqCst);
+            self.uids[index.min(self.uids.len() - 1)]
+        }
+        fn occupancy(&self, _: i64) -> OccupancyObservation {
+            let index = self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.occupancy[index.min(self.occupancy.len() - 1)].clone()
+        }
+        // No image-policy implementation: a system updater need not satisfy
+        // the old platform-signature or sealed-volume exception.
+    }
+
+    fn incomplete(gap: OccupancyGap) -> OccupancyObservation {
+        OccupancyObservation {
+            paths: vec![],
+            complete: false,
+            gap: Some(gap),
+        }
+    }
+    fn complete() -> OccupancyObservation {
+        OccupancyObservation {
+            paths: vec![],
+            complete: true,
+            gap: None,
+        }
+    }
+    fn observations(cwd: CwdObservation, uids: Option<ProcessUids>) -> Observations {
+        Observations {
+            cwd,
+            uids: vec![uids],
+            credential_reads: AtomicUsize::new(0),
+            occupancy: vec![complete()],
+            attempts: AtomicUsize::new(0),
+        }
+    }
+    fn processes() -> Result<InjectedCensus, Box<dyn Error>> {
+        Ok(InjectedCensus {
+            census: provenant_supervisor::census::Census::from_observations(
+                [refused_fact(100), refused_fact(200)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::new(),
+            current: refused_fact(100),
+            platform_uids: BTreeMap::new(),
+        })
+    }
+    struct Workers<'a>(&'a InjectedCensus, &'a Observations);
+    impl WorkerObserver for Workers<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            observe_worker_roots(roots, self.0, self.1, &self.0.current, false).0
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn unreadable_foreign_system_process_allows_merged_worktree_and_branch_cleanup()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let context = TestContext::new(&fixture)?;
+        let created = create(
+            &context.context(),
+            WorktreeCreate {
+                branch: "landed".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let owner = fs::metadata(&created.path)?.uid();
+        // Root is foreign on a user-owned checkout. A root-run test must not
+        // excuse a process with the checkout owner's uid, so use a service uid.
+        let system_uid = if owner == 0 { 88 } else { 0 };
+        let mut observation = observations(
+            CwdObservation::PermissionDenied,
+            Some(test_uids(system_uid)),
+        );
+        observation.occupancy = vec![incomplete(OccupancyGap::DescriptorsDenied)];
+        let processes = processes()?;
+        let workers = Workers(&processes, &observation);
+        assert!(
+            workers.observe_roots(std::slice::from_ref(&created.path))[&created.path]
+                .is_available()
+        );
+        remove(
+            &WorktreeContext {
+                workers: &workers,
+                ..context.context()
+            },
+            WorktreeRemove::Name {
+                name: "landed".into(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancel(),
+        )?;
+        assert!(!created.path.exists());
+        assert!(!branch_exists(&fixture, "landed"));
+        Ok(())
+    }
+
+    #[test]
+    fn transient_user_occupancy_gaps_converge_and_keep_earlier_positive_paths()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let outside = canonicalize(fixture._temp.path())?;
+        let owner = fs::metadata(&root)?.uid();
+        let processes = processes()?;
+        for gap in [OccupancyGap::Churn, OccupancyGap::DescriptorsUnavailable] {
+            for held in [false, true] {
+                let mut observation = observations(
+                    CwdObservation::Path(outside.clone()),
+                    Some(test_uids(owner)),
+                );
+                let mut first = incomplete(gap);
+                if held {
+                    first.paths.push(root.join("held-file"));
+                }
+                observation.occupancy = vec![first, complete()];
+                // Exercise the same budget-bound path used by landing retries.
+                let (states, holders, _, _) = observe_worker_holders_while(
+                    std::slice::from_ref(&root),
+                    &processes,
+                    &observation,
+                    &processes.current,
+                    false,
+                    &mut |_, _| {},
+                    Some(&|| true),
+                );
+                assert_eq!(
+                    states[&root].label(),
+                    if held { "live" } else { "free" },
+                    "{gap:?}"
+                );
+                assert_eq!(observation.attempts.load(Ordering::SeqCst), 2);
+                assert_eq!(holders.contains_key(&root), held);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn possible_user_writers_and_positive_system_occupants_remain_protected()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let outside = canonicalize(fixture._temp.path())?;
+        let owner = fs::metadata(&root)?.uid();
+        let system_uid = if owner == 0 { 88 } else { 0 };
+        let system = test_uids(system_uid);
+        let processes = processes()?;
+        for uids in [
+            Some(test_uids(owner)),
+            None,
+            Some(test_uids(500)),
+            Some(ProcessUids {
+                real: owner,
+                ..system
+            }),
+            Some(ProcessUids {
+                effective: owner,
+                ..system
+            }),
+            Some(ProcessUids {
+                saved: owner,
+                ..system
+            }),
+        ] {
+            let mut observation = observations(CwdObservation::PermissionDenied, uids);
+            observation.occupancy = vec![incomplete(OccupancyGap::DescriptorsDenied)];
+            let states =
+                Workers(&processes, &observation).observe_roots(std::slice::from_ref(&root));
+            assert!(states[&root].is_unknown(), "{uids:?}");
+        }
+        // Even a readable outside cwd cannot excuse an unreadable open file.
+        let mut observation = observations(CwdObservation::Path(outside), Some(test_uids(owner)));
+        observation.occupancy = vec![incomplete(OccupancyGap::DescriptorsUnavailable)];
+        assert!(
+            Workers(&processes, &observation).observe_roots(std::slice::from_ref(&root))[&root]
+                .is_unknown()
+        );
+        assert_eq!(observation.attempts.load(Ordering::SeqCst), 4);
+
+        for cwd_inside in [false, true] {
+            let mut observation = observations(
+                if cwd_inside {
+                    CwdObservation::Path(root.clone())
+                } else {
+                    CwdObservation::PermissionDenied
+                },
+                Some(system),
+            );
+            observation.occupancy = vec![OccupancyObservation {
+                paths: if cwd_inside {
+                    vec![]
+                } else {
+                    vec![root.join("held-file")]
+                },
+                ..incomplete(OccupancyGap::DescriptorsDenied)
+            }];
+            assert!(
+                Workers(&processes, &observation).observe_roots(std::slice::from_ref(&root))[&root]
+                    .is_observed()
+            );
+        }
+        let mut changing = observations(CwdObservation::PermissionDenied, Some(system));
+        changing.uids.push(Some(test_uids(owner)));
+        assert!(
+            Workers(&processes, &changing).observe_roots(std::slice::from_ref(&root))[&root]
+                .is_unknown()
+        );
+        Ok(())
+    }
+}
+
 /// What the census concludes for one process beside a candidate root.
 mod narrowing {
     use super::*;
@@ -2302,14 +2548,6 @@ mod narrowing {
     /// Observe one process (pid 200) beside the root; returns state, detail
     /// and the audited (pid, condition) pairs.
     fn observe(scripted: Scripted, zombie: bool) -> Result<Observed, Box<dyn Error>> {
-        observe_with_strict_occupancy(scripted, zombie, false)
-    }
-
-    fn observe_with_strict_occupancy(
-        scripted: Scripted,
-        zombie: bool,
-        strict: bool,
-    ) -> Result<Observed, Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let base = canonicalize(fixture._temp.path())?;
         let root = base.join("root");
@@ -2366,43 +2604,13 @@ mod narrowing {
             &current,
             false,
             &mut |pid, condition| audit.push((pid, condition)),
-            (None, strict),
+            None,
         );
         Ok((
             states[&root].clone(),
             details.get(&root).cloned().unwrap_or_default(),
             audit,
         ))
-    }
-
-    #[test]
-    fn retry_requires_complete_occupancy_even_for_outside_cwd() -> Result<(), Box<dyn Error>> {
-        for gap_kind in [
-            OccupancyGap::DescriptorsDenied,
-            OccupancyGap::DescriptorsUnavailable,
-            OccupancyGap::Churn,
-            OccupancyGap::LimitExceeded,
-        ] {
-            let (initial, _, _) = observe(path_scripted(gap(gap_kind), None), false)?;
-            let (retry, _, _) =
-                observe_with_strict_occupancy(path_scripted(gap(gap_kind), None), false, true)?;
-            assert_eq!(initial, Occupancy::Available, "{gap_kind:?}");
-            assert!(retry.is_unknown(), "{gap_kind:?}: {retry:?}");
-        }
-        let (retry, _, _) = observe_with_strict_occupancy(
-            path_scripted(
-                OccupancyObservation {
-                    paths: vec![],
-                    complete: true,
-                    gap: None,
-                },
-                None,
-            ),
-            false,
-            true,
-        )?;
-        assert_eq!(retry, Occupancy::Available);
-        Ok(())
     }
 
     /// Stands for a path that cannot be canonicalised; `observe` makes it a
@@ -2555,46 +2763,19 @@ mod narrowing {
     }
 
     #[test]
-    fn a_sealed_system_image_with_a_wholly_denied_descriptor_listing_is_excused_by_design()
+    fn persistent_descriptor_gaps_cannot_be_excused_by_an_outside_cwd_or_image()
     -> Result<(), Box<dyn Error>> {
-        let (state, _, audit) = observe(
-            path_scripted(gap(OccupancyGap::DescriptorsDenied), SYSTEM),
-            false,
-        )?;
-        assert_eq!((state).label(), "free");
-        assert!(audit.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn descriptor_gaps_outside_roots_are_excused_with_a_detail() -> Result<(), Box<dyn Error>> {
         for gap_kind in [
             OccupancyGap::DescriptorsDenied,
             OccupancyGap::DescriptorsUnavailable,
             OccupancyGap::Churn,
             OccupancyGap::LimitExceeded,
         ] {
-            let (state, detail, audit) = observe(path_scripted(gap(gap_kind), None), false)?;
-            assert_eq!(state, Occupancy::Available, "{gap_kind:?}");
-            assert!(
-                detail.contains(&format!(
-                    "occupancy incomplete (excused): {}",
-                    gap_kind.describe()
-                )),
-                "{detail}"
-            );
-            assert!(audit.is_empty());
-
-            let (state, _, _) = observe(
-                Scripted {
-                    cwd: CwdObservation::Unsupported,
-                    occupancy: gap(gap_kind),
-                    sealed: None,
-                    kernel_thread: false,
-                },
-                false,
-            )?;
-            assert_eq!(state.label(), "unknown", "{gap_kind:?}");
+            for sealed in [None, SYSTEM] {
+                let (state, detail, _) = observe(path_scripted(gap(gap_kind), sealed), false)?;
+                assert!(state.is_unknown(), "{gap_kind:?}, {sealed:?}");
+                assert!(detail.contains(gap_kind.describe()), "{detail}");
+            }
             let (state, _, _) = observe(
                 Scripted {
                     cwd: CwdObservation::Path(PathBuf::from("inside")),
@@ -2604,7 +2785,7 @@ mod narrowing {
                 },
                 false,
             )?;
-            assert_eq!(state.label(), "live", "{gap_kind:?}");
+            assert!(state.is_observed(), "{gap_kind:?}");
         }
         Ok(())
     }
@@ -2626,7 +2807,7 @@ mod narrowing {
     }
 
     #[test]
-    fn a_setuid_sealed_image_with_a_refused_cwd_is_non_occupying() -> Result<(), Box<dyn Error>> {
+    fn a_setuid_sealed_image_cannot_excuse_a_possible_user_writer() -> Result<(), Box<dyn Error>> {
         // /usr/bin/login: ruid=501, euid=0, cwd refused by the transition.
         let (state, _, audit) = observe(
             Scripted {
@@ -2637,8 +2818,8 @@ mod narrowing {
             },
             false,
         )?;
-        assert_eq!((state).label(), "free");
-        assert!(audit.is_empty());
+        assert!(state.is_unknown());
+        assert!(!audit.is_empty());
         Ok(())
     }
 
@@ -2655,7 +2836,7 @@ mod narrowing {
             false,
         )?;
         assert_eq!((state).label(), "unknown");
-        assert!(detail.contains("descriptors unavailable"), "{detail}");
+        assert!(detail.contains("cwd unreadable"), "{detail}");
         Ok(())
     }
 
