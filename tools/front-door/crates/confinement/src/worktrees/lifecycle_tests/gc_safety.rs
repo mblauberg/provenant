@@ -440,7 +440,8 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
         calls.set(count);
         if count == 1 {
             let repository_free = context
-                .project_state
+                .repo
+                .common_dir()
                 .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
                 .is_ok();
             let writer_held = matches!(
@@ -497,7 +498,8 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
             let count = calls.get() + 1;
             calls.set(count);
             let repository_held = context
-                .project_state
+                .repo
+                .common_dir()
                 .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
                 .is_err();
             if !changed.get()
@@ -578,7 +580,8 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
         {
             observations.borrow_mut().push(
                 context
-                    .project_state
+                    .repo
+                    .common_dir()
                     .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
                     .is_ok(),
             );
@@ -845,7 +848,7 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
         let mut context = test_context.context();
         let mut lane = gc_merged_worktree(&fixture, &context, "gc-census-lock")?;
         let probe = LockProbeWorkers {
-            project_state: context.project_state,
+            common: context.repo.common_dir(),
             repository_held: Default::default(),
         };
         context.workers = &probe;
@@ -887,7 +890,7 @@ fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
     let probe = LockProbeWorkers {
-        project_state: context.project_state,
+        common: context.repo.common_dir(),
         repository_held: Default::default(),
     };
     context.workers = &probe;

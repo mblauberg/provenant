@@ -75,6 +75,19 @@ confinement may deny other paths. Cargo seed and cache mechanisms belong to the
 [`measure-cargo-target-seed`](../scripts/measure-cargo-target-seed) is a host-only measurement tool; experimental timing
 results belong in their issue, not this policy.
 
+## Repository mutation ownership
+
+Worktree registry operations and writer Git setup share
+`provenant-repository.lock` in the Git common directory. Shared holders read
+configuration snapshots; exclusive holders add or remove worktrees or write
+configuration and retain the lock across the snapshots those writes depend on.
+When writer custody is already held, blocking acquisition follows `writer.lock`
+then the repository lock. A repository holder may only try a writer lock without
+waiting, so the opposite direction cannot create a blocking cycle. Slow census,
+network discovery and provider execution run without the repository lock; a
+final custody recheck may run under the mutation owner. The lock inode stays in
+place for the repository's lifetime.
+
 ## Writer dispatch
 
 Use the [lane lifecycle runbook](runbooks/lane-lifecycle.md) to explain and submit

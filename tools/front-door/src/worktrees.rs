@@ -1589,7 +1589,8 @@ fn with_context_mode<T>(
     let name = binding.project_id().to_string();
     let project_state = if read_only {
         let project_state = worktrees_state.open_verified_directory(OsStr::new(&name))?;
-        project_state.metadata_at(OsStr::new("worktrees.lock"), false)?;
+        repo.common_dir()
+            .metadata_at(OsStr::new(worktrees::REPOSITORY_LOCK), false)?;
         project_state
     } else {
         child(&worktrees_state, &name)?

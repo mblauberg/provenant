@@ -365,6 +365,26 @@ fn create_with_default(
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let facts = context.facts;
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
+    // Another setup may have changed configuration while this caller waited.
+    // Retain structural custody, then take the dependent snapshots under the
+    // mutation owner instead of rejecting a legitimate sibling's config write.
+    context.repo.revalidate_identity()?;
+    let repo = context.utility.open_repo(
+        context.executor,
+        context.repo.root_path(),
+        context.utility_budget,
+        cancel,
+    )?;
+    if !repo
+        .common_identity()
+        .same_identity(&context.repo.common_identity())
+    {
+        return Err(RepoError::IdentityChanged.into());
+    }
+    let context = &WorktreeContext {
+        repo: &repo,
+        ..*context
+    };
     context.repo.revalidate()?;
     let entries = context.facts.fresh_inventory(context, cancel)?;
     let checked_out = entries

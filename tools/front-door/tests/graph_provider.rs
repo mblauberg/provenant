@@ -1645,10 +1645,10 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         .join(binding.project_id().to_string());
     fs::create_dir_all(&registry)?;
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
-    let directory = Directory::open_anchor(&registry)?;
+    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let clock = SystemClock;
     let _held = directory.lock(
-        std::ffi::OsStr::new("worktrees.lock"),
+        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
         LockMode::Exclusive,
         WaitBudget::nonblocking(clock.mono_now()),
         &provenant_core::CancelToken::new(),
@@ -1799,10 +1799,10 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         .join(binding.project_id().to_string());
     fs::create_dir_all(&registry)?;
     fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
-    let directory = Directory::open_anchor(&registry)?;
+    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
     let clock = SystemClock;
     let _held = directory.lock(
-        std::ffi::OsStr::new("worktrees.lock"),
+        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
         LockMode::Exclusive,
         WaitBudget::nonblocking(clock.mono_now()),
         &provenant_core::CancelToken::new(),

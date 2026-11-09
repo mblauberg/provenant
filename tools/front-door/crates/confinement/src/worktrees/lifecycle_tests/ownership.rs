@@ -1113,7 +1113,8 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
     }
     // A repository mutation on another tree must not delay these claims.
     let _registry = context
-        .project_state
+        .repo
+        .common_dir()
         .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)?;
     let barrier = std::sync::Barrier::new(claims.len());
     std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
@@ -1193,7 +1194,7 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
     let tree = verify_worktree(&fixture.repo, &info.path)?;
     let probe = Probe {
         inner: context.executor,
-        registry: context.project_state,
+        registry: context.repo.common_dir(),
         calls: Default::default(),
         slot: context
             .project_state

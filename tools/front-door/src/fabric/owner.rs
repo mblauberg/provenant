@@ -3908,13 +3908,9 @@ mod journal_error_tests {
             .ok_or("deadline")?;
         owner.provision_writer_worktree(".worktrees/later", "later", source.trim())?;
         let budget = owner.writer_launch_budget.ok_or("budget")?;
-        let directory = Directory::open_anchor(
-            &rig.state
-                .join("worktrees")
-                .join(factory.context.identity.project.to_string()),
-        )?;
+        let directory = Directory::open_anchor(&rig.project.join(".git"))?;
         let held = directory.lock(
-            std::ffi::OsStr::new("worktrees.lock"),
+            std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
             LockMode::Exclusive,
             WaitBudget::nonblocking(factory.clock.mono_now()),
             &cancel,
