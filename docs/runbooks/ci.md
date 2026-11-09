@@ -135,8 +135,12 @@ and 5xx responses with doubling backoff, gives up after 180 seconds or five
 attempts, and fails at once on any other HTTP error. `scripts/test-download-with-retry`
 covers that policy against a local server.
 
-Each `taiki-e/install-action` step has a `timeout-minutes` of 3 per tool, so a
-stalled install fails rather than retrying until the job is cancelled. The
+Each workflow step that installs a tool has a `timeout-minutes`, so a stalled
+install fails rather than retrying until the job is cancelled. The shared
+`.github/actions/install-nextest` action pins nextest in one place, tries the
+prebuilt download first, and falls back to `cargo install --locked` at the same
+version when the download fails. Its calling workflow step supplies the timeout
+because composite actions do not support `timeout-minutes` on their inner steps. The
 actionlint and lychee archives are cached under a key that names their versions
 and checksums. Every run still verifies the pinned checksum before extracting
 them. Changing a pin changes its key, so update both together.

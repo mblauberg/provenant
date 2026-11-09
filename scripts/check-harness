@@ -262,6 +262,13 @@ def main():
             except (OSError, ValueError, KeyError, TypeError) as error:
                 fail(path, f"invalid route fixture: {error}")
 
+    ambient_path = re.compile(r"(?<![\w./~-])(?:\.\.?/)*(?:docs|config|scripts)/[\w./-]*|(?<![\w-])MAINTAINING\.md\b")
+    for path in (Path("GLOBAL-AGENTS.md"), Path("HARNESS.md")):
+        if path in paths:
+            for number, line in enumerate((root / path).read_text().splitlines(), 1):
+                for match in ambient_path.finditer(line):
+                    fail(path, f"line {number}: ambient file names repository path {match.group(0)}")
+
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1

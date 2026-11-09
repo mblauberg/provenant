@@ -12,4 +12,4 @@ fi
 for head in "${heads[@]}"; do
   scripts/check-added-blobs "$head"
 done
-scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations --exclude-reserved
+scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations

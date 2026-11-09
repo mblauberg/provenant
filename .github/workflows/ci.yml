@@ -92,7 +92,7 @@ jobs:
       - name: Check generated contract reference
         run: scripts/generate-reference --check
       - name: Require documentation inventory and resolvable evidence
-        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations --exclude-reserved
+        run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
       # Commands and non-evidence inline references remain advisory.
       - name: Report unresolved documentation references
         continue-on-error: true
@@ -197,10 +197,8 @@ jobs:
           add-job-id-key: false
           save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
       - name: Install nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
-        timeout-minutes: 3
-        with:
-          tool: cargo-nextest@0.9.149
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
       - name: Check literal nextest test filters
         working-directory: tools/front-door
         run: python3 ../../scripts/check-nextest-filters
@@ -328,10 +326,8 @@ jobs:
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Install nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
-        timeout-minutes: 3
-        with:
-          tool: cargo-nextest@0.9.149
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
       - name: Lint Rust workspace
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

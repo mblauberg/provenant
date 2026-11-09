@@ -63,7 +63,7 @@ and GC preview below to investigate it.
    index activity for `--idle-days` (seven days by default; scheduled GC uses
    `gc.idle_days`). Under disk pressure the output threshold becomes one day.
    Preview reports eligible output and reasons for keeping it; the worktrees remain
-   unless the project opts into `foreign_worktrees = "merged-clean"`. See the [configuration runbook](configuration.md#lane-cache-collection).
+   unless the project opts into `foreign_worktrees = "merged-clean"`. See [GC](gc.md#choose-worktrees-and-output-to-collect).
    Set `gc.alert_below` for a Fabric event and gc log message once per low-space
    dip. GC does not sweep arbitrary `/private/tmp/provenant-*` paths.
 
