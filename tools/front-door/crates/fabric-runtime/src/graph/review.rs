@@ -149,6 +149,8 @@ pub(super) fn contract_error(
                 matches!(triage.decision.as_str(), "confirmed" | "rejected")
                     && !triage.reason.trim().is_empty()
                     && !triage.root_cause.trim().is_empty()
+                    && triage.root_cause.len() <= OUTPUT_FIELD_BYTES
+                    && triage.reason.len() <= OUTPUT_FIELD_BYTES
                     && matches!(
                         triage.blocking_class.as_str(),
                         "acceptance" | "default_path_defect" | "boundary" | "data_loss" | "none"
