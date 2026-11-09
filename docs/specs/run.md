@@ -44,7 +44,7 @@ and clone failures leave the target empty and are reported in
 `cargo-target-setup.json`. Existing targets are retained. A clone is private and
 writable; no lane may write the published generation. Preparation holds the
 store lock until cloning finishes, so GC cannot remove the source mid-clone.
-- Test: `crates/run/src/cargo_seed.rs::tests`; `crates/run/src/target_seed.rs::lane_probe_tests`; `crates/run/src/writer.rs::cargo_setup_tests`; `crates/run/src/cargo_seed.rs::tests::enabled_writer_with_a_verified_pin_is_seeded_on_apfs`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`; `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`; `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
+- Test: `crates/run/src/cargo_seed.rs::tests`; `crates/run/src/target_seed.rs::lane_probe_tests`; `crates/run/src/writer.rs::cargo_setup_tests`; `crates/run/src/cargo_seed.rs::tests::enabled_writer_with_a_verified_pin_is_seeded_on_apfs`; `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`; `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`; `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
 - Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/target_seed.rs`
 
 ## Lane build output
@@ -307,7 +307,7 @@ growth is unbounded and is not counted towards the disk floor.
 
 - Why: caller claims cannot establish membership or hide a known contradiction,
   and a waiting index reader must not block unrelated Fabric writers.
-- Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider.rs::configured_grants_cannot_expose_host_indexes`
+- Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`
 - Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
 
 ## Chair associations
@@ -375,7 +375,7 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 - Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
   `crates/cli/src/run/children.rs::tests::{legacy_child_cannot_claim_a_chair_under_a_lane_chosen_run_id, child_chair_seals_the_validated_request_despite_a_lane_rewrite, continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run, continuation_cannot_redirect_its_source_to_another_runs_chair}`;
-  `crates/cli/src/run.rs::tests::operation_replays_after_its_context_ref_moves_or_is_deleted`;
+  `crates/cli/src/run/tests.rs::operation_replays_after_its_context_ref_moves_or_is_deleted`;
   `crates/run/src/dispatch_lifecycle_tests.rs::{nested_continuation_uses_host_derived_ids, nested_continuation_preserves_legacy_replay_even_before_request_publication, nested_continuation_preflight_does_not_reuse_crashed_staging}`
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
@@ -515,7 +515,7 @@ lane; silence never counts as completion or settlement.
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
   `::a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root`;
-  `crates/cli/src/run.rs::a_nested_lane_reads_the_host_ledger_when_it_opens_read_only`;
+  `crates/cli/src/run/tests_submission.rs::a_nested_lane_reads_the_host_ledger_when_it_opens_read_only`;
   `crates/cli/src/run/remote.rs::a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones`;
   `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
   `crates/fabric-runtime/src/coordination/input.rs::concurrency_above_the_task_count_is_accepted_up_to_sixteen`;
@@ -531,7 +531,7 @@ lane; silence never counts as completion or settlement.
   `crates/run/src/holder.rs::host_clock_tests::an_unreadable_host_clock_reaches_the_guardian_as_itself`;
   `crates/os/src/sys/clock.rs::host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable`;
   `::lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for`;
-  `crates/cli/src/run.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
+  `crates/cli/src/run/tests_lanes.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
   `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
 
@@ -549,7 +549,7 @@ differs.
 - Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
   `::priority_failures_degrade_and_preserve_evidence`;
   `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
-  `crates/cli/src/run.rs::render_lanes_removes_peer_terminal_controls`
+  `crates/cli/src/run/tests_lanes.rs::render_lanes_removes_peer_terminal_controls`
 - Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
 
 ## Immutable attempts, no writer replay
@@ -561,7 +561,7 @@ transient failure. A writer (an attempt that may edit files) is never replayed a
 never share a worktree.
 - Why: evidence must not be rewritten, and replaying a writer clobbers edits.
 - Test: `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
-  `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`
+  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::writer_limit_after_launch_never_tries_a_second_route`
 - Owner: `crates/run/src/store.rs`, `crates/run/src/launch.rs`
 
 ## Publication order
@@ -844,7 +844,7 @@ The `Status:` line protocol is removed.
 - Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`;
   `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
   `crates/run/src/completion.rs::tests`;
-  `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
+  `crates/providers/src/tests_stream_outcomes.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
 - Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
 
 ## A writer stops on a token budget
@@ -963,7 +963,7 @@ back to a fresh named launch under the existing resume policy.
 - Why: optional host features must declare their lane contract and keep its
   confinement and provenance through execution and recovery.
 - Test: `crates/records/src/adapters.rs::host_native_declares_a_fresh_named_writer_contract`;
-  `tests/dispatch_provider.rs::host_native_preparation_uses_the_provider_contract`;
+  `tests/graph_provider.rs::host_native_preparation_uses_the_provider_contract`;
   `::host_native_dispatch_uses_the_declared_agent_and_refuses_resume`;
   `crates/cli/src/run.rs::host_native_attempts_do_not_resume_implicitly_or_explicitly`
 - Owner: `crates/records/src/adapters.rs`, `crates/cli/src/run/provider.rs`
@@ -1198,7 +1198,7 @@ read-only to the lane, so no host path creates such a link today.
   only a link made by something other than the lane can exist, and only the
   Git control files make such a link dangerous; refusing whole build trees cost
   launches without protecting anything.
-- Test: `crates/confinement/src/permissions.rs::only_git_control_files_are_checked_for_other_names`;
+- Test: `crates/confinement/src/permissions/tests/validation.rs::only_git_control_files_are_checked_for_other_names`;
   `::a_hard_linked_exact_grant_names_its_path`;
   `::held_path_failures_name_the_path_and_the_check`;
   `::a_grant_in_a_directory_that_does_not_exist_needs_no_anchor`;
@@ -1330,7 +1330,7 @@ replacements or a guarantee against unknown secret formats.
   `::session_scrub_refuses_more_candidates_than_its_bound`;
   `::session_scrub_reaches_tool_result_text_under_projects`;
   `::token_split_across_the_session_chunk_boundary_is_redacted`;
-  `tests/dispatch_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
+  `tests/graph_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
 - Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`,
   `crates/confinement/src/redact.rs`
 
@@ -1449,18 +1449,18 @@ is silently skipped. Other failures may add a fixed, redacted
 or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
-- Test: `crates/confinement/src/worktrees.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
   `crates/cli/src/run.rs::tests::run_in_linked_worktree_requires_explicit_target`;
   `::explicit_target_or_mode_passes_the_linked_worktree_guard`;
   `::explicit_read_only_from_a_linked_worktree_dispatches`;
   `::submodule_gitfile_is_not_a_linked_worktree`;
-  `crates/confinement/src/worktrees.rs::create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones`;
+  `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
   `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
-  `tools/front-door/src/fabric.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
-  `tools/front-door/src/fabric.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
-  `tools/front-door/src/fabric.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
+  `src/fabric/peer_writer_delivery.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
+  `src/fabric/peer_graph_submission.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
+  `src/fabric/peer_writer_delivery.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
 
 ## Delivery modes and settled pickup
@@ -1525,7 +1525,7 @@ delivery; a moved head refuses verification. The failure gives an inspection
 action where the host has an identifiable PR.
 - Why: delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
-- Test: `crates/run/src/delivery_tests.rs::local_integration_fast_forwards_merges_and_replays`;
+- Test: `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_fast_forwards_merges_and_replays`;
   `::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
   `::remote_integration_refreshes_the_leased_destination`;
   `::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
@@ -1615,7 +1615,7 @@ reassigned worktrees require a new owned checkout for fresh fallback;
   `::resume_continues_a_terminal_attempt_once_with_its_route`;
   `crates/run/src/controls.rs::lineage_tests::resume_preserves_explicit_unowned_and_adopted_worktrees`;
   `::resume_refuses_a_pruned_worktree_reused_by_another_lane`;
-  `crates/cli/src/run.rs::tests::displaced_fallback_reports_unavailable_history`;
+  `crates/cli/src/run/tests_graph.rs::displaced_fallback_reports_unavailable_history`;
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
 - Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`
 

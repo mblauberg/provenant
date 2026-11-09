@@ -71,7 +71,7 @@ setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zer
 `quota` and `status` show live cooldowns and their remaining time.
 - Test: `crates/quota/src/schedule.rs::tests::reserve_adopts_a_renamed_label_for_the_same_account_key`;
   `crates/quota/src/schedule.rs::tests::report_shows_only_live_capacity_cooldowns`;
-  `crates/cli/src/run.rs::tests::lanes_show_only_live_capacity_cooldowns`;
+  `crates/cli/src/run/tests_lanes.rs::lanes_show_only_live_capacity_cooldowns`;
   `tests/dispatch_provider.rs::capacity_holder_persists_and_explicit_and_resume_ignore_cooldown`
 
 ### Settlement retry
@@ -99,7 +99,7 @@ window opens when the wait ends, and each attempt records its continuation row.
 The lane's reason names the retry and its attempt number.
 - Why: same-session capacity recovery preserves the applied route; route switches
   require verified local preparation and released custody.
-- Test: `crates/providers/src/tests.rs::agy_overload_is_typed_capacity_not_a_generic_failure`;
+- Test: `crates/providers/src/tests_stream_outcomes.rs::agy_overload_is_typed_capacity_not_a_generic_failure`;
   `::codex_usage_limit_is_quota_limited`;
   `crates/providers/src/claude.rs::overload_tests::usage_limit_is_a_typed_quota_refusal_not_a_generic_failure`;
   `crates/run/src/policy.rs::tests::writer_retry_keeps_its_granted_route_and_child_stores_never_retry`;
@@ -108,8 +108,8 @@ The lane's reason names the retry and its attempt number.
   `crates/run/src/dispatch_tests.rs::a_policy_retry_launches_for_no_launcher_before_its_sealed_time`;
   `crates/run/src/launch.rs::retry_pin_tests::redraws_of_a_pinned_granted_route_keep_the_pin`;
   `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
-  `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
-  `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
+  `crates/cli/src/route/tests_2.rs::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/cli/src/route/tests_3.rs::review_substitution_skips_refused_unused_families`;
   `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`;
   `tests/dispatch_provider.rs::interrupted_progress_recovers_on_another_account_in_the_same_worktree`
 - Owner: `crates/cli/src/run.rs`
@@ -137,7 +137,7 @@ the eligible accounts' quota using the launch admission rules; an unprobed
 provider alone is not an admission refusal. A launch still probes availability
 and rechecks current evidence before starting.
 - Why: the fallback plan is decided once and visible.
-- Test: `crates/routing/src/tests.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
+- Test: `crates/routing/src/tests/selection.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
   `crates/routing/src/fallback.rs::tests::switching_requires_safe_outcome_and_every_guard`;
   `crates/routing/src/tests/availability.rs::availability_access_and_scoped_quota_are_independent_gates`;
   `crates/cli/src/run/provider/tests_writer_scratch.rs::provider_fence_preparation_reports_causes_and_selects_available_candidate`;
@@ -245,7 +245,7 @@ in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-cali
 A confidential request admits only models whose catalogue row says they do
 neither train on nor retain prompts; price does not affect eligibility. Fast or priority service is never enabled.
 - Why: prompts carry private code; cost is not a privacy signal.
-- Test: `crates/routing/src/tests.rs::confidential_pool_excludes_training_models`
+- Test: `crates/routing/src/tests/selection.rs::confidential_pool_excludes_training_models`
 - Owner: `crates/routing/src/`
 
 ### Families come from evidence
@@ -256,8 +256,8 @@ requested ID. Decoders read documented event positions and never search
 tool or subagent output for the answering identity.
 - Why: cross-family review is an assurance claim and must not be forgeable
   by output text.
-- Test: `crates/routing/src/tests.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
-  `crates/providers/src/tests.rs::synthetic_and_api_error_messages_cannot_change_answering_identity`
+- Test: `crates/routing/src/tests/alternatives.rs::family_requires_provider_answer_evidence_at_the_same_revision`;
+  `crates/providers/src/tests_adapter_results.rs::synthetic_and_api_error_messages_cannot_change_answering_identity`
 - Owner: `crates/providers/src/`
 
 ### Closed adapter table
@@ -269,7 +269,7 @@ skill; it never waives authority, confinement or assurance gates.
 - Why: one closed list keeps every surface agreeing; routing grants no
   authority.
 - Test: `crates/cli/src/install.rs::adapter_specs_cover_config_routing_and_cli_names`;
-  `crates/routing/src/tests.rs::probe_adapters_include_only_requested_routes_pools_and_fallbacks`
+  `crates/routing/src/tests/availability.rs::probe_adapters_include_only_requested_routes_pools_and_fallbacks`
 - Owner: `crates/records/src/adapters.rs`
 
 ## Providers
@@ -281,7 +281,7 @@ outrank claimed success, provider prose about quota asserts nothing, and
 malformed or oversized frames fail closed. Session continuation binds the exact
 adapter, session, account, host, model and controls.
 - Why: a provider's text must not decide an outcome or switch identity.
-- Test: `crates/providers/src/tests.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`;
+- Test: `crates/providers/src/tests_stream_outcomes.rs::terminal_answer_and_nonzero_exit_remain_separate_facts`;
   `::continuation_preserves_session_and_rejects_changed_identity_and_grants`
 - Owner: `crates/providers/src/`
 
@@ -299,7 +299,7 @@ Agy’s selected native keychain mechanism permits its client and IPC in both
 account modes; see [authentication diagnosis](../runbooks/agy-authentication.md).
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
 - Why: the launch spec carries credentials and authority.
-- Test: `crates/providers/src/tests.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;
+- Test: `crates/providers/src/tests_accounts_and_limits.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;
   `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`;
   `::agy_isolated_account_links_its_own_keychain_and_grants_only_that_path`
 - Owner: `crates/providers/src/`
@@ -318,7 +318,7 @@ On a successful Agy result, a denial with an empty response fails the lane as
 as a non-fatal note. Denials do not override an earlier failure.
 - Why: headless permission prompts otherwise deny read-only commands, and a
   remaining denial must not be mistaken for an empty response.
-- Test: `crates/providers/src/tests.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
+- Test: `crates/providers/src/tests_launch_access.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
   `::agy_writers_exec_what_codex_writers_exec`;
   `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_compiled_profile_denies_read_root_write`;
   `tests/dispatch_provider.rs::agy_denial_result_reaches_terminal_reason`
@@ -337,7 +337,7 @@ use an empty private config directory, scrub child environments and deny
 keychain reads. Claude still holds the
 token and has outbound HTTPS, so isolation is incomplete.
 - Why: credential writes belong to the user's own sign-in flow.
-- Test: `crates/providers/src/tests.rs::claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token`;
+- Test: `crates/providers/src/tests_account_identity.rs::claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token`;
   `::claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token`;
   `::claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools`
 - Owner: `crates/providers/src/claude.rs`, `crates/providers/src/host.rs`
@@ -357,7 +357,7 @@ identify empty output, without quoting captured contents.
   version-probe failure needs an actionable diagnostic without output disclosure.
 - Test: `crates/providers/src/quota_live/claude.rs::fixed_directory_rejects_changed_account_fingerprint`;
   `crates/providers/src/host.rs::start_up_sweeps_crashed_probes_but_never_a_live_one`;
-  `crates/cli/src/run/provider.rs::version_probe_reports_outcomes_without_disclosing_output`
+  `crates/cli/src/run/provider/tests_provider_auth_setup.rs::version_probe_reports_outcomes_without_disclosing_output`
 - Owner: `crates/providers/src/identity.rs`, `crates/providers/src/host.rs`,
   `crates/cli/src/run/provider.rs`
 
@@ -369,7 +369,7 @@ credentials stay in memory and are never logged, written, put on argv or
 passed in a child environment; linked credential files are rejected, and usage calls pass the
 header to `curl --config -` on stdin.
 - Why: the user decides which account pays, and a probe must not leak.
-- Test: `crates/routing/src/tests.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`;
+- Test: `crates/routing/src/tests/availability.rs::account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks`;
   `tests/quota.rs::disabled_modes_never_read_auth_or_invoke_external_tools`.
   No test asserts tokens are absent from curl argv and environment, or that
   credentials are never copied between directories (gaps).
@@ -422,17 +422,17 @@ Compatibility: the four reason codes are new `RouteExclusionReason` variants;
 older readers that reject unknown variants cannot read records carrying them.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
-  `crates/routing/src/tests.rs::stale_availability_is_selectable_but_current_account_wins`;
+  `crates/routing/src/tests/alternatives.rs::stale_availability_is_selectable_but_current_account_wins`;
   `::independent_pool_reset_and_refusal_scope`;
-  `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`;
-  `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;
+  `tests/graph_provider.rs::codex_capacity_settles_without_quota_refusal`;
+  `crates/routing/src/tests/policies.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;
   `crates/quota/src/admission.rs::admission_tests::account_block_types_mismatch_free_and_scoped_refusals`;
-  `crates/routing/src/tests.rs::persisted_mismatch_excludes_account_and_selects_another`;
+  `crates/routing/src/tests/exclusions.rs::persisted_mismatch_excludes_account_and_selects_another`;
   `::invalid_account_evidence_excludes_only_that_account`;
   `::free_pool_refusal_excludes_the_account_for_every_free_model`;
   `::live_scoped_refusal_excludes_only_the_matching_account_and_model`;
-  `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
-  `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
+  `crates/cli/src/route/tests_2.rs::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/cli/src/route/tests_3.rs::review_substitution_skips_refused_unused_families`;
   `crates/records/tests/forward_compatibility.rs::route_exclusion_reason_codes_round_trip`
 - Owner: `crates/quota/src/admission.rs`
 
@@ -546,7 +546,7 @@ configuration.
 - Why: a lane-chosen Git or helper would run with host authority.
 - Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
   `crates/confinement/src/utility.rs::executable_pin_keeps_the_locator_and_follows_a_swapped_target`;
-  `crates/cli/src/run/provider.rs::host_write_paths_reach_writers_only`
+  `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::host_write_paths_reach_writers_only`
 - Owner: `crates/os/src/git.rs`
 
 ## Not provided

@@ -406,7 +406,7 @@ Missing reviewer fields print `unknown`.
 and `reviewer` with `provenance`, `actor_id`, `model` and `family`.
 - Why: chairs can cite grep-able provenance without calling a writer a reviewer
   or guessing provider defaults.
-- Test: `tests/dispatch_provider.rs::receipt_output_resolves_run_task_and_attempt`;
+- Test: `tests/graph_provider.rs::receipt_output_resolves_run_task_and_attempt`;
   `::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
   `::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
   `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`
@@ -639,7 +639,7 @@ Retrying an already-merged PR bypasses CI and merge and retries safe cleanup.
   `::pr_land_changes_nothing_when_the_merge_does_not_happen`;
   `::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone`;
   `::pr_land_leaves_a_reused_branch_name_alone`;
-  `crates/confinement/src/worktrees.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`
+  `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::named_removal_refuses_a_head_that_moved_after_the_callers_check`
 - Owner: `src/pr/land.rs`, `src/worktrees.rs`, `crates/confinement/src/worktrees.rs`
 
 ### Pull request bodies come from receipts

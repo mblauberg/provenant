@@ -117,7 +117,7 @@ priced at the output rate and providers count it inside output.
 - Why: a share that counts providers which never report a split reads as a
   cache miss, and a token total that includes cached input is not input.
 - Test: `crates/telemetry/src/tests.rs::cache_read_share_is_reported_per_model_account_provider_and_source`;
-  `crates/providers/src/tests.rs::codex_cached_input_is_cache_read_and_leaves_uncached_input`
+  `crates/providers/src/tests_stream_outcomes.rs::codex_cached_input_is_cache_read_and_leaves_uncached_input`
 - Owner: `crates/telemetry/src/reducer.rs`, `crates/providers/src/`
 
 ## Chair usage is read from the session transcript

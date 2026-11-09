@@ -23,7 +23,7 @@ if none remains, the findings block is invalid.
 
 - Why: reviewers can reconcile findings by identity without repeating their descriptions.
 - Test: `crates/fabric-runtime/src/graph/outputs.rs::alias_tests::unknown_identity_warns_when_another_disposition_is_valid`;
-  `crates/fabric-runtime/src/graph/graph_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
+  `crates/fabric-runtime/src/graph/graph_synthesis_findings_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
   `tests/dispatch_provider.rs::review_resolves_identity_only_dispositions`
 - Owner: `src/preset.rs`, `crates/fabric-runtime/src/graph/outputs.rs`
 
@@ -492,10 +492,10 @@ idle runs or uncommitted edits can be inspected, and is reclaimed later
 through gc or disk reclaim.
 - Why: lifecycle automation must preserve the distinction between publishing
   evidence and accepting a change under the repository's workflow.
-- Test: `crates/run/src/delivery_tests.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
-  `src/fabric.rs::graph_submission_refuses_a_push_to_main_before_admission`;
-  `src/fabric.rs::graph_submission_replays_an_accepted_push_after_protection_changes`;
-  `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`.
+- Test: `crates/run/src/delivery_tests/settlement.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
+  `src/fabric/peer_graph_submission.rs::graph_submission_refuses_a_push_to_main_before_admission`;
+  `src/fabric/peer_graph_submission.rs::graph_submission_replays_an_accepted_push_after_protection_changes`;
+  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`.
 - Owner: `crates/run/src/delivery.rs`, `src/fabric.rs`; acceptance remains with `crates/workflow`
 
 ## Bounded planner pattern expansion

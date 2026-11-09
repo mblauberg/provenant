@@ -323,7 +323,7 @@ host path or an arbitrary source error is omitted; uncertain handoffs name the
 operation to inspect instead of directing a new launch.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
-  `src/fabric.rs::peer_run_errors_stay_typed_through_cli_rendering`
+  `src/fabric/peer_writer_delivery.rs::peer_run_errors_stay_typed_through_cli_rendering`
 - Owner: `crates/fabric-runtime/src/coordination/facade.rs`
 
 ## Bounded graphs and route fallback
@@ -376,7 +376,7 @@ is retryable; an active writer remains a refusal. The launch retry limit and
 backoff are fixed with the attempt from the configured knobs. A launch retry
 requires a wall clock to record its wake: if that clock or the computed deadline
 is unavailable, advancement returns a refusal and leaves the prior checkpoint.
-- Test: `crates/fabric-runtime/src/graph/graph_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
+- Test: `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
   `::launch_retry_kinds_are_decided_from_the_typed_error_only`;
   `::launch_retry_policy_limits_failures_and_persists_the_source`
 - Owner: `crates/fabric-runtime/src/graph.rs`
@@ -607,7 +607,7 @@ writers. In a composite, `continues` follows the same local-name rules as
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::repair_reuses_the_writer_worktree_and_pushes_only_to_its_branch`;
   `::a_repair_without_a_delivered_branch_fails_before_launch`;
   `::continuation_and_land_wiring_is_checked_before_launch`;
-  `crates/run/src/delivery_tests.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`.
+  `crates/run/src/delivery_tests/prepare.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`.
 - Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/fabric.rs`,
   `crates/run/src/delivery.rs`
 
@@ -638,7 +638,7 @@ as a task. Omitting `kind`, or setting it to `task`, preserves task behaviour.
 - Why: one configurable agent can combine results for different purposes without
   adding a node kind for each purpose.
 - Test: `crates/fabric-runtime/src/graph.rs::synthesise_receives_selected_reviewer_findings_and_emits_typed_output`;
-  `crates/fabric-runtime/src/graph.rs::synthesise_requires_selected_inputs`;
+  `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::synthesise_requires_selected_inputs`;
   `crates/fabric-runtime/src/graph.rs::synthesise_json_preserves_purpose_and_rejects_unknown_configuration`.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
@@ -735,7 +735,7 @@ deliver once its active paths succeed, with gate evidence and skipped nodes
 recorded in the final PR body.
 
 - Why: deterministic decisions need durable evidence without a provider launch.
-- Test: `crates/fabric-runtime/src/graph.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
+- Test: `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
   `::gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities`;
   `::gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume`;
   `::gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery`;
@@ -757,7 +757,7 @@ recorded in the final PR body.
   `::pending_ci_does_not_consume_attempt_concurrency`;
   `::ci_failure_activates_recovery_path`;
   `::ci_validation_rejects_bad_targets_and_timeouts`;
-  `crates/fabric-runtime/src/graph.rs::agent_json_still_requires_explicit_access`;
+  `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::agent_json_still_requires_explicit_access`;
   `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
   `::gate_skipped_chain_replays_every_save_after_the_gate_decision`;
   `::gate_reachability_handles_two_gates_and_deep_paths`;
@@ -863,7 +863,7 @@ remain in use. Existing graph budget and limit extensions still apply.
   `::loop_body_integrate_requires_the_graph_integration_branch`;
   `::loop_rounds_integrate_from_the_head_the_previous_round_delivered`;
   `::loop_stops_when_the_target_moved_after_the_previous_delivery`;
-  `crates/run/src/delivery_tests.rs::fast_forward_only_integration_advances_but_never_merges`;
+  `crates/run/src/delivery_tests/remote_delivery.rs::fast_forward_only_integration_advances_but_never_merges`;
   `::loop_body_failure_blocks_later_rounds_and_dependants`.
 - Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
 
@@ -955,7 +955,7 @@ graph advance compares the deadline with the host wall clock itself.
   `::a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it`;
   `::decide_timeouts_past_a_century_are_kept_until_the_deadline_overflows`;
   `crates/fabric-runtime/src/graph/loop_tests.rs::loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled`;
-  `src/fabric.rs::graph_ask_inbox_tests::graph_ask_inbox_replays_requests_and_acknowledged_answers`;
+  `src/fabric/graph_tests.rs::graph_ask_inbox_replays_requests_and_acknowledged_answers`;
   `::graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume`;
   `::cancel_closes_a_legacy_loop_request_by_its_original_operation`;
   `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`.
@@ -1100,7 +1100,7 @@ edge and continuation slots, including when every current attempt has settled.
 
 - Why: bounded slicing and honest handoffs should advance through the same
   scheduler, persistence and delivery path as static graphs and loops.
-- Test: `crates/fabric-runtime/src/graph.rs::plan_fixture_expands_and_replays_without_replanning`;
+- Test: `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::plan_fixture_expands_and_replays_without_replanning`;
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_effective_limits_and_ceiling_before_saving`;
   `::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
   `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
@@ -1110,7 +1110,7 @@ edge and continuation slots, including when every current attempt has settled.
   `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;
   `::expansion_at_node_budget_reads_journal_once`;
   `::plan_inside_loop_keeps_round_membership_after_checkpoint_serialisation`;
-  `src/fabric.rs::graph_status_handles_pause_left_after_terminal_checkpoint`.
+  `src/fabric/graph_tests.rs::graph_status_handles_pause_left_after_terminal_checkpoint`.
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`, `src/fabric.rs`
 
 ### Typed node outputs
@@ -1291,7 +1291,7 @@ delimiter collisions escaped. Result digests and excerpts are passed instead
 of transcripts. Paths remain visible in status but are omitted from downstream
 briefs.
 - Why: downstream nodes can use bounded evidence without copying transcripts.
-- Test: `crates/fabric-runtime/src/graph.rs::outputs_feed_direct_dependants_and_survive_replay`;
+- Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`;
   `::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
   `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
   `::matched_required_contract_cannot_override_ambiguous_verdict_evidence`;
@@ -1300,7 +1300,7 @@ briefs.
   `crates/records/src/result_capture.rs::verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries`;
   `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
   `crates/run/src/tests.rs::streamed_verdict_evidence_validates_complete_large_artifacts`;
-  `src/fabric.rs::graph_owner_fails_node_when_result_integrity_is_lost`
+  `src/fabric/peer_graph_routing.rs::graph_owner_fails_node_when_result_integrity_is_lost`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Checkpoint before launch
@@ -1317,7 +1317,7 @@ before calling run, so replay returns the existing attempt. A checkpoint
 missing launch evidence or the submitting actor is refused, and digests
 detect tampering. Cancelling a graph persists the admission fence first.
 - Why: a restart must never launch a node twice.
-- Test: `crates/fabric-runtime/src/graph.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
+- Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
   `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`;
   `crates/fabric-runtime/src/graph/transitions.rs::complete_attempt_transition_needs_no_owner_or_journal`;
   `::preparation_transitions_enforce_pinned_sources_and_input_capacity_without_io`
@@ -1400,8 +1400,8 @@ before reporting delivery. A missing or invalid identity leaves delivery
 unsettled. If the checkpoint write fails, retry reconciles the existing PR
 before any creation rather than assuming the first result was not published.
 - Why: a launched writer may have effects; read-only classified refusals can be retried within budget.
-- Test: `crates/fabric-runtime/src/graph/graph_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`;
-  `crates/fabric-runtime/src/graph/graph_tests.rs::fallback_outcomes_are_named_by_access_and_launch_state`
+- Test: `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`;
+  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::fallback_outcomes_are_named_by_access_and_launch_state`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Settlement advances graphs
@@ -1418,9 +1418,9 @@ worktree is missing, tick reports the graph once and continues with other
 work; restoring the worktree or cancelling the graph resolves the condition.
 Pending graphs remain protected from checkpoint retention.
 - Why: dependants progress without scanning unrelated terminal graphs.
-- Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory`;
+- Test: `crates/fabric-runtime/src/graph/journal_tests.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory`;
   `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
-  `src/fabric/facade_tests.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
+  `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ## Landing
@@ -1581,12 +1581,12 @@ names the admitted graph ID.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
   `crates/confinement/src/scratch.rs::scratch_ensure_respects_the_callers_lock_budget`;
   `crates/confinement/src/scratch.rs::scratch_ignores_legacy_root_and_never_touches_it`;
-  `src/preset_tests.rs::graph_publication_repairs_owned_loose_directory`;
+  `src/fabric/graph_document.rs::graph_publication_repairs_owned_loose_directory`;
   `src/fabric/preset_graph.rs::refusal_names_the_path_mode_and_repair`;
-  `src/fabric/facade_tests.rs::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root`;
+  `src/fabric/peer_graph_submission.rs::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root`;
   `src/preset_tests.rs::preset_wait_prepares_scratch_once_across_polls`,
   `::preset_wait_retries_an_injected_scratch_failure_after_graph_admission`;
-  `crates/cli/src/run/provider.rs::writers_read_the_primary_checkouts_untracked_scratch`.
+  `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::writers_read_the_primary_checkouts_untracked_scratch`.
 - Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider.rs`, `src/fabric.rs`
 
 ### Graph delivery
@@ -1622,11 +1622,11 @@ eligible for advancement or manual resume. Neither conflicts nor unknown
 launches are auto-resolved.
 - Why: lanes can feed one integration branch while the graph owns the single
   review boundary and reuses run's delivery checks.
-- Test: `crates/fabric-runtime/src/graph.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
+- Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
   `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
-  `src/fabric.rs::graph_submission_pins_the_integration_base_across_replay`;
-  `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
-  `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
+  `src/fabric/peer_graph_submission.rs::graph_submission_pins_the_integration_base_across_replay`;
+  `crates/run/src/delivery_tests/remote_delivery.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
+  `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
 `status GRAPH --wait=DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.
