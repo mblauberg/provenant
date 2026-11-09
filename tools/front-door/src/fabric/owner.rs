@@ -3478,6 +3478,15 @@ impl BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
+                let preparation_cause = match &attempt.state {
+                    AttemptState::Terminal { extra, .. } => {
+                        extra.get("terminal_cause").cloned().and_then(|value| {
+                            serde_json::from_value::<provenant_records::run::TerminalCause>(value)
+                                .ok()
+                        })
+                    }
+                    _ => None,
+                };
                 let (result, result_warning) =
                     if attempt.result.is_some() || outcome == Outcome::Succeeded {
                         let captured = if remote {
@@ -3517,6 +3526,21 @@ impl BoundGraphOwner<'_> {
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
                         AttemptOutcome::OtherFailure
+                    } else if !launched
+                        && outcome == Outcome::Rejected
+                        && attempt.preparation_failure.is_none_or(|failure| {
+                            failure == provenant_records::run::PreparationFailure::AdapterUnavailable
+                        })
+                        && let Some(cause) = preparation_cause
+                        && !matches!(
+                            cause,
+                            provenant_records::run::TerminalCause::PreparationRefused
+                                | provenant_records::run::TerminalCause::CommandUnavailable
+                        )
+                    {
+                        // The fallback classification describes route policy,
+                        // not the cause (for example an unregistered account).
+                        AttemptOutcome::PreparationRefused(cause)
                     } else if let Some(failure) = attempt.preparation_failure {
                         match failure {
                             provenant_records::run::PreparationFailure::AuthRequired => {
@@ -3558,9 +3582,10 @@ impl BoundGraphOwner<'_> {
                                 AttemptOutcome::DeadlineExceeded
                             }
                             Outcome::TimedOut => AttemptOutcome::OtherFailure,
-                            // A route refused before launch leaves the next route free to try.
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-                            Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
+                            Outcome::Rejected if !launched => AttemptOutcome::PreparationRefused(
+                                preparation_cause.unwrap_or(provenant_records::run::TerminalCause::PreparationRefused),
+                            ),
                             Outcome::ReviewRequired if matches!(
                                 &attempt.state,
                                 AttemptState::Terminal { extra, .. }
