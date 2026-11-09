@@ -126,29 +126,54 @@ pub(super) fn make_outputs_with_upstream(
         }
         valid
     });
-    // Leading items first: a handoff lists the most pressing work first.
-    let handoff_remaining = result
-        .and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref))
-        .map(|handoff| {
-            let mut kept: Vec<String> = Vec::new();
-            for item in &handoff.remaining {
-                kept.push(item.clone());
-                if canonical_len(&kept) > REMAINING_BYTES {
-                    kept.pop();
-                    warnings.push(bounded(
-                        &format!(
-                            "handoff remaining items cut to {} of {}",
-                            kept.len(),
-                            handoff.remaining.len()
-                        ),
-                        WARNING_BYTES,
-                    ));
-                    break;
-                }
+    // Remaining work and spec concerns share one bounded checkpoint projection.
+    // Full entries stay in the immutable result and handoff artifacts.
+    let handoff = result.and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref));
+    let spec_concern_count = handoff.map_or(0, |handoff| handoff.spec_concerns.len());
+    let mut kept_concerns = Vec::<provenant_records::handoff::SpecConcern>::new();
+    let mut kept_remaining = Vec::<String>::new();
+    let projection_bytes =
+        |remaining: &[String], concerns: &[provenant_records::handoff::SpecConcern]| {
+            // Without concerns, preserve the original remaining-array budget.
+            if spec_concern_count == 0 {
+                return canonical_len(&remaining);
             }
-            kept
-        })
-        .filter(|items| !items.is_empty());
+            canonical_len(&serde_json::json!({
+                "remaining":remaining,
+                "spec_concerns":concerns,
+                "spec_concern_count":spec_concern_count,
+            }))
+        };
+    if let Some(handoff) = handoff {
+        for concern in &handoff.spec_concerns {
+            kept_concerns.push(concern.clone());
+            if projection_bytes(&kept_remaining, &kept_concerns) > REMAINING_BYTES {
+                kept_concerns.pop();
+                break;
+            }
+        }
+        for item in &handoff.remaining {
+            kept_remaining.push(item.clone());
+            if projection_bytes(&kept_remaining, &kept_concerns) > REMAINING_BYTES {
+                kept_remaining.pop();
+                break;
+            }
+        }
+        if kept_concerns.len() < handoff.spec_concerns.len() {
+            warnings.push(bounded(&format!(
+                "handoff spec concerns retained {} of {}; full entries: {} and the attempt handoff.json",
+                kept_concerns.len(), handoff.spec_concerns.len(), path.as_deref().unwrap_or("the attempt result artifact")
+            ), WARNING_BYTES));
+        }
+        if kept_remaining.len() < handoff.remaining.len() {
+            warnings.push(bounded(&format!(
+                "handoff remaining items cut to {} of {}; full entries in the attempt result and handoff.json",
+                kept_remaining.len(), handoff.remaining.len()
+            ), WARNING_BYTES));
+        }
+    }
+    let handoff_remaining = (!kept_remaining.is_empty()).then_some(kept_remaining);
+    let spec_concerns = (spec_concern_count > 0).then(|| serde_json::json!(kept_concerns));
     let verdict_error = result.and_then(|capture| {
         if capture.source_truncated {
             Some("result truncated before the verdict could be verified".to_owned())
@@ -182,6 +207,45 @@ pub(super) fn make_outputs_with_upstream(
         .filter(|design| design.get("within_scope").is_some_and(serde_json::Value::is_boolean)
             && design.get("one_way_door").is_some_and(serde_json::Value::is_boolean))
         .map(|design| serde_json::json!({"within_scope":design["within_scope"],"one_way_door":design["one_way_door"]}));
+    let spec_defect_count = findings
+        .iter()
+        .filter(|finding| finding.spec_defect())
+        .count();
+    let repair_items = result
+        .filter(|capture| !capture.source_truncated)
+        .and_then(|capture| findings_block(capture).ok())
+        .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .and_then(|block| block.get("repair_items").cloned())
+        .filter(|items| {
+            canonical_len(items) <= FINDINGS_BYTES
+                && items.as_array().is_some_and(|items| {
+                    items.len() <= MAX_FINDINGS
+                        && items.iter().all(|item| {
+                            let text = |key| {
+                                item.get(key)
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|value| {
+                                        !value.trim().is_empty()
+                                            && value.len() <= OUTPUT_FIELD_BYTES
+                                    })
+                            };
+                            text("id")
+                                && text("reason")
+                                && item
+                                    .get("status")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|status| {
+                                        matches!(
+                                            status,
+                                            "fixed"
+                                                | "removed-the-case"
+                                                | "disputed"
+                                                | "design-cannot-hold"
+                                        ) && (status != "design-cannot-hold" || text("alternative"))
+                                    })
+                        })
+                })
+        });
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
         ResultOutput {
@@ -200,6 +264,16 @@ pub(super) fn make_outputs_with_upstream(
             .map(|tier| ("risk_tier".into(), tier.into()))
             .into_iter()
             .chain(repair_design.map(|design| ("repair_design".into(), design)))
+            .chain(repair_items.map(|items| ("repair_items".into(), items)))
+            .chain(spec_concerns.map(|concerns| ("spec_concerns".into(), concerns)))
+            .chain(
+                (spec_concern_count > 0)
+                    .then(|| ("spec_concern_count".into(), spec_concern_count.into())),
+            )
+            .chain(
+                (spec_defect_count > 0)
+                    .then(|| ("spec_defect_count".into(), spec_defect_count.into())),
+            )
             .collect(),
         verdict_error,
         schema_version: 2,
@@ -475,7 +549,18 @@ fn parse_findings(
                     .as_object()
                     .ok_or_else(|| fail("id", "invalid upstream finding"))?
                 {
-                    if field != "disposition" && field != "reason" && field != "propagates" {
+                    if matches!(field.as_str(), "trigger" | "triage") {
+                        entry.entry(field.clone()).or_insert_with(|| value.clone());
+                    } else if field == "verification"
+                        && entry
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| {
+                                matches!(value, "upheld" | "falsified" | "unverifiable" | "new")
+                            })
+                    {
+                        // A verifier's typed decision supersedes the prior decision.
+                    } else if !matches!(field.as_str(), "disposition" | "reason" | "propagates") {
                         entry.insert(field.clone(), value.clone());
                     }
                 }
@@ -575,6 +660,9 @@ fn parse_findings(
                         | "design_defect"
                         | "risk_grew"
                         | "scope_grew"
+                        | "trigger"
+                        | "triage"
+                        | "kind"
                 )
             });
             finding.summary.clear();
@@ -1010,8 +1098,13 @@ pub(super) fn selected_findings(
 ) -> Vec<(String, Finding)> {
     resolved_inputs(node, plan, checkpoint, positions, false)
         .into_iter()
+        .filter(|item| !repair_writer(node) || repair::blocking(&item.finding))
         .map(|item| (item.source, item.finding))
         .collect()
+}
+
+pub(super) fn repair_writer(node: &PlannedNode) -> bool {
+    node.extra.get("repair_writer") == Some(&serde_json::Value::Bool(true))
 }
 
 /// Full identities from selected truncated composites, including nested members.
@@ -1117,6 +1210,13 @@ pub(super) fn required_input_unavailable(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<String> {
+    if repair_writer(node)
+        && resolved_inputs(node, plan, checkpoint, positions, false)
+            .iter()
+            .any(|item| item.finding.triage().is_none())
+    {
+        return Some("checked finding triage before repair writer".into());
+    }
     for input in &node.inputs {
         let source = positions
             .get(&input.node)
@@ -1273,7 +1373,7 @@ pub(super) fn render_input(
                 prompt.push_str(&section);
             }
             let value = match kind {
-                OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated}))),
+                OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated,"repair_items":outputs.extra.get("repair_items")}))),
                 OutputKind::Verdict => serde_json::to_string(&outputs.verdict.as_ref().filter(|_| positions.get(&input.node).is_some_and(|index| verdict_available(&plan.nodes[*index], &checkpoint.nodes[*index], outputs)))),
                 OutputKind::Findings => {
                     // A composite may retain a useful partial selection. Its
@@ -1287,7 +1387,19 @@ pub(super) fn render_input(
                         selected.iter().filter(|(source, _)| source == &input.node)
                             .map(|(_, finding)| finding).collect::<Vec<_>>()
                     });
-                    serde_json::to_string(&findings)
+                    if repair_writer(node) {
+                        let mut groups: std::collections::BTreeMap<String, Vec<&Finding>> = Default::default();
+                        for finding in findings.into_iter().flatten() {
+                            if let Some(triage) = finding.triage() {
+                                groups.entry(triage.root_cause).or_default().push(finding);
+                            }
+                        }
+                        serde_json::to_string(&groups.into_iter().map(|(invariant, findings)| {
+                            serde_json::json!({"id":invariant,"invariant":invariant,"findings":findings})
+                        }).collect::<Vec<_>>())
+                    } else {
+                        serde_json::to_string(&findings)
+                    }
                 },
                 OutputKind::Branch => serde_json::to_string(&outputs.branch),
                 OutputKind::Commit => serde_json::to_string(&outputs.commit.as_ref().filter(|commit| provenant_core::GitOid::parse(commit).is_ok())),
@@ -1333,6 +1445,23 @@ pub(super) fn upstream_results(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<InputRequest> {
+    // A repair writer receives the checked selection, never a full source
+    // transcript containing rejected or ineligible findings.
+    if repair_writer(node) {
+        let mut grouped: std::collections::BTreeMap<String, Vec<Finding>> = Default::default();
+        for (source, finding) in selected_findings(node, plan, checkpoint, positions) {
+            grouped.entry(source).or_default().push(finding);
+        }
+        return grouped
+            .into_iter()
+            .map(|(label, findings)| InputRequest {
+                label,
+                attempt_ref: None,
+                inline_findings: Some(findings),
+                finding_prefix: None,
+            })
+            .collect();
+    }
     #[allow(
         clippy::too_many_arguments,
         reason = "recursive traversal carries source selection and identity"
@@ -1678,6 +1807,117 @@ mod alias_tests {
     use super::*;
 
     #[test]
+    fn missing_trigger_is_a_note_without_parse_refusal() {
+        let block = serde_json::json!({"schema_version":1,"findings":[{
+            "id":"F1","severity":"high","file":"a.rs","summary":"hypothesis","status":"open"
+        }]})
+        .to_string();
+        let (findings, warnings, _) = parse_findings(&block, &[]).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(findings[0].severity, "high");
+        assert_eq!(findings[0].effective_severity(), "note");
+        assert!(!repair::blocking(&findings[0]));
+        let mut restored = findings[0].clone();
+        restored.extra.insert("trigger".into(), serde_json::json!({"sequence":"default invocation", "reach":"default_path", "observed":true}));
+        assert_eq!(restored.effective_severity(), "high");
+    }
+
+    #[test]
+    fn spec_concern_handoff_reaches_chair_view() {
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(b"Report.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"spec_concerns\":[{\"criterion\":\"Keep old format\",\"claim\":\"Format is retired\",\"evidence\":\"Approved scope removes reader\",\"proposed_change\":\"Use current format\",\"status\":\"as_written\"}]}\n```\n");
+        let captured = capture.finish();
+        let outputs = make_outputs(Some(&captured), None, None, None, None);
+        let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"g","plan_digest":"digest","asks":[],
+            "nodes":[{"id":"writer","state":"succeeded","worktree":null,"outputs":outputs,"attempts":[]}]
+        })).unwrap();
+        let view = graph_waits(&checkpoint);
+        assert_eq!(view[0].spec_concern_count, 1);
+        assert_eq!(view[0].spec_concerns[0].criterion, "Keep old format");
+        assert_eq!(
+            view[0].spec_concerns[0].status,
+            provenant_records::handoff::SpecConcernStatus::AsWritten
+        );
+
+        // An individual concern may fill the handoff's field limit. Its full
+        // content remains in the source while the checkpoint stays bounded.
+        let concern = serde_json::json!({
+            "criterion":"retired reader", "claim":"scope conflict", "evidence":"x".repeat(4096),
+            "proposed_change":"remove reader", "status":"as_written"
+        });
+        let full_handoff = serde_json::json!({
+            "schema_version":2, "status":"done", "note":"done", "remaining":["continue delivery"],
+            "decisions":[], "verify":[], "spec_concerns":[concern.clone(), concern]
+        });
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(format!("```handoff\n{full_handoff}\n```\n").as_bytes());
+        let captured = capture.finish();
+        assert_eq!(
+            captured
+                .handoff
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .spec_concerns
+                .len(),
+            2
+        );
+        let outputs = make_outputs(
+            Some(&captured),
+            None,
+            Some("/attempt/result.md".into()),
+            None,
+            None,
+        );
+        assert_eq!(outputs.extra["spec_concern_count"], 2);
+        assert!(
+            outputs.extra["spec_concerns"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            outputs.remaining.as_deref(),
+            Some(["continue delivery".to_owned()].as_slice())
+        );
+        assert!(
+            canonical_len(&serde_json::json!({
+                "remaining":outputs.remaining,
+                "spec_concerns":outputs.extra["spec_concerns"],
+                "spec_concern_count":outputs.extra["spec_concern_count"],
+            })) <= REMAINING_BYTES
+        );
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("retained 0 of 2")
+                    && warning.contains("/attempt/result.md"))
+        );
+
+        let remaining = "r".repeat(4090);
+        let no_concerns = serde_json::json!({
+            "schema_version":2, "status":"done", "note":"done", "remaining":[remaining],
+            "decisions":[], "verify":[]
+        });
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(format!("```handoff\n{no_concerns}\n```\n").as_bytes());
+        let captured = capture.finish();
+        let outputs = make_outputs(Some(&captured), None, None, None, None);
+        assert_eq!(outputs.remaining.as_ref().unwrap(), &vec!["r".repeat(4090)]);
+        assert!(!outputs.extra.contains_key("spec_concerns"));
+        assert!(!outputs.extra.contains_key("spec_concern_count"));
+        assert!(
+            !outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("remaining items cut"))
+        );
+    }
+
+    #[test]
     fn display_id_uniqueness_property_for_colon_containing_roots() {
         use std::collections::BTreeSet;
         let roots: Vec<_> = ["a", "b", "a:F1"]
@@ -1776,6 +2016,7 @@ mod alias_tests {
         for finding in outputs.findings {
             assert_eq!(finding.id, "F1");
             assert_eq!(finding.severity, "high");
+            assert_eq!(finding.effective_severity(), "note");
             assert_eq!(finding.file, "src/lib.rs");
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));

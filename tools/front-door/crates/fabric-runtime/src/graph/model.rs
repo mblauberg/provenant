@@ -918,6 +918,91 @@ pub struct Finding {
     pub reason: Option<String>,
 }
 
+/// Evidence checked by verification or synthesis before a repair writer starts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingTrigger {
+    pub sequence: String,
+    pub reach: FindingReach,
+    pub observed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingReach {
+    DefaultPath,
+    OperatorMistake,
+    AttackerOrUnreachable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingTriage {
+    pub decision: String,
+    pub reason: String,
+    pub worth_fixing: bool,
+    pub root_cause: String,
+    pub blocking_class: String,
+    #[serde(default)]
+    pub shared_flaw: bool,
+}
+
+impl Finding {
+    pub fn trigger(&self) -> Option<FindingTrigger> {
+        serde_json::from_value(self.extra.get("trigger")?.clone()).ok()
+    }
+
+    pub fn triage(&self) -> Option<FindingTriage> {
+        serde_json::from_value(self.extra.get("triage")?.clone()).ok()
+    }
+
+    pub fn boundary_or_data_loss(&self) -> bool {
+        self.triage().is_some_and(|triage| {
+            matches!(triage.blocking_class.as_str(), "boundary" | "data_loss")
+        }) || self
+            .extra
+            .get("class")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|class| matches!(class, "boundary" | "data_loss"))
+    }
+
+    pub fn default_path(&self) -> bool {
+        self.trigger().is_some_and(|trigger| {
+            trigger.reach == FindingReach::DefaultPath && !trigger.sequence.trim().is_empty()
+        })
+    }
+
+    pub fn effective_severity(&self) -> &str {
+        if self.boundary_or_data_loss() || self.default_path() {
+            &self.severity
+        } else {
+            "note"
+        }
+    }
+
+    pub fn falsified_with_evidence(&self) -> bool {
+        self.extra
+            .get("verification")
+            .and_then(serde_json::Value::as_str)
+            == Some("falsified")
+            && self
+                .extra
+                .get("evidence")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|evidence| !evidence.trim().is_empty())
+    }
+
+    pub fn rejected_boundary(&self) -> bool {
+        self.boundary_or_data_loss()
+            && (self.disposition.as_deref() == Some("rejected")
+                || self
+                    .triage()
+                    .is_some_and(|triage| triage.decision == "rejected"))
+    }
+
+    pub fn spec_defect(&self) -> bool {
+        self.extra.get("kind").and_then(serde_json::Value::as_str) == Some("spec_defect")
+    }
+}
+
 /// Fallback after provider launch is safe only for a confined read-only node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

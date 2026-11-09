@@ -359,14 +359,14 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path"}"#)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
         ].into(),
         ..Default::default()
     };
     let document = graph(vec![node("prior", route("fixture")), verify]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let output = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
-    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded, "{:?}", run.checkpoint.nodes[1].advance_error);
     assert_eq!(output.findings[0].extra["verification"], "falsified");
     assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
     assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));

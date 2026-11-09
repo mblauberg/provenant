@@ -1,6 +1,6 @@
-doc = "Falsify the input review findings."
+doc = "Check every finding against reachable code, its trigger, practical consequence and shared cause before any writer starts. Confirm or reject with evidence, decide worth fixing, and name the invariant under repair."
 review = "verify"
-brief = "Falsify the input review findings."
+brief = "Check every finding against reachable code, its trigger, practical consequence and shared cause before any writer starts. Confirm or reject with evidence, decide worth fixing, and name the invariant under repair."
 tier = "senior"
 access = "read_only"
 outputs = ["result", "findings", "verdict"]

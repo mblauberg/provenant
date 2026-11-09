@@ -430,6 +430,11 @@ pub(super) fn attach_handoffs(session: &Session, lanes: &[run::AttemptRecord], d
             .ok()
             .flatten()
             .map_or(Value::Null, |handoff| json!(handoff));
+        row["spec_concern_count"] = json!(
+            row["handoff"]["spec_concerns"]
+                .as_array()
+                .map_or(0, Vec::len)
+        );
     }
 }
 
