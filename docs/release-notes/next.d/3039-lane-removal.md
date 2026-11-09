@@ -6,4 +6,4 @@
 
 - Completion cleanup drains final retentions from its queue. Transient failures retry with durable backoff for at most five attempts; exhausted requests stay as diagnostic evidence.
 
-- A graph waiting for a writer lock can resume from its checkpoint before its first attempt has launched, while malformed or unbounded launch waits remain refused.
+- A graph waiting for a writer lock can resume from its checkpoint before its first attempt has launched, while malformed or unbounded launch waits remain refused. An exhausted writer wait reports its refusal even while other graph nodes are still running.

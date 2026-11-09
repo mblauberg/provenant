@@ -1793,8 +1793,12 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         elapsed < std::time::Duration::from_secs(4),
         "expanded provisioning exceeded its deadline: {elapsed:?}"
     );
-    assert_ne!(code(&output), 0, "{output:?}");
+    // The independent slow node keeps this graph waiting (exit 0), while
+    // the exhausted writer launch still projects its actionable error.
+    assert_eq!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["status"], "waiting", "{response}");
+    assert_eq!(response["data"]["timed_out"], true, "{response}");
     assert_eq!(response["error"]["code"], "writer_lock_busy", "{response}");
     let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
         &roots.state,
@@ -1802,6 +1806,27 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         "expanded-lock",
     )?
     .ok_or("checkpoint")?;
+    let writer = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "writer")
+        .ok_or("writer")?;
+    assert_eq!(
+        writer.state,
+        provenant_fabric_runtime::graph::NodeState::Blocked
+    );
+    assert!(writer.attempts.is_empty());
+    assert_eq!(
+        writer.advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert_eq!(
+        writer.advance_owner_code.as_deref(),
+        Some("writer_lock_busy")
+    );
+    assert!(writer.last_launch_retry.as_ref().is_some_and(|retry| {
+        retry.deadline.is_some() && retry.failures > 0 && retry.wake_at.is_none()
+    }));
     assert!(
         provenant_fabric_runtime::graph::relay::pending_provisioning(&checkpoint)
             .iter()
