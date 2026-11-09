@@ -1689,7 +1689,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         }))
                         && progress.attempts.len() < node.routes.len()
                 }
-                None => false,
+                // A writer waiting on binding or provisioning contention has
+                // not launched yet; its recorded retry is what keeps it live.
+                None => progress.launch_retry.is_some(),
             },
             // A planner whose failure was settled by its static fallback is
             // succeeded though its last attempt failed (or never launched).
