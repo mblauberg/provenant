@@ -35,6 +35,12 @@
       "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"}
     }
   },
+  "host_cleanup_settings": {
+    "path": "cleanup",
+    "settings": {
+      "unlanded_days": {"type": "int", "allowed": "1 to 3650 days", "default": "14", "effect": "Keep a ref Provenant created this many days after the ref ledger recorded it when it has not landed; landed refs go on settlement or the next gc pass"}
+    }
+  },
   "provider_updates": {
     "path": "providers.<id>",
     "provider_ids": ["claude", "codex", "cursor", "agy", "opencode"],

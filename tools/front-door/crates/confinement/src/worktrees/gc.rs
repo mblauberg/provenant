@@ -24,6 +24,10 @@ pub struct WorktreeGcReport {
     pub idle_output: Vec<OutputEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_error: Option<String>,
+    /// One outcome per ref the ledger records as created: removed once
+    /// landed or expired, otherwise retained with its reason.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<super::ArtefactOutcome>,
 }
 
 #[derive(Debug, Serialize)]

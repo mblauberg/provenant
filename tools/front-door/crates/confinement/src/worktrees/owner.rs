@@ -381,6 +381,16 @@ pub fn prune_owned(
         }
         _ => Disposition::Keep(RetainReason::NotMerged),
     };
+    // Only a branch the ledger records as created, at the generation this
+    // owner links, may be deleted; an adopted or unobserved one is kept.
+    let disposition = match disposition {
+        Disposition::Merged
+            if created_branch(context, branch, owner.reference.as_ref()).is_none() =>
+        {
+            Disposition::Keep(RetainReason::NotCreated)
+        }
+        other => other,
+    };
     let removed = remove_tree_when(
         context,
         entry,

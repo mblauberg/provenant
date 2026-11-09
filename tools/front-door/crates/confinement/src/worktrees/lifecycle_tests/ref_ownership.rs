@@ -283,3 +283,123 @@ fn landed_check_uses_ancestry_and_refuses_rewritten_or_missing_commits()
     );
     Ok(())
 }
+
+#[test]
+fn ledger_lists_current_records_and_forgets_only_the_generation_acted_on()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let base = fixture.head()?;
+    for branch in ["lane/one", "lane/two"] {
+        create(
+            &context,
+            WorktreeCreate {
+                branch: branch.into(),
+                base: Some(base.to_string()),
+            },
+            &cancel(),
+        )?;
+    }
+    let ledger = RefLedger::for_context(&context)?;
+    let mut listed = ledger
+        .list()?
+        .into_iter()
+        .map(|record| record.reference)
+        .collect::<Vec<_>>();
+    listed.sort();
+    assert_eq!(listed, ["refs/heads/lane/one", "refs/heads/lane/two"]);
+    let one = ledger_record(&context, "lane/one")?.ok_or("no record")?;
+    // A newer generation is not forgotten on the strength of an older one.
+    let mut stale = one.clone();
+    stale.generation += 1;
+    assert!(!ledger.forget(&stale, &test.clock, &cancel())?);
+    assert!(ledger.forget(&one, &test.clock, &cancel())?);
+    assert!(ledger_record(&context, "lane/one")?.is_none());
+    assert_eq!(ledger.list()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn only_a_created_branch_at_its_linked_generation_is_a_removal_candidate()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fixture.run(&["branch", "human/topic"])?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let base = fixture.head()?;
+    create(
+        &context,
+        WorktreeCreate {
+            branch: "lane/made".into(),
+            base: Some(base.to_string()),
+        },
+        &cancel(),
+    )?;
+    create(
+        &context,
+        WorktreeCreate {
+            branch: "human/topic".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let made = GitRefName::branch("lane/made")?;
+    let record = created_branch(&context, &made, None).ok_or("created branch refused")?;
+    assert_eq!(
+        created_branch(&context, &made, Some(&record.ownership())),
+        Some(record.clone())
+    );
+    let mut older = record.ownership();
+    older.generation += 1;
+    assert!(created_branch(&context, &made, Some(&older)).is_none());
+    assert!(created_branch(&context, &GitRefName::branch("human/topic")?, None).is_none());
+    assert!(created_branch(&context, &GitRefName::branch("never/seen")?, None).is_none());
+    Ok(())
+}
+
+#[test]
+fn leased_ref_deletion_keeps_a_moved_or_checked_out_branch() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let base = fixture.head()?;
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "lane/leased".into(),
+            base: Some(base.to_string()),
+        },
+        &cancel(),
+    )?;
+    let reference = GitRefName::branch("lane/leased")?;
+    assert_eq!(
+        delete_ref_leased(&context, &reference, base, &cancel())?,
+        RefDeletion::CheckedOut
+    );
+    fixture.run(&[
+        "worktree",
+        "remove",
+        "--force",
+        lane.path.to_str().ok_or("path")?,
+    ])?;
+    fixture.run(&["commit", "--allow-empty", "-m", "elsewhere"])?;
+    let moved = fixture.head()?;
+    fixture.run(&["branch", "-f", "lane/leased", &moved.to_string()])?;
+    assert_eq!(
+        delete_ref_leased(&context, &reference, base, &cancel())?,
+        RefDeletion::Changed
+    );
+    assert!(branch_exists(&fixture, "lane/leased"));
+    assert_eq!(
+        delete_ref_leased(&context, &reference, moved, &cancel())?,
+        RefDeletion::Removed
+    );
+    assert!(!branch_exists(&fixture, "lane/leased"));
+    assert_eq!(
+        delete_ref_leased(&context, &reference, moved, &cancel())?,
+        RefDeletion::Absent
+    );
+    assert_eq!(ref_tip(&context, &reference, &cancel())?, None);
+    Ok(())
+}

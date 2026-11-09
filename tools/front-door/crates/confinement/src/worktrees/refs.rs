@@ -14,6 +14,8 @@ const LEDGER_LOCK: &str = "refs.lock";
 const LEDGER_LOCK_SECONDS: u64 = 5;
 const MAX_REMOTE: usize = 256;
 const MAX_PUSH_URL: usize = 4096;
+/// Bound on records a listing reads; far above any one repository's lanes.
+const MAX_LEDGER_RECORDS: usize = 65_536;
 
 /// Where the ref lives. A remote endpoint names the remote and push URL the
 /// host bound for delivery; it is never inferred from a default remote name.
@@ -169,21 +171,7 @@ impl RefLedger {
         if !observation.reference.as_str().starts_with("refs/") {
             return Err(WorktreeError::InvalidRequest);
         }
-        let budget = WaitBudget::cli(clock.mono_now(), LEDGER_LOCK_SECONDS)
-            .map_err(|_| WorktreeError::InvalidRequest)?;
-        let _lock = self
-            .directory
-            .lock(
-                OsStr::new(LEDGER_LOCK),
-                LockMode::Exclusive,
-                budget,
-                cancel,
-                clock,
-            )
-            .map_err(|error| match error {
-                FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
-                other => other.into(),
-            })?;
+        let _lock = self.lock(clock, cancel)?;
         let current = self.load(&observation.endpoint, &observation.reference)?;
         if let Some(current) = current.as_ref()
             && current.tip == observation.tip
@@ -220,6 +208,76 @@ impl RefLedger {
             .require_durable()
             .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
         Ok(record)
+    }
+}
+
+impl RefLedger {
+    fn lock(&self, clock: &dyn Clock, cancel: &CancelToken) -> Result<LockGuard, WorktreeError> {
+        let budget = WaitBudget::cli(clock.mono_now(), LEDGER_LOCK_SECONDS)
+            .map_err(|_| WorktreeError::InvalidRequest)?;
+        self.directory
+            .lock(
+                OsStr::new(LEDGER_LOCK),
+                LockMode::Exclusive,
+                budget,
+                cancel,
+                clock,
+            )
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+                other => other.into(),
+            })
+    }
+
+    /// Every current record, in name order. A record that does not parse or
+    /// belongs elsewhere is skipped, so the ref it names stays unobserved and
+    /// is retained. The listing is bounded; a larger ledger is an error.
+    pub fn list(&self) -> Result<Vec<RefRecord>, WorktreeError> {
+        let mut names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_RECORDS)?;
+        names.sort();
+        let mut records = Vec::new();
+        for name in names {
+            if !name.as_bytes().ends_with(b".json") || name.as_bytes().starts_with(b".") {
+                continue;
+            }
+            let Ok(bytes) = read_bounded(&self.directory, &name, MAX_STATE_RECORD) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<RefRecord>(&bytes) else {
+                continue;
+            };
+            let Ok(reference) = GitRefName::new(&record.reference) else {
+                continue;
+            };
+            if record.repository != self.repository
+                || validate_record(&record).is_err()
+                || record_name(&record.endpoint, &reference).ok().as_deref() != name.to_str()
+            {
+                continue;
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    /// Drop a record once its ref is gone, only while it is still the
+    /// generation the caller acted on. Returns whether it was removed.
+    pub fn forget(
+        &self,
+        record: &RefRecord,
+        clock: &dyn Clock,
+        cancel: &CancelToken,
+    ) -> Result<bool, WorktreeError> {
+        let reference =
+            GitRefName::new(&record.reference).map_err(|_| WorktreeError::InvalidRequest)?;
+        let _lock = self.lock(clock, cancel)?;
+        if self.load(&record.endpoint, &reference)?.as_ref() != Some(record) {
+            return Ok(false);
+        }
+        let name = record_name(&record.endpoint, &reference)?;
+        self.directory.unlink(OsStr::new(&name))?;
+        self.directory.sync()?;
+        Ok(true)
     }
 }
 

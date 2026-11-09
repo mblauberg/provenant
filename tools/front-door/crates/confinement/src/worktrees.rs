@@ -12,6 +12,7 @@ mod landed;
 mod lifecycle;
 mod owner;
 mod refs;
+mod removal;
 pub use census::*;
 pub use context::{
     with_context, with_context_using_facts, with_context_using_workers,
@@ -31,6 +32,10 @@ pub use owner::{
     save_lane_owner_when_free, save_owner, update_owner_when_unchanged,
 };
 pub use refs::{RefEndpoint, RefLedger, RefObservation, RefOrigin, RefOwnership, RefRecord};
+pub use removal::{
+    Artefact, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out, created_branch,
+    delete_ref_leased, has_commit, landing_in_repo, ref_tip,
+};
 
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
@@ -625,6 +630,8 @@ pub enum RetainReason {
     GitFailure,
     Unregistered,
     LockedOrPrunable,
+    /// Provenant did not create the branch, or cannot observe that it did.
+    NotCreated,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize)]

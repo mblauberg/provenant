@@ -28,6 +28,7 @@ mod hook_worktree;
 mod hooks;
 mod hosts;
 mod install;
+mod lane_cleanup;
 pub mod local_answers;
 mod overflow;
 mod pr;

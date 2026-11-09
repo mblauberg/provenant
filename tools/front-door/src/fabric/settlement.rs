@@ -600,7 +600,8 @@ pub(crate) fn settle_owned_worktree(
             serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason})
         }
         Ok(Some(result)) => {
-            serde_json::json!({"schema_version":1, "state":"pruned", "worktree": writer.worktree, "result":result})
+            let artefacts = worktrees::ArtefactOutcome::from_remove(&result);
+            serde_json::json!({"schema_version":1, "state":"pruned", "worktree": writer.worktree, "result":result, "artefacts":artefacts})
         }
         Err(error) => {
             if let Some(mut pruned) =
@@ -615,6 +616,61 @@ pub(crate) fn settle_owned_worktree(
     };
     if let Some(warning) = tracking_ref_warning {
         receipt["tracking_ref_warning"] = serde_json::json!(warning);
+    }
+    // An integrated lane's own remote branch, when a delivery created one,
+    // goes once the integration receipt proves it landed. Failure is a
+    // warning in the receipt, never a settlement failure.
+    if receipt["state"] == "pruned"
+        && delivery_request.is_some_and(|request| {
+            matches!(
+                request.mode,
+                provenant_records::run::DeliveryMode::Integrate(_)
+            )
+        })
+        && let Some(delivered) = delivery.filter(|receipt| {
+            matches!(
+                receipt.state,
+                provenant_run::WriterDeliveryState::Delivered { .. }
+            )
+        })
+        && let Some(branch) = pruning_intent
+            .as_ref()
+            .and_then(|intent| intent["branch"].as_str())
+            .and_then(|branch| provenant_confinement::repo::GitRefName::new(branch).ok())
+    {
+        let settings =
+            provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+                .map(|config| config.cleanup)
+                .unwrap_or_default();
+        if let Some(sweep) = crate::lane_cleanup::Sweep::new(&settings, false) {
+            let outcomes = crate::worktrees::with_context_using_facts(
+                roots,
+                &settled.roots.home,
+                &writer.project,
+                std::time::Duration::from_secs(60),
+                workers,
+                facts,
+                |context, cancel| {
+                    Ok(crate::lane_cleanup::settle_integrated(
+                        context, &branch, delivered, &sweep, cancel,
+                    ))
+                },
+            );
+            match (outcomes, receipt["artefacts"].as_array_mut()) {
+                (Ok(outcomes), Some(artefacts)) => {
+                    artefacts.extend(
+                        outcomes
+                            .iter()
+                            .filter_map(|outcome| serde_json::to_value(outcome).ok()),
+                    );
+                }
+                (Ok(_), None) => {}
+                (Err(error), _) => {
+                    receipt["cleanup_warning"] =
+                        serde_json::json!(format!("remote branch cleanup did not run: {error}"));
+                }
+            }
+        }
     }
     // The Git mutation has its own 120-second bound. Start a fresh storage
     // budget after it so a completed prune can always publish its receipt.

@@ -147,6 +147,57 @@ collector skips settlement collection; the daily backstop retries eligible
 data. Provider-cache and temporary cleanup at settlement remain scoped to
 their owner. `gc.schedule = false` leaves settlement and landing cleanup enabled.
 
+## Remove finished lanes' refs
+
+Provenant removes what a finished lane leaves behind once its work has
+landed: the worktree, the local branch, the remote branch and its
+remote-tracking ref. It needs no action from you.
+
+- Only refs the ref ledger records as created by Provenant are removed. A
+  branch it found already there (adopted), or one it never observed, stays.
+  The ledger lives at `<state>/worktrees/<project>/refs/`.
+- A ref has landed when the shared landed check proves it: its tip is an
+  ancestor of the freshly fetched target, or an integration receipt chain
+  carries it there. Tree or patch-id equality is never proof, so a squash
+  merge without a receipt is not landed.
+- A created ref that has not landed stays for `cleanup.unlanded_days`
+  (default 14) from when the ledger recorded it, then goes too. A remote
+  branch is removed then only while its commit is in the local object store,
+  so the reported `head` can restore it.
+- Every deletion is leased on the tip just checked: a local ref is deleted
+  with `update-ref -d NAME TIP` and a remote branch with
+  `git push --force-with-lease=REF:TIP URL :REF`. A ref that moved is kept.
+- A branch any worktree has checked out, the integration branch itself,
+  dirty worktrees, worktrees with a live writer and declared `keep` paths
+  are retained.
+- Remote names and push URLs come from the delivery endpoint recorded with
+  each ref, never from a default remote name.
+
+On settlement, `prune_owned` removes the lane's worktree and, for an
+integrated lane, its created local branch; an integrated lane's own created
+remote branch goes when the integration receipt proves it landed. A pushed
+lane is not landed at settlement; its refs go on the first full `gc` pass
+after the target contains them. `gc` lists every created ref in the ledger,
+fetches each bound remote's default branch once, and removes what landed or
+expired. `gc --pressure` skips this network step.
+
+Each artefact reports one outcome under `artefacts` in the settlement receipt
+and `worktree_cleanup[].refs` in `gc --json`:
+
+```json
+{"artefact":"remote_branch","name":"refs/heads/lane/x","remote":"origin",
+ "outcome":"removed","reason":"landed","head":"0123..."}
+```
+
+`artefact` is `worktree`, `local_branch`, `remote_branch` or `tracking_ref`.
+`outcome` is `removed`, `would_remove` (preview), `absent`, `retained` or
+`failed`; `reason` says why, for example `landed`, `unlanded_expired`,
+`not_landed`, `not_created`, `checked_out`, `changed` or
+`target_unavailable`. A failed removal prints a warning and never fails the
+settlement or the pass; the ref is retained and the next pass retries. To
+restore a removed ref, recreate it at `head`, for example
+`git branch lane/x HEAD_OID` or `git push URL HEAD_OID:refs/heads/lane/x`.
+
 Declared ignored output in an idle linked worktree no longer needs a terminal
 lane. It still needs free writer custody and no live lane. Undeclared ignored
 files such as `.env` block explicit removal, whose error names up to five

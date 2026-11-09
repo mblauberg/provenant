@@ -1501,6 +1501,39 @@ lane pruning and delivery's already-integrated test all use it.
 - Owner: `crates/confinement/src/worktrees/refs.rs`,
   `crates/confinement/src/worktrees/landed.rs`
 
+## Removal on completion
+
+Settlement and `gc` remove what a finished lane leaves behind: its worktree,
+local branch, remote branch and remote-tracking ref. Only refs whose current
+ledger record is `created` are candidates; for a worktree owner that links a
+generation, the record must still be that generation. A candidate goes once
+the landed check proves it landed, or once it has stayed unlanded for
+`cleanup.unlanded_days` (default 14) from its record time; an expired remote
+branch goes only while its commit is in the local object store. A branch any
+worktree has checked out, the landing target itself, dirty worktrees,
+worktrees with a live writer and declared keep paths are retained. Local refs
+are deleted with `update-ref -d` on the tip just read and remote branches with
+`git push --force-with-lease=REF:TIP` to the push URL the ledger recorded, so
+a ref that moved is kept. A removed or absent ref's record is forgotten only
+while it is still the generation acted on. `prune_owned` deletes an
+integrated lane's local branch only when it is created; settlement then
+removes an integrated lane's own created remote branch on the receipt's
+chain. `gc` lists the ledger, fetches each bound endpoint's default branch
+once, and judges local branches on those targets and the fetched default.
+Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
+`outcome`, `reason`, `head`): under `artefacts` in the settlement receipt and
+`worktree_cleanup[].refs` in `gc --json`. A failure warns and never fails the
+settlement or the pass.
+- Why: finished lanes leave nothing behind once their work has landed, and
+  never take a ref Provenant did not make.
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`
+  (`leased_ref_deletion_keeps_a_moved_or_checked_out_branch`,
+  `only_a_created_branch_at_its_linked_generation_is_a_removal_candidate`,
+  `ledger_lists_current_records_and_forgets_only_the_generation_acted_on`);
+  `src/lane_cleanup.rs::tests`.
+- Owner: `crates/confinement/src/worktrees/removal.rs`, `src/lane_cleanup.rs`,
+  `src/fabric/settlement.rs`
+
 ## Delivery modes and settled pickup
 
 A template delivery setting resolves to the existing

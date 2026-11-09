@@ -641,6 +641,27 @@ fn gc_data_summary(data: &GcData) -> String {
                 ));
             }
         }
+        for outcome in &project.refs {
+            use provenant_confinement::worktrees::ArtefactState;
+            let verb = match outcome.outcome {
+                ArtefactState::Removed => "removed",
+                ArtefactState::WouldRemove => "would remove",
+                ArtefactState::Failed => "could not remove",
+                _ => continue,
+            };
+            let kind = serde_json::to_value(outcome.artefact)
+                .ok()
+                .and_then(|value| value.as_str().map(|kind| kind.replace('_', " ")))
+                .unwrap_or_default();
+            human.push_str(&format!("{verb} {kind} {}", outcome.name));
+            if let Some(remote) = &outcome.remote {
+                human.push_str(&format!(" on {remote}"));
+            }
+            if let Some(reason) = &outcome.reason {
+                human.push_str(&format!(" ({reason})"));
+            }
+            human.push('\n');
+        }
         for output in project
             .output
             .iter()
@@ -1236,7 +1257,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     context,
                     &project.lanes,
                     &worktrees::WorktreeGcPolicy {
-                        upstream: upstream.map(|(_, oid)| oid),
+                        upstream: upstream.as_ref().map(|(_, oid)| *oid),
                         terminal: &terminal,
                         no_live_lanes: &no_live_lanes,
                         regenerable: &settings.regenerable,
@@ -1251,6 +1272,24 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     cancel,
                 )?;
                 report.upstream_error = upstream_error;
+                // Refs the ledger records as created go once landed on the
+                // fetched default branch, or once expired. Pressure passes
+                // stay local and skip it.
+                if !command.pressure
+                    && let Some(sweep) = crate::lane_cleanup::Sweep::new(
+                        &config.cleanup,
+                        command.dry_run || !command.apply,
+                    )
+                {
+                    report.refs = crate::lane_cleanup::collect(
+                        context,
+                        upstream
+                            .as_ref()
+                            .and_then(crate::lane_cleanup::fetched_target),
+                        &sweep,
+                        cancel,
+                    );
+                }
                 Ok(report)
             },
         );
