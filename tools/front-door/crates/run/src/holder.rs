@@ -2143,6 +2143,25 @@ impl RunStore {
         ) {
             decoded.terminal_cause = None;
         }
+        self.seal_automatic_continuation(
+            &record,
+            attempt,
+            matches!(
+                decoded.outcome,
+                Outcome::ReviewRequired | Outcome::Uncommitted
+            ) && decoded.complete
+                && !cancelled
+                && !import_failed
+                && !import_stopped
+                && !redaction_failed
+                && exit.stop_reason.is_none()
+                && !exit.unresolved_cleanup
+                && exit.unresolved_pids.is_empty()
+                && exit.settlement_evidence != custody::SettlementEvidence::LeftoverNotProven
+                && exit.publication == custody::PublicationState::Durable,
+            handoff.as_ref(),
+            call,
+        )?;
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
             terminal_cause: decoded.terminal_cause,
@@ -3164,7 +3183,7 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for changed in [false, true] {
+        for (changed, dirty) in [(false, false), (true, false), (false, true)] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -3174,9 +3193,11 @@ mod writer_recovery_tests {
             run.request.tasks[0].writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
             let id = run.attempts[0].attempt_id;
+            let mut applied = route();
+            applied.extra.insert("max_continuations".into(), 2.into());
             store.mark_starting(
                 &store.record(id, &call)?,
-                &route(),
+                &applied,
                 &[],
                 &Default::default(),
                 None,
@@ -3250,6 +3271,12 @@ mod writer_recovery_tests {
                     head.into(),
                 ])?;
             }
+            if dirty {
+                std::fs::write(
+                    fixture.writer.worktree.join("unfinished.txt"),
+                    "retained partial edit",
+                )?;
+            }
             let mut observed = crate::tests::exit();
             observed.scope = scope;
             crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -3264,6 +3291,29 @@ mod writer_recovery_tests {
                 "```handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
             ));
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            let successor = store.pending_attempts(run.run_id, &call)?;
+            assert_eq!(successor.len(), 1);
+            assert_eq!(finished.superseded_by, Some(successor[0].attempt_id));
+            assert_eq!(successor[0].retry_of, Some(id));
+            assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Open);
+            if dirty {
+                assert!(matches!(
+                    finished.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Uncommitted,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    std::fs::read_to_string(fixture.writer.worktree.join("unfinished.txt"))?,
+                    "retained partial edit"
+                );
+                assert_eq!(
+                    store.request(run.run_id, &call)?.tasks[0].writer.as_ref(),
+                    Some(&fixture.writer)
+                );
+                continue;
+            }
             assert_eq!(
                 finished.settlement_reason,
                 Some(provenant_records::run::SettlementReason::DeclaredStop)

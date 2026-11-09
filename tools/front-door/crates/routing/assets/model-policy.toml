@@ -1,4 +1,9 @@
 # Operating defaults, evaluated by the same selectors and schedules as overrides.
+[defaults.lane]
+stop_early_ok = false
+max_continuations = 2
+resume_continuations = false
+
 [defaults.cache]
 read_share_target = 0.90
 
@@ -47,9 +52,6 @@ read_ratio = 0.05
 model = "codex/gpt-6.1-terra"
 [rules.policy.cache]
 read_ratio = 0.05
-[rules.policy.lane]
-stop_early_ok = false
-max_continuations = 8
 
 [[rules]]
 model = "codex/gpt-6-luna"

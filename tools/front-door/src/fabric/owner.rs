@@ -3409,7 +3409,18 @@ impl BoundGraphOwner<'_> {
                 return Ok(observation);
             }
         }
-        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let mut target = target;
+        let mut reference = reference;
+        let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        while let Some(next) = attempt.superseded_by {
+            target.attempt = next;
+            reference = Some(format!(
+                "{}/{}",
+                target.host.unwrap_or(self.factory.context.identity.host),
+                next
+            ));
+            attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        }
         // A remote parent is one origin node until its receiver-owned graph
         // has drained, including children that outlive the provider process.
         if target

@@ -113,7 +113,7 @@ table. These are adjustable operating defaults:
 | Luna, Haiku 5.5 and Sonnet 5 | Cache read 0.10x |
 | DeepSeek v4.1 Flash on Go | 1M context, cache read 0.02x, no cache-write fee, output 4x input, read-heavy multiplier 3; 800k task-boundary window after at least 20 turns |
 | DeepSeek weekday peak | 2x price multiplier at 01–04 and 06–10 UTC, reducing its read-heavy preference to 1.5x |
-| Terra | Flagged as prone to stopping early; up to two continuations when it explicitly reports unfinished work |
+| All writer models | Up to two automatic continuations as fresh attempts after an explicit `stopped_early` handoff |
 | Gemini Flash and OpenCode free routes | Non-empty result check; one fallback to Luna at high effort for an empty answer |
 | All models | Advisory cache-read share target 90% |
 
@@ -135,7 +135,7 @@ confinement checks. Edit-heavy work gets no cache preference.
 Compaction modes are `auto`, `task_boundary` and `never`. Claude launches receive
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for a configured window unless mode is `never`.
 Task-boundary mode asks the model to compact deliberately while the cache is warm
-and prefer a fresh lane with a handoff over repeated compaction. For models
+and continue the original brief after compaction. For models
 without an explicit per-model window, chair guidance is about 250–300k; do not
 lower it below about 150k without evidence. Use the per-model windows in the
 table above where specified. `never`
@@ -156,13 +156,31 @@ Cache `ttl_seconds` and `min_prefix`, and lane `max_context` and `max_turns`, ar
 planning guidance supplied to the model. They do not change a provider's cache
 TTL or impose a process kill. Providers without an evidenced launch control
 receive guidance only. `stop_early_ok = false` asks for the shared schema v2 `handoff` fence. A
-`stopped_early` declaration can continue the retained session, or start fresh
-on the same worktree when resume is unavailable, with `max_continuations`
-bounded to eight. `done` and `blocked` do not request automatic continuation.
+`stopped_early` declaration automatically starts a fresh attempt on the same worktree
+with the handoff and original brief, with `max_continuations`
+bounded to eight and defaulting to two across models. Two retries cover early stops
+without allowing an expensive open-ended chain. Set it to zero to disable automatic
+continuation; model and project overrides use the ordinary policy layers.
+`resume_continuations = true` opts a model into resuming its retained provider session
+when available, falling back to a fresh attempt when unavailable. The bundled
+`resume_continuations = false` default applies to every model. For example:
+
+```toml
+[[domains.routing.model_policy.rules]]
+model = "codex/gpt-6-luna"
+[domains.routing.model_policy.rules.policy.lane]
+resume_continuations = true
+```
+
+A writer that needs an owner decision or lacks a required capability declares
+`blocked`, never `stopped_early`, so it returns to the chair. `done` and `blocked`
+do not request automatic continuation.
 Missing or malformed blocks do not guess that more work is needed.
 
-Automatic read-only fallback and continuation preserve each attempt in the same
-run. The terminal transaction queues the successor before the run can appear
+Automatic writer continuation preserves each attempt in the same run, including
+when the writer is a graph node. Each successor carries the original brief,
+previous handoff and worktree; status and trace retain the predecessor and its
+successor link. The continuation allowance counts successors within this run. The terminal transaction queues the successor before the run can appear
 closed. Quota limits, cancellation, timeouts and unresolved custody retain their
 existing recovery behaviour and do not trigger result-policy retries.
 Allowances reset for each run, including a manually resumed run. The first

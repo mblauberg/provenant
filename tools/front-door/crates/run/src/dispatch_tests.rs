@@ -291,7 +291,9 @@ impl Providers for Fake {
         _: &ExitObservation,
         _: &std::path::Path,
     ) -> std::result::Result<Decoded, String> {
-        assert_eq!(applied, &route());
+        assert_eq!(applied.provider, route().provider);
+        assert_eq!(applied.model, route().model);
+        assert_eq!(applied.effort, route().effort);
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
             terminal_cause: None,
