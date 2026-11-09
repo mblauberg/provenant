@@ -736,16 +736,29 @@ fn render_profile_with_limit(
     if writer || profile.spec.allow_pseudo_tty {
         source.push_str(PSEUDO_TTY_RULES);
     }
-    // Keychain clients need both their executable and securityd IPC. A file
-    // grant alone does not select the native keychain mechanism.
+    // A file-shaped authentication grant alone never implies keychain IPC.
+    // The selected fixture-backed Agy profile names its one required service.
     let mandatory_keychains = mandatory_for_plan(plan, home, worktree_grants)?;
-    let keychain = selected_keychain(plan, profile, home, &mandatory_keychains).is_some();
-    if !keychain {
-        source.push_str(concat!(
-            "(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n",
-            "(deny mach-lookup (global-name-prefix \"com.apple.securityd\") (global-name-prefix \"com.apple.security.cloudkeychain\") (global-name-prefix \"com.apple.keychainsharing\"))\n",
-        ));
-    }
+    let keychain = !profile.spec.deny_keychain_access
+        && !profile.spec.deny_credential_access
+        && selected_authentication(plan, profile).is_some_and(|selected| {
+            selected.keychain == Some(KeychainAccess::SecurityServer)
+                && !selected.roots.iter().any(|root| {
+                    mandatory_keychains
+                        .non_exempt()
+                        .iter()
+                        .any(|boundary| root.overlaps(boundary))
+                })
+                && selected.roots.iter().any(|root| {
+                    root.scope == PathScope::Exact
+                        && root.path.ends_with("Library/Keychains/login.keychain-db")
+                        && !root.path.starts_with(home.join("Library/Keychains"))
+                })
+        });
+    source.push_str(concat!(
+        "(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n",
+        "(deny mach-lookup (global-name-prefix \"com.apple.securityd\") (global-name-prefix \"com.apple.security.cloudkeychain\") (global-name-prefix \"com.apple.keychainsharing\"))\n",
+    ));
     // TLS root lookup on macOS needs this one service: denying it stops every
     // provider reaching its API. Keychain files keep their own denials.
     if profile.spec.deny_keychain_access || profile.spec.deny_credential_access {
@@ -930,31 +943,6 @@ fn mandatory_for_plan(
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
-fn selected_keychain<'a>(
-    plan: &PlanPermissions,
-    profile: &'a ProviderProfile,
-    home: &Path,
-    mandatory: &MandatoryRoots,
-) -> Option<&'a PathGrant> {
-    if profile.spec.deny_keychain_access || profile.spec.deny_credential_access {
-        return None;
-    }
-    let auth = selected_authentication(plan, profile)?;
-    let [root] = auth.roots.as_slice() else {
-        return None;
-    };
-    (auth.keychain == Some(KeychainAccess::SecurityServer)
-        && root.scope == PathScope::Exact
-        && root.path.ends_with("Library/Keychains/login.keychain-db")
-        && !mandatory.non_exempt().iter().any(|boundary| {
-            root.overlaps(boundary)
-                && !(boundary.path == home.join("Library/Keychains")
-                    && root.path == home.join("Library/Keychains/login.keychain-db"))
-        }))
-    .then_some(root)
-}
-
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn selected_authentication<'a>(
     plan: &PlanPermissions,
     profile: &'a ProviderProfile,
@@ -1084,7 +1072,6 @@ fn push_boundaries(
     {
         mandatory.add_credentials(root.clone())?;
     }
-    let keychain = selected_keychain(plan, profile, home, &mandatory).cloned();
     let selected = selected_authentication(plan, profile);
     let gh = network == NetworkAccess::Open
         && !profile.spec.deny_network
@@ -1096,10 +1083,7 @@ fn push_boundaries(
                 selected
                     .roots
                     .iter()
-                    .filter(|root| {
-                        !root.path.starts_with(home.join("Library/Keychains"))
-                            || keychain.as_ref() == Some(*root)
-                    })
+                    .filter(|root| !root.path.starts_with(home.join("Library/Keychains")))
                     .cloned(),
             );
         }
@@ -1157,8 +1141,8 @@ fn push_boundaries(
         push_socket_denial(source, root, &[])?;
         push_ancestor_guards(source, root, &mut ancestors)?;
     }
-    // Only the typed native keychain mechanism can read the exact login
-    // keychain. Other mandatory stores and aliases retain their denials.
+    // Real-home keychains, preservation archives and Claude's MCP-secret file
+    // admit no authentication exception, including through canonical aliases.
     for root in mandatory.non_exempt() {
         for operation in [
             "file-read*",
@@ -1167,16 +1151,7 @@ fn push_boundaries(
             "process-exec",
             "file-map-executable",
         ] {
-            if operation == "file-read*" && root.path == home.join("Library/Keychains") {
-                push_denial(
-                    source,
-                    operation,
-                    root,
-                    &keychain.iter().cloned().collect::<Vec<_>>(),
-                )?;
-            } else {
-                push_rule(source, "deny", operation, &root.path, root.scope)?;
-            }
+            push_rule(source, "deny", operation, &root.path, root.scope)?;
         }
         push_socket_denial(source, root, &[])?;
     }

@@ -689,29 +689,6 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
         let mut input = fixture_input(&route, &plan, &prompt, cwd, None);
         input.account = Some(&account);
         let spec = agy::Agy.prepare(input)?;
-        let profile = provenant_confinement::permissions::snapshot::render(
-            plan.permissions(),
-            &spec.profile,
-            Path::new("/fixture/home"),
-        )
-        .unwrap();
-        // Exercise prepare AND rendering: a declared executable was previously
-        // cancelled by an unconditional denial later in the rendered profile.
-        assert!(!profile.contains("(deny process-exec (literal \"/usr/bin/security\"))"));
-        assert!(
-            !profile.contains("(deny mach-lookup (global-name-prefix \"com.apple.securityd\")")
-        );
-        assert!(!profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\")"));
-
-        assert!(profile.contains(
-            "(require-not (literal \"/fixture/home/Library/Keychains/login.keychain-db\"))"
-        ));
-        assert!(
-            !profile.contains("(deny file-read* (subpath \"/fixture/home/Library/Keychains\"))")
-        );
-        assert!(
-            profile.contains("(deny file-write* (subpath \"/fixture/home/Library/Keychains\"))")
-        );
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
         // Headless lanes auto-approve tools within the outer profile.
         assert!(
@@ -767,20 +744,6 @@ fn agy_isolated_account_links_its_own_keychain_and_grants_only_that_path()
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         input.account = Some(&account);
         let spec = agy::Agy.prepare(input)?;
-        let profile = provenant_confinement::permissions::snapshot::render(
-            plan.permissions(),
-            &spec.profile,
-            Path::new("/fixture/home"),
-        )
-        .unwrap();
-        // Exercise prepare AND rendering: a declared executable was previously
-        // cancelled by an unconditional denial later in the rendered profile.
-        assert!(!profile.contains("(deny process-exec (literal \"/usr/bin/security\"))"));
-        assert!(
-            !profile.contains("(deny mach-lookup (global-name-prefix \"com.apple.securityd\")")
-        );
-        assert!(!profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\")"));
-
         assert!(spec.env.contains(&("HOME".into(), "/fixture/state".into())));
         assert!(spec.setup.contains(&SetupStep::Symlink {
             link: "/fixture/state/Library/Keychains/login.keychain-db".into(),

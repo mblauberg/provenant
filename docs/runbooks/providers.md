@@ -312,9 +312,6 @@ whether `~/.cargo/bin/cargo-nextest` is executable for lanes.
 
 ## Agy accounts
 
-For lane keychain permissions, failure diagnostics and post-install checks, see
-[Agy authentication](agy-authentication.md).
-
 Agy has no account switch, so a second Google account gets its own `HOME`
 holding its own login keychain. The registered `directory` is that home. A
 directory other than your own home is an isolated account: the lane's private

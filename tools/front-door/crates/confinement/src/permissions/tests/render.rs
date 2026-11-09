@@ -1078,10 +1078,10 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
     Ok(())
 }
 
-// Small: both login and isolated keychains require the selected typed mechanism.
+// Small: only a selected isolated keychain mechanism can open its named IPC.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn keychain_ipc_requires_the_selected_typed_mechanism() -> Result<(), PermissionError> {
+fn keychain_ipc_requires_the_selected_isolated_typed_mechanism() -> Result<(), PermissionError> {
     let home = Path::new("/fixture/home");
     for (path, selected, typed, explicit_deny, permitted) in [
         (
@@ -1110,7 +1110,7 @@ fn keychain_ipc_requires_the_selected_typed_mechanism() -> Result<(), Permission
             true,
             true,
             false,
-            true,
+            false,
         ),
         (
             "/fixture/isolated/Library/Keychains/login.keychain-db",
@@ -1152,9 +1152,8 @@ fn keychain_ipc_requires_the_selected_typed_mechanism() -> Result<(), Permission
             "com.apple.SecurityServer",
         ] {
             assert!(
-                source.contains(&format!("(global-name-prefix \"{prefix}\")"))
-                    == (prefix == "com.apple.SecurityServer" || !permitted),
-                "keychain IPC prefix {prefix}"
+                source.contains(&format!("(global-name-prefix \"{prefix}\")")),
+                "mandatory keychain IPC prefix {prefix}"
             );
         }
     }

@@ -152,17 +152,13 @@ Exceptions are host-derived typed grants, never optional configuration:
    writes require the existing `AuthenticationProfile::in_place_writes` subset
    check and grant only that mechanism's exact files; they confer no create,
    unlink or rename authority over the credential directory. Codex's selected
-   `auth.json`, Cursor's declared login store and Agy's selected login or isolated
+   `auth.json`, Cursor's declared login store and Agy's selected isolated
    `Library/Keychains/login.keychain-db` follow their provider profile. Claude's
    host credential acquisition and private environment delivery remain
    host-owned; they do not grant general keychain access. Unselected identities,
-   unselected real-home keychains and unrelated services remain inaccessible.
-   Agy’s selected native keychain mechanism permits `/usr/bin/security` and
-   keychain IPC, including securityd. Its exact selected login keychain has a
-   read exception; direct writes and neighbouring keychain files stay denied.
-   Native keychain services are outside client filesystem confinement, so
-   identity verification remains essential. Other mechanisms retain the IPC
-   and executable denials. Provider setup is not
+   real-home keychains and unrelated services remain inaccessible. Keychain
+   IPC and `/usr/bin/security` must be explicitly denied unless a verified
+   selected mechanism requires the precise service. Provider setup is not
    permission to expose an entire home. Credentials never cross hosts.
    OpenCode currently reads its host configuration/account store through runtime
    grants without a selected mechanism. Before flipping, declare its selected
