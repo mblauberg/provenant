@@ -1897,12 +1897,14 @@ fn no_work_stop(head: Option<&str>) -> AttemptObservation {
 }
 
 #[test]
-fn no_work_continuation_requires_enabled_writer_and_proven_unchanged_head() {
-    for (access, enabled, head) in [
-        (AccessMode::WorktreeWrite, Some(false), Some("a".repeat(40))),
-        (AccessMode::ReadOnly, None, Some("a".repeat(40))),
-        (AccessMode::WorktreeWrite, None, Some("b".repeat(40))),
-        (AccessMode::WorktreeWrite, None, None),
+fn writer_stop_restarts_only_for_enabled_writers_and_leaves_others_failed() {
+    // (access, auto_continue_no_work, head, restarts)
+    for (access, enabled, head, restarts) in [
+        (AccessMode::WorktreeWrite, Some(false), Some("a".repeat(40)), false),
+        (AccessMode::ReadOnly, None, Some("a".repeat(40)), false),
+        // A committed stop (moved or missing head) restarts in place too.
+        (AccessMode::WorktreeWrite, None, Some("b".repeat(40)), true),
+        (AccessMode::WorktreeWrite, None, None, true),
     ] {
         let mut work = node("work", pool_route("junior"));
         work.access = access;
@@ -1915,15 +1917,25 @@ fn no_work_continuation_requires_enabled_writer_and_proven_unchanged_head() {
         {
             *outcome = AttemptOutcome::DeclaredStop;
         }
+        let mut observations = vec![stopped];
+        if restarts {
+            observations.push(done_as("finished"));
+        }
         let mut owner = FakeOwner {
-            observations: [stopped].into(),
+            observations: observations.into(),
             ..Default::default()
         };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-        assert_eq!(owner.calls.len(), 1);
-        assert!(run.checkpoint.expansions.is_empty());
+        if restarts {
+            assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+            assert_eq!(owner.calls.len(), 2);
+            assert_eq!(run.checkpoint.expansions.len(), 1);
+        } else {
+            assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+            assert_eq!(owner.calls.len(), 1);
+            assert!(run.checkpoint.expansions.is_empty());
+        }
     }
 }
 
