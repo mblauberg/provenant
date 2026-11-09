@@ -194,8 +194,31 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
             .iter()
             .any(|grant| grant.path == fixture.project)
     );
+    let private = permissions.private_state.as_ref().ok_or("missing private state")?;
+    let handoff = private.path.join("handoff.json");
+    let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
+    let stdin = String::from_utf8_lossy(&launch.stdin);
+    assert!(prompt.contains(&handoff.display().to_string()) || stdin.contains(&handoff.display().to_string()));
+    let policy = provenant_confinement::permissions::snapshot::render(permissions, &confinement.profile, &fixture.home)?;
+    assert!(policy.contains(&format!("(allow file-write* (subpath \"{}\"))", private.path.display())));
+    let denial = policy.lines().find(|line| line.starts_with("(deny file-write* (require-all") && line.contains(fixture.state.to_str().unwrap())).ok_or("state denial")?;
+    assert!(denial.contains(&format!("(require-not (subpath \"{}\"))", private.path.display())));
+    assert!(policy.contains(&format!("(deny file-write* (subpath \"{}\"))", launch.cwd.display())));
     let writes = provenant_confinement::write_grants(permissions, &confinement.profile);
     source_tree::ensure_view_read_only(&launch.cwd, &writes)?;
+    Ok(())
+}
+
+#[test]
+fn denied_handoff_is_not_named_in_the_brief() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = CommitSourcePreparation::new()?;
+    std::fs::write(fixture.state.join("config.toml"), format!(
+        "schema_version=1\n[domains.run.host_policy]\ndeny_write=[{:?}]\n", fixture.state.to_str().ok_or("state path")?
+    ))?;
+    let launch = fixture.prepare()?;
+    let prompt = launch.argv.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ");
+    assert!(!prompt.contains("Progress handoff JSON:"));
+    assert!(!String::from_utf8_lossy(&launch.stdin).contains("Progress handoff JSON:"));
     Ok(())
 }
 

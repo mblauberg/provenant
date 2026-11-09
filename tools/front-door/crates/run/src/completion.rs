@@ -15,7 +15,7 @@ use std::{
 };
 
 pub(crate) fn guidance() -> &'static str {
-    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. Keep the handoff current as work progresses, writing JSON atomically to the handoff.json path supplied below, outside the commit set. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). Use done only when the brief is finished. Use blocked when you need a change or decision you cannot make yourself. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). Use done only when the brief is finished. Use blocked when you need a change or decision you cannot make yourself. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
 }
 
 impl RunStore {
@@ -173,11 +173,11 @@ pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI
 
 /// The text placed before a lane's task: model policy, the build-slot rule for
 /// writers only, then the handoff file.
-pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: &Path) -> String {
+pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: Option<&Path>) -> String {
     format!(
         "{model_guidance}\n{}{}",
         if writer { BUILD_SLOT_GUIDANCE } else { "" },
-        handoff_progress_guidance(handoff)
+        handoff.map(handoff_progress_guidance).unwrap_or_default()
     )
 }
 
@@ -198,12 +198,13 @@ mod tests {
     #[test]
     fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
-        let writer = lane_preamble("Model policy.", true, handoff);
+        let writer = lane_preamble("Model policy.", true, Some(handoff));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
-        let reader = lane_preamble("Model policy.", false, handoff);
+        let reader = lane_preamble("Model policy.", false, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
+        assert!(!lane_preamble("Model policy.", false, None).contains("handoff.json"));
     }
 
     fn snapshot(status: &str) -> Vec<u8> {

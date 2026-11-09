@@ -2718,12 +2718,35 @@ pub(super) fn prepare_candidates(
         } else {
             text
         };
+        let preliminary = confinement_request(
+            project_id,
+            ConfinementRoots {
+                host_roots: Some(roots),
+                cwd: &cwd,
+                home: &home,
+                state: roots.state.as_path(),
+                credential_roots: &credential_roots,
+                github_roots: &github_roots,
+                protected_worktrees: &protected_worktrees,
+                scratch,
+                private_state,
+                assets,
+                prompt_file: None,
+            },
+            writer.as_ref(),
+            &task.access,
+            &host_writes,
+            adapter.id(),
+            publishing_gh.is_some(),
+        )?;
+        let handoff = private_state.join("handoff.json");
+        let writable_handoff = handoff_writable(&preliminary.permissions, private_state);
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
                 &model_policy.guidance(),
                 writer.is_some(),
-                &private_state.join("handoff.json")
+                writable_handoff.then_some(handoff.as_path())
             )
         );
         let prompt = match launch_prompt(
@@ -3297,6 +3320,9 @@ pub(super) fn prepare_candidates(
                     policy.mandatory_mut().add_state_read(root.clone())?;
                 }
             }
+        }
+        if writable_handoff && !handoff_writable(plan.permissions(), private_state) {
+            return Err("handoff path is denied by the final confinement policy".into());
         }
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
