@@ -186,7 +186,6 @@ pub(crate) fn post_refusal_notice(
         body: format!("operation {} refused: {code}", record.operation_id),
         artifacts: Vec::new(),
         reply_to: None,
-        task: None,
         created_at: time,
     };
     Ok(store.send(&message, &request)?)
@@ -394,7 +393,6 @@ pub(crate) fn post_notice(
         body: reaction.notice.clone(),
         artifacts: Vec::new(),
         reply_to: None,
-        task: None,
         created_at: provenant_core::WallTime::from_micros(reaction.finished_micros)?,
     };
     Ok(store.send(&message, &request)?)

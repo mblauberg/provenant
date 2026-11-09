@@ -1318,9 +1318,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
-            Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
-                Self::InvalidInput { detail: None }
-            }
+            Error::PathEncoding => Self::InvalidInput { detail: None },
             Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
                 if *found > 1 =>
             {

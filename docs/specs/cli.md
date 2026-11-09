@@ -180,11 +180,6 @@ Session cursors bind the selection and observed records; changed snapshots
 require a fresh walk. Tagged paths preserve native bytes.
 
 Workflow owns [summary revisions and inbox coverage](workflow.md#structured-summary-revisions-and-inbox-coverage).
-Viewer state records only local presentation and the summary revision actually
-rendered. Acknowledgements are monotonic; unavailable or pruned baselines stay
-unavailable. A lane may mark bounded request presentation state but cannot
-answer, resolve or unblock a request. Closed/expired requests refuse writes,
-and capacity refusal preserves existing baselines.
 
 Remote request answers are human acts committed by the configured owner with
 source-host and actor provenance. Retry IDs bind content. Closing and

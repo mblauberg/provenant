@@ -211,46 +211,6 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         "pattern": "^[0-9a-f]{32}$",
         "type": "string"
       },
-      "MessageRef": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "id": {
-                "$ref": "#/$defs/Id"
-              },
-              "scope": {
-                "const": "local"
-              }
-            },
-            "required": [
-              "id",
-              "scope"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "host": {
-                "$ref": "#/$defs/Id"
-              },
-              "id": {
-                "$ref": "#/$defs/Id"
-              },
-              "scope": {
-                "const": "remote"
-              }
-            },
-            "required": [
-              "host",
-              "id",
-              "scope"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "OperationId": {
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         "type": "string"
@@ -412,17 +372,44 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "reply_to": {
             "anyOf": [
               {
-                "$ref": "#/$defs/MessageRef"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "task": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/MessageRef"
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "$ref": "#/$defs/Id"
+                      },
+                      "scope": {
+                        "const": "local"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "scope"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "host": {
+                        "$ref": "#/$defs/Id"
+                      },
+                      "id": {
+                        "$ref": "#/$defs/Id"
+                      },
+                      "scope": {
+                        "const": "remote"
+                      }
+                    },
+                    "required": [
+                      "host",
+                      "id",
+                      "scope"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               {
                 "type": "null"
@@ -993,7 +980,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Discover inbox, console, chair, graph, task, lease and event tools. Call discovered tools by name.",
+  "description": "Discover inbox, console, chair, graph, lease and event tools. Call discovered tools by name.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -1009,236 +996,6 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
 ```
 
 ## Discoverable tools
-
-### `fabric_task`
-
-```json
-{
-  "_meta": {
-    "io.provenant/schemaVersion": 2
-  },
-  "description": "Create and manage fenced project tasks.",
-  "inputSchema": {
-    "$defs": {
-      "Id": {
-        "pattern": "^[0-9a-f]{32}$",
-        "type": "string"
-      },
-      "OperationId": {
-        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
-        "type": "string"
-      },
-      "TaskProof": {
-        "additionalProperties": false,
-        "properties": {
-          "generation": {
-            "maximum": 18446744073709551615,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "task": {
-            "$ref": "#/$defs/Id"
-          },
-          "token": {
-            "pattern": "^[0-9a-f]{32}$",
-            "type": "string"
-          }
-        },
-        "required": [
-          "generation",
-          "task",
-          "token"
-        ],
-        "type": "object"
-      }
-    },
-    "oneOf": [
-      {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "$ref": "#/$defs/Id"
-          },
-          "lease_seconds": {
-            "maximum": 3600,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "op": {
-            "const": "claim"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          }
-        },
-        "required": [
-          "id",
-          "lease_seconds",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "note": {
-            "anyOf": [
-              {
-                "maxLength": 65536,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "objective": {
-            "maxLength": 65536,
-            "type": "string"
-          },
-          "op": {
-            "const": "create"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          }
-        },
-        "required": [
-          "objective",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "op": {
-            "const": "finish"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "proof": {
-            "$ref": "#/$defs/TaskProof"
-          },
-          "state": {
-            "enum": [
-              "done",
-              "cancelled"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "op",
-          "proof",
-          "state"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "after": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Id"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "limit": {
-            "maximum": 100,
-            "minimum": 1,
-            "type": "integer"
-          },
-          "op": {
-            "const": "list"
-          },
-          "state": {
-            "anyOf": [
-              {
-                "enum": [
-                  "open",
-                  "done",
-                  "cancelled"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "limit",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "op": {
-            "const": "release"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "proof": {
-            "$ref": "#/$defs/TaskProof"
-          }
-        },
-        "required": [
-          "op",
-          "proof"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "note": {
-            "anyOf": [
-              {
-                "maxLength": 65536,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "objective": {
-            "maxLength": 65536,
-            "type": "string"
-          },
-          "op": {
-            "const": "update"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "proof": {
-            "$ref": "#/$defs/TaskProof"
-          }
-        },
-        "required": [
-          "objective",
-          "op",
-          "proof"
-        ],
-        "type": "object"
-      }
-    ],
-    "type": "object"
-  },
-  "name": "fabric_task"
-}
-```
 
 ### `fabric_events`
 

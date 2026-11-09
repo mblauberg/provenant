@@ -28,6 +28,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/011-queued-delivery.sql"),
     include_str!("migrations/012-hook-delivery.sql"),
     include_str!("migrations/013-viewer-state.sql"),
+    include_str!("migrations/014-remove-viewer-state.sql"),
+    include_str!("migrations/015-remove-tasks.sql"),
 ];
 
 /// Most recent database schema supported by this release.

@@ -1,7 +1,5 @@
 use super::facade::{GraphInput, HostsInput, IdentityInput, OutputInput, RunInput, SubmitInput};
-use super::{
-    ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, TaskInput, TaskState, WorkScope,
-};
+use super::{ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, WorkScope};
 use provenant_core::WaitTransport;
 use provenant_records::run::RequestedRoute;
 
@@ -344,35 +342,6 @@ impl ValidateInput for MailInput {
     }
 }
 
-impl ValidateInput for TaskInput {
-    fn validate_input(&self, _transport: WaitTransport) -> Result<(), InputError> {
-        match self {
-            Self::Create {
-                objective, note, ..
-            }
-            | Self::Update {
-                objective, note, ..
-            } => {
-                task_text(objective, "objective")?;
-                optional_text(note.as_deref(), "note", MAX_TEXT_BYTES)
-            }
-            Self::List { state, limit, .. } => {
-                if state.is_some_and(|value| value == TaskState::Active) {
-                    return Err(field("state"));
-                }
-                page(*limit, "limit")
-            }
-            Self::Claim { lease_seconds, .. } => lease(*lease_seconds),
-            Self::Finish { state, .. }
-                if !matches!(state, TaskState::Done | TaskState::Cancelled) =>
-            {
-                Err(field("state"))
-            }
-            Self::Finish { .. } | Self::Release { .. } => Ok(()),
-        }
-    }
-}
-
 impl ValidateInput for EventsInput {
     fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
@@ -632,7 +601,6 @@ mod tests {
     use super::super::facade::{GraphInput, OutputInput, RunInput, SubmitInput};
     use super::super::{
         ClaimInput, CoordinationApi, CoordinationError, CoordinationService, LandingInput,
-        TaskInput,
     };
     use provenant_core::ThreadPause;
     use provenant_core::{
@@ -808,14 +776,17 @@ mod tests {
     }
 
     #[test]
-    fn serde_rejects_out_of_bounds_task_text() {
+    fn serde_rejects_out_of_bounds_message_text() {
         let input = serde_json::json!({
-            "op": "create",
-            "objective": "x".repeat(65_537),
-            "note": null
+            "op": "send",
+            "recipients": ["00000000000000000000000000000001"],
+            "kind": "note",
+            "body": "x".repeat(65_537),
+            "artifacts": [],
+            "reply_to": null
         });
 
-        rejects::<TaskInput>(input, "objective");
+        rejects::<super::super::MailInput>(input, "body");
     }
 
     #[test]
@@ -883,11 +854,10 @@ mod tests {
 
     #[test]
     fn serde_rejects_numeric_and_collection_bounds() {
-        rejects::<TaskInput>(
-            json!({"op":"claim","id":"00000000000000000000000000000001","lease_seconds":0}),
+        rejects::<ClaimInput>(
+            json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1"},"lease_seconds":0}),
             "lease_seconds",
         );
-        rejects::<TaskInput>(json!({"op":"list","state":"active","limit":1}), "state");
         rejects::<super::super::EventsInput>(
             json!({"op":"read","limit":1,"wait_seconds":0}),
             "wait_seconds",
@@ -911,24 +881,24 @@ mod tests {
 
     #[test]
     fn proof_tokens_are_hex_and_binary_output_is_base64() {
-        use crate::coordination::TaskProof;
+        use crate::coordination::ClaimProof;
         use crate::coordination::facade::OutputBytes;
-        let proof = TaskProof {
+        let proof = ClaimProof {
             extra: Default::default(),
-            task: provenant_core::TaskId::from_bytes([1; 16]),
+            id: provenant_core::ClaimId::from_bytes([1; 16]),
             generation: 2,
             token: [0xab; 16],
         };
         let value = serde_json::to_value(&proof).unwrap();
         assert_eq!(value["token"], "ab".repeat(16));
         assert_eq!(
-            serde_json::from_value::<TaskProof>(value.clone()).unwrap(),
+            serde_json::from_value::<ClaimProof>(value.clone()).unwrap(),
             proof
         );
         for token in [json!(vec![0; 16]), json!("AB".repeat(16)), json!("ab")] {
             let mut invalid = value.clone();
             invalid["token"] = token;
-            assert!(serde_json::from_value::<TaskProof>(invalid).is_err());
+            assert!(serde_json::from_value::<ClaimProof>(invalid).is_err());
         }
         let bytes = OutputBytes::from_bytes(vec![0xff, 0x00]);
         let encoded = serde_json::to_value(&bytes).unwrap();
@@ -1003,12 +973,15 @@ mod tests {
             &backoff,
         );
 
-        // Task mutations need an operation id; `mutate` supplies a fresh one.
+        // Claim mutations need an operation id; `mutate` supplies a fresh one.
         let error = CoordinationApi::mutate(
             &service,
-            crate::coordination::Mutation::Task(TaskInput::Claim {
+            crate::coordination::Mutation::Claim(ClaimInput::Acquire {
                 extra: Default::default(),
-                id: provenant_core::TaskId::from_bytes([3; 16]),
+                scope: crate::coordination::WorkScope::Issue {
+                    extra: Default::default(),
+                    key: "issue".into(),
+                },
                 lease_seconds: 0,
             }),
             None,

@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     CancelToken, Clock, DurationMicros, MessageId, MonoTime, PathResolver, RootInputs, StateRoot,
-    TaskId, TestClock, TimeError,
+    TestClock, TimeError,
 };
 use provenant_records::{ArtifactRef, PathWire, RecordHeader};
 use std::{
@@ -53,9 +53,15 @@ fn fabric_commits_signal_inbox_and_board() {
         .unwrap();
     let after = provenant_os::changes::read(fixture.root.as_path()).unwrap();
     assert!(after.inbox > before.inbox);
-    store
-        .create_task(&task(&fixture), &fixture.request())
-        .unwrap();
+    let note = event(
+        project(),
+        Some(actor(3)),
+        EventKind::Note,
+        None,
+        "board".into(),
+        fixture.now(),
+    );
+    store.note(&note, None, &fixture.request()).unwrap();
     let board = provenant_os::changes::read(fixture.root.as_path()).unwrap();
     assert!(board.board > after.board);
 }
@@ -211,37 +217,10 @@ fn message(f: &Fixture, n: u8) -> Message {
             digest: None,
         }],
         reply_to: None,
-        task: None,
         conversation: None,
         created_at: f.now(),
     }
 }
-fn task(f: &Fixture) -> Task {
-    Task {
-        extra: Default::default(),
-        header: RecordHeader::V1,
-        project: project(),
-        id: TaskId::from_bytes([6; 16]),
-        objective: "Build F1".into(),
-        note: None,
-        state: TaskState::Open,
-        owner: None,
-        generation: 0,
-        expires_at: None,
-        created_at: f.now(),
-        updated_at: f.now(),
-    }
-}
-fn claim(f: &Fixture, who: u8) -> TaskClaim {
-    TaskClaim {
-        project: project(),
-        task: task(f).id,
-        actor: actor(who),
-        token: [who; 16],
-        lease: DurationMicros::from_seconds(1).unwrap(),
-    }
-}
-
 // Simulate a newer writer, then exercise the older reader's normal store API.
 fn add_future_member(store: &Store, table: &str) {
     store.db.execute(
@@ -255,30 +234,6 @@ fn assert_future_member(value: &impl Serialize) {
         serde_json::to_value(value).unwrap()["future_member"],
         serde_json::json!({"revision": 2, "notes": ["new"]})
     );
-}
-
-#[test]
-fn task_unknown_fields_survive_load_update_and_save() {
-    let f = Fixture::new();
-    let store = f.open();
-    store.create_task(&task(&f), &f.request()).unwrap();
-    add_future_member(&store, "tasks");
-    assert_future_member(&store.task(project(), task(&f).id, &f.request()).unwrap());
-    let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-    store
-        .update_task(
-            project(),
-            &fence,
-            "updated objective",
-            Some("updated note"),
-            &f.request(),
-        )
-        .unwrap();
-    drop(store);
-    let store = f.open();
-    let saved = store.task(project(), task(&f).id, &f.request()).unwrap();
-    assert_eq!(saved.objective, "updated objective");
-    assert_future_member(&saved);
 }
 
 #[test]
@@ -429,80 +384,6 @@ fn immutable_mail_and_recipient_scoped_monotonic_durable_cursors() {
     );
 }
 #[test]
-fn task_fences_survive_expiry_and_release_and_cannot_be_bypassed() {
-    let mut f = Fixture::new();
-    let store = f.open();
-    let t = task(&f);
-    store.create_task(&t, &f.request()).unwrap();
-    let first = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-    assert!(matches!(
-        store.claim_task(&claim(&f, 4), &f.request()),
-        Err(Error::Conflict)
-    ));
-    let mut wrong = first.clone();
-    wrong.token = [9; 16];
-    assert!(matches!(
-        store.finish_task(project(), &wrong, TaskState::Done, &f.request()),
-        Err(Error::StaleFence)
-    ));
-    f.clock
-        .advance(DurationMicros::from_seconds(1).unwrap())
-        .unwrap();
-    let next = store.claim_task(&claim(&f, 4), &f.request()).unwrap();
-    assert_eq!(next.generation, first.generation + 1);
-    assert!(matches!(
-        store.release_task(project(), &first, &f.request()),
-        Err(Error::StaleFence)
-    ));
-    store.release_task(project(), &next, &f.request()).unwrap();
-    let third = store.claim_task(&claim(&f, 4), &f.request()).unwrap();
-    assert_eq!(third.generation, next.generation + 1);
-    store
-        .update_task(
-            project(),
-            &third,
-            "New objective",
-            Some("blocker"),
-            &f.request(),
-        )
-        .unwrap();
-    store
-        .finish_task(project(), &third, TaskState::Cancelled, &f.request())
-        .unwrap();
-    assert!(matches!(
-        store.claim_task(&claim(&f, 3), &f.request()),
-        Err(Error::Conflict)
-    ));
-}
-#[test]
-fn barrier_race_between_two_connections_has_one_task_owner() {
-    let f = Fixture::new();
-    f.open().create_task(&task(&f), &f.request()).unwrap();
-    let barrier = Arc::new(Barrier::new(2));
-    std::thread::scope(|s| {
-        let launch = |who| {
-            let barrier = barrier.clone();
-            let f = &f;
-            s.spawn(move || {
-                let store = f.open();
-                barrier.wait();
-                store.claim_task(&claim(f, who), &f.request())
-            })
-        };
-        let a = launch(3);
-        let b = launch(4);
-        let results = [a.join().unwrap(), b.join().unwrap()];
-        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-        assert_eq!(
-            results
-                .iter()
-                .filter(|r| matches!(r, Err(Error::Conflict)))
-                .count(),
-            1
-        );
-    });
-}
-#[test]
 fn sqlite_full_rolls_back_messages_deliveries_and_events() {
     let f = Fixture::new();
     let store = f.open();
@@ -566,13 +447,12 @@ fn future_schema_refuses_without_journal_mutation() {
 }
 
 #[test]
-fn event_failure_rolls_back_task_and_mail_mutations() {
+fn event_failure_rolls_back_mail_mutations() {
     let f = Fixture::new();
     let store = f.open();
     store.db.execute_batch("CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected event failure'); END").unwrap();
-    assert!(store.create_task(&task(&f), &f.request()).is_err());
     assert!(store.send(&message(&f, 5), &f.request()).is_err());
-    for table in ["tasks", "messages", "deliveries", "events"] {
+    for table in ["messages", "deliveries", "events"] {
         assert_eq!(
             store
                 .db
@@ -582,22 +462,6 @@ fn event_failure_rolls_back_task_and_mail_mutations() {
             0
         );
     }
-    store.db.execute_batch("DROP TRIGGER fail_events").unwrap();
-    store.create_task(&task(&f), &f.request()).unwrap();
-    let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-    store.db.execute_batch("CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected event failure'); END").unwrap();
-    assert!(
-        store
-            .finish_task(project(), &fence, TaskState::Done, &f.request())
-            .is_err()
-    );
-    assert_eq!(
-        store
-            .task(project(), fence.task, &f.request())
-            .unwrap()
-            .state,
-        TaskState::Active
-    );
 }
 #[test]
 fn event_replay_deduplication_and_durable_cursor() {
@@ -862,37 +726,6 @@ fn delivery_sequences_are_local_to_each_project_and_never_wrap() {
 }
 
 #[test]
-fn caller_timestamp_cannot_take_over_a_live_lease() {
-    let f = Fixture::new();
-    let store = f.open();
-    let mut future_task = task(&f);
-    future_task.created_at = f
-        .now()
-        .checked_add(DurationMicros::from_seconds(60).unwrap())
-        .unwrap();
-    future_task.updated_at = future_task.created_at;
-    store.create_task(&future_task, &f.request()).unwrap();
-    store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-    // The caller can future-date stored input, but cannot supply decision time.
-    let mut future = claim(&f, 4);
-    future.lease = DurationMicros::from_seconds(3600).unwrap();
-    assert!(matches!(
-        store.claim_task(&future, &f.request()),
-        Err(Error::Conflict)
-    ));
-    let active = store.task(project(), task(&f).id, &f.request()).unwrap();
-    assert_eq!(active.updated_at, f.now());
-    assert_eq!(
-        active.expires_at,
-        Some(
-            f.now()
-                .checked_add(DurationMicros::from_seconds(1).unwrap())
-                .unwrap()
-        )
-    );
-}
-
-#[test]
 fn nonempty_unversioned_database_is_refused_before_mutation() {
     let f = Fixture::new();
     drop(f.open());
@@ -977,108 +810,40 @@ fn byte_bounded_pages_report_truncation_and_resume_without_loss() {
 }
 
 #[test]
-fn task_pages_report_byte_truncation_and_resume_without_loss() {
-    let f = Fixture::new();
-    let store = f.open();
-    for n in 1..=20 {
-        let mut record = task(&f);
-        record.id = TaskId::from_bytes([n; 16]);
-        record.objective = "x".repeat(MAX_BODY_BYTES);
-        store.create_task(&record, &f.request()).unwrap();
-    }
-
-    let first = store
-        .tasks(project(), None, None, 100, &f.request())
-        .unwrap();
-    let first = serde_json::to_value(first).unwrap();
-    assert_eq!(
-        first.get("truncated").and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    let first_items: Vec<Task> = serde_json::from_value(first["items"].clone()).unwrap();
-    let next = store
-        .tasks(
-            project(),
-            None,
-            first_items.last().map(|record| record.id),
-            100,
-            &f.request(),
-        )
-        .unwrap();
-    let next = serde_json::to_value(next).unwrap();
-    assert_eq!(
-        next.get("truncated").and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    let next_items: Vec<Task> = serde_json::from_value(next["items"].clone()).unwrap();
-    assert_eq!(first_items.len() + next_items.len(), 20);
-}
-
-#[test]
-fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
+fn store_clock_controls_mutation_times_and_acknowledgements() {
     let mut f = Fixture::new();
     let store = f.open();
-    let mut t = task(&f);
-    t.updated_at = f
-        .now()
-        .checked_add(DurationMicros::from_seconds(3600).unwrap())
-        .unwrap();
-    store.create_task(&t, &f.request()).unwrap();
-    let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
     f.clock
         .advance(DurationMicros::from_micros(500_000))
         .unwrap();
-    store
-        .update_task(project(), &fence, "updated", None, &f.request())
-        .unwrap();
-    assert_eq!(
-        store
-            .task(project(), t.id, &f.request())
-            .unwrap()
-            .updated_at,
-        f.now()
-    );
     store.send(&message(&f, 5), &f.request()).unwrap();
     store
         .mark_mail_read(project(), actor(3), 1, &f.request())
         .unwrap();
     let events = store.events(project(), 0, 100, &f.request()).unwrap();
     assert_eq!(events.items.last().unwrap().record.at, f.now());
-    f.clock
-        .advance(DurationMicros::from_micros(500_000))
-        .unwrap();
-    assert!(matches!(
-        store.update_task(project(), &fence, "too late", None, &f.request()),
-        Err(Error::StaleFence)
-    ));
-    store.release_task(project(), &fence, &f.request()).unwrap();
-    assert!(matches!(
-        store.finish_task(project(), &fence, TaskState::Done, &f.request()),
-        Err(Error::StaleFence)
-    ));
 }
 
-// The TaskResult shape a coordination receipt stores, without the runtime crate.
+// A coordination receipt as stored, without the runtime crate.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
-enum TaskReceipt {
-    Created { task: Task },
+enum SentReceipt {
+    Sent { message: Message },
 }
-const PEER_TASK: &str = "/result/data/result/task";
+const PEER_MESSAGE: &str = "/result/data/result/message";
 // A committed PeerResponse is plain serde_json in field order, not canonical.
-fn peer_reply(task: &str) -> Vec<u8> {
+fn peer_reply(message: &str) -> Vec<u8> {
     format!(
-        r#"{{"version":1,"host":"{0}","project":"{0}","result":{{"result":"coordination","data":{{"domain":"task","result":{{"result":"created","task":{task}}}}}}}}}"#,
+        r#"{{"version":1,"host":"{0}","project":"{0}","result":{{"result":"coordination","data":{{"domain":"mail","result":{{"result":"sent","message":{message}}}}}}}}}"#,
         "07".repeat(16)
     )
     .into_bytes()
 }
-// Every column that holds a serialised Task, Message or Event, as text.
+// Every column that holds a serialised Message or Event, as text.
 fn stored_records(db: &rusqlite::Connection) -> Vec<String> {
     let mut result = Vec::new();
     for query in [
         "SELECT record FROM messages ORDER BY id",
-        "SELECT record FROM tasks ORDER BY id",
         "SELECT record FROM events ORDER BY seq",
         "SELECT result FROM coordination_operations ORDER BY id",
         "SELECT response FROM peer_operations ORDER BY id",
@@ -1093,35 +858,42 @@ fn stored_records(db: &rusqlite::Connection) -> Vec<String> {
     result
 }
 // Fixtures rewinding a current database must remove later tables in
-// foreign-key order before the older schema can be upgraded again.
-const REMOVE_VIEWER_TABLES: &str = "DROP TABLE viewer_requests; DROP TABLE viewer_summaries;";
+// foreign-key order and restore removed ones before the older schema can be
+// upgraded again.
 const REMOVE_HUMAN_TABLES: &str = "DROP TABLE run_chairs; DROP TABLE human_answer_outbox; \
     DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests;";
+/// The task board table as every release before migration 015 created it.
+pub(crate) const RESTORE_TASKS_TABLE: &str = "CREATE TABLE tasks (
+ project TEXT NOT NULL, id TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('open','active','done','cancelled')),
+ generation INTEGER NOT NULL CHECK(generation >= 0),
+ owner TEXT, token BLOB, expires INTEGER, record BLOB NOT NULL,
+ PRIMARY KEY(project, id),
+ CHECK((state = 'active' AND owner IS NOT NULL AND length(token) = 16 AND expires IS NOT NULL)
+    OR (state <> 'active' AND owner IS NULL AND token IS NULL AND expires IS NULL))
+) STRICT;";
 fn downgrade_to_six(store: &Store, rows: &str) {
     store
         .db
         .execute_batch(&format!(
-            "{REMOVE_VIEWER_TABLES} {REMOVE_HUMAN_TABLES} CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, tasks INTEGER NOT NULL, messages INTEGER NOT NULL, skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; {rows} PRAGMA user_version=6;"
+            "{REMOVE_HUMAN_TABLES} {RESTORE_TASKS_TABLE} CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, tasks INTEGER NOT NULL, messages INTEGER NOT NULL, skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; {rows} PRAGMA user_version=6;"
         ))
         .unwrap();
 }
-// Seed each record kind that carried the removed members: a message, a task,
-// its coordination receipt and a committed peer reply carrying that task.
-fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
+// Seed a message, its coordination receipt and a committed peer reply
+// carrying that message.
+fn seed_records(f: &Fixture, store: &Store) -> Message {
     let request = f.request();
     let mut m = message(f, 5);
     m.body = "Review \"this\"\tnow é".into();
-    let mut t = task(f);
-    t.objective = "Ship \"F1\"\n é".into();
-    store.send(&m, &request).unwrap();
-    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    let id = provenant_core::OperationId::parse("send-1").unwrap();
     let receipt = store
-        .coordination_operation(project(), actor(2), &id, &"create", &request, || {
-            store.create_task(&t, &request)?;
-            Ok::<_, Error>(TaskReceipt::Created { task: t.clone() })
+        .coordination_operation(project(), actor(2), &id, &"send", &request, || {
+            store.send(&m, &request)?;
+            Ok::<_, Error>(SentReceipt::Sent { message: m.clone() })
         })
         .unwrap();
-    assert_eq!(receipt, TaskReceipt::Created { task: t.clone() });
+    assert_eq!(receipt, SentReceipt::Sent { message: m.clone() });
     let peer = provenant_core::OperationId::parse("peer-1").unwrap();
     let digest = provenant_core::Digest::from_bytes([7; 32]);
     store
@@ -1130,7 +902,7 @@ fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
     store
         .peer_phase(project(), actor(2), &peer, PeerPhaseChange::Sent, &request)
         .unwrap();
-    let response = peer_reply(&serde_json::to_string(&t).unwrap());
+    let response = peer_reply(&serde_json::to_string(&m).unwrap());
     store
         .peer_phase(
             project(),
@@ -1140,52 +912,26 @@ fn seed_records(f: &Fixture, store: &Store) -> (Message, Task) {
             &request,
         )
         .unwrap();
-    (m, t)
+    m
 }
 
-// Rewrite each seeded row as a version 6 binary writes it, with the removed
+// Rewrite the seeded message as a version 6 binary writes it, with the removed
 // members null. Canonical records sort `legacy` and `legacy_output_path` into
-// place; the peer reply's Task has `legacy` as its last field.
-fn write_null_members(store: &Store, t: &Task) {
-    let rows = [
-        (
-            "messages",
-            "record",
-            "",
-            &["legacy", "legacy_output_path"][..],
-        ),
-        ("tasks", "record", "", &["legacy"][..]),
-        (
-            "coordination_operations",
-            "result",
-            "/task",
-            &["legacy"][..],
-        ),
-    ];
-    for (table, column, pointer, names) in rows {
-        let bytes: Vec<u8> = store
-            .db
-            .query_row(&format!("SELECT {column} FROM {table}"), [], |r| r.get(0))
-            .unwrap();
-        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let object = value.pointer_mut(pointer).unwrap().as_object_mut().unwrap();
-        for name in names {
-            object.insert((*name).into(), serde_json::Value::Null);
-        }
-        let old = encode(&value).unwrap();
-        store
-            .db
-            .execute(&format!("UPDATE {table} SET {column}=?1"), [old])
-            .unwrap();
+// place.
+fn write_null_members(store: &Store) {
+    let bytes: Vec<u8> = store
+        .db
+        .query_row("SELECT record FROM messages", [], |r| r.get(0))
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let object = value.as_object_mut().unwrap();
+    for name in ["legacy", "legacy_output_path"] {
+        object.insert(name.into(), serde_json::Value::Null);
     }
-    let task_json = serde_json::to_string(t).unwrap();
-    let old_reply = peer_reply(&format!(
-        "{},\"legacy\":null}}",
-        task_json.strip_suffix('}').unwrap()
-    ));
+    let old = encode(&value).unwrap();
     store
         .db
-        .execute("UPDATE peer_operations SET response=?1", [old_reply])
+        .execute("UPDATE messages SET record=?1", [old])
         .unwrap();
 }
 
@@ -1193,9 +939,9 @@ fn write_null_members(store: &Store, t: &Task) {
 fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     let f = Fixture::new();
     let store = f.open();
-    let (m, t) = seed_records(&f, &store);
+    let m = seed_records(&f, &store);
     let before = stored_records(&store.db);
-    write_null_members(&store, &t);
+    write_null_members(&store);
     downgrade_to_six(&store, "");
     let before_upgrade = stored_records(&store.db);
     assert_ne!(before_upgrade, before);
@@ -1225,19 +971,18 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     // for receipts, only if the stored reply still decodes.
     let request = f.request();
     store.send(&m, &request).unwrap();
-    store.create_task(&t, &request).unwrap();
-    let id = provenant_core::OperationId::parse("create-1").unwrap();
+    let id = provenant_core::OperationId::parse("send-1").unwrap();
     let replayed = store
-        .coordination_operation(project(), actor(2), &id, &"create", &request, || {
-            Err::<TaskReceipt, Error>(Error::Invalid("receipt replay reran its effect"))
+        .coordination_operation(project(), actor(2), &id, &"send", &request, || {
+            Err::<SentReceipt, Error>(Error::Invalid("receipt replay reran its effect"))
         })
         .unwrap();
-    assert_eq!(replayed, TaskReceipt::Created { task: t.clone() });
+    assert_eq!(replayed, SentReceipt::Sent { message: m.clone() });
     assert_eq!(
         store
-            .coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request)
+            .coordination_receipt::<SentReceipt>(project(), actor(2), &id, &request)
             .unwrap(),
-        Some(TaskReceipt::Created { task: t.clone() })
+        Some(SentReceipt::Sent { message: m.clone() })
     );
     let peer = provenant_core::OperationId::parse("peer-1").unwrap();
     let digest = provenant_core::Digest::from_bytes([7; 32]);
@@ -1250,8 +995,9 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
         provenant_records::Limits::CONFIG,
     )
     .unwrap();
-    let task: Task = serde_json::from_value(reply.pointer(PEER_TASK).unwrap().clone()).unwrap();
-    assert_eq!(task, t);
+    let sent: Message =
+        serde_json::from_value(reply.pointer(PEER_MESSAGE).unwrap().clone()).unwrap();
+    assert_eq!(sent, m);
     assert_eq!(stored_records(&store.db), before);
     drop(store);
     drop(f.open());
@@ -1261,10 +1007,7 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
 fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
     let f = Fixture::new();
     let store = f.open();
-    let (modern_message, modern_task) = seed_records(&f, &store);
-    let mut imported_task = task(&f);
-    imported_task.id = TaskId::from_bytes([80; 16]);
-    store.create_task(&imported_task, &f.request()).unwrap();
+    let modern_message = seed_records(&f, &store);
     for id in 81..=85 {
         store.send(&message(&f, id), &f.request()).unwrap();
     }
@@ -1273,18 +1016,16 @@ fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
         &store,
         &format!(
             "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,1,5,X'7B7D'); \
-             UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json_object('id','old')) AS BLOB) WHERE id='{}'; \
              UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json_object('id','old')) AS BLOB) WHERE id='{}'; \
              UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.conversation',json_object('scope','legacy','id','old')) AS BLOB) WHERE id='{}'; \
              UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',json_object('scope','legacy','id','old')) AS BLOB) WHERE id='{}'; \
              UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.task',json_object('scope','legacy','id','old')) AS BLOB) WHERE id='{}'; \
              UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy_output_path','old-output') AS BLOB) WHERE id='{}'; \
              INSERT INTO events(project,dedup,record) SELECT project,NULL,CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) FROM events WHERE seq=1; \
-             INSERT INTO coordination_operations SELECT project,'legacy-create',actor,request,CAST(json_set(CAST(result AS TEXT),'$.task.legacy',json_object('id','old')) AS BLOB) FROM coordination_operations WHERE id='create-1'; \
-             INSERT INTO peer_operations SELECT project,'legacy-peer',actor,digest,phase,request,CAST(json_set(CAST(response AS TEXT),'$.result.data.result.task.legacy',json_object('id','old')) AS BLOB) FROM peer_operations WHERE id='peer-1'; \
+             INSERT INTO coordination_operations SELECT project,'legacy-send',actor,request,CAST(json_set(CAST(result AS TEXT),'$.message.legacy',json_object('id','old')) AS BLOB) FROM coordination_operations WHERE id='send-1'; \
+             INSERT INTO peer_operations SELECT project,'legacy-peer',actor,digest,phase,request,CAST(json_set(CAST(response AS TEXT),'$.result.data.result.message.legacy',json_object('id','old')) AS BLOB) FROM peer_operations WHERE id='peer-1'; \
              INSERT INTO peer_operations SELECT project,'empty-peer',actor,digest,phase,request,X'' FROM peer_operations WHERE id='peer-1';",
             project(),
-            imported_task.id,
             MessageId::from_bytes([81; 16]),
             MessageId::from_bytes([82; 16]),
             MessageId::from_bytes([83; 16]),
@@ -1318,17 +1059,6 @@ fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
         )
         .unwrap();
     assert!(empty_response.is_empty());
-    assert_eq!(
-        store
-            .tasks(project(), None, None, 100, &request)
-            .unwrap()
-            .items,
-        vec![modern_task.clone()]
-    );
-    assert!(matches!(
-        store.task(project(), imported_task.id, &request),
-        Err(Error::NotFound)
-    ));
     let mail = store
         .read_mail(project(), actor(3), Some(0), 100, &request)
         .unwrap();
@@ -1373,14 +1103,16 @@ fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
     );
     assert_eq!(
         store
-            .coordination_receipt::<TaskReceipt>(
+            .coordination_receipt::<SentReceipt>(
                 project(),
                 actor(2),
-                &provenant_core::OperationId::parse("create-1").unwrap(),
+                &provenant_core::OperationId::parse("send-1").unwrap(),
                 &request
             )
             .unwrap(),
-        Some(TaskReceipt::Created { task: modern_task })
+        Some(SentReceipt::Sent {
+            message: modern_message
+        })
     );
     let operation = store
         .lookup_peer(
@@ -1395,10 +1127,10 @@ fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
         serde_json::from_slice(operation.response.as_deref().unwrap()).unwrap();
     assert!(
         store
-            .coordination_receipt::<TaskReceipt>(
+            .coordination_receipt::<SentReceipt>(
                 project(),
                 actor(2),
-                &provenant_core::OperationId::parse("legacy-create").unwrap(),
+                &provenant_core::OperationId::parse("legacy-send").unwrap(),
                 &request
             )
             .unwrap()
@@ -1426,51 +1158,96 @@ fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
 }
 
 #[test]
-fn newer_stored_task_header_reports_unsupported_version() {
+fn task_board_migration_drops_tasks_and_strips_message_links() {
     let f = Fixture::new();
     let store = f.open();
-    let (_, task) = seed_records(&f, &store);
-    store.db.execute(
-        "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.header.schema_version',2) AS BLOB)",
-        [],
-    ).unwrap();
-    assert!(matches!(
-        store.task(project(), task.id, &f.request()),
-        Err(Error::Decode(
-            provenant_records::DecodeError::UnsupportedVersion { found: 2, .. }
+    let request = f.request();
+    let mut m = message(&f, 5);
+    m.body = "Review \"this\"\tnow é".into();
+    store.send(&m, &request).unwrap();
+    let modern_events = store.events(project(), 0, 100, &request).unwrap().items;
+    let mail_send = serde_json::json!({"domain":"mail","input":{"op":"send","body":"b"}});
+    let send_id = provenant_core::OperationId::parse("mail-send").unwrap();
+    store
+        .coordination_operation(project(), actor(2), &send_id, &mail_send, &request, || {
+            Ok::<_, Error>(serde_json::json!({"result":"sent"}))
+        })
+        .unwrap();
+    let peer = provenant_core::OperationId::parse("task-peer").unwrap();
+    store
+        .prepare_peer(
+            project(),
+            actor(2),
+            &peer,
+            provenant_core::Digest::from_bytes([7; 32]),
+            br#"{"input":{"domain":"task","input":{"op":"list"}}}"#,
+            &request,
+        )
+        .unwrap();
+    // Rewind to schema 14 with the rows a release with the task board wrote.
+    store
+        .db
+        .execute_batch(&format!(
+            "{RESTORE_TASKS_TABLE} \
+             INSERT INTO tasks VALUES('{project}','t1','open',0,NULL,NULL,NULL,CAST('{{}}' AS BLOB)); \
+             INSERT INTO events(project,dedup,record) SELECT project,NULL,CAST(json_set(CAST(record AS TEXT),'$.kind','task_created') AS BLOB) FROM events WHERE seq=1; \
+             UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.task',json_object('scope','local','id','t1')) AS BLOB); \
+             UPDATE coordination_operations SET request=CAST(json_set(CAST(request AS TEXT),'$.input.task',json('null')) AS BLOB) WHERE id='mail-send'; \
+             INSERT INTO coordination_operations VALUES('{project}','task-create','{actor}',CAST('{{\"domain\":\"task\",\"input\":{{\"op\":\"create\"}}}}' AS BLOB),CAST('{{}}' AS BLOB)); \
+             PRAGMA user_version=14;",
+            project = project(),
+            actor = actor(2),
         ))
-    ));
-}
-
-#[test]
-fn owner_can_close_its_expired_active_task_but_cannot_update_it() {
-    for state in [TaskState::Open, TaskState::Done, TaskState::Cancelled] {
-        let mut f = Fixture::new();
-        let store = f.open();
-        store.create_task(&task(&f), &f.request()).unwrap();
-        let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-        f.clock
-            .advance(DurationMicros::from_seconds(1).unwrap())
-            .unwrap();
-        assert!(matches!(
-            store.update_task(project(), &fence, "changed", None, &f.request()),
-            Err(Error::StaleFence)
-        ));
-        if state == TaskState::Open {
-            store.release_task(project(), &fence, &f.request()).unwrap();
-        } else {
-            store
-                .finish_task(project(), &fence, state, &f.request())
-                .unwrap();
-        }
-        assert_eq!(
-            store
-                .task(project(), fence.task, &f.request())
-                .unwrap()
-                .state,
-            state
-        );
-    }
+        .unwrap();
+    drop(store);
+    let store = f.open();
+    let tables: i64 = store
+        .db
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='tasks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    assert_eq!(
+        store.events(project(), 0, 100, &request).unwrap().items,
+        modern_events
+    );
+    let mail = store
+        .read_mail(project(), actor(3), Some(0), 100, &request)
+        .unwrap();
+    assert_eq!(mail.items[0].message, m);
+    store.send(&m, &request).unwrap();
+    assert!(
+        store
+            .coordination_replay::<serde_json::Value>(
+                project(),
+                actor(2),
+                &send_id,
+                &mail_send,
+                &request
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .coordination_receipt::<serde_json::Value>(
+                project(),
+                actor(2),
+                &provenant_core::OperationId::parse("task-create").unwrap(),
+                &request
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .lookup_peer(project(), actor(2), &peer, &request)
+            .unwrap()
+            .is_none()
+    );
 }
 
 mod f2;
@@ -1487,7 +1264,7 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     store
         .db
         .execute_batch(&format!(
-            "{REMOVE_VIEWER_TABLES} DROP INDEX human_hook_queued; DROP INDEX human_hook_pending; DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;"
+            "{RESTORE_TASKS_TABLE} DROP INDEX human_hook_queued; DROP INDEX human_hook_pending; DROP INDEX human_queued_delivery; DROP INDEX human_local_delivery; DROP TABLE run_chairs; PRAGMA user_version=8;"
         ))
         .unwrap();
     drop(store);

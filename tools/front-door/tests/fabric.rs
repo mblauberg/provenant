@@ -77,42 +77,6 @@ fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
         call(&rig, &["fabric", "mail", "read"], 0)?["data"]["page"]["items"],
         json!([])
     );
-    let create = [
-        "fabric",
-        "task",
-        "create",
-        "--objective",
-        "review",
-        "--operation-id",
-        "task-1",
-    ];
-    let task = call(&rig, &create, 0)?;
-    assert_eq!(task, call(&rig, &create, 0)?);
-    let id = task["data"]["task"]["id"].as_str().ok_or("task ID")?;
-    let claim = call(
-        &rig,
-        &["fabric", "task", "claim", id, "--operation-id", "claim-1"],
-        0,
-    )?;
-    let proof = &claim["data"]["proof"];
-    let generation = proof["generation"].to_string();
-    let token = token(proof)?;
-    call(
-        &rig,
-        &[
-            "fabric",
-            "task",
-            "finish",
-            id,
-            "--generation",
-            &generation,
-            "--token",
-            &token,
-            "--operation-id",
-            "finish-1",
-        ],
-        0,
-    )?;
     let note = [
         "fabric",
         "events",

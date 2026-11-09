@@ -84,13 +84,13 @@ fn mcp(rig: &TestRig, name: &str, arguments: Value) -> Result<Value> {
 fn lane_reads_wal_outside_home_without_mutating_the_database() -> Result {
     let mut rig = TestRig::new()?;
     assert!(!rig.project.starts_with(&rig.home));
-    let task = host(
+    host(
         &rig,
         &[
             "fabric",
-            "task",
-            "create",
-            "--objective",
+            "events",
+            "note",
+            "--note",
             "visible through WAL",
             "--operation-id",
             "lane-read-seed",
@@ -101,16 +101,16 @@ fn lane_reads_wal_outside_home_without_mutating_the_database() -> Result {
     let before = files
         .map(|suffix| std::fs::read(rig.state.join(format!("fabric/fabric.sqlite3{suffix}"))).ok());
     lane_environment(&mut rig, AttemptId::from_bytes([13; 16]))?;
-    let listed = host(&rig, &["fabric", "task", "list", "--json"])?;
+    let listed = host(&rig, &["fabric", "events", "read", "--json"])?;
     assert_eq!(
-        listed["data"]["page"]["items"][0]["id"],
-        task["data"]["task"]["id"]
+        listed["data"]["page"]["items"][0]["record"]["detail"],
+        "visible through WAL"
     );
-    let listed = mcp(&rig, "fabric_task", json!({"op":"list","limit":10}))?;
+    let listed = mcp(&rig, "fabric_events", json!({"op":"read","limit":10}))?;
     assert_ne!(listed["isError"], true, "{listed}");
     assert_eq!(
-        listed["structuredContent"]["page"]["items"][0]["id"],
-        task["data"]["task"]["id"]
+        listed["structuredContent"]["page"]["items"][0]["record"]["detail"],
+        "visible through WAL"
     );
     let after = files
         .map(|suffix| std::fs::read(rig.state.join(format!("fabric/fabric.sqlite3{suffix}"))).ok());
@@ -490,7 +490,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
 fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Result {
     let mut rig = TestRig::new()?;
     host(&rig, &["fabric", "identity", "--json"])?;
-    host(&rig, &["fabric", "task", "list", "--json"])?;
+    host(&rig, &["fabric", "events", "read", "--json"])?;
     lane_environment(&mut rig, AttemptId::from_bytes([78; 16]))?;
     let preview = host(
         &rig,
@@ -539,7 +539,7 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         atomic::{AtomicBool, Ordering},
     };
     let mut rig = TestRig::new()?;
-    host(&rig, &["fabric", "task", "list", "--json"])?;
+    host(&rig, &["fabric", "events", "read", "--json"])?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let fail_observation = Arc::new(AtomicBool::new(false));
     let failure = Arc::clone(&fail_observation);
@@ -636,7 +636,7 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
 fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Result {
     use provenant_fabric_runtime::graph::relay::RelayOp;
     let mut rig = TestRig::new()?;
-    host(&rig, &["fabric", "task", "list", "--json"])?;
+    host(&rig, &["fabric", "events", "read", "--json"])?;
     std::fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=60\n",

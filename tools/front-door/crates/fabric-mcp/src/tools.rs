@@ -8,7 +8,7 @@ pub use provenant_fabric_runtime::coordination::facade::*;
 use provenant_fabric_runtime::coordination::input::{InputError, ValidateInput};
 pub use provenant_fabric_runtime::coordination::{
     ClaimInput, CoordinationApi, CoordinationError, CoordinationService, EventsInput, LandingInput,
-    MailInput, Mutation, TaskInput,
+    MailInput, Mutation,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
 use provenant_fabric_runtime::runs::RunResult;
@@ -253,7 +253,6 @@ pub enum ToolCall {
     Chair(ChairInput),
     Identity(IdentityInput),
     Mail(MailInput, Option<OperationId>),
-    Task(TaskInput, Option<OperationId>),
     Events(EventsInput, Option<OperationId>),
     Claim(ClaimInput, Option<OperationId>),
     Landing(LandingInput, Option<OperationId>),
@@ -288,7 +287,6 @@ impl ToolCall {
             Self::Chair(_) => schema::ToolKind::Chair,
             Self::Identity(_) => schema::ToolKind::Identity,
             Self::Mail(..) => schema::ToolKind::Mail,
-            Self::Task(..) => schema::ToolKind::Task,
             Self::Events(..) => schema::ToolKind::Events,
             Self::Claim(..) => schema::ToolKind::Claim,
             Self::Landing(..) => schema::ToolKind::Claim,
@@ -353,26 +351,6 @@ impl ToolCall {
             ) => body(text, "text"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
-            Self::Task(
-                TaskInput::Create {
-                    objective, note, ..
-                },
-                _,
-            )
-            | Self::Task(
-                TaskInput::Update {
-                    objective, note, ..
-                },
-                _,
-            ) => {
-                body(objective, "objective")?;
-                if let Some(note) = note {
-                    body(note, "note")?;
-                }
-                Ok(())
-            }
-            Self::Task(TaskInput::List { limit, .. }, _) => page(*limit),
-            Self::Task(TaskInput::Claim { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Events(EventsInput::Read { limit, .. }, _) => page(*limit),
             Self::Events(EventsInput::Note { note, .. }, _) => body(note, "note"),
             Self::Claim(ClaimInput::List { limit, .. }, _) => page(*limit),
@@ -407,14 +385,6 @@ impl ToolCall {
         matches!(
             self,
             Self::Mail(MailInput::Send { .. } | MailInput::MarkRead { .. }, _)
-                | Self::Task(
-                    TaskInput::Create { .. }
-                        | TaskInput::Claim { .. }
-                        | TaskInput::Update { .. }
-                        | TaskInput::Finish { .. }
-                        | TaskInput::Release { .. },
-                    _
-                )
                 | Self::Events(EventsInput::Note { .. }, _)
                 | Self::Claim(
                     ClaimInput::Acquire { .. }
@@ -440,7 +410,6 @@ impl ToolCall {
         }
         match self {
             Self::Mail(input, id) => Some((Mutation::Mail(input.clone()), id.clone())),
-            Self::Task(input, id) => Some((Mutation::Task(input.clone()), id.clone())),
             Self::Events(input, id) => Some((Mutation::Events(input.clone()), id.clone())),
             Self::Claim(input, id) => Some((Mutation::Claim(input.clone()), id.clone())),
             _ => None,
@@ -451,7 +420,6 @@ impl ToolCall {
         matches!(
             self,
             Self::Mail(MailInput::Read { .. }, _)
-                | Self::Task(TaskInput::List { .. }, _)
                 | Self::Events(EventsInput::Read { .. }, _)
                 | Self::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. }, _)
                 | Self::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }, _)
@@ -464,18 +432,15 @@ impl ToolCall {
         }
         let mut arguments = match self {
             Self::Mail(input, _) => serde_json::to_value(input)?,
-            Self::Task(input, _) => serde_json::to_value(input)?,
             Self::Events(input, _) => serde_json::to_value(input)?,
             Self::Claim(input, _) => serde_json::to_value(input)?,
             Self::Landing(input, _) => serde_json::to_value(input)?,
             _ => return Err(CoordinationError::LaneMutation.into()),
         };
         let id = match self {
-            Self::Mail(_, id)
-            | Self::Task(_, id)
-            | Self::Events(_, id)
-            | Self::Claim(_, id)
-            | Self::Landing(_, id) => id,
+            Self::Mail(_, id) | Self::Events(_, id) | Self::Claim(_, id) | Self::Landing(_, id) => {
+                id
+            }
             _ => return Err(CoordinationError::LaneMutation.into()),
         };
         if let Some(id) = id {
@@ -549,9 +514,6 @@ impl ToolCall {
         match self {
             Self::Mail(input, _) => Ok(serde_json::to_value(
                 coordination.mail(input, budget, cancel)?,
-            )?),
-            Self::Task(input, _) => Ok(serde_json::to_value(
-                coordination.task(input, budget, cancel)?,
             )?),
             Self::Events(input, _) => Ok(serde_json::to_value(
                 coordination.events(input, budget, cancel)?,
@@ -641,14 +603,9 @@ impl ToolCall {
         } else {
             None
         };
-        let operation_id =
-            match schema::tool_kind(name) {
-                Some(
-                    schema::ToolKind::Mail
-                    | schema::ToolKind::Task
-                    | schema::ToolKind::Events
-                    | schema::ToolKind::Claim,
-                ) => match arguments
+        let operation_id = match schema::tool_kind(name) {
+            Some(schema::ToolKind::Mail | schema::ToolKind::Events | schema::ToolKind::Claim) => {
+                match arguments
                     .as_object_mut()
                     .and_then(|object| object.remove("operation_id"))
                 {
@@ -663,9 +620,10 @@ impl ToolCall {
                         });
                     }
                     None => None,
-                },
-                _ => None,
-            };
+                }
+            }
+            _ => None,
+        };
         macro_rules! parse {
             ($ty:ty, $variant:ident $(, $metadata:expr)*) => {
                 <$ty>::decode_for_transport(arguments.clone(), WaitTransport::Mcp)
@@ -722,7 +680,6 @@ impl ToolCall {
             }
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
-            Some(schema::ToolKind::Task) => parse!(TaskInput, Task, operation_id.clone()),
             Some(schema::ToolKind::Events) => parse!(EventsInput, Events, operation_id.clone()),
             Some(schema::ToolKind::Claim) if operation.starts_with("landing_") => {
                 parse!(LandingInput, Landing, operation_id.clone())
@@ -861,7 +818,6 @@ impl ToolCall {
             Self::Chair(input) => input.validate(),
             Self::Identity(input) => input.validate_input(WaitTransport::Mcp),
             Self::Mail(input, _) => input.validate_input(WaitTransport::Mcp),
-            Self::Task(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Events(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Claim(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Landing(input, _) => input.validate_input(WaitTransport::Mcp),
@@ -920,7 +876,6 @@ impl ToolCall {
                 Self::Inbox(..)
                     | Self::Chair(..)
                     | Self::Mail(..)
-                    | Self::Task(..)
                     | Self::Events(..)
                     | Self::Claim(..)
                     | Self::Landing(..)
@@ -988,22 +943,6 @@ impl ToolCall {
                     )
                 } else {
                     response(tool_name, service.coordination.mail(input, budget, cancel)?)
-                }
-            }
-            Self::Task(input, operation_id) => {
-                if !matches!(&input, TaskInput::List { .. }) {
-                    response(
-                        tool_name,
-                        CoordinationApi::mutate(
-                            &service.coordination,
-                            Mutation::Task(input),
-                            operation_id,
-                            budget,
-                            cancel,
-                        )?,
-                    )
-                } else {
-                    response(tool_name, service.coordination.task(input, budget, cancel)?)
                 }
             }
             Self::Events(

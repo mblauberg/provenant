@@ -362,22 +362,6 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
         json!({"op":"read","after":0,"limit":10}),
     )?;
     assert_eq!(inbox["page"]["items"][0]["message"]["id"], sent["id"]);
-    let task = call(
-        &mut service,
-        "fabric_task",
-        json!({"op":"create","objective":"Review"}),
-    )?;
-    let claimed = call(
-        &mut service,
-        "fabric_task",
-        json!({"op":"claim","id":task["task"]["id"],"lease_seconds":1}),
-    )?;
-    let finished = call(
-        &mut service,
-        "fabric_task",
-        json!({"op":"finish","proof":claimed["proof"],"state":"done"}),
-    )?;
-    assert_eq!(finished["task"]["state"], "done");
     let noted = call(
         &mut service,
         "fabric_events",
@@ -659,23 +643,19 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
     let args = json!({"op":"send","recipients":[actor],"kind":"note","body":"hello host","artifacts":[],"operation_id":"relay-send"});
     let sent = relay_call("fabric_mail", args.clone())?;
     assert_eq!(sent, relay_call("fabric_mail", args)?);
-    let task = relay_call(
-        "fabric_task",
-        json!({"op":"create","objective":"Review","operation_id":"relay-task"}),
-    )?;
-    let claimed = relay_call(
-        "fabric_task",
-        json!({"op":"claim","id":task["task"]["id"],"lease_seconds":10,"operation_id":"relay-claim"}),
-    )?;
-    assert_eq!(claimed["result"], "claimed");
-    // A long-lived reader observes changes made after its first observation.
-    let before = call(&mut lane, "fabric_task", json!({"op":"list","limit":10}))?;
-    assert_eq!(before["page"]["items"][0]["owner"], json!(actor));
     relay_call(
-        "fabric_task",
-        json!({"op":"finish","proof":claimed["proof"],"state":"done","operation_id":"relay-finish"}),
+        "fabric_events",
+        json!({"op":"note","note":"first","operation_id":"relay-note"}),
     )?;
-    let after = call(&mut lane, "fabric_task", json!({"op":"list","limit":10}))?;
+    // A long-lived reader observes changes made after its first observation.
+    let before = call(&mut lane, "fabric_events", json!({"op":"read","limit":10}))?;
+    let items = before["page"]["items"].as_array().ok_or("events")?;
+    assert_eq!(items.last().ok_or("note")?["record"]["actor"], json!(actor));
+    relay_call(
+        "fabric_events",
+        json!({"op":"note","note":"second","operation_id":"relay-note-2"}),
+    )?;
+    let after = call(&mut lane, "fabric_events", json!({"op":"read","limit":10}))?;
     assert_ne!(before, after);
     let host = CoordinationService::open(
         &root,

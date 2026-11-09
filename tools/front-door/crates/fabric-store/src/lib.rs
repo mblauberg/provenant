@@ -1,4 +1,4 @@
-//! Project-scoped mail, tasks and events. One concrete connection per worker.
+//! Project-scoped mail and events. One concrete connection per worker.
 #![forbid(unsafe_code)]
 
 mod chairs;
@@ -11,8 +11,6 @@ mod landing;
 mod local_delivery;
 mod messages;
 mod operations;
-mod tasks;
-mod viewer;
 
 pub use chairs::*;
 pub use claims::*;
@@ -24,8 +22,6 @@ pub use human_inbox::{
 };
 pub use landing::*;
 pub use messages::*;
-pub use tasks::*;
-pub use viewer::*;
 
 use provenant_core::{ActorId, ProjectId, WallTime};
 use provenant_records::{CanonicalV1, Limits};
@@ -64,10 +60,6 @@ pub enum Error {
     Invalid(&'static str),
     #[error("record not found")]
     NotFound,
-    #[error("viewer state limit reached")]
-    ViewerLimit,
-    #[error("viewer request is not open")]
-    ViewerNotOpen,
     #[error("record conflicts with existing state")]
     Conflict,
     #[error("push operation {operation} requires reconciliation")]
@@ -80,7 +72,7 @@ pub enum Error {
     Overlap { claim: provenant_core::ClaimId },
     #[error("path cannot be represented as UTF-8")]
     PathEncoding,
-    #[error("task ownership fence is stale")]
+    #[error("ownership fence is stale")]
     StaleFence,
     #[error("SQLite remained busy past its busy timeout")]
     Busy,

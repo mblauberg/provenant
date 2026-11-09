@@ -24,9 +24,7 @@ pub(crate) fn identity(
 
 use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{
-    ActorId, CancelToken, ClaimId, Clock, GitOid, OperationId, TaskId, WaitBudget,
-};
+use provenant_core::{ActorId, CancelToken, ClaimId, Clock, GitOid, OperationId, WaitBudget};
 use provenant_fabric_runtime::coordination::*;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::Serialize;
@@ -55,9 +53,6 @@ pub enum Fabric {
     /// Send and read inbox messages
     #[command(subcommand)]
     Mail(Mail),
-    /// Create, claim and finish shared tasks
-    #[command(subcommand)]
-    Task(Task),
     /// Read and add to the activity log
     #[command(subcommand)]
     Events(Events),
@@ -111,9 +106,6 @@ pub enum Mail {
         /// Message this replies to
         #[arg(long)]
         reply_to: Option<provenant_core::MessageId>,
-        /// Task this message concerns
-        #[arg(long)]
-        task: Option<TaskId>,
         #[command(flatten)]
         operation: Operation,
     },
@@ -136,34 +128,6 @@ pub enum Mail {
         #[command(flatten)]
         operation: Operation,
     },
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum FinishState {
-    Done,
-    Cancelled,
-}
-impl From<FinishState> for TaskState {
-    fn from(value: FinishState) -> Self {
-        match value {
-            FinishState::Done => Self::Done,
-            FinishState::Cancelled => Self::Cancelled,
-        }
-    }
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum State {
-    Open,
-    Done,
-    Cancelled,
-}
-impl From<State> for TaskState {
-    fn from(value: State) -> Self {
-        match value {
-            State::Open => Self::Open,
-            State::Done => Self::Done,
-            State::Cancelled => Self::Cancelled,
-        }
-    }
 }
 #[derive(Clone)]
 pub struct Token([u8; 16]);
@@ -190,86 +154,6 @@ pub struct Fence {
     /// Fence token (32 lowercase hex digits)
     #[arg(long)]
     token: Token,
-}
-#[derive(Debug, Args)]
-pub struct TaskFence {
-    /// Task ID
-    id: TaskId,
-    #[command(flatten)]
-    fence: Fence,
-}
-impl TaskFence {
-    fn proof(self) -> TaskProof {
-        TaskProof {
-            extra: Default::default(),
-            task: self.id,
-            generation: self.fence.generation,
-            token: self.fence.token.0,
-        }
-    }
-}
-#[derive(Debug, Subcommand)]
-pub enum Task {
-    /// Create a shared task
-    Create {
-        /// Task objective
-        #[arg(long)]
-        objective: String,
-        /// Note to attach
-        #[arg(long)]
-        note: Option<String>,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// List shared tasks
-    List {
-        /// Only tasks in this state
-        #[arg(long, value_enum)]
-        state: Option<State>,
-        /// Return tasks after this ID
-        #[arg(long)]
-        after: Option<TaskId>,
-        /// Maximum tasks (1 to 100)
-        #[arg(long, default_value = "100", catalog_u64_range = 1..=100)]
-        limit: u64,
-    },
-    /// Claim a task under a lease
-    Claim {
-        /// Task ID
-        id: TaskId,
-        #[command(flatten)]
-        lease: Lease,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Update a claimed task
-    Update {
-        #[command(flatten)]
-        fence: TaskFence,
-        #[arg(long)]
-        objective: String,
-        #[arg(long)]
-        note: Option<String>,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Finish a claimed task
-    Finish {
-        #[command(flatten)]
-        fence: TaskFence,
-        /// Final state
-        #[arg(long, value_enum, default_value = "done")]
-        state: FinishState,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Release a claimed task
-    Release {
-        #[command(flatten)]
-        fence: TaskFence,
-        #[command(flatten)]
-        operation: Operation,
-    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Events {
@@ -567,17 +451,6 @@ impl Fabric {
                     Mail::MarkRead { .. } => "mark-read",
                 },
             ),
-            Self::Task(v) => (
-                "task",
-                match v {
-                    Task::Create { .. } => "create",
-                    Task::List { .. } => "list",
-                    Task::Claim { .. } => "claim",
-                    Task::Update { .. } => "update",
-                    Task::Finish { .. } => "finish",
-                    Task::Release { .. } => "release",
-                },
-            ),
             Self::Events(v) => (
                 "events",
                 match v {
@@ -622,7 +495,6 @@ impl Fabric {
             self,
             Self::Identity
                 | Self::Mail(Mail::Read { .. })
-                | Self::Task(Task::List { .. })
                 | Self::Events(Events::Read { .. })
                 | Self::Claim(Claim::Verify(_) | Claim::List { .. })
                 | Self::Landing(Landing::Verify(_) | Landing::Wait { .. })
@@ -716,7 +588,6 @@ fn execute(
                 }
                 let call = match observation {
                     Mutation::Mail(input) => ToolCall::Mail(input, None),
-                    Mutation::Task(input) => ToolCall::Task(input, None),
                     Mutation::Events(input) => ToolCall::Events(input, None),
                     Mutation::Claim(input) => ToolCall::Claim(input, None),
                     Mutation::Landing(input) => ToolCall::Landing(input, None),
@@ -738,7 +609,6 @@ fn execute(
         }
         match input {
             Mutation::Mail(input) => json(service.mail(input, budget, &cancel)?),
-            Mutation::Task(input) => json(service.task(input, budget, &cancel)?),
             Mutation::Events(input) => json(service.events(input, budget, &cancel)?),
             Mutation::Claim(input) => json(service.claim(input, budget, &cancel)?),
             Mutation::Landing(input) => json(service.landing(input, budget, &cancel)?),
@@ -757,7 +627,6 @@ fn execute(
             kind,
             body,
             reply_to,
-            task,
             operation,
         }) => {
             ctx.text(&body)?;
@@ -778,10 +647,6 @@ fn execute(
                     body,
                     artifacts: vec![],
                     reply_to: reply_to.map(|id| MessageRef::Local {
-                        extra: Default::default(),
-                        id,
-                    }),
-                    task: task.map(|id| TaskRef::Local {
                         extra: Default::default(),
                         id,
                     }),
@@ -807,82 +672,6 @@ fn execute(
                 extra: Default::default(),
                 through,
                 session,
-            }),
-            operation,
-        )?,
-        Fabric::Task(Task::Create {
-            objective,
-            note,
-            operation,
-        }) => {
-            ctx.texts(&objective, note.as_deref())?;
-            mutate(
-                Mutation::Task(TaskInput::Create {
-                    extra: Default::default(),
-                    objective,
-                    note,
-                }),
-                operation,
-            )?
-        }
-        Fabric::Task(Task::List {
-            state,
-            after,
-            limit,
-        }) => {
-            ctx.page(limit)?;
-            observe(Mutation::Task(TaskInput::List {
-                extra: Default::default(),
-                state: state.map(Into::into),
-                after,
-                limit,
-            }))?
-        }
-        Fabric::Task(Task::Claim {
-            id,
-            lease,
-            operation,
-        }) => mutate(
-            Mutation::Task(TaskInput::Claim {
-                extra: Default::default(),
-                id,
-                lease_seconds: ctx.lease(lease)?,
-            }),
-            operation,
-        )?,
-        Fabric::Task(Task::Update {
-            fence,
-            objective,
-            note,
-            operation,
-        }) => {
-            ctx.texts(&objective, note.as_deref())?;
-            mutate(
-                Mutation::Task(TaskInput::Update {
-                    extra: Default::default(),
-                    proof: fence.proof(),
-                    objective,
-                    note,
-                }),
-                operation,
-            )?
-        }
-        Fabric::Task(Task::Finish {
-            fence,
-            state,
-            operation,
-        }) => mutate(
-            Mutation::Task(TaskInput::Finish {
-                extra: Default::default(),
-                proof: fence.proof(),
-                state: state.into(),
-            }),
-            operation,
-        )?,
-        Fabric::Task(Task::Release { fence, operation }) => mutate(
-            Mutation::Task(TaskInput::Release {
-                extra: Default::default(),
-                proof: fence.proof(),
             }),
             operation,
         )?,

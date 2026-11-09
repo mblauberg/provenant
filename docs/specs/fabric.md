@@ -6,7 +6,7 @@ Anchor: `crates/fabric-store/src/tests.rs`, `crates/fabric-runtime/src/graph.rs`
 `crates/fabric-mcp/src/stdio_tests.rs`
 
 Fabric is the daemonless coordination layer for agents on one user's hosts:
-mail, tasks, an event log, advisory claims, fenced landing, bounded graphs,
+mail, an event log, advisory claims, fenced landing, bounded graphs,
 peer hosts over SSH and the stdio MCP server. It grants no authority to
 install, land or run a live provider, and keeps no second run status
 ([run](run.md)). ADRs [0020](../adr/0020-retire-the-daemon-fabric.md),
@@ -43,7 +43,7 @@ closes it on provider exit, failed spawn or guardian teardown. Each lane may
 connect only to its own exact Unix socket under a private, short-lived host
 directory. The host captures the project and `lane-<attempt>` actor from the
 custody context; request fields and lane environment labels cannot select the
-sender. Mail, tasks, event notes and advisory claims use the existing atomic
+sender. Mail, event notes and advisory claims use the existing atomic
 operation receipts. Observations of a configured remote home also use this
 relay, preserving the sole owner rather than reading a local mirror. Landing
 verification also uses the host because it requires an OS lock.
@@ -82,43 +82,26 @@ mutations carry an operation ID: the same ID with a different digest is a
 conflict, and a lost reply is answered from the stored receipt, never by
 repeating the mutation.
 - Why (default): agents retry after timeouts; a duplicate send or claim is a bug.
-- Test: `crates/fabric-store/src/tests.rs::event_failure_rolls_back_task_and_mail_mutations`;
+- Test: `crates/fabric-store/src/tests.rs::event_failure_rolls_back_mail_mutations`;
   `crates/fabric-store/src/tests/operations.rs::concurrent_duplicate_operations_apply_once_and_share_the_committed_receipt`
 - Owner: `crates/fabric-store/src/`
 
 ### Fences and cursors
 
 Generation counters survive release and expiry, and claims use the home
-host's clock, never a caller's. Task `finish` needs the live fence. Path
+host's clock, never a caller's. Path
 claims compare canonical prefixes and are advisory and never authorise writing
 to a worktree. Mail cursors advance monotonically and only for the caller. Run
 events are pulled lazily and deduplicated in the same transaction that
 advances the cursor; an unreachable peer is `Unknown` and partial results never
 claim complete coverage.
 - Why (default): a stale holder must never act, and a reader must never skip events.
-- Test: `crates/fabric-store/src/tests.rs::task_fences_survive_expiry_and_release_and_cannot_be_bypassed`;
+- Test: `crates/fabric-store/src/tests/f2.rs::canonical_overlap_expiry_release_and_generation`;
   `crates/fabric-store/src/federation.rs::run_event_rows_and_host_cursor_rollback_together_then_deduplicate`
 - Owner: `crates/fabric-store/src/`
 
 
 ## Human requests
-
-Viewer request presentation state is separate from resolution and blocking.
-Viewer names are caller-supplied labels, like agent labels: they are not an
-authentication boundary. A local caller that knows a label can change that
-viewer's state; the direct SQLite access residual above also applies.
-A lane may dismiss or snooze a request in any viewer, including `console`.
-Snoozing never grants authority.
-A lane may change only the bounded request presentation fields `seen_revision`,
-`snoozed_until` and `dismissed`; it never changes resolution, answers or the
-blocking state, and summary baselines remain outside a lane.
-Quotas are per project and viewer, with a combined per-project cap. Writes
-reclaim closed or expired request rows. A new summary baseline is refused at
-capacity rather than evicting an existing one.
-- Why (default): viewing and snoozing do not authorise an answer or unblock work.
-- Test: `crates/fabric-store/src/tests/human_inbox.rs::viewer_isolation`;
-  `tests/inbox.rs::viewer_cli_isolation_and_render_race`
-- Owner: `crates/fabric-store/src/viewer.rs`, `src/chair.rs`
 
 Human requests, immutable answers, revision history and the delivery outbox
 belong to Fabric. CLI and MCP must use the same service. The service binds
@@ -411,7 +394,7 @@ The ordinary dependency-depth limit remains four; the default host ceiling is
 64 so a template can request an explicit compatible depth. A lower configured ceiling caps explicit requests and appears in explain.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
-shared task title validation and appear in lanes and graph status. A node may
+run task title validation and appear in lanes and graph status. A node may
 specify a single `route` or an ordered `routes` list for agent work. A route can name a pool
 with just `alias`, resolved as for `run --tier`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
