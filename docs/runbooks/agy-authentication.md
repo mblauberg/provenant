@@ -1,4 +1,6 @@
 # Agy authentication in lanes
+Owner: provenant
+Anchor: tools/front-door/crates/providers/src/agy.rs
 
 Agy uses the operating system's native keyring for silent sign-in. The
 [vendor authentication guide](https://antigravity.google/docs/install/#local-silent-keyring-sign-in)
@@ -70,3 +72,10 @@ account. Keep credential stores closed throughout.
 Do not sign out a working account to manufacture a failure. Synthetic stderr
 fixtures cover signed-out and denied diagnostics; real launches belong to the
 account owner. No `security` command or credential inspection is required.
+
+## Accepted risk
+
+A lane using the shared login account can read the host `login.keychain-db`
+file, including from tools the provider launches. The file is encrypted, and
+the owner accepted this exposure so that Agy works. Replacing it with an
+isolated credential store or a host-side broker is follow-up work.
