@@ -423,6 +423,24 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         options.reap_timeout = CLEANUP_TIMEOUT;
         executor.execute(options).expect("bounded sandbox child")
     };
+    // A reader can atomically publish its own progress while the surrounding
+    // state and checkout remain protected by the same rendered profile.
+    let handoff = provider_state.join("handoff.json");
+    let temporary_handoff = provider_state.join("handoff.tmp");
+    let result = run_in(
+        &read_only_sbpl,
+        &executables[3],
+        &[
+            Path::new("-c"),
+            Path::new("printf progress > \"$1\" && mv \"$1\" \"$2\""),
+            Path::new("handoff-probe"),
+            &temporary_handoff,
+            &handoff,
+        ],
+    );
+    assert!(successful_probe(&result), "reader handoff: {result:?}");
+    assert_eq!(std::fs::read(&handoff)?, b"progress");
+    assert!(!temporary_handoff.exists());
     let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
     let connect = |sbpl: &str, socket: &Path| {
         run_in(
