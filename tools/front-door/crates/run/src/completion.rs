@@ -169,7 +169,7 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
 /// The slot-wait rule every writer lane is told. A writer's `cargo` commands
 /// that compile take one of the host's shared build slots, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Test tiers: when the repository defines test tiers, start with T0 and choose T1 targets for the change. T2 and T3 normally run in CI or on a configured host.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Test tiers: follow the repository lane verification instructions and choose T1 targets for the change. T2 and T3 normally run in CI or on a configured host.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
 
 /// The text placed before a lane's task: model policy, the build-slot rule for
 /// writers only, then the handoff file.
