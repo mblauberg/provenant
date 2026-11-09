@@ -207,6 +207,8 @@ group.
 
 The default size bands measure added plus removed lines, changed files and
 crate roots in the diff from the merge base of the base ref to the subject.
+The review range uses that merge base as well; an equal base and subject is
+reported as `review_empty_range` before a lens starts.
 Small is at most 150 lines, 3 files and 1 crate; medium is at most 1,000 lines,
 15 files and 3 crates; larger or binary changes are large. Configure these limits
 under `domains.routing.review.size`; each small limit must not exceed its medium

@@ -23,6 +23,7 @@ pub struct Report {
     pub receipts: Vec<LandingReceipt>,
     pub outcomes: BTreeMap<u64, Outcome>,
     pub warnings: Vec<String>,
+    pub exclusion_reasons: BTreeMap<u64, String>,
     pub local_steps: BTreeMap<u64, serde_json::Value>,
     pub head_moves: BTreeMap<u64, super::head_move::HeadMove>,
 }
@@ -262,7 +263,7 @@ fn run_inner(
     }
     let mut deferred = Vec::new();
     for numbers in open.chunks(limit) {
-        let selected = candidate::select_batch_with_dependencies(
+        let (selected, reasons) = candidate::select_batch_with_reasons(
             forge,
             numbers,
             &open,
@@ -270,6 +271,7 @@ fn run_inner(
             limit,
             request.settings.batch_wait_seconds,
         )?;
+        report.exclusion_reasons.extend(reasons);
         for number in numbers {
             if !selected.iter().any(|pr| pr.number == *number) {
                 report.outcomes.entry(*number).or_insert(Outcome::Excluded);
@@ -446,6 +448,10 @@ fn run_inner(
             if !excluded.is_empty() {
                 for pr in &excluded {
                     report.outcomes.insert(pr.number, Outcome::Excluded);
+                    report.exclusion_reasons.insert(
+                        pr.number,
+                        "head, base, or approval changed during publication".into(),
+                    );
                 }
                 let retained: Vec<_> = prs
                     .iter()
@@ -574,6 +580,10 @@ fn run_inner(
                             prs.retain(|pr| {
                                 if pr.number == number {
                                     report.outcomes.insert(number, Outcome::Excluded);
+                                    report.exclusion_reasons.insert(
+                                        number,
+                                        "head, base, or approval changed during publication".into(),
+                                    );
                                     false
                                 } else {
                                     true

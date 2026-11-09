@@ -3499,7 +3499,7 @@ impl BoundGraphOwner<'_> {
                                     // still identifies the peer's sealed original artifact.
                                     result.digest = artifact.digest.to_string();
                                     result.source_truncated = artifact.bytes
-                                    > provenant_records::result_capture::ResultCapture::HEAD_BYTES
+                                    > provenant_records::result_capture::ResultCapture::TAIL_BYTES
                                         as u64;
                                 }
                                 (Some(Box::new(result)), None)
@@ -4278,7 +4278,7 @@ fn capture_graph_output(
                 return Err(FacadeError::StateCorrupt);
             }
             result.source_truncated =
-                offset > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+                offset > provenant_records::result_capture::ResultCapture::TAIL_BYTES as u64;
             result.handoff = result.handoff.and_then(|handoff| {
                 handoff
                     .map(|handoff| {

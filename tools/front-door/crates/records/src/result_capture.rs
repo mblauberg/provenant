@@ -48,6 +48,7 @@ pub struct CapturedResult {
 
 impl ResultCapture {
     pub const HEAD_BYTES: usize = HEAD_BYTES;
+    pub const TAIL_BYTES: usize = TAIL_BYTES;
 
     pub fn new(required_verdict: Option<&str>) -> Self {
         Self {

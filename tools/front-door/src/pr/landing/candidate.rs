@@ -24,14 +24,26 @@ pub fn select_batch_with_dependencies(
     limit: usize,
     batch_wait_seconds: u64,
 ) -> Result<Vec<EligiblePr>, LandingError> {
+    Ok(select_batch_with_reasons(forge, numbers, requested, target, limit, batch_wait_seconds)?.0)
+}
+
+pub fn select_batch_with_reasons(
+    forge: &mut dyn Forge,
+    numbers: &[u64],
+    requested: &[u64],
+    target: &str,
+    limit: usize,
+    batch_wait_seconds: u64,
+) -> Result<(Vec<EligiblePr>, std::collections::BTreeMap<u64, String>), LandingError> {
     if limit == 0 || numbers.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Default::default()));
     }
     let clock = provenant_os::clock::SystemClock::new();
     let start = clock.mono_now().as_micros();
     let budget = batch_wait_seconds.saturating_mul(1_000_000);
     loop {
         let mut selected = Vec::new();
+        let mut reasons = std::collections::BTreeMap::new();
         for &number in numbers {
             if selected.iter().any(|pr: &EligiblePr| pr.number == number) {
                 continue;
@@ -39,6 +51,10 @@ pub fn select_batch_with_dependencies(
             let info = forge.pull_request(number)?;
             if let Some(stack) = &info.stack {
                 if stack.base_branch != target {
+                    reasons.insert(
+                        number,
+                        format!("stack targets {}, expected {target}", stack.base_branch),
+                    );
                     continue;
                 }
                 let members = forge.stack_members(stack.number)?;
@@ -65,6 +81,7 @@ pub fn select_batch_with_dependencies(
                     )));
                 }
                 if !lower.is_empty() {
+                    reasons.insert(number, "lower stack members have not landed".into());
                     continue;
                 }
             }
@@ -73,6 +90,10 @@ pub fn select_batch_with_dependencies(
                 || info.base_branch != target
                 || provenant_core::GitOid::parse(&info.head).is_err()
             {
+                reasons.insert(
+                    number,
+                    format!("pull request is not open with a valid head targeting {target}"),
+                );
                 continue;
             }
             let approval = forge
@@ -84,6 +105,7 @@ pub fn select_batch_with_dependencies(
                         && !approval.reviewer.eq_ignore_ascii_case(&info.author)
                 });
             if info.author.is_empty() {
+                reasons.insert(number, "pull request author is missing".into());
                 continue;
             }
             if let Some(approval) = approval {
@@ -96,13 +118,18 @@ pub fn select_batch_with_dependencies(
                 if selected.len() == limit {
                     break;
                 }
+            } else {
+                reasons.insert(
+                    number,
+                    "no independent approval for the current head".into(),
+                );
             }
         }
         if selected.len() == limit
             || selected.len() == numbers.len()
             || clock.mono_now().as_micros().saturating_sub(start) >= budget
         {
-            return Ok(selected);
+            return Ok((selected, reasons));
         }
         let now = clock.mono_now().as_micros();
         let deadline = start
@@ -196,6 +223,16 @@ mod tests {
             stack: None,
         }
     }
+    #[test]
+    fn unapproved_pull_request_reports_why_it_was_excluded() {
+        let mut forge = FakeForge::default();
+        forge.pull_requests.insert(7, info(7, "author", "main"));
+        let (selected, reasons) =
+            select_batch_with_reasons(&mut forge, &[7], &[7], "main", 1, 0).unwrap();
+        assert!(selected.is_empty());
+        assert!(reasons[&7].contains("no independent approval"));
+    }
+
     #[test]
     fn upper_stack_selection_names_its_unmerged_lower_member() {
         use crate::pr::landing::ports::{StackMember, StackMembership};
