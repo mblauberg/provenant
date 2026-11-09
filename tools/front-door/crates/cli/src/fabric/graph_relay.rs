@@ -2995,7 +2995,7 @@ mod panel_tests {
                 version: "fixture".into(),
                 last_update: None,
                 fixture_ref: "test".into(),
-                catalogue_revision: catalogue.revision.clone(),
+                catalogue_revision: catalogue.revision().to_owned(),
                 account_key: Some("fixture-account".into()),
                 observed_models: vec!["test".into()],
                 observed_unix_seconds: 80,
@@ -3081,7 +3081,8 @@ mod panel_tests {
         }
         .compile(&json!({
             "id": "review", "use": "review", "over": "@review-panel", "with": {"lens": "${item}"}
-        }))?;
+        }))
+        .map_err(|error| format!("{error:?}"))?;
         for (member, slot) in compiled
             .composite
             .ok_or("panel")?
