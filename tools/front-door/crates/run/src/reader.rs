@@ -147,6 +147,7 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
+    let usage = r.effective_usage().into();
     let AttemptState::Terminal {
         outcome,
         exit_code,
@@ -189,7 +190,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         provider_ms: r.provider_ms,
         finished_at,
         resolved_route: r.resolved_route.map(Into::into),
-        usage: r.usage.into(),
+        usage,
         reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
         delivery_id: r.delivery_id,
         subject: r.subject,

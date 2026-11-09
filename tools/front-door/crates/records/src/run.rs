@@ -1451,6 +1451,7 @@ pub struct AttemptRecord {
     /// A terminal attempt can still hold its custody fence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custody_pending: Option<bool>,
+    /// Raw provider evidence; readers must use `effective_usage`.
     pub usage: UsageRecord,
     pub prompt: ArtifactRecord,
     pub result: Option<ArtifactRecord>,
@@ -1465,6 +1466,21 @@ pub struct AttemptRecord {
     pub trace: crate::Trace,
 }
 impl AttemptRecord {
+    /// Usage attributable to this attempt, excluding legacy Codex session totals.
+    pub fn effective_usage(&self) -> UsageRecord {
+        if self
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.provider.as_deref())
+            == Some("codex")
+            && self.usage.extra.get("per_attempt") != Some(&serde_json::Value::Bool(true))
+        {
+            UsageRecord::default()
+        } else {
+            self.usage.clone()
+        }
+    }
+
     pub fn user_skills(&self) -> Option<&serde_json::Value> {
         self.applied_route.as_ref()?.extra.get("user_skills")
     }

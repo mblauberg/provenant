@@ -215,10 +215,14 @@ fn agy_denials_preserve_answers_and_prior_failures() {
             Path::new("/unused"),
         )
         .unwrap();
-    assert_eq!(decoded.outcome, run::Outcome::Failed);
+    // A refusal the provider reports with no answer is its own failed state,
+    // never `succeeded`, and names the denied action (adapter-validated).
+    assert_eq!(decoded.outcome, run::Outcome::PermissionDenied);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied an action; check account access and inspect the result")
+        Some(
+            "provider denied an action; check account access and inspect the result; denied action: unknown action"
+        )
     );
     let mut failed_exit = clean_exit();
     failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
@@ -643,6 +647,30 @@ fn codex_usage_records_cache_read_apart_from_uncached_input() {
     assert_eq!(decoded.usage.cache_read, Some(80));
     assert_eq!(decoded.usage.cache_write, None);
     assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
+}
+
+#[test]
+fn codex_last_turn_completed_is_the_session_total() {
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":150,\"cached_input_tokens\":100,\"output_tokens\":12}}\n",
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    assert_eq!(decoded.usage.uncached_input, Some(50));
+    assert_eq!(decoded.usage.cache_read, Some(100));
+    assert_eq!(decoded.usage.output_excluding_reasoning, Some(12));
 }
 #[test]
 fn command_exit_keeps_requested_route() {

@@ -128,6 +128,10 @@ holds. Each host owns its budget and recovery; peer placement does not imply a
 cross-host spending ledger.
 
 Checkpoint formats must remain readable across an upgrade or be drained first.
+State readability breaks are declared by a compiled-in state format version
+compared during staged preflight between the installed and target release;
+routine upgrades without state format breaks warn on in-flight work and proceed,
+while broken formats block until drained or overridden with `--yes`.
 Unreadable records are preserved and reported. Event sourcing with a projected
 checkpoint is rejected: it would replace a working recovery authority without
 solving a present need.

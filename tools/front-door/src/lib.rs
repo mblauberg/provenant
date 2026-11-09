@@ -1564,11 +1564,12 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     let usage_project = usage_roots.as_ref().and_then(usage::project_id);
     let status = match parsed {
         ParseOutcome::Invocation(inv) => run(inv, process),
-        ParseOutcome::Invalid { error, globals } => fail(
+        ParseOutcome::Invalid { error, globals } => fail_with_repair(
             "parse",
             Outcome::Invalid,
             "INVALID",
             &error.to_string(),
+            error.repair(),
             &globals,
         ),
         ParseOutcome::Help {

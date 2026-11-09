@@ -114,8 +114,8 @@ items = { type = "list", default = ["implementation"], min = 1 }
 min_ok = { type = "integer", default = 1, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
 integration_branch = { type = "string", default = "batch/integration" }
-worktree = { type = "string", default = "" }
-write_scope = { type = "list", default = [] }
+worktree = { type = "string" }
+write_scope = { type = "list", min = 1 }
 
 [deliver]
 identity = "content"
@@ -136,8 +136,8 @@ nodes = [
 [deliver.parameters]
 max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
 brief = { type = "string", default = "Meet the acceptance checks." }
-worktree = { type = "string", default = "" }
-write_scope = { type = "list", default = [] }
+worktree = { type = "string" }
+write_scope = { type = "list", min = 1 }
 
 [task-once]
 nodes = [{ id = "task", use = "task", brief = "${brief}" }]
@@ -183,8 +183,8 @@ nodes = [
 ]
 [plan-then-deliver.parameters]
 brief = { type = "string", default = "Meet the acceptance checks." }
-worktree = { type = "string", default = "" }
-write_scope = { type = "list", default = [] }
+worktree = { type = "string" }
+write_scope = { type = "list", min = 1 }
 
 [findings-panel]
 doc = "Collect qualified findings without treating reported defects as an execution failure."

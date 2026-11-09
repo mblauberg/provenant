@@ -306,7 +306,7 @@ provider-controlled denial contents; retained captures preserve the evidence.
 - Test: `crates/providers/src/tests_launch_access.rs::spilled_prompts_reach_argv_adapters_with_file_read_permissions`;
   `crates/providers/src/tests_launch_access.rs::agy_writers_exec_what_codex_writers_exec`;
   `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_compiled_profile_denies_read_root_write`;
-  `tests/graph_provider.rs::agy_denial_result_stays_out_of_terminal_diagnostics`
+  `tests/graph_provider.rs::agy_denial_keeps_raw_step_out_of_terminal_diagnostics`
 - Owner: `crates/providers/src/agy.rs`, `crates/cli/src/run.rs`
 
 ### Claude token refresh

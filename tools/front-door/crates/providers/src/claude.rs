@@ -856,6 +856,8 @@ enum Event {
         is_error: bool,
         result: Option<String>,
         #[serde(default)]
+        permission_denials: Vec<serde_json::Value>,
+        #[serde(default)]
         api_error_status: Option<u16>,
         // The result carries the run total; assistant messages only carry
         // streaming placeholders.
@@ -1064,6 +1066,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             subtype,
             is_error,
             result,
+            permission_denials,
             api_error_status,
             usage,
             stop_reason,
@@ -1079,6 +1082,27 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     cache_write_1h: usage
                         .cache_creation
                         .and_then(|split| split.ephemeral_1h_input_tokens),
+                });
+            }
+            // Claude reports denials accumulated during the session, but does not
+            // say whether any denial ended the work. Record them without turning
+            // a potentially recovered denial into a failed lane.
+            if let Some(denied) = permission_denials.first() {
+                let name = denied
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let action = if (1..=64).contains(&name.len())
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    name
+                } else {
+                    "unknown action"
+                };
+                events.push(E::DeniedNote {
+                    action: action.into(),
                 });
             }
             if is_error || subtype != "success" {
@@ -1138,6 +1162,30 @@ mod overload_tests {
             .unwrap();
         events.extend(outcome.final_events().iter().cloned());
         events
+    }
+
+    #[test]
+    fn permission_denial_with_answer_is_a_note() {
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"done","permission_denials":[{"tool_name":"Read"}]}"#).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
+        );
+        assert!(events.iter().any(|event| matches!(event, E::Terminal)));
+        assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
+    }
+
+    #[test]
+    fn permission_denial_without_answer_is_a_note() {
+        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"","permission_denials":[{"tool_name":"Read"}]}"#).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
+        );
+        assert!(events.iter().any(|event| matches!(event, E::Terminal)));
+        assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
     }
 
     #[test]
