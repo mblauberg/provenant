@@ -2788,16 +2788,15 @@ pub(super) fn prepare_candidates(
                 path: path.to_owned(),
                 scope: PathScope::Exact,
             };
-            if let Some(policy) = request.permissions.policy.as_mut() {
-                if let Err(error) = policy
+            if let Some(policy) = request.permissions.policy.as_mut()
+                && let Err(error) = policy
                     .mandatory_mut()
                     .add_state_read(grant.clone())
                     .map_err(PlanCheckError::from)
-                {
-                    reason_boundaries.insert(reasons.len(), error.boundary_class());
-                    reasons.push(error.skipped(&label));
-                    continue;
-                }
+            {
+                reason_boundaries.insert(reasons.len(), error.boundary_class());
+                reasons.push(error.skipped(&label));
+                continue;
             }
             request.permissions.read_roots.push(grant);
         }
