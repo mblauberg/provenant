@@ -173,7 +173,7 @@ fn risk_factors() -> Value {
         "migration":"none","oracle_quality":"strong","external_effects":"none","critical_surface":"none"})
 }
 fn risk() -> Value {
-    json!({"factors":risk_factors(),"derived":"routine","tier":"routine","downgrade_approval":null})
+    json!({"factors":risk_factors(),"changed_paths":[],"derived":"routine","tier":"routine","downgrade_approval":null})
 }
 fn subject() -> Value {
     json!({"kind":"document","path":path(),"digest":digest()})
@@ -311,7 +311,7 @@ cases! {
     evidence_ref_preserves_digest: workflow::EvidenceRef => evidence();
     approval_ref_preserves_digest: workflow::ApprovalRef => approval();
     risk_record_preserves_digest: workflow::RiskRecord => risk();
-    pr_subject_preserves_digest: workflow::Subject => json!({"kind":"pr","repository":ID,"number":1,"head":"abababababababababababababababababababab"});
+    pr_subject_preserves_digest: workflow::Subject => json!({"kind":"pr","repository":"github.com/example/repo","number":1,"head":"abababababababababababababababababababab"});
     document_subject_preserves_digest: workflow::Subject => subject();
     observed_provenance_preserves_digest: workflow::RouteProvenance => observed_provenance();
     attested_provenance_preserves_digest: workflow::RouteProvenance => json!({"source":"chair_attested","route":"codex/model@high","tier":"principal","declared_family":null,"evidence":evidence()});

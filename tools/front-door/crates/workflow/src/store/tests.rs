@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::{receipt, risk};
-use provenant_core::{ActorId, GitOid, MonoTime, RepoId, RootInputs, TestClock, UtcMicros};
+use provenant_core::{ActorId, GitOid, MonoTime, RootInputs, TestClock, UtcMicros};
 use provenant_records::workflow::*;
 use std::io;
 struct Resolver;
@@ -38,7 +38,7 @@ fn setup() -> (tempfile::TempDir, ReceiptStore, DeliveryReceipt) {
         delivery_id: delivery,
         subject: Subject::Pr {
             extra: Default::default(),
-            repository: RepoId::from_bytes([3; 16]),
+            repository: "github.com/example/repo".into(),
             number: 1,
             head: GitOid::Sha1([4; 20]),
         },

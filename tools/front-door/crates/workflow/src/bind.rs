@@ -209,7 +209,7 @@ mod tests {
     fn subject() -> Subject {
         Subject::Pr {
             extra: Default::default(),
-            repository: RepoId::from_bytes([8; 16]),
+            repository: "github.com/example/repo".into(),
             number: 1,
             head: GitOid::Sha1([6; 20]),
         }

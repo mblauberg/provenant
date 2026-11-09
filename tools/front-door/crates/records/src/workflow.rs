@@ -2,9 +2,7 @@
 //! Lane F's store enforces ID/creation immutability, resets the decision when
 //! the subject changes, and keeps updated_at monotonic across revisions.
 use crate::PathWire;
-use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, ProjectId, RepoId, UtcMicros,
-};
+use provenant_core::{ActorId, AttemptId, DeliveryId, Digest, GitOid, ProjectId, UtcMicros};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -99,7 +97,6 @@ pub struct RiskRecord {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     factors: RiskFactors,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     changed_paths: Vec<String>,
     derived: RiskTier,
     tier: RiskTier,
@@ -175,7 +172,8 @@ pub enum Subject {
     Pr {
         #[serde(flatten)]
         extra: crate::ExtraFields,
-        repository: RepoId,
+        /// Explicit GitHub repository: HOST/OWNER/REPO.
+        repository: String,
         number: u64,
         head: GitOid,
     },
@@ -693,7 +691,7 @@ mod tests {
             ProjectId::from_bytes([2; 16]),
             Subject::Pr {
                 extra: Default::default(),
-                repository: RepoId::from_bytes([3; 16]),
+                repository: "github.com/example/repo".into(),
                 number: 1,
                 head: GitOid::Sha1([4; 20]),
             },
@@ -832,7 +830,7 @@ mod tests {
 
         candidate.subject = Subject::Pr {
             extra: Default::default(),
-            repository: RepoId::from_bytes([3; 16]),
+            repository: "github.com/example/repo".into(),
             number: 1,
             head: GitOid::Sha256([9; 32]),
         };

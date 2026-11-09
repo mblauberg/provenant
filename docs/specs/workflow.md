@@ -117,11 +117,15 @@ changed subject resets the decision and needs fresh review. Each save
 rechecks derived risk and the complete changed paths (both sides of renames).
 A downgrade uses a chair record with actor, evidence and a nonblank reason of
 at most 4096 bytes, stored alongside the path snapshot. Routing compiles the
-matched boundary floors into workflow policy at the edge. The edge supplies
-current paths again on save; a changed snapshot invalidates the prior assessment.
-Any path matching a bundled or configured crucial or terminal floor refuses the
-downgrade and
-names the path. Auth/security and irreversible external-effect floors remain
+matched boundary floors from effective configuration into workflow policy at the edge.
+PR subjects name the GitHub repository as `HOST/OWNER/REPO` and bind its head OID.
+The edge verifies that head against the PR and computes paths from its actual
+base/head merge base, using both names of renames. Saves and review reports
+recompute the snapshot; changed paths invalidate the prior assessment. Non-PR
+subjects have no diffable commits, so downgrades are refused without changing
+ordinary tier selection. Any path matching an effective crucial or terminal floor
+refuses the downgrade and names the path; owners may remove or lower bundled
+path floors through configuration. Auth/security and irreversible external-effect floors remain
 binding, including with owner approval. Owner decision approvals remain separate.
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
 - Why: acceptance must track the exact subject reviewed.

@@ -79,6 +79,7 @@ lenses = ["correctness-spec", "adversarial"]
 # output redaction.
 paths = [
   "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
+  "tools/front-door/crates/run/src/delivery.rs",
   "tools/front-door/crates/confinement/src/disclosure.rs",
   "tools/front-door/crates/confinement/src/redact.rs",
 ]
@@ -88,6 +89,8 @@ lenses = ["correctness-spec", "security-privacy"]
 # ADR 0035 boundary 1: a writer lane reaches shared refs only through
 # host-owned delivery. A lane that escapes can rewrite shared history.
 paths = [
+  "tools/front-door/crates/confinement/src/utility.rs",
+  "tools/front-door/src/pr/git.rs",
   "tools/front-door/crates/confinement/src/worktrees.rs",
   "tools/front-door/crates/confinement/src/worktrees/**",
   "tools/front-door/crates/confinement/src/permissions/**",

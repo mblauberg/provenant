@@ -106,7 +106,7 @@ fn validate_shape(receipt: &DeliveryReceipt) -> Result<(), ReceiptError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{ActorId, AttemptId, GitOid, RelativePath, RepoId};
+    use provenant_core::{ActorId, AttemptId, GitOid, RelativePath};
     use provenant_records::PathWire;
     fn time() -> UtcMicros {
         UtcMicros::from_micros(1_234_567).unwrap()
@@ -127,7 +127,7 @@ mod tests {
             project_id: ProjectId::from_bytes([2; 16]),
             subject: Subject::Pr {
                 extra: Default::default(),
-                repository: RepoId::from_bytes([3; 16]),
+                repository: "github.com/example/repo".into(),
                 number: 42,
                 head: GitOid::Sha256([4; 32]),
             },
@@ -161,7 +161,7 @@ mod tests {
             let mut input = input();
             input.subject = Subject::Pr {
                 extra: Default::default(),
-                repository: RepoId::from_bytes([3; 16]),
+                repository: "github.com/example/repo".into(),
                 number: u64::MAX,
                 head,
             };
