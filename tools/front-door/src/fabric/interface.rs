@@ -93,7 +93,7 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     match error.admission.clone() {
         Some(admission) => FacadeError::graph_admission(admission),
         None => match error.parameter.clone() {
-            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(Box::new(refusal))),
+            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(refusal)),
             None => graph_input_reason(error),
         },
     }
