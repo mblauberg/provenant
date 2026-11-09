@@ -144,6 +144,19 @@ fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64
     u64::try_from(waited / 1_000).ok()
 }
 
+fn attempt_usage(
+    provider: Option<&str>,
+    usage: &provenant_records::run::UsageRecord,
+) -> provenant_records::Usage {
+    if provider == Some("codex")
+        && usage.extra.get("per_attempt") != Some(&serde_json::Value::Bool(true))
+    {
+        Default::default()
+    } else {
+        usage.clone().into()
+    }
+}
+
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
@@ -175,6 +188,12 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
     let (tier, template, parent_node) = graph_labels(r.context.as_ref());
     let slot_wait_ms = slot_wait_ms(r.queued_at, r.started_at);
+    let usage = attempt_usage(
+        r.applied_route
+            .as_ref()
+            .and_then(|route| route.provider.as_deref()),
+        &r.usage,
+    );
     Ok(AttemptFact {
         context: r.context,
         attempt_id: r.attempt_id,
@@ -189,7 +208,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         provider_ms: r.provider_ms,
         finished_at,
         resolved_route: r.resolved_route.map(Into::into),
-        usage: r.usage.into(),
+        usage,
         reviewer: reviewer_fact(r.attempt_id, r.verified_owner, r.observed_route.as_ref()),
         delivery_id: r.delivery_id,
         subject: r.subject,
@@ -1314,6 +1333,14 @@ pub(crate) fn verified_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_codex_usage_is_unknown() {
+        let old: provenant_records::run::UsageRecord =
+            serde_json::from_value(serde_json::json!({"uncached_input": 42})).unwrap();
+        assert_eq!(attempt_usage(Some("codex"), &old).uncached_input, None);
+        assert_eq!(attempt_usage(Some("claude"), &old).uncached_input, Some(42));
+    }
 
     #[test]
     fn slot_wait_is_queue_to_start_and_absent_until_started() {

@@ -11,6 +11,107 @@ use provenant_supervisor::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn codex_attempt_usage(
+    usage: &mut UsageRecord,
+    session: Option<&str>,
+    prior: Option<(Option<&str>, &UsageRecord)>,
+) {
+    let total = usage.clone();
+    let baseline = match prior {
+        None => Some(UsageRecord::default()),
+        Some((previous_session, _))
+            if session.is_some() && previous_session.is_some() && previous_session != session =>
+        {
+            Some(UsageRecord::default())
+        }
+        Some((previous_session, previous_usage))
+            if session.is_some() && previous_session == session =>
+        {
+            previous_usage
+                .extra
+                .get("session_total")
+                .and_then(|v| serde_json::from_value::<UsageRecord>(v.clone()).ok())
+        }
+        Some(_) => None,
+    };
+    let delta = |current: Option<u64>, previous: Option<u64>| match baseline.as_ref() {
+        None => None,
+        Some(_)
+            if prior.is_none()
+                || prior.is_some_and(|(previous_session, _)| {
+                    session.is_some() && previous_session.is_some() && previous_session != session
+                }) =>
+        {
+            current
+        }
+        Some(_) => current.zip(previous).and_then(|(a, b)| a.checked_sub(b)),
+    };
+    usage.uncached_input = delta(
+        total.uncached_input,
+        baseline.as_ref().and_then(|b| b.uncached_input),
+    );
+    usage.cache_read = delta(
+        total.cache_read,
+        baseline.as_ref().and_then(|b| b.cache_read),
+    );
+    usage.cache_write = delta(
+        total.cache_write,
+        baseline.as_ref().and_then(|b| b.cache_write),
+    );
+    usage.cache_write_1h = delta(
+        total.cache_write_1h,
+        baseline.as_ref().and_then(|b| b.cache_write_1h),
+    );
+    usage.output_excluding_reasoning = delta(
+        total.output_excluding_reasoning,
+        baseline.as_ref().and_then(|b| b.output_excluding_reasoning),
+    );
+    usage.reasoning = delta(total.reasoning, baseline.as_ref().and_then(|b| b.reasoning));
+    usage
+        .extra
+        .insert("per_attempt".into(), serde_json::Value::Bool(true));
+    usage.extra.insert(
+        "session_total".into(),
+        serde_json::to_value(total).expect("usage serializes"),
+    );
+}
+
+#[cfg(test)]
+mod codex_usage_tests {
+    use super::*;
+
+    #[test]
+    fn codex_session_deltas_and_unknown_baseline() {
+        let mut first = UsageRecord {
+            uncached_input: Some(20),
+            cache_read: Some(80),
+            output_excluding_reasoning: Some(7),
+            ..Default::default()
+        };
+        codex_attempt_usage(&mut first, Some("t"), None);
+        assert_eq!(first.uncached_input, Some(20));
+        assert_eq!(first.extra["session_total"]["cache_read"], 80);
+        let mut second = UsageRecord {
+            uncached_input: Some(50),
+            cache_read: Some(100),
+            output_excluding_reasoning: Some(12),
+            ..Default::default()
+        };
+        codex_attempt_usage(&mut second, Some("t"), Some((Some("t"), &first)));
+        assert_eq!(second.uncached_input, Some(30));
+        assert_eq!(second.cache_read, Some(20));
+        assert_eq!(second.output_excluding_reasoning, Some(5));
+        assert_eq!(second.extra["session_total"]["uncached_input"], 50);
+        let mut unknown = second.clone();
+        codex_attempt_usage(
+            &mut unknown,
+            Some("t"),
+            Some((Some("t"), &UsageRecord::default())),
+        );
+        assert_eq!(unknown.uncached_input, None);
+    }
+}
+
 fn account_directories(
     specs: &[provenant_records::AdapterSpec],
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -1354,6 +1455,27 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        if record
+            .applied_route
+            .as_ref()
+            .and_then(|r| r.provider.as_deref())
+            == Some("codex")
+        {
+            let request = self.request(record.run_id, call)?;
+            let prior_id = if record.continuation.as_deref() == Some("automatic") {
+                record.retry_of
+            } else if request.fresh_continuation.is_none() {
+                request.parent
+            } else {
+                None
+            };
+            let prior = prior_id.map(|id| self.record(id, call)).transpose()?;
+            codex_attempt_usage(
+                &mut decoded.usage,
+                decoded.session.as_deref(),
+                prior.as_ref().map(|p| (p.session.as_deref(), &p.usage)),
+            );
+        }
         if !cancelled && matches!(exit.termination, Some(Termination::Signal(_))) {
             decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
         }
