@@ -3,7 +3,7 @@
 Owner: `crates/fabric-store` (SQLite), `crates/fabric-runtime` (identity,
 coordination, peers, graphs, Git transport), `crates/fabric-mcp` (stdio MCP)
 Anchor: `crates/fabric-store/src/tests.rs`, `crates/fabric-runtime/src/graph.rs`,
-`crates/fabric-mcp/src/stdio_tests.rs`, `tests/fabric.rs`, `tests/fabric_transport.rs`
+`crates/fabric-mcp/src/stdio_tests.rs`
 
 Fabric is the daemonless coordination layer for agents on one user's hosts:
 mail, tasks, an event log, advisory claims, fenced landing, bounded graphs,

@@ -6,9 +6,7 @@ Anchor: `crates/core/src/roots.rs`, `crates/records/tests/contracts.rs`,
 `crates/config/src/managed_tests.rs`
 
 State owns root selection, identities, record codecs, typed configuration and
-the managed installation. The [cross-cutting
-decisions](README.md#cross-cutting-decisions) fix the root, layout and
-environment. Config keys are listed in the generated [config
+the managed installation. Config keys are listed in the generated [config
 reference](../reference/config-keys.md); the attempt layout is `AttemptFile`
 in `crates/records/src/attempt_file.rs`. Operator steps are in the [install
 runbook](../runbooks/install.md) and [GC runbook](../runbooks/gc.md). Paths
