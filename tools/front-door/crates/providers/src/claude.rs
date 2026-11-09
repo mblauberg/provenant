@@ -648,6 +648,11 @@ fn prepare(
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
     if access == Access::ReadOnly {
+        // The handoff is beside the pinned source view, outside the cwd.
+        // Bash is pre-approved below; native file tools also need this root.
+        if let Some(private) = &plan.private_state {
+            argv.extend(["--add-dir".into(), private.path.as_os_str().to_owned()]);
+        }
         // dontAsk mode refuses reads outside the working directory and its
         // added directories, even where the seatbelt profile would allow them.
         // A root that holds the working directory still reaches beyond it.

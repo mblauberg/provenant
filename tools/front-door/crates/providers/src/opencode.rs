@@ -143,7 +143,8 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
 }
 
 /// OpenCode uses the user's configuration and stored provider accounts.
-/// Inline permissions deny edits and shell commands for read-only runs. Its
+/// Read-only runs deny edits but allow shell commands inside outer confinement
+/// so they can atomically publish progress in their private state. Its
 /// built-in search tools still run ripgrep, which the profile grants by path.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -196,11 +197,16 @@ fn prepare(
     } else {
         let mut permission = serde_json::json!({
             "edit": "deny",
-            "bash": "deny",
+            "bash": "allow",
             "webfetch": "deny",
         });
         let mut external = serde_json::Map::new();
         let mut reads = serde_json::Map::new();
+        // The pinned cwd and candidate state are siblings. Headless tools must
+        // not prompt for the private directory where progress is published.
+        let progress = format!("{}/**", private.to_str().ok_or(ProviderError::InvalidPath)?);
+        external.insert(progress.clone(), "allow".into());
+        reads.insert(progress, "allow".into());
         if input.git_context {
             // Scratch is outside the workspace; headless runs cannot answer the
             // external-directory prompt. Keep the exception inside its existing grant.
@@ -375,17 +381,18 @@ fn prepare(
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
-    let mut tool_exec_roots = if shell {
-        vec![subtree("/bin"), subtree("/usr/bin"), package.clone()]
-    } else {
-        Vec::new()
-    };
+    // Read-only Bash needs a shell and atomic rename utilities, but receives
+    // no writer toolchain or source write grant. The outer profile owns writes.
+    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin")];
+    if shell {
+        tool_exec_roots.push(package.clone());
+    }
     if access == Access::ReadOnly {
         // OpenCode's grep, glob and list tools execute ripgrep. It resolves
         // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
-        // exactly that binary for execution, alongside system grep. No shell is enabled.
+        // exactly that binary for execution, alongside system grep.
         let rg = private.join("cache/opencode/bin/rg");
         // Resolve install-name symlinks to exact files, accepting libraries by
         // content regardless of the host's package manager or PATH ordering.
@@ -1213,7 +1220,7 @@ mod tests {
                 .to_string_lossy(),
         )
         .unwrap();
-        assert_eq!(config["permission"]["bash"], "deny");
+        assert_eq!(config["permission"]["bash"], "allow");
         assert_eq!(config["permission"]["edit"], "deny");
 
         // OpenCode resolves ripgrep from PATH and then its cache bin, which is
@@ -1227,7 +1234,12 @@ mod tests {
         );
         assert_eq!(
             spec.profile.spec.tool_exec_roots,
-            [rg.clone(), exact("/usr/bin/grep")]
+            [
+                subtree("/bin"),
+                subtree("/usr/bin"),
+                rg.clone(),
+                exact("/usr/bin/grep")
+            ]
         );
         // No shell toolchain leaks into a read-only lane.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
@@ -1243,8 +1255,9 @@ mod tests {
         let exec = format!("(allow process-exec (literal \"{}\"))", rg.path.display());
         assert!(profile.contains(&exec), "{exec}");
         assert!(
-            !profile.contains("(allow process-exec (subpath"),
-            "read-only search must not grant an exec subtree"
+            provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                .iter()
+                .all(|grant| !grant.path.starts_with(input.cwd))
         );
         // The private state grant is the read access ripgrep needs.
         assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
@@ -1520,6 +1533,37 @@ mod tests {
                 program.display()
             );
         }
+        // The same launch must support the brief's temporary-file + rename
+        // protocol while refusing writes to the pinned source or another member.
+        let private = &plan.permissions().private_state.as_ref().unwrap().path;
+        let source = root.join("repo");
+        let sibling = root.join("other-member");
+        std::fs::create_dir_all(&source)?;
+        std::fs::create_dir_all(&sibling)?;
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sh", "-c"])
+            .arg(r#"set -eu
+printf '%s' '{"schema_version":2,"status":"done","note":"progress","remaining":[],"decisions":[],"verify":[]}' > "$1/handoff.tmp"
+/bin/mv "$1/handoff.tmp" "$1/handoff.json"
+if (printf forbidden > "$2/forbidden") 2>/dev/null; then exit 91; fi
+if (printf forbidden > "$3/forbidden") 2>/dev/null; then exit 92; fi
+"#)
+            .arg("handoff-probe")
+            .arg(private)
+            .arg(&source)
+            .arg(&sibling)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let progress: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(private.join("handoff.json"))?)?;
+        assert_eq!(progress["status"], "done");
+        assert!(!private.join("handoff.tmp").exists());
+        assert!(!source.join("forbidden").exists());
+        assert!(!sibling.join("forbidden").exists());
         Ok(())
     }
 
@@ -1761,6 +1805,8 @@ mod tests {
                 assert_eq!(
                     roots,
                     &[
+                        subtree("/bin"),
+                        subtree("/usr/bin"),
                         exact(
                             plan.permissions()
                                 .private_state
