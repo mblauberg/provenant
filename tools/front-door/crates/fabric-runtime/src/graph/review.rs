@@ -74,12 +74,14 @@ pub(super) fn contract_error(
     outputs: &NodeOutputs,
 ) -> Option<(&'static str, String)> {
     template::review_behaviour(node)?;
-    if outputs.verdict_error.is_some()
-        || !matches!(
-            outputs.verdict.as_deref(),
-            Some("VERDICT: PASS" | "VERDICT: FAIL" | "VERDICT: INCONCLUSIVE")
-        )
-    {
+    // ResultCapture has already validated uniqueness and final position while
+    // allowing the shared trailing handoff fence. `verdict_error` also carries
+    // source truncation, which is diagnosed by findings availability below;
+    // do not misreport a captured verdict as malformed for that reason.
+    if !matches!(
+        outputs.verdict.as_deref(),
+        Some("VERDICT: PASS" | "VERDICT: FAIL" | "VERDICT: INCONCLUSIVE")
+    ) {
         return Some((
             "review_verdict_invalid",
             "review needs exactly one final verdict: PASS, FAIL or INCONCLUSIVE".into(),
