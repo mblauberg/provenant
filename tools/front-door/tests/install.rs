@@ -1815,7 +1815,7 @@ fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_override
         (
             "cargo",
             format!(
-                "#!/bin/sh\n[ \"$1\" = run ] || exit 0\nwhile [ \"$1\" != --out ]; do shift; done\ncp -R '{}/.' \"$2\"\n",
+                "#!/bin/sh\n[ \"$1\" = run ] || exit 0\nwhile [ \"$1\" != --out ]; do shift; done\ncp -Rp '{}/.' \"$2\"\n",
                 stage.display()
             ),
         ),
