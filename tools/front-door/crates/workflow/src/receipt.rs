@@ -127,7 +127,7 @@ mod tests {
             project_id: ProjectId::from_bytes([2; 16]),
             subject: Subject::Pr {
                 extra: Default::default(),
-                repository: "github.com/example/repo".into(),
+                repository: provenant_core::RepoId::from_bytes([3; 16]),
                 number: 42,
                 head: GitOid::Sha256([4; 32]),
             },
@@ -161,7 +161,7 @@ mod tests {
             let mut input = input();
             input.subject = Subject::Pr {
                 extra: Default::default(),
-                repository: "github.com/example/repo".into(),
+                repository: provenant_core::RepoId::from_bytes([3; 16]),
                 number: u64::MAX,
                 head,
             };

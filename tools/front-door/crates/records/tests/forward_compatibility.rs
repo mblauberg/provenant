@@ -173,7 +173,7 @@ fn risk_factors() -> Value {
         "migration":"none","oracle_quality":"strong","external_effects":"none","critical_surface":"none"})
 }
 fn risk() -> Value {
-    json!({"factors":risk_factors(),"changed_paths":[],"derived":"routine","tier":"routine","downgrade_approval":null})
+    json!({"factors":risk_factors(),"derived":"routine","tier":"routine","downgrade_approval":null})
 }
 fn subject() -> Value {
     json!({"kind":"document","path":path(),"digest":digest()})
@@ -311,7 +311,7 @@ cases! {
     evidence_ref_preserves_digest: workflow::EvidenceRef => evidence();
     approval_ref_preserves_digest: workflow::ApprovalRef => approval();
     risk_record_preserves_digest: workflow::RiskRecord => risk();
-    pr_subject_preserves_digest: workflow::Subject => json!({"kind":"pr","repository":"github.com/example/repo","number":1,"head":"abababababababababababababababababababab"});
+    pr_subject_preserves_digest: workflow::Subject => json!({"kind":"pr","repository":ID,"number":1,"head":"abababababababababababababababababababab"});
     document_subject_preserves_digest: workflow::Subject => subject();
     observed_provenance_preserves_digest: workflow::RouteProvenance => observed_provenance();
     attested_provenance_preserves_digest: workflow::RouteProvenance => json!({"source":"chair_attested","route":"codex/model@high","tier":"principal","declared_family":null,"evidence":evidence()});
@@ -428,5 +428,29 @@ fn older_install_receipt_defaults_state_format_version() -> TestResult {
         "harnesses":["codex"],"harness_targets":[harness_target()],"entries":[owned_entry()]});
     let receipt: InstallReceipt = serde_json::from_value(old)?;
     assert_eq!(receipt.state_format_version, STATE_FORMAT_VERSION);
+    Ok(())
+}
+
+#[test]
+fn receipt_without_changed_paths_and_with_repo_id_loads() -> TestResult {
+    let mut value = receipt();
+    value["subject"] = json!({"kind":"pr","repository":ID,"number":1,"head":GIT_OID});
+    let decoded: workflow::DeliveryReceipt = serde_json::from_value(value.clone())?;
+    assert!(decoded.risk().changed_paths().is_empty());
+    assert!(
+        matches!(decoded.subject(), workflow::Subject::Pr { repository, .. }
+        if repository.to_string() == ID)
+    );
+    assert_eq!(serde_json::to_value(decoded)?, value);
+    Ok(())
+}
+
+#[test]
+fn recorded_changed_paths_survive_round_trip() -> TestResult {
+    let mut value = risk();
+    value["changed_paths"] = json!(["src/auth.rs"]);
+    let decoded: workflow::RiskRecord = serde_json::from_value(value.clone())?;
+    assert_eq!(decoded.changed_paths(), &["src/auth.rs"]);
+    assert_eq!(serde_json::to_value(decoded)?, value);
     Ok(())
 }

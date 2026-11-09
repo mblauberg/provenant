@@ -372,16 +372,20 @@ impl Edge {
         facts: &[ReviewFact],
         blockers: Vec<BlockerInput>,
     ) -> Result<coverage::ValidationReport, Error> {
-        // A receipt's saved downgrade cannot survive a changed path set or policy.
-        let paths = subject_changed_paths(&self.cwd, receipt.subject(), &self.cancel)?;
+        let paths = receipt.risk().changed_paths();
+        if receipt.risk().downgrade_approval().is_some() && paths.is_empty() {
+            return Err(invalid(
+                "receipt downgrade has no recorded paths; re-save with workflow receipt save",
+            ));
+        }
         let config = provenant_config::read_with_domains(&self.roots, &crate::domains::SECTIONS)
             .map_err(|e| invalid(e.to_string()))?;
-        let policy = config.domains.routing.review.workflow_risk_policy(&paths);
+        let policy = config.domains.routing.review.workflow_risk_policy(paths);
         risk::validate(
             receipt.risk(),
             &policy,
             receipt.risk().downgrade_approval(),
-            &paths,
+            paths,
         )
         .map_err(|e| invalid(e.to_string()))?;
         let blockers: Vec<_> = blockers
@@ -765,8 +769,6 @@ fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error
     }
 }
 /// Obtain the PR's actual base and verify its head before reading local objects.
-/// The persisted path set binds the merge-base diff as well as the subject head:
-/// a base branch move can change the diff without changing that head.
 fn subject_changed_paths(
     cwd: &Path,
     subject: &Subject,
@@ -775,37 +777,15 @@ fn subject_changed_paths(
     use provenant_confinement::{UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::{ffi::OsString, time::Duration};
-    let Subject::Pr {
-        repository,
-        number,
-        head,
-        ..
-    } = subject
-    else {
+    let Subject::Pr { number, head, .. } = subject else {
         return Ok(Vec::new());
     };
-    let parts: Vec<_> = repository.split('/').collect();
-    if parts.len() != 3
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || part.starts_with('-')
-                || *part == "."
-                || *part == ".."
-                || !part
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
-        })
-    {
-        return Err(invalid("PR repository must be HOST/OWNER/REPO"));
-    }
     let executor = SystemExecutor::new(1).map_err(|e| invalid(e.to_string()))?;
     let argv: Vec<OsString> = [
         "gh",
         "pr",
         "view",
         &number.to_string(),
-        "--repo",
-        repository.as_str(),
         "--json",
         "baseRefOid,headRefOid",
     ]
@@ -874,6 +854,41 @@ fn diff_paths(
     Ok(paths)
 }
 
+/// Only sub-terminal PR saves can gain a stricter tier from a path floor.
+fn save_changed_paths(
+    subject: &Subject,
+    tier: provenant_records::workflow::RiskTier,
+    is_downgrade: bool,
+    stored: Option<&DeliveryReceipt>,
+    read: impl FnOnce() -> Result<Vec<String>, Error>,
+) -> Result<(Vec<String>, Vec<String>), Error> {
+    use provenant_records::workflow::RiskTier;
+    let Subject::Pr { head, .. } = subject else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    if tier == RiskTier::Terminal {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if let Some(receipt) = stored
+        && matches!(receipt.subject(), Subject::Pr { head: saved, .. } if saved == head)
+        && !receipt.risk().changed_paths().is_empty()
+    {
+        return Ok((receipt.risk().changed_paths().to_vec(), Vec::new()));
+    }
+    match read() {
+        Ok(paths) => Ok((paths, Vec::new())),
+        Err(error) if is_downgrade => Err(invalid(format!(
+            "cannot establish paths for downgrade: {error}"
+        ))),
+        Err(error) => Ok((
+            Vec::new(),
+            vec![format!(
+                "cannot record PR changed paths; keeping chosen tier: {error}"
+            )],
+        )),
+    }
+}
+
 fn save(
     edge: &Edge,
     delivery: DeliveryId,
@@ -883,7 +898,17 @@ fn save(
     let now = edge.clock.wall_now()?;
     let config = provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?;
-    let changed_paths = subject_changed_paths(&edge.cwd, &req.subject, &edge.cancel)?;
+    let store = ReceiptStore::new(edge.roots.state.clone(), edge.project, delivery);
+    let stored = store.read()?;
+    let initial_policy = config.domains.routing.review.workflow_risk_policy(&[]);
+    let is_downgrade = req.risk.tier < risk::minimum(&req.risk.factors, &initial_policy);
+    let (changed_paths, warnings) = save_changed_paths(
+        &req.subject,
+        req.risk.tier,
+        is_downgrade,
+        stored.as_ref(),
+        || subject_changed_paths(&edge.cwd, &req.subject, &edge.cancel),
+    )?;
     let policy = config
         .domains
         .routing
@@ -963,7 +988,7 @@ fn save(
     if let Some(blocker) = earliest_blocker {
         valid_until = valid_until.min(blocker);
     }
-    let saved = ReceiptStore::new(edge.roots.state.clone(), edge.project, delivery).save(
+    let saved = store.save(
         &candidate,
         expected,
         SaveContext {
@@ -981,9 +1006,11 @@ fn save(
     struct Saved {
         receipt: DeliveryReceipt,
         clock_regression: Option<bool>,
+        warnings: Vec<String>,
     }
     serde_json::to_value(Saved {
         receipt: saved.receipt,
+        warnings,
         clock_regression: saved.clock_regression.map(|_| true),
     })
     .map_err(|e| invalid(e.to_string()))
