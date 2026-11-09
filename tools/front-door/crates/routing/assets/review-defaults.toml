@@ -19,27 +19,92 @@ min_monthly_allowance_usd = 60
 [pacing]
 [pacing_reserve]
 # Path classes are owner-configurable. Unknown paths use the unknown class.
+# Crucial selects the deep shape, so a crucial floor covers only paths that
+# implement a hard boundary of ADR 0035 or an irreversible external effect,
+# where a missed defect cannot be reverted or recovered afterwards. Each floor
+# states which. A broad change reaches deep through its integration head, not
+# through a path name. Match paths, not substrings: a word such as "build" or
+# "object" appears in many files that guard nothing.
 [review.floors.routine]
+# Documentation and prose carry no executable behaviour.
 paths = ["docs/**", "**/*.md"]
 tier = "routine"
 lenses = []
 [review.floors.unknown]
+# A path no class names gets one correctness reviewer, not a guess.
 paths = []
 tier = "substantial"
 lenses = ["correctness-spec"]
 [review.floors.security]
-paths = ["**/*credential*", "**/*secret*", "**/*auth*", "**/*security*", "**/credentials/**", "**/auth/**", "**/security/**"]
+# ADR 0035 boundary 2: credentials never cross hosts and never reach prompts,
+# receipts or output. A leak cannot be recalled.
+paths = [
+  "**/credentials/**",
+  "**/auth/**",
+  "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
+  "tools/front-door/crates/confinement/src/disclosure.rs",
+  "tools/front-door/crates/confinement/src/redact.rs",
+]
 tier = "crucial"
 lenses = ["correctness-spec", "security-privacy"]
-[review.floors.boundary]
-paths = ["**/*authority*", "**/*integrity*", "**/*worktree*", "**/*object*", "**/*publish*", "**/*handoff*", "**/*chair*", "**/*landing*", "**/git/**"]
+[review.floors.lane_git]
+# ADR 0035 boundary 1: a writer lane reaches shared refs only through
+# host-owned delivery. A lane that escapes can rewrite shared history.
+paths = [
+  "tools/front-door/crates/confinement/src/worktrees.rs",
+  "tools/front-door/crates/confinement/src/worktrees/**",
+  "tools/front-door/crates/confinement/src/permissions/**",
+  "tools/front-door/crates/confinement/src/push.rs",
+  "tools/front-door/crates/confinement/src/transport.rs",
+  "tools/front-door/crates/confinement/src/repo.rs",
+  "tools/front-door/crates/confinement/tests/lane_git_conformance.rs",
+  "tools/front-door/crates/os/src/git.rs",
+  "tools/front-door/crates/fabric-runtime/src/git_transport.rs",
+]
 tier = "crucial"
 lenses = ["correctness-spec", "adversarial"]
-[review.floors.operations]
-paths = ["**/.github/**", "**/ci/**", "**/build/**", "**/release/**", "**/*build*", "**/*release*", "**/*review*policy*", "**/Cargo.toml", "**/Cargo.lock", "**/Makefile"]
+[review.floors.object_integrity]
+# ADR 0035 boundary 3: lane objects are digest-checked and fsck-verified on
+# receipt. A corrupt or substituted object lands in shared history unnoticed.
+paths = [
+  "tools/front-door/crates/run/src/objects.rs",
+  "tools/front-door/crates/run/src/objects/**",
+  "tools/front-door/crates/run/src/objects_tests.rs",
+]
+tier = "crucial"
+lenses = ["correctness-spec", "adversarial"]
+[review.floors.authority]
+# ADR 0035 boundary 4: landing, publishing, handoff acceptance and chair
+# switching need held authority. Merging and publishing are external effects.
+paths = [
+  "tools/front-door/crates/fabric-store/src/landing.rs",
+  "tools/front-door/crates/fabric-store/src/chairs.rs",
+  "tools/front-door/crates/fabric-runtime/src/chairs.rs",
+  "tools/front-door/crates/fabric-runtime/src/graph/land.rs",
+  "tools/front-door/crates/fabric-runtime/src/handoff.rs",
+  "tools/front-door/crates/fabric-runtime/src/handoff/**",
+  "tools/front-door/crates/records/src/handoff.rs",
+  "tools/front-door/src/handoff.rs",
+  "tools/front-door/src/pr/land.rs",
+  "tools/front-door/src/pr/landing/**",
+  "tools/front-door/src/fabric/landing.rs",
+]
+tier = "crucial"
+lenses = ["correctness-spec", "adversarial"]
+[review.floors.external_effects]
+# Irreversible effects outside the repository: a published release cannot be
+# unpublished, and an unreviewed auto-merge changes the default branch.
+paths = [
+  ".github/workflows/release.yml",
+  ".github/workflows/dependabot-automerge.yml",
+  "tools/front-door/src/bin/package-release.rs",
+  "tools/front-door/src/upgrade-release.sh",
+]
 tier = "crucial"
 lenses = ["correctness-spec", "reliability"]
 [review.floors.contract]
+# A public interface or schema change is costly to undo but recoverable, so it
+# keeps the standard panel rather than deep.
 paths = ["**/cli/**", "**/config/**", "**/schema/**", "**/*config*", "**/*schema*"]
 tier = "substantial"
 lenses = ["correctness-spec", "design-fit-reuse"]
@@ -74,10 +139,11 @@ integration = "deep"
 docs = "quick"
 refactor = "standard"
 [review.select.by_paths]
+# Size never reaches deep. Deep is for integration heads and boundary paths.
 [review.select.by_size]
 small = "quick"
 medium = "standard"
-large = "deep"
+large = "standard"
 # Base lenses fill a shape's slots in this order. A kind may replace the order
 # (docs) or add lenses outside the slot cap (refactor); risk tags add more.
 [review.lenses]

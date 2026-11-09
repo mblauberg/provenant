@@ -1398,9 +1398,11 @@ mod tests {
         for (lines, files, crates, expected) in [
             (150, 3, 1, "quick"),
             (151, 3, 1, "standard"),
-            (1001, 3, 1, "deep"),
-            (1, 16, 1, "deep"),
-            (1, 1, 4, "deep"),
+            // Size alone never reaches deep: that is for integration heads and
+            // boundary paths.
+            (1001, 3, 1, "standard"),
+            (1, 16, 1, "standard"),
+            (1, 1, 4, "standard"),
         ] {
             let size = review.size.classify(lines, files, crates);
             assert_eq!(
@@ -1450,7 +1452,7 @@ mod tests {
                 .select_shape(None, None, Some("refactor"), &[], Some("large"))
                 .unwrap()
                 .name,
-            "deep"
+            "standard"
         );
         assert_eq!(
             review
@@ -1675,9 +1677,28 @@ mod tests {
         };
         for (path, class) in [
             ("src/auth/session.rs", "security"),
-            ("src/git/refs.rs", "boundary"),
-            ("src/object_receive.rs", "boundary"),
-            (".github/workflows/test.yml", "operations"),
+            (
+                "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
+                "security",
+            ),
+            (
+                "tools/front-door/crates/confinement/src/worktrees/refs.rs",
+                "lane_git",
+            ),
+            (
+                "tools/front-door/crates/confinement/src/permissions/grants.rs",
+                "lane_git",
+            ),
+            (
+                "tools/front-door/crates/run/src/objects/view.rs",
+                "object_integrity",
+            ),
+            ("tools/front-door/src/pr/landing/publish.rs", "authority"),
+            (
+                "tools/front-door/crates/fabric-runtime/src/handoff/session.rs",
+                "authority",
+            ),
+            (".github/workflows/release.yml", "external_effects"),
             ("src/config/parser.rs", "contract"),
             ("src/cli/run.rs", "contract"),
         ] {
@@ -1689,7 +1710,26 @@ mod tests {
                 "{path}"
             );
         }
-        let paths = vec!["src/credential_store.rs".into()];
+        // Paths that matched only a removed substring are no longer crucial.
+        for path in [
+            "src/object_receive.rs",
+            "src/build_graph.rs",
+            "src/authority_notes.rs",
+            "src/chair_view.rs",
+            "src/git/refs.rs",
+            "src/security_banner.rs",
+            "src/release_notes.rs",
+            "Cargo.toml",
+            ".github/workflows/ci.yml",
+        ] {
+            let floors = review.path_floors(&[path.into()]);
+            assert_ne!(floors.tier.as_deref(), Some("crucial"), "{path}");
+            let panel = review
+                .resolve_panel(&request, None, &[path.into()], false)
+                .unwrap();
+            assert_ne!(panel.shape, "deep", "{path}");
+        }
+        let paths = vec!["src/credentials/store.rs".into()];
         let panel = review.resolve_panel(&request, None, &paths, false).unwrap();
         assert_eq!(panel.shape, "deep");
         let names: Vec<_> = panel.slots.iter().map(|slot| slot.lens.as_str()).collect();
@@ -1750,7 +1790,7 @@ mod tests {
             ..Default::default()
         };
         for (path, class, required) in [
-            ("docs/security.md", "security", "security-privacy"),
+            ("docs/credentials/guide.md", "security", "security-privacy"),
             ("docs/private.md", "project", "adversarial"),
         ] {
             let paths = vec![path.to_owned()];
