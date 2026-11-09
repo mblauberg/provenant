@@ -292,9 +292,11 @@ in `.provenant/templates/` and temporary briefs in `.provenant/scratch/`.
 Delivery failure blocks dependent work; retry only after checking the
 integration head and retained evidence. Review remains bound to its subject.
 
-Finish or stop pending graphs and drain writers on every host before
-[upgrading](install.md#bootstrap-and-upgrade). Install on all hosts before new
-launches. Preserve unreadable records and report them.
+When a release breaks state readability, finish or stop pending graphs and drain
+writers on every host before [upgrading](install.md#bootstrap-and-upgrade).
+Routine releases preserve state readability and allow running graphs and lanes
+to continue across upgrades. Install on all hosts before new launches. Preserve
+unreadable records and report them.
 
 A retained slot-root reservation is carried to its named attempt during locked
 recovery. The attempt evidence is synced before the slot-root record is removed;

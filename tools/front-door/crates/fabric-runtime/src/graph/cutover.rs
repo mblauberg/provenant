@@ -1,14 +1,49 @@
 //! Cutover checks shared by host admission and staged upgrades.
 use std::{io, path::Path};
 
+pub use provenant_records::STATE_FORMAT_VERSION;
+
+/// Findings classified into unreadable/corrupt records and in-flight work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClassifiedFindings {
+    /// Findings that always block because state cannot be read or is corrupt.
+    pub unreadable: Vec<String>,
+    /// Pending in-flight readable graphs (project, id).
+    pub pending_graphs: Vec<(String, String)>,
+    /// Live lanes (formatted as "Live lane {project}/{run}/{attempt} ({location})").
+    pub live_lanes: Vec<String>,
+}
+
+impl ClassifiedFindings {
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.unreadable.len() + self.pending_graphs.len() + self.live_lanes.len()
+    }
+
+    pub fn into_findings(self) -> Vec<String> {
+        let mut all = self.unreadable;
+        for (project, id) in self.pending_graphs {
+            all.push(format!(
+                "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
+            ));
+        }
+        all.extend(self.live_lanes);
+        all.sort();
+        all
+    }
+}
+
 /// Read-only drain check, shared by staged preflight and the first new launch.
 /// New interface runs persist their resolved template library in the execution.
 /// A legacy lane cannot become current merely by upgrading its executable.
-pub fn pending_findings(
+pub fn classified_pending_findings(
     state: &provenant_core::StateRoot,
     legacy_only: bool,
-) -> Result<Vec<String>, String> {
-    let mut findings = Vec::new();
+) -> Result<ClassifiedFindings, String> {
+    let mut findings = ClassifiedFindings::default();
     let mut current = std::collections::BTreeSet::new();
     let projects = state.as_path().join("fabric/graphs");
     let entries = match std::fs::read_dir(&projects) {
@@ -39,21 +74,27 @@ pub fn pending_findings(
                     current.insert((project.to_string(), id));
                     continue;
                 }
-                match super::FileJournal::pending_execution(state, project, &id) {
+                let is_unreadable = match super::FileJournal::pending_execution(state, project, &id)
+                {
                     Ok(None) => continue,
-                    Ok(Some(_)) => {}
+                    Ok(Some(_)) => false,
                     Err(error) if error.is_unreadable() => {
                         if super::FileJournal::unreadable_settled(state, project, &id)
                             .map_err(|e| e.to_string())?
                         {
                             continue;
                         }
+                        true
                     }
                     Err(error) => return Err(error.to_string()),
+                };
+                if is_unreadable {
+                    findings.unreadable.push(format!(
+                        "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
+                    ));
+                } else {
+                    findings.pending_graphs.push((project.to_string(), id));
                 }
-                findings.push(format!(
-                    "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
-                ));
             }
         }
     }
@@ -125,11 +166,23 @@ pub fn pending_findings(
             } else {
                 location.display().to_string()
             };
-            findings.push(format!("Live lane {project}/{run}/{attempt} ({location})"));
+            findings
+                .live_lanes
+                .push(format!("Live lane {project}/{run}/{attempt} ({location})"));
         }
     }
-    findings.sort();
+    findings.unreadable.sort();
+    findings.pending_graphs.sort();
+    findings.live_lanes.sort();
     Ok(findings)
+}
+
+/// Read-only drain check, shared by staged preflight and the first new launch.
+pub fn pending_findings(
+    state: &provenant_core::StateRoot,
+    legacy_only: bool,
+) -> Result<Vec<String>, String> {
+    classified_pending_findings(state, legacy_only).map(|c| c.into_findings())
 }
 
 // The guardian holds this existing lock for the lifetime of supervision.
@@ -535,5 +588,56 @@ mod tests {
         assert!(fresh_guard(&state).is_err());
         drop(lock);
         assert!(fresh_guard(&state).is_ok());
+    }
+
+    #[test]
+    fn classified_findings_separates_unreadable_from_in_flight() {
+        let temp = crate::test_support::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.clone());
+        let state = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let project = ProjectId::from_bytes([2; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        drop(
+            super::super::FileJournal::open(
+                &state,
+                project,
+                "old-pending-fixture",
+                budget,
+                &cancel,
+                &clock,
+            )
+            .unwrap(),
+        );
+        let path = base.join(format!(
+            "fabric/graphs/{project}/graph-old-pending-fixture.json"
+        ));
+        std::fs::write(
+            &path,
+            include_bytes!("../../../../tests/fixtures/install/old-pending-checkpoint.json"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Also add an unreadable file.
+        let unreadable_path = base.join(format!("fabric/graphs/{project}/graph-corrupt.json"));
+        std::fs::write(&unreadable_path, b"not json").unwrap();
+
+        let classified = classified_pending_findings(&state, false).unwrap();
+        assert_eq!(classified.unreadable.len(), 1);
+        assert!(classified.unreadable[0].contains("corrupt"));
+        assert_eq!(classified.pending_graphs.len(), 1);
+        assert_eq!(
+            classified.pending_graphs[0],
+            (project.to_string(), "old-pending-fixture".to_string())
+        );
+        assert!(classified.live_lanes.is_empty());
+
+        let all = classified.into_findings();
+        assert_eq!(all.len(), 2);
     }
 }

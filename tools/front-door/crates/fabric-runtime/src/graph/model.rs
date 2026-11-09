@@ -928,6 +928,7 @@ pub enum AccessMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Bump STATE_FORMAT_VERSION for changes an older or newer binary cannot read.
 pub struct GraphCheckpoint {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
