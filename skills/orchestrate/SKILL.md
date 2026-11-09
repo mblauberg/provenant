@@ -19,7 +19,9 @@ provenant run --use batch --file brief.md --set 'worktree="/absolute/project/.wo
 ```
 
 Use `explore` over areas, `research` for primary sources and `review` for
-a pinned head. Nodes use `over`, `after` and `inputs` for copies, dependencies
+a pinned head. Send broad code reading to a read-only lane and take back its
+findings with paths and line ranges; the chair's context is paid for again on
+every later turn, so it reads only what its own judgement needs. Nodes use `over`, `after` and `inputs` for copies, dependencies
 and evidence. Layers are bundled, user, repository and inline; project templates go under
 `.provenant/templates/`. Inspect them with `provenant templates NAME --json`.
 

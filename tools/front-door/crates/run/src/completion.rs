@@ -171,11 +171,15 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
 /// stopped to report the wait cost a whole task (#2484).
 pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on your pushed branch. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
 
+/// The reading rule every lane is told. Tool output stays in a lane's context and is
+/// paid for again on every later turn, so whole-file and large-range reads dominate its cost.
+pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with line numbers (`rg -n`), then read a bounded range of the lines you need; avoid whole-file `cat` or `sed` reads and unbounded `git diff` or `rg` output. Everything you print stays in your context and is paid for again on every later turn.\n";
+
 /// The text placed before a lane's task: model policy, the build-slot rule for
-/// writers only, then the handoff file.
+/// writers only, the handoff file, then the reading rule.
 pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: &Path) -> String {
     format!(
-        "{model_guidance}\n{}{}",
+        "{model_guidance}\n{}{}{READING_GUIDANCE}",
         if writer { BUILD_SLOT_GUIDANCE } else { "" },
         handoff_progress_guidance(handoff)
     )
@@ -204,6 +208,8 @@ mod tests {
         let reader = lane_preamble("Model policy.", false, handoff);
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
+        assert!(writer.contains("locate before you read"));
+        assert!(reader.contains("locate before you read"));
     }
 
     fn snapshot(status: &str) -> Vec<u8> {
