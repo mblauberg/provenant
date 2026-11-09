@@ -224,10 +224,12 @@ These are observational comparisons. Missing joint coverage or simultaneous
 changes prevent separating a release effect from harness experiments, task
 difficulty or user activity; every stats report states that limitation.
 
-Storage adds optional trace, row, demand-log and cursor fields without changing
+Storage adds optional trace, row and demand-log fields without changing
 their existing versions. Serde defaults read pending and historical records;
 unknown row versions continue to survive rewriting. Cursor state retains pending
-structural events across a routine upgrade. No prompt or response text, remote
+structural events across a routine upgrade. The derived cursor cache advances to
+version 2; version-1 cursors trigger a deduplicated transcript replay because
+they did not retain pending events. No prompt or response text, remote
 collection or parallel identity store is introduced.
 - Test: `crates/telemetry/src/tests.rs::lane_context_fixture_joins_existing_chair_and_graph`;
   `crates/telemetry/src/ingest/tests.rs::ambiguous_native_trigger_and_unreported_reasoning_stay_distinct`;

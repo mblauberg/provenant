@@ -431,7 +431,9 @@ fn read_cursors(directory: &Directory, store: &[u8]) -> BTreeMap<String, Cursor>
     }
     serde_json::from_slice::<CursorStore>(&bytes)
         .ok()
-        .filter(|cursor| cursor.schema_version == 1 && cursor.store_digest == digest(store))
+        // Version 1 did not retain pending structural events. Replay those
+        // transcripts rather than treating discarded observations as zero.
+        .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == digest(store))
         .map(|cursor| cursor.files)
         .unwrap_or_default()
 }
@@ -886,7 +888,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     if request.incremental && !report.store_full {
         let bytes = serde_json::to_vec(&CursorStore {
-            schema_version: 1,
+            schema_version: 2,
             store_digest: digest(if changed { &out } else { &existing }),
             files: cursors,
         })

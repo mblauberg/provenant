@@ -868,5 +868,60 @@ fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
     assert!(row.get("prompt").is_none());
     assert!(row.get("response").is_none());
     assert_eq!(row["reply"]["inferred"], "unknown");
+    // An old cursor cannot recover pending events; upgrade replays the native
+    // file, preserving token deduplication and the next reply's compaction.
+    let path = fixture
+        .dir("native")
+        .join("projects/p/fixture-session.jsonl");
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+    file.write_all(b"{\"type\":\"system\",\"subtype\":\"compact_boundary\"}\n")?;
+    let dirs = [ConfigDir {
+        account: "fixture-account".into(),
+        path: fixture.dir("native"),
+    }];
+    let chairs = BTreeSet::new();
+    let request = Request {
+        dirs: &dirs,
+        chair_sessions: &chairs,
+        provider: None,
+        since: None,
+        deadline: None,
+        incremental: true,
+    };
+    ingest(&fixture.roots, &request)?;
+    let cursor_path = fixture.roots.state.as_path().join(CURSORS);
+    let mut cursors: serde_json::Value = serde_json::from_slice(&std::fs::read(&cursor_path)?)?;
+    cursors["schema_version"] = serde_json::json!(1);
+    for cursor in cursors["files"].as_object_mut().unwrap().values_mut() {
+        cursor.as_object_mut().unwrap().remove("reply");
+        cursor.as_object_mut().unwrap().remove("last_reply");
+    }
+    std::fs::write(&cursor_path, serde_json::to_vec(&cursors)?)?;
+    file.write_all(
+        message("fixture-after-upgrade", "2026-10-01T00:00:02Z", 1, 0, 0, 1).as_bytes(),
+    )?;
+    ingest(&fixture.roots, &request)?;
+    let upgraded = read_rows(&fixture.roots, &RowFilter::default())?;
+    assert_eq!(upgraded.len(), 2);
+    assert_eq!(
+        upgraded
+            .iter()
+            .find(|row| row.message == "fixture-reply")
+            .unwrap()
+            .buckets(),
+        before[0].buckets()
+    );
+    assert_eq!(
+        upgraded
+            .iter()
+            .find(|row| row.message == "fixture-after-upgrade")
+            .unwrap()
+            .reply
+            .as_ref()
+            .unwrap()
+            .compactions,
+        1
+    );
     Ok(())
 }
