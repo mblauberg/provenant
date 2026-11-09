@@ -405,9 +405,7 @@ pub fn peer(
                             // re-derives it from the result text.
                             attempt.extra.insert(
                                 "graph_handoff".into(),
-                                serde_json::json!(
-                                    store.handoff(attempt).map_err(run_error)?
-                                ),
+                                serde_json::json!(store.handoff(attempt).map_err(run_error)?),
                             );
                         }
                         if let provenant_fabric_runtime::runs::RunResult::Status {
