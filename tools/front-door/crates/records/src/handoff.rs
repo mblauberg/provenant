@@ -14,6 +14,24 @@ pub enum HandoffStatus {
     Blocked,
 }
 
+/// A writer's evidenced challenge to a criterion, for the chair to settle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecConcern {
+    pub criterion: String,
+    pub claim: String,
+    pub evidence: String,
+    pub proposed_change: String,
+    pub status: SpecConcernStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecConcernStatus {
+    AsWritten,
+    Diverged,
+    Stopped,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handoff {
     pub schema_version: u64,
@@ -22,6 +40,8 @@ pub struct Handoff {
     pub remaining: Vec<String>,
     pub decisions: Vec<String>,
     pub verify: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spec_concerns: Vec<SpecConcern>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
@@ -35,6 +55,17 @@ impl Handoff {
         let text_valid = |s: &str| !s.trim().is_empty() && s.len() <= NOTE_BYTES;
         if handoff.schema_version != 2
             || !text_valid(&handoff.note)
+            || handoff.spec_concerns.len() > ITEMS
+            || handoff.spec_concerns.iter().any(|concern| {
+                [
+                    &concern.criterion,
+                    &concern.claim,
+                    &concern.evidence,
+                    &concern.proposed_change,
+                ]
+                .iter()
+                .any(|text| !text_valid(text))
+            })
             || [&handoff.remaining, &handoff.decisions, &handoff.verify]
                 .iter()
                 .any(|items| items.len() > ITEMS || items.iter().any(|s| !text_valid(s)))
@@ -183,6 +214,31 @@ fn fence(line: &str) -> Option<(u8, usize, &str)> {
 mod tests {
     use super::*;
     const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Parser done.\",\"remaining\":[\"Renderer\"],\"decisions\":[],\"verify\":[\"Parser tests pass\"]}\n```";
+
+    #[test]
+    fn spec_concerns_round_trip_and_absence_is_unchanged() {
+        let original = Handoff::from_result(STOP).unwrap().unwrap();
+        assert!(original.spec_concerns.is_empty());
+        assert!(!original.fenced().contains("spec_concerns"));
+        for status in [
+            SpecConcernStatus::AsWritten,
+            SpecConcernStatus::Diverged,
+            SpecConcernStatus::Stopped,
+        ] {
+            let mut handoff = original.clone();
+            handoff.spec_concerns.push(SpecConcern {
+                criterion: "Retain old format".into(),
+                claim: "The format is retired".into(),
+                evidence: "The approved scope removes the old reader".into(),
+                proposed_change: "Accept the current format only".into(),
+                status,
+            });
+            assert_eq!(
+                Handoff::from_result(&handoff.fenced()).unwrap(),
+                Some(handoff)
+            );
+        }
+    }
 
     #[test]
     fn statuses_and_forward_fields_share_the_same_codec() {

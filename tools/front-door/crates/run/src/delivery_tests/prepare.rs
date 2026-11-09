@@ -478,7 +478,10 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
         )
     );
     // Upgrades may leave the old lock inodes. New commands must not hold them.
-    for name in ["provenant-lane-setup.lock", &integrate] {
+    for name in [
+        provenant_confinement::worktrees::REPOSITORY_LOCK,
+        &integrate,
+    ] {
         if directory.metadata_at(OsStr::new(name), false).is_err() {
             directory.create_new(OsStr::new(name))?;
         }
@@ -505,13 +508,16 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
                 },
             );
             let available = matches!(&pipe, Ok(Ok(_)))
-                && ["provenant-lane-setup.lock", &integrate]
-                    .iter()
-                    .all(|name| {
-                        directory
-                            .try_lock_existing(OsStr::new(name), LockMode::Exclusive)
-                            .is_ok()
-                    });
+                && [
+                    provenant_confinement::worktrees::REPOSITORY_LOCK,
+                    &integrate,
+                ]
+                .iter()
+                .all(|name| {
+                    directory
+                        .try_lock_existing(OsStr::new(name), LockMode::Exclusive)
+                        .is_ok()
+                });
             let resume_file = std::fs::write(&resume, b"resume");
             let resumed = match pipe {
                 Ok(Ok(mut pipe)) if resume_file.is_ok() => pipe.write_all(b"resume\n"),

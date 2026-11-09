@@ -670,8 +670,8 @@ pub fn prepare_writer_with_facts(
         .map_err(worktrees::WorktreeError::from)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let _config_lock = common.lock(
-        OsStr::new("provenant-lane-setup.lock"),
+    let _config_lock = worktrees::lock_repository(
+        &common,
         LockMode::Shared,
         WaitBudget::cli(clock.mono_now(), 60)
             .map_err(error("set writer config lock budget", None))?,
@@ -1046,8 +1046,8 @@ fn prepare_writer_git(
     let common = old_repo.common_dir().try_clone()?;
     let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
         let clock = SystemClock::new();
-        Ok(common.lock(
-            OsStr::new("provenant-lane-setup.lock"),
+        Ok(worktrees::lock_repository(
+            &common,
             mode,
             WaitBudget::cli(clock.mono_now(), 60)
                 .map_err(error("set writer config lock budget", None))?,
@@ -1095,8 +1095,28 @@ fn prepare_writer_git(
     // Keep post-fetch snapshots and both upstream writes in one exclusive
     // phase. Reopening outside this phase races siblings' atomic config writes.
     let config_lock = lock_config(LockMode::Exclusive)?;
-    repo.revalidate()
+    repo.revalidate_identity()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
+    // Configuration may legitimately change while fetch owns no mutation lock.
+    // Refresh every dependent snapshot only after regaining the common owner.
+    let fresh_repo = utility
+        .open_repo(&executor, &project, budget()?, cancel)
+        .map_err(error(
+            "reopen writer repository after fetch",
+            Some(&project),
+        ))?;
+    let refreshed = provenant_confinement::verify_worktree(&fresh_repo, &path)
+        .map_err(worktrees::WorktreeError::from)?;
+    if !root_identity.same_identity(&refreshed.identity())
+        || !private_identity.same_identity(&refreshed.repo().private_identity())
+        || !common_identity.same_identity(&refreshed.repo().common_identity())
+    {
+        return Err(RunError::Validation(
+            "writer identity changed before launch",
+        ));
+    }
+    writer.worktree = refreshed;
+    let repo = writer.worktree.repo();
     let ref_path = Path::new(writer.branch.as_str());
     let parent = repo.common_git_dir().join(
         ref_path
@@ -1652,8 +1672,8 @@ mod cargo_setup_tests {
         let common = Directory::open_anchor(&git_dir)?;
         let clock = provenant_os::clock::SystemClock::new();
         use provenant_core::Clock;
-        let config_lock = common.lock(
-            OsStr::new("provenant-lane-setup.lock"),
+        let config_lock = worktrees::lock_repository(
+            &common,
             provenant_os::fs::LockMode::Exclusive,
             provenant_core::WaitBudget::cli(clock.mono_now(), 60)?,
             &cancel,
@@ -1756,7 +1776,7 @@ mod cargo_setup_tests {
         // Preparation returns no lock for provider launch or custody to retain.
         let common = Directory::open_anchor(&git_dir)?;
         drop(common.try_lock_existing(
-            OsStr::new("provenant-lane-setup.lock"),
+            OsStr::new(worktrees::REPOSITORY_LOCK),
             provenant_os::fs::LockMode::Exclusive,
         )?);
         let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;

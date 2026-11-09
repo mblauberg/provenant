@@ -315,7 +315,7 @@ Cancelling a lane that has not launched a provider settles it as cancelled
 with nothing to import, and frees its queue place and its worktree's writer
 before `stop` returns, so a new `provenant run` there succeeds straight away.
 A launcher still preparing the writer (for example waiting on
-`provenant-lane-setup.lock`) sees the request within a fraction of a second,
+`provenant-repository.lock`) sees the request within a fraction of a second,
 stops waiting and never advances towards launch. If it has not let go within
 about four seconds, `stop` reports the request as pending and the launcher
 settles the attempt as it unwinds. A launcher that dies before the provider

@@ -639,6 +639,26 @@ impl<T: Clone> Select<T> {
     }
 }
 impl ReviewConfig {
+    /// Compile boundary floors from the effective, already layered configuration.
+    pub fn workflow_risk_policy(
+        &self,
+        paths: &[String],
+    ) -> provenant_records::workflow::RiskPolicy {
+        use provenant_records::workflow::{RiskPolicy, RiskTier};
+        let mut policy = RiskPolicy::default();
+        for path in paths {
+            let floor = self.path_floors(std::slice::from_ref(path));
+            let tier = match floor.tier.as_deref() {
+                Some("terminal") => RiskTier::Terminal,
+                Some("crucial") => RiskTier::Crucial,
+                _ => RiskTier::Routine,
+            };
+            if tier >= RiskTier::Crucial {
+                policy.boundary_floors.insert(path.clone(), tier);
+            }
+        }
+        policy
+    }
     /// The configured minimum coverage for each changed path. Routine applies
     /// only when no other class matches; unmatched paths use unknown.
     pub fn path_floors(&self, paths: &[String]) -> AppliedFloors {
@@ -1393,6 +1413,29 @@ mod tests {
     use provenant_config::DomainConfig;
 
     #[test]
+    fn workflow_policy_allows_removing_bundled_boundary_floor() {
+        use provenant_records::workflow::RiskTier;
+        let mut review = ReviewConfig::default();
+        let mut custom = review.floors["security"].clone();
+        custom.paths = vec!["**/special/**".into()];
+        custom.tier = "terminal".into();
+        review.floors.insert("custom".into(), custom);
+        review.floors.remove("security");
+        let paths = vec![
+            "src/credentials/store.rs".into(),
+            "src/special/a.rs".into(),
+            "src/build_graph.rs".into(),
+        ];
+        let policy = review.workflow_risk_policy(&paths);
+        assert!(!policy.boundary_floors.contains_key(&paths[0]));
+        assert_eq!(
+            policy.boundary_floors.get(&paths[1]),
+            Some(&RiskTier::Terminal)
+        );
+        assert!(!policy.boundary_floors.contains_key(&paths[2]));
+    }
+
+    #[test]
     fn size_and_kind_choose_shapes_with_risk_floor() {
         let review = ReviewConfig::default();
         for (lines, files, crates, expected) in [
@@ -1691,7 +1734,24 @@ mod tests {
                 "provenant_credentials",
             ),
             (
+                "tools/front-door/crates/run/src/delivery.rs",
+                "provenant_credentials",
+            ),
+            (
+                "tools/front-door/crates/confinement/src/utility.rs",
+                "provenant_lane_git",
+            ),
+            ("tools/front-door/src/pr/git.rs", "provenant_lane_git"),
+            (
+                "tools/front-door/src/pr/landing/gate.rs",
+                "provenant_authority",
+            ),
+            (
                 "tools/front-door/crates/confinement/src/worktrees/refs.rs",
+                "provenant_lane_git",
+            ),
+            (
+                "tools/front-door/crates/confinement/src/run_config.rs",
                 "provenant_lane_git",
             ),
             (

@@ -297,6 +297,7 @@ impl GraphRelayCause {
 pub enum InvalidInputDetail {
     CloudPlacement(CloudPlacementIssue),
     GraphReason(String),
+    OperationFailed,
     GraphRelayCause(GraphRelayCause),
     /// A `--set` or `with` parameter a template refuses; names are disclosable.
     Parameter(Box<crate::graph::template::ParameterRefusal>),
@@ -373,6 +374,7 @@ impl InvalidInputDetail {
             // Parser and transport errors may contain input, prompts or source
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
+            Self::OperationFailed => Some("graph operation failed".into()),
             Self::GraphReason(_) => Some("graph input could not be processed".into()),
             Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
@@ -408,6 +410,11 @@ impl InvalidInputDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
+    #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
+    GitMutationFailed {
+        operation: provenant_confinement::worktrees::GitMutationOperation,
+        lock_failure: bool,
+    },
     #[error("run execution owner is unavailable")]
     OwnerUnavailable,
     /// `detail` names the field path or static reason when the refusing check
@@ -759,6 +766,13 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
+            Self::GitMutationFailed { operation, lock_failure } => {
+                projected = projected.detail(format!("{operation} failed (Git reported lock failure: {lock_failure})"))
+                    .next("inspect repository Git mutation state before retrying");
+            }
+            Self::GraphRelayRefused { detail: Some(InvalidInputDetail::OperationFailed), .. } => {
+                projected = projected.detail("graph operation failed").next("inspect host operation diagnostics before retrying");
+            }
             Self::GraphRelayRefused { detail: Some(InvalidInputDetail::UpgradeDrainRequired), .. } => {
                 if let Some(detail) = InvalidInputDetail::UpgradeDrainRequired.safe_text() {
                     projected = projected.detail(detail);
@@ -924,7 +938,7 @@ impl FacadeError {
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
-            Self::Io { .. } => "io",
+            Self::GitMutationFailed { .. } | Self::Io { .. } => "io",
         }
     }
 }

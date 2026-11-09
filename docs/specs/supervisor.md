@@ -130,7 +130,7 @@ Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation
 cleanup. Silence, CPU inactivity, capture failure, ENOSPC and failed
 publication cannot produce a stop reason, and there is no startup deadline. A
 natural exit observed in a tick wins over a late cancel or deadline.
-- Why: a bookkeeping fault or slow start must never kill a healthy provider.
+- Why (default): a bookkeeping fault or slow start must never kill a healthy provider.
 - Test: `crates/supervisor/src/machine.rs::silence_capture_and_observation_failures_are_not_stop_reasons`;
   `::a_wnowait_exit_wins_over_late_cancel_and_deadline`
 - Owner: `crates/supervisor/src/machine.rs`
@@ -148,7 +148,7 @@ running lanes, and `reconcile` asks a live guardian that is still running
 two minutes past it to stop at the deadline. The attempt settles as
 `timed_out` with the reason `runtime deadline exceeded: provider stopped after
 Ns`, custody is released, and `provenant retry` continues its session.
-- Why: stuck attempts hold worktrees, locks and quota for hours.
+- Why (default): stuck attempts hold worktrees, locks and quota for hours.
 - Test: `crates/supervisor/src/machine.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
   `crates/supervisor/tests/custody.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
   `crates/run/src/dispatch_core_tests.rs::a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout`
@@ -163,7 +163,7 @@ cleanup. Only the unreaped provider, its group while the leader is unreaped,
 and proven attempt-sandbox escapees may be signalled. Reused identities,
 members that left the group, shared hosts and sibling groups are never signalled.
 Census and working-directory (CWD) observations never grant signal authority.
-- Why: signalling a recycled PID or a sibling's group kills unrelated work.
+- Why (default): signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
   `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
@@ -174,7 +174,7 @@ A registered nested owner is spared from signals only with matching native ident
 observed ancestry and proof of its held custody; an unlocked descriptor,
 environment token or process name is not proof. When macOS cannot prove an
 owner's custody, that owner and its descendants stay protected.
-- Why: a nested lane's owner must survive its parent's cleanup.
+- Why (default): a nested lane's owner must survive its parent's cleanup.
 - Test: `crates/supervisor/tests/custody.rs::nested_owner_stays_protected_when_native_custody_proof_is_uncertain`;
   `crates/supervisor/src/census.rs::ancestry_requires_exact_identities_and_strictly_older_parent_stamps`
 - Owner: `crates/supervisor/src/census.rs`
@@ -187,7 +187,7 @@ permitted to look up that name is an escapee: supervisor re-identifies it,
 then sends SIGTERM and SIGKILL. If the nested child store is unreadable or
 holds a nested run, supervisor signals nothing and the escapee stays
 unresolved.
-- Why: a detached descendant keeps the sandbox but leaves the group.
+- Why (default): a detached descendant keeps the sandbox but leaves the group.
 - Test: `crates/supervisor/tests/custody.rs::detached_descendant_in_the_attempt_sandbox_is_found_and_ended`;
   `::escapee_is_ended_only_when_the_host_reports_no_nested_runs`
 - Owner: `crates/supervisor/src/guardian/`
@@ -201,7 +201,7 @@ disk. The guardian keeps the provider, attempt lock and lease after the run
 owner or MCP host dies. Provider exec needs both leases and the durable
 reservation and closes every custody descriptor. A missing acknowledgement
 is an unknown launch, never permission to launch again.
-- Why: losing the caller must not lose custody or double-launch a writer.
+- Why (default): losing the caller must not lose custody or double-launch a writer.
 - Test: `crates/supervisor/tests/custody.rs::owner_death_keeps_guardian_and_writer_live`;
   `crates/os/src/exec/tests.rs::secret_input_arrives_by_descriptor_with_eof_and_no_token_environment`.
   The unknown-launch rule has no test (gap).
@@ -238,7 +238,7 @@ A writer stays fenced until three things hold: the provider is reaped; two
 complete census snapshots at least 20 ms apart show no other session or group
 member and no tracked survivor; and a fresh non-blocking lock on the original
 lease inode succeeds. Failed, racing or incomplete reads keep the fence.
-- Why: a leftover descendant could still write the worktree.
+- Why (default): a leftover descendant could still write the worktree.
 - Test: `crates/supervisor/src/guardian/tests.rs::darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes`;
   `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`
 - Owner: `crates/supervisor/src/guardian/`
@@ -257,7 +257,7 @@ settling after two complete clear censuses and a fresh nonblocking lock on an
 independently opened descriptor for that original inode. It leaves any
 reservation and unresolved exit in place; a replacement lock never proves
 the old inode idle.
-- Why: recovery must not kill a reused PID or free a busy worktree.
+- Why (default): recovery must not kill a reused PID or free a busy worktree.
 - Test: `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`;
   `crates/supervisor/src/custody_tests.rs::reconcile_requires_matching_authority_and_records_before_release`
 - Owner: `crates/supervisor/src/custody/orphans.rs`
@@ -266,7 +266,7 @@ the old inode idle.
 
 Signalling a healthy process, weakened confinement and lost publication
 escalate to the user; no environment guess or uncertain signal compensates.
-- Why: these outcomes cannot be repaired safely by the supervisor alone.
+- Why (default): these outcomes cannot be repaired safely by the supervisor alone.
 - Test: none (review gate); the blocking tests in this section stop the
   signal but do not notify the user.
 - Owner: `crates/supervisor/src/custody/orphans.rs`
@@ -277,7 +277,7 @@ The exit record is published without replacing an existing record after the file
 durable. A failed publication keeps custody and retries; a visible link with
 a failed directory sync is `durability_unconfirmed`, never absent. On ENOSPC,
 supervisor releases a 64 KiB reserve for one retry, with no provider signal.
-- Why: a lost or overwritten exit record loses the only proof of outcome.
+- Why (default): a lost or overwritten exit record loses the only proof of outcome.
 - Test: `crates/supervisor/tests/publication.rs::exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot`;
   `crates/supervisor/tests/custody.rs::publication_failure_retains_the_lease_and_retries_without_overwrite`
 - Owner: `crates/supervisor/src/custody.rs`
@@ -309,7 +309,7 @@ can renumber volumes across a reboot) is still recoverable when the
 reservation and attempt shared a device, their current directories still have
 the recorded inodes, and both now share a device. Within one boot, a changed
 device number refuses recovery.
-- Why: a writer must never be freed on a partial or forged settlement.
+- Why (default): a writer must never be freed on a partial or forged settlement.
 - Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
   `::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
   `::worktree_settlement_retains_flock_until_recovery_is_dropped`;
@@ -326,7 +326,7 @@ earlier-generation `cancel.json`, or a symlink, FIFO or oversized entry, without
 following it; a reattached handle never replaces a later generation's
 request. Because the lane can write its attempt directory, it can pre-empt
 or undo the host's stop request; this residual risk is accepted.
-- Why: stale or forged requests must not cancel a later attempt.
+- Why (default): stale or forged requests must not cancel a later attempt.
 - Test: `crates/supervisor/tests/custody.rs::held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation`
 - Owner: `crates/supervisor/src/custody.rs`
 
@@ -339,7 +339,7 @@ run custody, repository metadata, writer reservation, attempt publication,
 children journal. Authoritative writes use held directory handles, 0600
 temporaries in 0700 directories, file sync, atomic rename or no-replace and
 a parent sync.
-- Why: a recreated lock inode lets two owners hold "the same" lock, and a
+- Why (default): a recreated lock inode lets two owners hold "the same" lock, and a
   crash must leave the old or new file whole.
 - Test: `crates/os/src/fs/tests.rs::stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion`;
   `::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes`.
@@ -353,7 +353,7 @@ Captures are bounded (8 MiB retained per stream by default, 64 MiB maximum,
 decoder loss, never a fabricated terminal event, and tee loss never stalls
 capture. A natural exit followed by a drain deadline is `drain_truncated`,
 not `timed_out`. Utility execution reserves its reaper slot before spawn.
-- Why: unbounded output or a hung pipe must not stall custody or invent an
+- Why (default): unbounded output or a hung pipe must not stall custody or invent an
   outcome.
 - Test: `crates/os/src/capture.rs::oversized_frames_are_counted_and_never_decoded_as_terminal`;
   `crates/os/src/exec/tests.rs::reaper_reserves_before_spawn_and_releases_unused_admission`
@@ -364,7 +364,7 @@ not `timed_out`. Utility execution reserves its reaper slot before spawn.
 Fake providers cannot certify a real sandbox profile, and a missing native
 recording of the platform, backend and allowed or denied operations blocks
 that profile's support.
-- Why: snapshot equality does not prove confinement behaviour.
+- Why (default): snapshot equality does not prove confinement behaviour.
 - Test: none (review gate); acceptance evidence is the native recordings under
   `crates/confinement/tests/fixtures/external`.
 - Owner: `crates/confinement/src/permissions.rs`
@@ -383,7 +383,7 @@ permission prompts with the default tool set; OpenCode writers approve tools
 and external directories. Filesystem grants, selected network access, credential
 and keychain denials, shared Git immutability and host-process isolation remain
 in force. Read-only lanes retain their requested tool restrictions.
-- Why: a second tool permission table can refuse ordinary work already
+- Why (default): a second tool permission table can refuse ordinary work already
   authorised by the confinement plan.
 - Test: `crates/confinement/src/permissions/tests/render.rs::writer_programs_keep_filesystem_and_credential_boundaries`;
   `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`;
@@ -456,7 +456,7 @@ between allocation and journal append can still leave an unrecorded test object.
 postmaster parent and siblings. Signals to the outside supervisor, host
 processes and independently launched sandboxes stay denied.
 
-- Why: PostgreSQL startup and database checks need kernel IPC and
+- Why (default): PostgreSQL startup and database checks need kernel IPC and
   intra-sandbox signals for queries and clean shutdown.
 - Test: `crates/confinement/src/permissions/tests/ipc.rs::postgres_lifecycle_is_ambient_with_and_without_database_grants`;
   `::ambient_database_creates_and_removes_own_sysv_segments_and_semaphores`;
@@ -589,7 +589,7 @@ Literal discovery grants accept absent entries or real directories through
   held, revalidated parents. They refuse symlinks and other entry types and
   grant no reads of children beyond existing read roots. Anchor refusals during
   discovery and held-directory revalidation name the path and failure stage.
-- Why: one broad grant silently voids the boundary; directory discovery must
+- Why (default): one broad grant silently voids the boundary; directory discovery must
   not pass through regular-file validation or expand configuration access.
 - Test: `crates/confinement/src/permissions/tests/validation.rs::broad_home_tmp_and_credential_roots_are_refused`;
   `crates/confinement/src/permissions/tests/render.rs::network_levels_shared_writes_and_hard_denies_render_in_order`;
@@ -626,7 +626,7 @@ After provider exit, the host imports the pinned head through Git's receive
 quarantine and moves the real branch with compare-and-swap. Lane configuration
 is never executed as host configuration. Read-only lanes likewise cannot write
 the common Git directory.
-- Why: private Git supports ordinary commands while the shared metadata and
+- Why (default): private Git supports ordinary commands while the shared metadata and
   object store retain one host-controlled write boundary.
 - Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
   `crates/confinement/tests/lane_git_conformance.rs`;
@@ -642,7 +642,7 @@ Postgres capability) or `open` (adds outbound IP, the default for every lane).
 At every level the Unix-socket peers are the DNS responder, the attempt-bound
 [host Fabric relay](fabric.md#lane-store-isolation) and, from `local`, Postgres.
 No lane reaches the peer agent's socket.
-- Why: the peer agent relays to unconfined `fabric peer` children.
+- Why (default): the peer agent relays to unconfined `fabric peer` children.
 - Test: `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`
 - Owner: `crates/confinement/src/permissions.rs`
 
@@ -655,7 +655,7 @@ identities, created by no-follow traversal with mode 0700; read-only lanes
 link shared stores read-only and build offline. Only writers may execute
 fixtures, and only in their own `tmp/candidate-N`. Only a profile declaring
 `allow_pseudo_tty` (Agy's) may open a PTY.
-- Why: a poisoned `build.rs` or package would run on the host's next build.
+- Why (default): a poisoned `build.rs` or package would run on the host's next build.
 - Test: `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
   `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/`
@@ -699,7 +699,7 @@ the path, it appears in the output. On a non-zero exit the shim adds one line
 naming the writable roots and the overrides in force. Read-only lanes (#2542)
 reuse the same toolchain resolution and shim with scratch-only roots; they
 do not receive it yet.
-- Why: a writer that cannot build or test commits untested Swift.
+- Why (default): a writer that cannot build or test commits untested Swift.
 - Test: `src/worktree_tests/lane_cases.rs::lane_builds_and_tests_swift_in_a_registered_worktree`
   (one writer case: builds and tests a SwiftPM package in the worktree
   through the production profile when a Swift toolchain is selected; it has
@@ -719,7 +719,7 @@ fsmonitor and tag and submodule pushes off. URLs with embedded credentials,
 query or fragment, shell SSH overrides and opaque credential helpers are
 refused, and credentials travel only on the guardian pipe. A sealed start
 marker stops the push repeating.
-- Why: delivery is the one external effect a lane causes; it must be exactly
+- Why (default): delivery is the one external effect a lane causes; it must be exactly
   once and never leak credentials.
 - Test: `crates/run/src/delivery_tests/prepare.rs::host_delivery_fetches_commits_pushes_and_records_upstream`;
   `crates/run/src/delivery_tests/settlement.rs::prepare_refuses_remote_urls_with_embedded_credentials`
@@ -733,7 +733,7 @@ and token patterns across chunk boundaries. Guardian capture attaches independen
 known-shape filters before stdout or stderr reaches disk; a
 redactor failure discards that output. The inherited environment is never
 persisted.
-- Why: lane output is stored and shared with other models.
+- Why (default): lane output is stored and shared with other models.
 - Test: `crates/confinement/src/redact.rs::shell_output_secrets_split_across_chunks_are_never_emitted`;
   `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`
@@ -773,7 +773,7 @@ the user's own configuration includes from, say) can change what Git reads
 between the check and the command; the host does not snapshot the values into
 `-c` parameters because credential helpers and SSH settings the user needs are
 scoped by URL and multi-valued.
-- Why: repository content is attacker-controlled input to the host.
+- Why (default): repository content is attacker-controlled input to the host.
 - Test: `crates/confinement/src/utility.rs::onbranch_include_of_a_lane_writable_file_is_neutralised_for_its_worktree`;
   `crates/confinement/src/utility.rs::host_transport_is_hardened_and_refuses_lane_writable_programs`;
   `crates/confinement/src/transport.rs::include_targets_in_lane_areas_are_refused_even_when_unread`;
@@ -804,7 +804,7 @@ Registered detached checkouts use the same checks and preserve all branches.
 An unmerged detached HEAD refuses unless `--discard` is explicit, naming the
 commit and a command to preserve it. Removal rechecks the exact HEAD and
 optional branch by canonical path under writer custody.
-- Why: removing a tree under a live writer destroys its work.
+- Why (default): removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::writer_lock_busy_is_distinct_from_observed_live_process`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::remove_registered_detached_worktree`;
@@ -971,7 +971,7 @@ branch. The integration branch and its tip are never pruned, refs are deleted
 against their expected old OID, and there is no remote deletion. A failed
 `worktree create` removes only what it made, and refuses `PrimaryMoved` if
 the primary checkout's HEAD changed during the add.
-- Why: pruning or rollback on a guess deletes the user's work.
+- Why (default): pruning or rollback on a guess deletes the user's work.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_pruning.rs::timed_out_add_keeps_a_branch_it_did_not_create`. `PrimaryMoved` has
   no test (gap).
@@ -988,7 +988,7 @@ gate cache collection. v1 owners are never idle.
 Merged worktrees go only when clean, registered and with terminal lanes;
 output pruning skips tracked and keep paths, dirty trees, symlinks and
 writes within 24 hours. Deletion detaches and re-verifies identity first.
-- Why: GC runs unattended at load and hourly; any doubt keeps data.
+- Why (default): GC runs unattended at load and hourly; any doubt keeps data.
 - Test: `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`;
   `src/worktree_tests/gc_cases.rs::gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links`
 - Owner: `crates/confinement/src/cache.rs`, `crates/confinement/src/worktrees.rs`
@@ -1001,7 +1001,7 @@ Persisted state tolerates added fields within its supported schema version.
 Version, scope, identity and custody validation still apply. Owner references and launch summaries carry no
 PID-derived or replayable authority, and a stale observation cannot
 establish death.
-- Why: authority comes from held custody, never a file a lane can write.
+- Why (default): authority comes from held custody, never a file a lane can write.
 - Test: `crates/supervisor/src/custody_tests.rs::contradictory_never_spawned_records_never_prove_absence`
 - Owner: `crates/records/src/`, `crates/supervisor/src/custody.rs`
 

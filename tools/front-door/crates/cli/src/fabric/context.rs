@@ -744,7 +744,8 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
         FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
-        FacadeError::DispatchUnobserved { .. }
+        FacadeError::GitMutationFailed { .. }
+        | FacadeError::DispatchUnobserved { .. }
         | FacadeError::HostDeliveryStage { .. }
         | FacadeError::HostDeliveryLimit { .. } => (Outcome::Error, ErrorKind::Io),
         FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),

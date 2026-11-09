@@ -72,7 +72,23 @@ use thiserror::Error;
 const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
-const REPOSITORY_LOCK: &str = "worktrees.lock";
+/// The single common-directory protocol for repository mutations and the Git
+/// snapshots they depend on. Blocking acquisition follows writer custody, when
+/// held; a repository holder may only try a writer lock without waiting. Release
+/// this owner before network discovery, slow census, or provider execution.
+pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
+
+/// Coordinate all checkouts, independently of their state registry or caller.
+/// Shared holders read Git configuration; exclusive holders mutate Git state.
+pub fn lock_repository(
+    common: &Directory,
+    mode: LockMode,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard, FsError> {
+    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
+}
 const WRITER_LOCK: &str = "writer.lock";
 const WORKTREE_ROOT: &str = ".worktrees";
 
@@ -197,6 +213,11 @@ pub enum WorktreeError {
     Primary,
     #[error("worktree Git output is malformed or incomplete")]
     InvalidOutput,
+    #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
+    MutationFailed {
+        operation: GitMutationOperation,
+        lock_failure: bool,
+    },
     #[error("worktree was created but registration publication is unconfirmed")]
     RegistrationUnconfirmed,
     #[error("worktree identity changed during the operation")]
@@ -224,6 +245,22 @@ pub enum WorktreeError {
     PathWire(#[from] PathWireError),
 }
 
+/// Closed operation names: no Git output, arguments or host paths are disclosed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum GitMutationOperation {
+    #[error("git merge --ff-only")]
+    FastForward,
+    #[error("git worktree add")]
+    WorktreeAdd,
+    #[error("git worktree remove")]
+    WorktreeRemove,
+    #[error("git config")]
+    SetBranchConfig,
+    #[error("git update-ref --delete")]
+    DeleteRef,
+}
+
 /// Stable machine cause for worktree admission transitions. Presentation may
 /// change; lifecycle callers must branch on this value rather than refusal text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +282,17 @@ fn dirty_suffix(paths: &str) -> String {
 }
 
 impl WorktreeError {
+    pub fn mutation_failure(&self) -> Option<(GitMutationOperation, bool)> {
+        match self {
+            Self::MutationFailed {
+                operation,
+                lock_failure,
+            } => Some((*operation, *lock_failure)),
+            Self::CreateFailed { cause, .. } => cause.mutation_failure(),
+            _ => None,
+        }
+    }
+
     /// Returns a typed retry-relevant cause without making the error retryable
     /// by itself. The caller still owns deadlines and transition policy.
     pub fn admission_cause(&self) -> Option<AdmissionCause> {

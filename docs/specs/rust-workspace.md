@@ -17,7 +17,7 @@ never depends on `run`. A change to a crate's edges updates `LAYERS` in the
 same PR. Fabric runtime may use the shared SQLite boundary to inspect legacy
 run stores read-only when enforcing the graph cutover drain. It does not depend
 on the run crate. The binary `provenant` is the only executable.
-- Why: one-way edges keep policy testable without the command layer; typed
+- Why (default): one-way edges keep policy testable without the command layer; typed
   events break cycles, never an import of `run` into `providers` or
   `routing`.
 - Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
@@ -38,7 +38,7 @@ bespoke parser. `unicode-normalization` (with `tinyvec`) gives NFC comparison
 of branch names, whose tables are not cheap to own. `serde_path_to_error` (serde only) gives the field path of a graph or
 attempt decode error, so a refusal names what to fix; paths stop at user map keys. There is no async
 runtime and no daemon.
-- Why: a small, audited supply chain with bounded, synchronous code.
+- Why (default): a small, audited supply chain with bounded, synchronous code.
 - Test: `tests/workspace_policy.rs::every_member_obeys_the_direct_dependency_policy`;
   `tests/workspace_policy.rs::transitive_crates_and_renamed_dependencies_are_rejected`
 - Owner: `Cargo.toml` (`[workspace.dependencies]`), `deny.toml`
@@ -48,7 +48,7 @@ runtime and no daemon.
 Libraries return `thiserror` enums, including refusal, contention, cancellation and I/O. Production code has no `unwrap`, `expect`, `panic!` or direct
 printing; the binary edge owns wording and exit codes. Errors keep cause and
 path, never secret values. Publication and recovery never rely on `Drop`.
-- Why: a panic or silent success on a failed write loses evidence or
+- Why (default): a panic or silent success on a failed write loses evidence or
   custody.
 - Test: workspace clippy lints (`unwrap_used`, `expect_used`, `panic`,
   `print_stdout`, `print_stderr`), run in CI;
@@ -65,7 +65,7 @@ supervisor may use OS `sys::{fs, child, raw_exec, reaper}`, `handoff_file`
 and `from_handoff`. `std::process::Command::new` is disallowed outside
 those boundaries. Each `unsafe` block documents its invariants and needs a second
 reviewer.
-- Why: process custody is the safety core; one audited boundary is
+- Why (default): process custody is the safety core; one audited boundary is
   reviewable.
 - Test: `tests/workspace_policy.rs::os_internals_are_reserved_for_supervisor`;
   `tests/workspace_policy.rs::native_boundaries_mirror_workspace_lints_except_for_unsafe_code`. The
@@ -78,7 +78,7 @@ Integers are `i64` or `u64`, never `f64`, and the `serde_json` feature `arbitrar
 off. Digest bytes come from the canonical encoder, never `HashMap` iteration order.
 Diagnostics go to bounded, redacted stderr, never MCP stdout or result
 bytes, and never carry prompt or credential contents.
-- Why: float or map-order digests change identity, and protocol streams must
+- Why (default): float or map-order digests change identity, and protocol streams must
   stay parseable.
 - Test: `crates/records/tests/contracts.rs::canonical_v1_rejects_float_values`;
   `crates/fabric-mcp/src/stdio_tests.rs::oversize_frame_emits_a_diagnostic_and_broken_stdout_stops_writes`
@@ -92,7 +92,7 @@ Tests use explicit clocks and handshakes, never sleeps. Code samples wall
 time through an injected `provenant_core::Clock`, with
 `provenant_os::clock::SystemClock` at the process edge; clippy disallows
 `SystemTime::now`, `jiff::Timestamp::now` and `jiff::Zoned::now` elsewhere.
-- Why: a test that touches the real install can destroy user state.
+- Why (default): a test that touches the real install can destroy user state.
 - Test: `crates/cli/src/check/dates.rs::workspace_rust_test_dates_use_injected_clocks`;
   clippy `disallowed_methods`. Home isolation has no guard test (gap).
 - Owner: `tests/support/mod.rs`
@@ -105,6 +105,6 @@ writing outside the selected roots and silent wrong answers. Other edge cases
 get a typed refusal or a PR note. Reviews block by the
 [code-review rubric](../../skills/code-review/SKILL.md#rubric). Never mute the
 `ci-status` check.
-- Why: guardrails for unobserved risks cost more than they save.
+- Why (default): guardrails for unobserved risks cost more than they save.
 - Test: none (review gate)
 - Owner: code review

@@ -250,7 +250,7 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
     context.mutation_budget = UtilityBudget::bounded(mutation_timeout)?;
     let failed = FailedFetch {
         inner: context.executor,
-        project_state: context.project_state,
+        project_state: context.repo.common_dir(),
         calls: Default::default(),
         mutation_timeout,
     };

@@ -116,6 +116,129 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         Some(error) => format!("{node} {state}: {error}"),
         None => format!("{node} {state}"),
     }));
+    if let Some(nodes) = checkpoint
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for node in nodes {
+            let node_id = node
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            if let Some(concerns) = node
+                .pointer("/outputs/spec_concerns")
+                .and_then(serde_json::Value::as_array)
+            {
+                let full_count = node
+                    .pointer("/outputs/spec_concern_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(concerns.len() as u64);
+                rows.push(format!(
+                    "{}: {} spec concerns for chair judgement ({} retained)",
+                    bounded_reason(node_id),
+                    full_count,
+                    concerns.len()
+                ));
+                if (concerns.len() as u64) < full_count {
+                    let source = node
+                        .pointer("/outputs/result/path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("the attempt result artifact and handoff.json");
+                    rows.push(format!("full spec concerns: {}", bounded_reason(source)));
+                }
+                for concern in concerns {
+                    let detail = |key| {
+                        concern
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .map(bounded_reason)
+                            .unwrap_or_default()
+                    };
+                    rows.push(format!(
+                        "criterion: {}; claim: {}; evidence: {}; proposed change: {}; status: {}",
+                        detail("criterion"),
+                        detail("claim"),
+                        detail("evidence"),
+                        detail("proposed_change"),
+                        detail("status")
+                    ));
+                }
+            }
+            if let Some(findings) = node
+                .pointer("/outputs/findings")
+                .and_then(serde_json::Value::as_array)
+            {
+                let rejected: Vec<provenant_fabric_runtime::graph::Finding> = findings
+                    .iter()
+                    .filter_map(|finding| serde_json::from_value(finding.clone()).ok())
+                    .filter(|finding: &provenant_fabric_runtime::graph::Finding| {
+                        finding.rejected_boundary()
+                    })
+                    .collect();
+                if !rejected.is_empty() {
+                    rows.push(format!(
+                        "{}: {} rejected boundary or data-loss findings for chair judgement",
+                        bounded_reason(node_id),
+                        rejected.len()
+                    ));
+                    for finding in rejected {
+                        rows.push(format!(
+                            "rejected boundary {}: {}; reason: {}; evidence: {}",
+                            bounded_reason(&finding.id),
+                            bounded_reason(&finding.summary),
+                            bounded_reason(
+                                finding
+                                    .reason
+                                    .as_deref()
+                                    .or_else(|| finding
+                                        .extra
+                                        .get("triage")
+                                        .and_then(|triage| triage.get("reason"))
+                                        .and_then(serde_json::Value::as_str))
+                                    .unwrap_or("unavailable")
+                            ),
+                            bounded_reason(
+                                finding
+                                    .extra
+                                    .get("evidence")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("unavailable")
+                            )
+                        ));
+                    }
+                }
+                let defects: Vec<_> = findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.get("kind").and_then(serde_json::Value::as_str)
+                            == Some("spec_defect")
+                    })
+                    .collect();
+                if !defects.is_empty() {
+                    rows.push(format!(
+                        "{}: {} spec defects for chair judgement",
+                        bounded_reason(node_id),
+                        defects.len()
+                    ));
+                    for finding in defects {
+                        rows.push(format!(
+                            "spec defect {}: {}",
+                            finding
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(bounded_reason)
+                                .unwrap_or_default(),
+                            finding
+                                .get("summary")
+                                .and_then(serde_json::Value::as_str)
+                                .map(bounded_reason)
+                                .unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+        }
+    }
     let next = match status.as_str() {
         "complete" | "cancelled" => None,
         "paused" => Some(format!("provenant retry {id}")),
@@ -372,5 +495,58 @@ mod test_presentation {
             human.push_str(&format!("Advance error: {error}\n"));
         }
         human
+    }
+}
+
+#[cfg(test)]
+mod spec_chair_tests {
+    #[test]
+    fn rejected_boundary_findings_reach_chair_summary() {
+        let summary = super::graph_summary(&serde_json::json!({
+            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                {"id":"review", "state":"succeeded", "outputs":{"findings":[{
+                    "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
+                    "summary":"boundary violation", "class":"boundary", "disposition":"rejected",
+                    "reason":"synthesis disagrees", "evidence":"reachable credential write"
+                }]}}
+            ]}
+        }));
+        let summary = summary.lines.join("\n");
+        assert!(summary.contains("1 rejected boundary or data-loss findings for chair judgement"));
+        assert!(summary.contains(
+            "boundary violation; reason: synthesis disagrees; evidence: reachable credential write"
+        ));
+    }
+
+    #[test]
+    fn completed_writer_spec_concerns_and_review_spec_defects_reach_chair_summary() {
+        let summary = super::graph_summary(&serde_json::json!({
+            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                {"id":"writer","state":"succeeded","outputs":{"spec_concerns":[{
+                    "criterion":"old reader", "claim":"format retired", "evidence":"approved scope",
+                    "proposed_change":"remove reader", "status":"diverged"
+                }]}},
+                {"id":"review","state":"succeeded","outputs":{"findings":[{
+                    "id":"F1","kind":"spec_defect","summary":"criterion conflicts with scope"
+                }]}}
+            ]}
+        }));
+        let text = summary.lines.join("\n");
+        assert!(text.contains("1 spec concerns"));
+        assert!(text.contains("format retired") && text.contains("approved scope"));
+        assert!(text.contains("remove reader") && text.contains("diverged"));
+        assert!(text.contains("1 spec defects"));
+        assert!(text.contains("criterion conflicts with scope"));
+        let clipped = super::graph_summary(&serde_json::json!({
+            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                {"id":"writer","state":"succeeded","outputs":{
+                    "spec_concerns":[],"spec_concern_count":2,"result":{"path":"/attempt/result.md"}
+                }}
+            ]}
+        }))
+        .lines
+        .join("\n");
+        assert!(clipped.contains("2 spec concerns") && clipped.contains("0 retained"));
+        assert!(clipped.contains("/attempt/result.md"));
     }
 }

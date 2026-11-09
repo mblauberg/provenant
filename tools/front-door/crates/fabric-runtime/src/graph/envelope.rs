@@ -398,6 +398,19 @@ fn node_bound(
     if plans::writer(node) {
         bytes += plans::STORED_HANDOFF_BYTES;
     }
+    if repair::may_report_items(node, plan) || repair::is_repair(node) {
+        bytes += FINDINGS_BYTES + 32;
+    }
+    if repair::is_repair(node) {
+        // A failed repair loop retains the review evidence and may carry its
+        // writer's design report into the principal's brief.
+        bytes += DISPOSITION_FINDINGS_BYTES
+            + MAX_WARNINGS * (WARNING_BYTES + 3)
+            + 80
+            + 256
+            + OUTPUT_FIELD_BYTES
+            + 256;
+    }
     if let Some(spec) = &node.loop_body {
         bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
@@ -479,6 +492,7 @@ fn node_bound(
         bytes += 80
             + excerpt
             + REMAINING_BYTES
+            + 256
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
             + 64

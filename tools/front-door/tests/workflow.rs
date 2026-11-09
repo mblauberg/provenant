@@ -39,6 +39,225 @@ fn receipt_request(critical: &str, decision: Value) -> Value {
 }
 const DELIVERY: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
+fn pr_receipt_request() -> Value {
+    let mut value = receipt_request("none", json!({"status": "pending"}));
+    value["subject"] = json!({
+        "kind": "pr", "repository": "02".repeat(16), "number": 12,
+        "head": "ab".repeat(20)
+    });
+    value
+}
+
+#[cfg(unix)]
+fn record_gh_calls(rig: &mut TestRig) -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = rig.root.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"headRefOid\":\"{}\",\"baseRefOid\":\"{}\"}}'\n",
+            rig.root.join("gh-called").display(),
+            "cd".repeat(20),
+            "ef".repeat(20)
+        ),
+    )?;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_report_without_downgrade_never_calls_github() -> Result {
+    let mut rig = TestRig::new()?;
+    record_gh_calls(&mut rig)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request())?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "receipt",
+            "save",
+            DELIVERY,
+            "--expected-revision",
+            "0",
+            "--request",
+            &pending,
+        ],
+        0,
+    )?;
+    assert!(
+        !saved["data"]["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .is_empty()
+    );
+    let marker = rig.root.join("gh-called");
+    assert!(marker.exists());
+    std::fs::remove_file(&marker)?;
+    let review = request(&rig, "review.json", json!({"delivery_id": DELIVERY}))?;
+    let report = call(&rig, &["workflow", "review", "--request", &review], 0)?;
+    assert_eq!(report["data"]["status"], "passed");
+    assert!(!marker.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_resave_with_unchanged_head_reuses_recorded_paths() -> Result {
+    let mut rig = TestRig::new()?;
+    record_gh_calls(&mut rig)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request())?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "receipt",
+            "save",
+            DELIVERY,
+            "--expected-revision",
+            "0",
+            "--request",
+            &pending,
+        ],
+        0,
+    )?;
+    let mut stored = saved["data"]["receipt"].clone();
+    stored["risk"]["changed_paths"] = json!(["docs/x.md"]);
+    let project = stored["project_id"].as_str().ok_or("project id")?;
+    let path = rig.state.join(format!(
+        "workflow/projects/{project}/deliveries/{DELIVERY}/receipt.json"
+    ));
+    std::fs::write(path, serde_json::to_vec(&stored)?)?;
+    let marker = rig.root.join("gh-called");
+    std::fs::remove_file(&marker)?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "receipt",
+            "save",
+            DELIVERY,
+            "--expected-revision",
+            "1",
+            "--request",
+            &pending,
+        ],
+        0,
+    )?;
+    assert_eq!(
+        saved["data"]["receipt"]["risk"]["changed_paths"],
+        json!(["docs/x.md"])
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_head_mismatch_refuses_downgrade() -> Result {
+    let mut rig = TestRig::new()?;
+    record_gh_calls(&mut rig)?;
+    let mut value = pr_receipt_request();
+    value["risk"]["factors"]["oracle_quality"] = json!("weak");
+    value["risk"]["downgrade_approval"] = json!({
+        "actor_id": "01".repeat(16),
+        "evidence": {
+            "path": {"encoding": "utf8", "path": "authority/approval.json"},
+            "digest": format!("sha256:{}", "0".repeat(64))
+        },
+        "reason": "chair approved a narrower review"
+    });
+    let pending = request(&rig, "pr.json", value)?;
+    let refused = call(
+        &rig,
+        &[
+            "workflow",
+            "receipt",
+            "save",
+            DELIVERY,
+            "--expected-revision",
+            "0",
+            "--request",
+            &pending,
+        ],
+        2,
+    )?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("PR head differs")
+    );
+    let args = std::fs::read_to_string(rig.root.join("gh-called"))?;
+    assert!(!args.lines().any(|arg| arg == "--repo"));
+    assert_eq!(
+        args.lines().take(3).collect::<Vec<_>>(),
+        ["pr", "view", "12"]
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_report_downgrade_without_recorded_paths_requires_resave() -> Result {
+    let mut rig = TestRig::new()?;
+    record_gh_calls(&mut rig)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request())?;
+    let saved = call(
+        &rig,
+        &[
+            "workflow",
+            "receipt",
+            "save",
+            DELIVERY,
+            "--expected-revision",
+            "0",
+            "--request",
+            &pending,
+        ],
+        0,
+    )?;
+    let mut stored = saved["data"]["receipt"].clone();
+    stored["risk"]["factors"]["oracle_quality"] = json!("weak");
+    stored["risk"]["derived"] = json!("crucial");
+    stored["risk"]["downgrade_approval"] = json!({
+        "actor_id": "01".repeat(16),
+        "evidence": {
+            "path": {"encoding": "utf8", "path": "authority/approval.json"},
+            "digest": format!("sha256:{}", "0".repeat(64))
+        },
+        "reason": "chair approved a narrower review"
+    });
+    stored["risk"]
+        .as_object_mut()
+        .ok_or("risk")?
+        .remove("changed_paths");
+    let project = stored["project_id"].as_str().ok_or("project id")?;
+    let path = rig.state.join(format!(
+        "workflow/projects/{project}/deliveries/{DELIVERY}/receipt.json"
+    ));
+    std::fs::write(path, serde_json::to_vec(&stored)?)?;
+    let marker = rig.root.join("gh-called");
+    std::fs::remove_file(&marker)?;
+    let review = request(&rig, "review.json", json!({"delivery_id": DELIVERY}))?;
+    let refused = call(&rig, &["workflow", "review", "--request", &review], 2)?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("workflow receipt save")
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
 fn state_snapshot(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
     let mut snapshot = Vec::new();
     if root.exists() {

@@ -642,6 +642,22 @@ fn fetch_tracking_ref(
     )
 }
 
+/// Resolve the common ancestor of a pinned review subject and base.
+pub fn review_merge_base_between(git: &Path, cwd: &Path, head: &str, base: &str) -> Result<String> {
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, git, cwd)?;
+    let (out, timed_out) =
+        read_git_with_env(&executor, git, cwd, &["merge-base", head, base], 256, &env)
+            .map_err(|_| RunError::Validation("cannot find review merge base"))?;
+    let value = std::str::from_utf8(&out.bytes)
+        .map_err(execution_error)?
+        .trim();
+    if timed_out || out.truncated || provenant_core::GitOid::parse(value).is_err() {
+        return Err(RunError::Validation("cannot find review merge base"));
+    }
+    Ok(value.to_owned())
+}
+
 /// Resolve the merge base against the locally recorded default origin branch.
 pub fn review_merge_base(git: &Path, cwd: &Path, head: &str) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
