@@ -28,8 +28,7 @@
 
 Base: `main` at `<sha>`. Head under review: `<branch>` at `<sha>`.
 Rows are bound to the head they ran on, and the merging head needs green CI.
-Review a later commit's delta; a clean base merge needs only CI. Apply the
-HARNESS head-move classes in shadow until tooling enforces them.
+Review a later commit's delta; a clean base merge needs only CI.
 
 <!-- Every row must be externally verifiable: an exact command with its
      result, or a linked artifact, bound to the exact head SHA. Never

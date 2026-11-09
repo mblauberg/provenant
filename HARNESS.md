@@ -198,26 +198,8 @@ provenance leaves coverage incomplete. Evidence decides claims, not votes.
 
 A verdict covers the diff it read. A later commit needs review of its delta,
 including repairs and conflict resolutions; a clean base merge needs only CI.
-Classify head moves in shadow until tooling enforces these paths; retain current
-exact-head landing gates in the meantime:
-
-- A: approval would carry over a proven clean `main` merge-in. The new head has
-  exactly two parents, reviewed head first and base-side commit second; the
-  reviewed base is an ancestor of that commit, which is an ancestor of fetched
-  `main`. `git merge-tree --write-tree` must succeed and produce exactly the
-  new head's tree, and the preceding receipt must remain valid and unrevoked.
-- B: a descendant changing one text file by at most 20 cumulative added and
-  deleted lines since the full panel, with no protected path, rename, binary,
-  mode, symlink, submodule, dependency or configuration change, would get one
-  delta reviewer other than the author, who reads the delta, callers and prior findings. Count author deltas cumulatively; proven base-only
-  imports do not consume the limit. Incomplete statistics fail this class.
-- C: all other moves get a full re-plan; expanding risk or scope also requires
-  re-planning. Candidate CI covers the landing head in every class.
-
-During shadowing, the landing report and receipt record the classification and
-available proof; an approval-time base that was not recorded remains unknown.
-Compare the classification with a full review; do not use A or B to bypass
-current exact-head requirements.
+Landing gates stay exact-head: a head that moved after review needs a review of the delta (or a full
+re-plan when risk or scope expanded), and candidate CI covers the landing head.
 
 A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
 lenses that raised them, checking closure and relevant tests. After three repair

@@ -442,7 +442,7 @@ pub fn retry_node_and_dependants(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, true, None)
+    retry_node_scope(graph, id, brief, context, true, None, None)
 }
 
 /// Redo a settled node or container, retaining prior attempts and journalling the reset.
@@ -453,7 +453,7 @@ pub fn retry_node(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, false, None)
+    retry_node_scope(graph, id, brief, context, false, None, None)
 }
 
 /// Host continuation uses the same checked, journalled reset as an explicit retry.
@@ -461,6 +461,7 @@ pub(super) fn continue_no_work(
     graph: &mut LiveGraph<'_>,
     id: &str,
     brief: &str,
+    routes: &[GraphRoute],
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
     retry_node_scope(
@@ -470,6 +471,7 @@ pub(super) fn continue_no_work(
         context,
         false,
         Some(&no_work_reason(id)),
+        Some(routes),
     )
 }
 
@@ -491,6 +493,7 @@ fn retry_node_scope(
     context: &PatchContext<'_>,
     dependants: bool,
     reason: Option<&str>,
+    replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
         graph.document,
@@ -681,6 +684,10 @@ fn retry_node_scope(
         if let Some(brief) = brief {
             node.prompt = brief.to_owned();
         }
+    }
+    if let Some(routes) = replacement_routes {
+        node.route = None;
+        node.routes = Some(routes.to_vec());
     }
     for progress in &mut candidate.nodes {
         if reset_ids.contains(&progress.id) {
@@ -1422,5 +1429,6 @@ pub(super) fn correct_review_verdict(
         context,
         false,
         Some(&format!("correct review verdict {id}")),
+        None,
     )
 }

@@ -18,6 +18,24 @@ routes do not fill missing resolved values.
 - Test: `crates/telemetry/src/tests.rs::groups_by_resolved_model_and_effort`
 - Owner: `crates/telemetry/src/`, `crates/cli/src/run/telemetry.rs`
 
+Every `telemetry stats` report also includes `route_outcomes`, grouped by
+resolved route, access mode, effort and pool assignment. Each row gives sample
+size, complete successes, success rate with a Wilson interval, API-equivalent
+cost per success and provider milliseconds per success. The last two divide
+all measured attempt cost or time, including failures, by complete successes.
+A successful settlement with a partial-completion signal is not a complete
+success. Missing measurements and ratios with no successes remain unknown.
+Only an original weighted pool draw is marked `hash_assigned_pool`; exact
+routes, preference overrides and conditional redraws are observational. A draw
+whose receipt lists a graph or flag exclusion in `considered_exclusions`, such
+as a graph restart excluding its predecessors' models, depends on the earlier
+attempt and is observational too; standing configuration exclusions are not.
+- Test: `crates/telemetry/src/tests.rs::route_outcomes_report_success_cost_time_access_effort_and_assignment`;
+  `crates/telemetry/src/tests.rs::route_outcomes_zero_success_and_unknown_cost_remain_unknown`;
+  `crates/telemetry/src/tests.rs::pool_preferences_and_fallbacks_are_not_hash_comparisons`;
+  `tests/telemetry_pipeline_cli.rs::stats_reports_route_access_effort_outcomes_and_nonrandom_comparison`
+- Owner: `crates/telemetry/src/route_outcomes.rs`, `crates/cli/src/run/telemetry.rs`
+
 ## A report cannot touch a lane
 
 Reporting starts no provider operation or background collection, and run does
