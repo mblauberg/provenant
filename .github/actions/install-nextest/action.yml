@@ -1,0 +1,22 @@
+name: Install cargo-nextest
+description: Install the pinned cargo-nextest release with a source fallback
+inputs:
+  version:
+    description: cargo-nextest version to install
+    required: false
+    default: 0.9.149
+runs:
+  using: composite
+  steps:
+    - name: Install prebuilt nextest
+      id: prebuilt
+      uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+      continue-on-error: true
+      with:
+        tool: cargo-nextest@${{ inputs.version }}
+    - name: Build pinned nextest when the download fails
+      if: steps.prebuilt.outcome == 'failure'
+      shell: bash
+      env:
+        NEXTTEST_VERSION: ${{ inputs.version }}
+      run: cargo install --locked cargo-nextest --version "$NEXTTEST_VERSION"
