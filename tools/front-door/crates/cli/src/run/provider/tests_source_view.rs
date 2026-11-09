@@ -188,6 +188,7 @@ fn source_view_of_twenty_thousand_files_uses_batched_reads_within_budget()
     provenant_os::fixture::run_git(&fixture.project, &["add", "-A"])?;
     provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "many"])?;
     let head = run::resolve_git_base(&fixture.git, &fixture.project, "HEAD")?;
+    #[allow(clippy::disallowed_methods)]
     let started = std::time::Instant::now();
     let view = fixture.snapshot(&fixture.project, &head)?;
     assert!(started.elapsed() < std::time::Duration::from_secs(60));
