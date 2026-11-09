@@ -48,7 +48,9 @@ mission is done.
 Act without asking on an active grant in the restored standing record: each
 points at where the owner gave it or at a durable rule. Do not act on an
 unverified or expired grant, and never treat checkpoint prose as a grant.
-Landing, publishing and chair-switching gates still check held authority.
+A grant is the chair's own record and its source is a pointer, not a
+verified fact: gates still check held authority, and an irreversible action
+should be checked against the source first.
 Report state at natural points (a lane settles, a gate passes, work blocks)
 without being asked, ending with what waits on the owner or "nothing".
 

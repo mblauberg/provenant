@@ -71,7 +71,12 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 open_read_only(edge, &call)?
             };
             let (exempt, exempt_line) = review_exempt_view(&context);
-            let owner = command.id.is_none().then(|| owner_wait(&context));
+            let owner = command
+                .id
+                .is_none()
+                .then(|| now(&clock))
+                .transpose()?
+                .map(|at| owner_wait(&context, at));
             let native = if command.id.is_none() {
                 Some(provenant_telemetry::native_attempts::read(edge.roots))
             } else {
@@ -410,22 +415,55 @@ pub(super) fn append_refused_operations(
 }
 
 /// What the chair's standing record says waits on the owner. The chair is
-/// found as settlement finds it: the session this actor last saved.
-fn owner_wait(context: &run::ExecutionContext) -> provenant_workflow::session::OwnerWait {
-    use provenant_workflow::session::{OwnerWait, SessionStore, chair_session_for};
-    let markdown = chair_session_for(&context.state_root, context.project_id, context.actor_id)
-        .and_then(|session| {
-            SessionStore::new(context.state_root.clone(), context.project_id, session)
-                .read()
-                .ok()
-                .flatten()
-        })
-        .map(|checkpoint| checkpoint.markdown);
-    OwnerWait::from_checkpoint(markdown.as_deref())
+/// found as settlement finds it: the session this actor last saved. A
+/// checkpoint older than the session-start hook's freshness window is stale,
+/// not a current ask, and a read failure is unknown rather than not recorded.
+fn owner_wait(
+    context: &run::ExecutionContext,
+    now: provenant_core::UtcMicros,
+) -> provenant_workflow::session::OwnerStatus {
+    use provenant_workflow::session::{
+        CHECKPOINT_MAX_AGE, OwnerStatus, OwnerWait, SessionStore, chair_sessions_for,
+        checkpoint_is_fresh,
+    };
+    let sessions = chair_sessions_for(&context.state_root, context.project_id, context.actor_id);
+    let Some(((session, saved), rest)) = sessions.split_first() else {
+        return OwnerStatus::new(OwnerWait::NotRecorded, None, None, Vec::new());
+    };
+    let other_live = rest
+        .iter()
+        .filter(|(_, at)| checkpoint_is_fresh(now, *at, CHECKPOINT_MAX_AGE))
+        .map(|(id, _)| id.as_str().to_owned())
+        .collect();
+    let read = SessionStore::new(
+        context.state_root.clone(),
+        context.project_id,
+        session.clone(),
+    )
+    .read();
+    let (wait, saved_at) = match read {
+        Err(error) => (OwnerWait::Unknown(error.to_string()), Some(*saved)),
+        Ok(None) => (OwnerWait::NotRecorded, Some(*saved)),
+        Ok(Some(checkpoint))
+            if !checkpoint_is_fresh(now, checkpoint.modified_at, CHECKPOINT_MAX_AGE) =>
+        {
+            (OwnerWait::Stale, Some(checkpoint.modified_at))
+        }
+        Ok(Some(checkpoint)) => (
+            OwnerWait::from_checkpoint(Some(&checkpoint.markdown)),
+            Some(checkpoint.modified_at),
+        ),
+    };
+    OwnerStatus::new(
+        wait,
+        Some(session.as_str().to_owned()),
+        saved_at,
+        other_live,
+    )
 }
 
 fn append_owner_wait(
-    owner: Option<&provenant_workflow::session::OwnerWait>,
+    owner: Option<&provenant_workflow::session::OwnerStatus>,
     data: &mut Value,
     human: &mut String,
 ) {

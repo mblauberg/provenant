@@ -102,6 +102,22 @@ struct StartOutput<'a> {
     additional_context: &'a str,
 }
 
+/// How old a chair checkpoint may be and still be restored or reported as
+/// current: 24 hours. The session-start hook and `provenant status` share it.
+pub const CHECKPOINT_MAX_AGE: DurationMicros =
+    DurationMicros::from_micros(24 * 60 * 60 * 1_000_000);
+
+/// A checkpoint saved at `at` is fresh when it is no newer than `now` and no
+/// older than `max_age`; a future save time is stale.
+pub fn checkpoint_is_fresh(
+    now: provenant_core::UtcMicros,
+    at: provenant_core::UtcMicros,
+    max_age: DurationMicros,
+) -> bool {
+    let age = i128::from(now.as_micros()) - i128::from(at.as_micros());
+    (0..=i128::from(max_age.as_micros())).contains(&age)
+}
+
 /// Freshness is supplied by the edge. Future mtimes are stale, too: a wall-clock
 /// regression cannot make a checkpoint appear fresh indefinitely. Never scans.
 pub fn hook_context(
@@ -199,10 +215,7 @@ pub fn hook_context_with(
                     Ok(autosave) => (autosave, None),
                     Err(error) => (None, Some(read_cause(error))),
                 };
-                let fresh = |at: provenant_core::UtcMicros| {
-                    let age = i128::from(now.as_micros()) - i128::from(at.as_micros());
-                    (0..=i128::from(max_age.as_micros())).contains(&age)
-                };
+                let fresh = |at| checkpoint_is_fresh(now, at, max_age);
                 let chair_stale = checkpoint.as_ref().is_some_and(|c| !fresh(c.modified_at));
                 let chair = checkpoint
                     .as_ref()

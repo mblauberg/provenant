@@ -3,11 +3,14 @@
 //! checkpoint frontmatter, beside `provenant_summary`, so it is saved, revised
 //! and restored with the checkpoint itself.
 //!
-//! The record never creates authority. A grant is a pointer: `owner:<ref>`
-//! names where the owner gave it and `rule:<ref>` a durable rule. A grant
-//! without such a source is shown as unverified and is not acted on; an
-//! expired one is not restored. Landing, publishing and chair-switching gates
-//! still check held authority themselves.
+//! The record is self-attested by the chair and is not verified. A grant is a
+//! pointer: `owner:<ref>` names where the owner gave it and `rule:<ref>` a
+//! durable rule. Nothing resolves a source, and only its shape is checked, so
+//! a grant lets a chair skip asking for what it could already do, no more.
+//! A grant without a well-formed source is shown as unverified and is not
+//! acted on; an expired one is not restored. Landing, publishing and
+//! chair-switching gates check held authority themselves, and an irreversible
+//! action should be checked against the grant's source first.
 use super::summary::{HEADER_LIMIT, empty_header, header_end, parse_header, strip_root_key};
 use provenant_core::UtcMicros;
 use serde::{Deserialize, Serialize};
@@ -139,7 +142,7 @@ pub fn restore_standing(markdown: &str, now: UtcMicros, limit: usize) -> Option<
             "The checkpoint's standing section is invalid, so no goal, grant or obligation is restored from it. Act on no grant from it until it is saved again with its source.".into(),
         ),
         Ok(Some(standing)) => {
-            lines.push("Restored from the typed record. Each grant points at where the owner gave it or at a durable rule and adds no authority; landing, publishing and chair-switch gates still check held authority.".into());
+            lines.push("Restored from the typed record. Grants are the chair's own record, each with a source to check; gates still check held authority. Check an irreversible action against its source first.".into());
             lines.push(format!(
                 "Goal: {}",
                 if standing.goal.trim().is_empty() {
@@ -173,7 +176,7 @@ pub fn restore_standing(markdown: &str, now: UtcMicros, limit: usize) -> Option<
             lines.push(if active.is_empty() {
                 "Standing grants: none".into()
             } else {
-                "Standing grants (act within these without asking):".into()
+                "Standing grants (act within these without asking; sources are pointers to check):".into()
             });
             list(&mut lines, active.into_iter());
             let unverified: Vec<String> = by(GrantState::Unverified)
@@ -227,6 +230,69 @@ pub enum OwnerWait {
     Invalid,
     Nothing,
     Asks(Vec<String>),
+    /// The checkpoint is older than the freshness rule, so its asks are not current.
+    Stale,
+    /// The checkpoint could not be read.
+    Unknown(String),
+}
+
+/// An [`OwnerWait`] with the chair session it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerStatus {
+    pub wait: OwnerWait,
+    pub session: Option<String>,
+    pub saved_at: Option<provenant_core::UtcMicros>,
+    /// Other sessions of the same actor saved within the freshness window.
+    pub other_live: Vec<String>,
+}
+
+impl OwnerStatus {
+    pub fn new(
+        wait: OwnerWait,
+        session: Option<String>,
+        saved_at: Option<provenant_core::UtcMicros>,
+        other_live: Vec<String>,
+    ) -> Self {
+        Self {
+            wait,
+            session,
+            saved_at,
+            other_live,
+        }
+    }
+
+    pub fn line(&self) -> String {
+        let mut line = self.wait.line();
+        if let Some(session) = &self.session {
+            line.push_str(&format!(" [session {}", super::clean(session, 128)));
+            if let Some(at) = self.saved_at {
+                line.push_str(&format!(", saved {}", at.as_timestamp()));
+            }
+            line.push(']');
+        }
+        if !self.other_live.is_empty() {
+            line.push_str(&format!(
+                "\nwaiting on owner: {} other live chair session(s) for this actor ({}); showing the newest",
+                self.other_live.len(),
+                self.other_live
+                    .iter()
+                    .take(LIST_LIMIT)
+                    .map(|id| super::clean(id, 128))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        line
+    }
+
+    pub fn value(&self) -> serde_json::Value {
+        let mut value = self.wait.value();
+        value["session"] = serde_json::json!(self.session);
+        value["saved_at"] =
+            serde_json::json!(self.saved_at.map(|at| at.as_timestamp().to_string()));
+        value["other_live_sessions"] = serde_json::json!(self.other_live);
+        value
+    }
 }
 
 impl OwnerWait {
@@ -255,6 +321,11 @@ impl OwnerWait {
                 "waiting on owner: unknown (the chair checkpoint's standing section is invalid)"
                     .into()
             }
+            Self::Stale => "waiting on owner: unknown (the chair checkpoint is stale, so its asks are not current)".into(),
+            Self::Unknown(cause) => format!(
+                "waiting on owner: unknown (the chair checkpoint could not be read: {})",
+                super::clean(cause, 160)
+            ),
             Self::Nothing => "waiting on owner: nothing".into(),
             Self::Asks(asks) => {
                 let mut shown: Vec<_> = asks.iter().take(LIST_LIMIT).cloned().collect();
@@ -268,6 +339,8 @@ impl OwnerWait {
 
     pub fn value(&self) -> serde_json::Value {
         let (state, asks): (&str, &[String]) = match self {
+            Self::Stale => ("stale", &[]),
+            Self::Unknown(_) => ("unknown", &[]),
             Self::NotRecorded => ("not_recorded", &[]),
             Self::Invalid => ("invalid", &[]),
             Self::Nothing => ("nothing", &[]),
@@ -305,5 +378,29 @@ mod tests {
             OwnerWait::NotRecorded
         );
         assert_eq!(OwnerWait::from_checkpoint(None), OwnerWait::NotRecorded);
+    }
+
+    #[test]
+    fn stale_and_unreadable_are_unknown_and_name_the_session() {
+        use super::OwnerStatus;
+        let at = provenant_core::UtcMicros::from_micros(0).unwrap();
+        let stale = OwnerStatus::new(
+            OwnerWait::Stale,
+            Some("s1".into()),
+            Some(at),
+            vec!["s2".into()],
+        );
+        assert!(stale.line().contains("stale"));
+        assert!(
+            stale
+                .line()
+                .contains("session s1, saved 1970-01-01T00:00:00Z")
+        );
+        assert!(stale.line().contains("1 other live chair session"));
+        assert_eq!(stale.value()["state"], "stale");
+        assert_eq!(stale.value()["session"], "s1");
+        let bad = OwnerStatus::new(OwnerWait::Unknown("io".into()), None, None, vec![]);
+        assert_eq!(bad.value()["state"], "unknown");
+        assert!(bad.line().starts_with("waiting on owner: unknown"));
     }
 }
