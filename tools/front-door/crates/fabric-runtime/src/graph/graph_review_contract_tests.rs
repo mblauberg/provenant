@@ -866,12 +866,22 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
             boundary.advance_error_code.as_deref(),
             Some("coverage_below_minimum")
         );
+        let output = boundary.outputs.as_ref().unwrap();
+        assert!(review::partial(output));
+        assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
         if export_failure {
-            assert!(boundary.outputs.is_none());
+            let lenses = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "panel--lenses")
+                .unwrap();
+            assert!(lenses.outputs.is_none());
+            assert_eq!(lenses.state, NodeState::Failed);
+            assert!(output.findings.is_empty());
+            assert_eq!(output.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
         } else {
-            let output = boundary.outputs.as_ref().unwrap();
             assert_eq!(output.findings.len(), 1);
-            assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
         }
         assert_eq!(
             advance(&document, &mut owner, &mut journal)
