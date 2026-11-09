@@ -1189,8 +1189,6 @@ impl Factory {
             let head =
                 provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
             let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
-            let base = provenant_run::review_merge_base_between(&git, &self.cwd, &head, &base)
-                .map_err(run_error)?;
             if base == head {
                 return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
             }
@@ -2322,7 +2320,7 @@ mod tests {
     }
 
     #[test]
-    fn review_ref_uses_subject_merge_base() -> Result {
+    fn review_ref_binds_tip_until_launch() -> Result {
         let rig = crate::worktree_tests::repository()?;
         let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
@@ -2330,11 +2328,12 @@ mod tests {
         let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", &base])?;
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "target advanced"])?;
+        let tip = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let result = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
-        assert_eq!(result["document"]["review_base"], base);
+        assert_eq!(result["document"]["review_base"], tip);
         Ok(())
     }
 
