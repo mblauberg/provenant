@@ -107,6 +107,28 @@ redaction, confinement and object integrity are not settings and stay on in
 every preset. The matching knobs are `lanes.isolation`, `lanes.supervision` and
 `lanes.receipts` in the [configuration reference](../reference/config-keys.md).
 
+## Hand off long writers before context grows
+
+Cost is context length multiplied by turns, so a writer that keeps working at a
+very large context pays for it again on every call. `lanes.context_handoff_tokens`
+stops a writer once one provider call's context reaches the threshold. The
+graph then continues it in a fresh attempt on the same worktree, from the
+writer's latest progress handoff. Commits and uncommitted edits stay in place.
+The setting is off (0) by default, because restart has not yet been shown to
+keep completion. The suggested setting is 200000:
+
+```sh
+provenant run --use task --file brief.md --knob lanes.context_handoff_tokens=200000
+```
+
+Set it in a profile or host configuration `[knobs]` table to apply it to every
+writer. Only providers that report each call's context are stopped (Claude
+today); other lanes keep today's behaviour. The restart is the graph's one
+automatic continuation for that writer, on another eligible route, so pool
+routes suit it best. Compare spend before and after with
+`provenant telemetry stats --since DATE --until DATE`: its spend by context band
+(`context_bands` in `--json`) shows how much was spent above 200k.
+
 ## Deliver through CI to land
 
 The `deliver` composite binds implementation, CI, bounded repair, independent

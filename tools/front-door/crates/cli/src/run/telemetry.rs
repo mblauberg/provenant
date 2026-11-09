@@ -532,6 +532,35 @@ pub(super) fn stats_inner(
                 "trigger_labels": "inferred labels; recorded structural events remain distinct in ingest rows",
                 "compaction_coverage": {"known": rows.iter().filter(|row| row.reply.is_some()).count(), "unknown": rows.iter().filter(|row| row.reply.is_none()).count()},
             });
+            // Spend by the context each reply sent: cost is context times
+            // turns, so this shows how much is spent at large contexts.
+            // Compare windows with --since and --until.
+            let bands = provenant_telemetry::context_bands(rows, &prices).map_err(|error| {
+                Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string())
+            })?;
+            human.push_str(
+                "spend by context band (host native replies; context = input + cached reads + cache writes):\n",
+            );
+            for band in &bands {
+                let range = match band.below_tokens {
+                    Some(below) => format!("{}k-{}k", band.min_tokens / 1000, below / 1000),
+                    None => format!("{}k+", band.min_tokens / 1000),
+                };
+                let source = serde_json::to_value(band.source)
+                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+                human.push_str(&format!(
+                    "  {} {range}: {} replies  {}\n",
+                    source.as_str().unwrap_or("unknown"),
+                    band.totals.attempts,
+                    cost_summary(&band.totals).trim()
+                ));
+            }
+            data["context_bands"] = json!({
+                "scope": "host native replies in selected time window; breakdown only, never added to project totals",
+                "context": "uncached input + cache reads + cache writes of one reply, in tokens",
+                "floors": provenant_telemetry::CONTEXT_BAND_FLOORS,
+                "bands": bands,
+            });
         }
         match (native, rows) {
             (Ok(attempts), Ok(rows)) => {

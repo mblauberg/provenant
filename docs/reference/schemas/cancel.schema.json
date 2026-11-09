@@ -698,7 +698,8 @@
                       "command_unavailable",
                       "host_native_unconfigured",
                       "identity_unobserved",
-                      "stopped_no_work"
+                      "stopped_no_work",
+                      "context_handoff"
                     ],
                     "type": "string"
                   },

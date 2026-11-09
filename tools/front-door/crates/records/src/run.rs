@@ -881,6 +881,9 @@ pub enum TerminalCause {
     StoppedNoWork,
     /// A writer finished without a final message.
     EmptyWriterResult,
+    /// The host stopped a writer at its context handoff threshold so a fresh
+    /// attempt continues from its handoff on the same worktree.
+    ContextHandoff,
 }
 
 impl TerminalCause {
@@ -916,6 +919,7 @@ impl TerminalCause {
             Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
+            Self::ContextHandoff => "context handoff threshold; provenant output ID",
         }
     }
 
@@ -998,6 +1002,9 @@ impl TerminalCause {
             }
             Self::EmptyWriterResult => {
                 "the provider ended with an empty final message; its commit is kept for review"
+            }
+            Self::ContextHandoff => {
+                "the host stopped the writer at lanes.context_handoff_tokens; a fresh attempt continues from its handoff on the same worktree"
             }
         }
     }

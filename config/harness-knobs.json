@@ -7,6 +7,7 @@
       "lanes.max_depth",
       "lanes.silence_seconds",
       "lanes.slot_wait_seconds",
+      "lanes.context_handoff_tokens",
       "lanes.publish",
       "lanes.local_cargo",
       "lanes.isolation",
@@ -517,6 +518,12 @@
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
       "effect": "Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline.",
       "trade_off": "Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."
+    },
+    "lanes.context_handoff_tokens": {
+      "type": "int", "min": 0, "max": 2000000, "default": 0, "status": "wired",
+      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "Context size, in tokens one provider call sent, at which the host stops a writer so a fresh attempt continues from its handoff on the same worktree. The stop settles as a declared stop and uses the graph's one automatic continuation; commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; others keep today's behaviour.",
+      "trade_off": "Lower stops paying for very large contexts sooner but restarts more often, and a restart may lose working state that the handoff does not record; off until a trial shows restart does not lower completion."
     },
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",

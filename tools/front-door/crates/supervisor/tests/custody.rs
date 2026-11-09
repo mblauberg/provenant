@@ -411,6 +411,7 @@ impl provenant_os::capture::FrameDecoder for Decoder {
                 tokens: tokens
                     .parse()
                     .map_err(|_| provenant_os::capture::DecodeFailure)?,
+                context: None,
             });
         }
         Ok(if frame == b"terminal" {

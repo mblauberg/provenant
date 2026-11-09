@@ -22,6 +22,10 @@ pub enum FrameEvent {
     Usage {
         key: u64,
         tokens: u64,
+        /// The context this call sent, in tokens (input, cached reads and cache
+        /// writes), where the provider reports it per call. `None` keeps a
+        /// host with no context figure on its existing behaviour.
+        context: Option<u64>,
     },
 }
 

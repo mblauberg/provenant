@@ -713,6 +713,12 @@ struct Driver<'a> {
     /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
 }
+/// Whether a writer's latest reported context has reached its context handoff
+/// threshold (`lanes.context_handoff_tokens`). 0 turns the threshold off, and a provider with no context figure
+/// (`None`) is never stopped for it.
+fn context_handoff_due(threshold: u64, context: Option<u64>) -> bool {
+    threshold > 0 && context.is_some_and(|context| context >= threshold)
+}
 /// Calls tracked by key before the sink stops de-duplicating and only adds.
 const USAGE_KEYS: usize = 65_536;
 #[derive(Default)]
@@ -721,14 +727,19 @@ struct Events {
     rejected: std::sync::atomic::AtomicBool,
     usage: std::sync::Mutex<Usage>,
 }
-/// Live token usage: one figure per provider call, summed.
+/// Live token usage: one figure per provider call, summed, and the context
+/// the latest call that reported one sent.
 #[derive(Default)]
 struct Usage {
     calls: std::collections::HashMap<u64, u64>,
     total: u64,
+    context: Option<u64>,
 }
 impl Usage {
-    fn report(&mut self, key: u64, tokens: u64) {
+    fn report(&mut self, key: u64, tokens: u64, context: Option<u64>) {
+        if context.is_some() {
+            self.context = context;
+        }
         let before = if self.calls.len() < USAGE_KEYS || self.calls.contains_key(&key) {
             self.calls.insert(key, tokens).unwrap_or(0)
         } else {
@@ -741,6 +752,10 @@ impl Events {
     /// Tokens the provider has reported so far.
     fn tokens(&self) -> u64 {
         self.usage.lock().map_or(0, |usage| usage.total)
+    }
+    /// The context the latest call sent, where the provider reports it.
+    fn context(&self) -> Option<u64> {
+        self.usage.lock().ok().and_then(|usage| usage.context)
     }
 }
 impl provenant_os::capture::DecodedEventSink for Events {
@@ -756,9 +771,13 @@ impl provenant_os::capture::DecodedEventSink for Events {
             provenant_os::capture::FrameEvent::ProtocolRejected => {
                 self.rejected.store(true, Ordering::Relaxed)
             }
-            provenant_os::capture::FrameEvent::Usage { key, tokens } => {
+            provenant_os::capture::FrameEvent::Usage {
+                key,
+                tokens,
+                context,
+            } => {
                 if let Ok(mut usage) = self.usage.lock() {
-                    usage.report(key, tokens);
+                    usage.report(key, tokens, context);
                 }
             }
             provenant_os::capture::FrameEvent::Progress => {}
@@ -948,6 +967,7 @@ impl Driver<'_> {
         let mut slot_extended_ms = 0_u64;
         let mut budget_warned = false;
         let mut budget_stop_sent = false;
+        let mut context_stop_sent = false;
         let spawn_result = self.spawn_provider(
             argv,
             env,
@@ -1261,6 +1281,14 @@ impl Driver<'_> {
                 && !budget_stop_sent
                 && !terminal
                 && exit.is_none();
+            let context_reached = context_handoff_due(
+                plan.context_handoff,
+                out_events.context().or_else(|| err_events.context()),
+            ) && !context_stop_sent
+                && !budget_stop_sent
+                && !over_budget
+                && !terminal
+                && exit.is_none();
             let event = if signal {
                 Event::SupervisorSignal
             } else if rejected {
@@ -1271,6 +1299,7 @@ impl Driver<'_> {
                     machine::StopReason::ProtocolRejected => Event::ProtocolRejected,
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
                     machine::StopReason::TokenBudget => Event::TokenBudget,
+                    machine::StopReason::ContextHandoff => Event::ContextHandoff,
                     machine::StopReason::WallDeadline
                     | machine::StopReason::PostTerminalCleanup
                         if state.stop_attempts().iter().any(|attempt| {
@@ -1286,6 +1315,14 @@ impl Driver<'_> {
             } else if over_budget {
                 budget_stop_sent = true;
                 Event::TokenBudget
+            } else if context_reached {
+                context_stop_sent = true;
+                warn(
+                    &mut warnings,
+                    &mut omitted_warnings,
+                    "context handoff threshold reached",
+                );
+                Event::ContextHandoff
             } else if newly_terminal {
                 Event::Terminal
             } else if output_progress || cpu_progress {

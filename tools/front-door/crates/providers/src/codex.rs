@@ -46,6 +46,9 @@ impl provenant_os::capture::FrameDecoder for LiveUsage {
             live_usage(frame).map_or(FrameEvent::Progress, |tokens| FrameEvent::Usage {
                 key: TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 tokens,
+                // A turn's usage sums its model calls, so it is not the
+                // context one call sent: no context figure.
+                context: None,
             }),
         )
     }
@@ -467,9 +470,15 @@ mod live_usage_tests {
     #[test]
     fn a_completed_turn_reports_its_fresh_input_and_output() {
         let turn = br#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}"#;
-        let FrameEvent::Usage { tokens, key } = LiveUsage.decode(turn).unwrap() else {
+        let FrameEvent::Usage {
+            tokens,
+            key,
+            context,
+        } = LiveUsage.decode(turn).unwrap()
+        else {
             panic!("a completed turn reports usage");
         };
+        assert_eq!(context, None);
         // 1000 (total input) - 800 (cached) + 50 (output) = 250 fresh tokens.
         assert_eq!(tokens, 250);
         // Each turn is its own call, so two identical turns both count.

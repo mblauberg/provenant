@@ -10,8 +10,8 @@ structured output. The contract is in the [telemetry spec](../specs/telemetry.md
 
 For behaviour comparisons, inspect `attempt_context` and `task_context` for
 source, effective time and known/unknown coverage, then `reply_context` for
-thinking per inferred trigger and `cli_ergonomics` for help, retry, wait and
-poll counts. Native replies and CLI counts cover the host window; attempt
+thinking per inferred trigger, `context_bands` for spend by the context each
+reply sent, and `cli_ergonomics` for help, retry, wait and poll counts. Native replies and CLI counts cover the host window; attempt
 context covers this project's finished attempts. Missing fields remain unknown.
 The report states when release changes, harness experiments, task difficulty
 and user activity cannot be separated. Accepted-outcome cost uses recorded

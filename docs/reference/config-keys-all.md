@@ -480,6 +480,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."` |
 | `type` | `"bool"` |
 
+## `lanes.context_handoff_tokens`
+
+| Field | Value |
+|---|---|
+| `default` | `0` |
+| `effect` | `"Context size, in tokens one provider call sent, at which the host stops a writer so a fresh attempt continues from its handoff on the same worktree. The stop settles as a declared stop and uses the graph's one automatic continuation; commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; others keep today's behaviour."` |
+| `max` | `2000000` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Lower stops paying for very large contexts sooner but restarts more often, and a restart may lose working state that the handoff does not record; off until a trial shows restart does not lower completion."` |
+| `type` | `"int"` |
+
 ## `lanes.isolation`
 
 | Field | Value |

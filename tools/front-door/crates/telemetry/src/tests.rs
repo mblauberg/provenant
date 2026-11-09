@@ -1537,3 +1537,60 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     assert_eq!(lane.usage.uncached_input, Some(42));
     Ok(())
 }
+
+#[test]
+fn context_bands_price_each_reply_by_the_context_it_sent() {
+    let mut config = configured(Some(1_000_000));
+    config.models[0].model = "p/m".into();
+    let prices = validate_prices(&config).unwrap();
+    let row = |source, cache_read, uncached_input| crate::ingest::Row {
+        schema_version: 1,
+        account: "a".into(),
+        provider: "p".into(),
+        model: "m".into(),
+        effort: None,
+        uncached_input,
+        cache_read,
+        cache_write: 0,
+        cache_write_1h: 0,
+        output: 10,
+        timestamp: "2026-11-10T00:00:00Z".into(),
+        session: "s".into(),
+        message: format!("{cache_read}-{uncached_input}"),
+        source,
+        agent_id: None,
+        native_config: None,
+        native_attempt: None,
+        reasoning_tokens: None,
+        reply: None,
+    };
+    use crate::ingest::Source;
+    let rows = [
+        row(Source::Lane, 10_000, 5),
+        row(Source::Lane, 250_000, 5),
+        row(Source::Lane, 260_000, 5),
+        row(Source::Chair, 450_000, 0),
+    ];
+    let bands = context_bands(&rows, &prices).unwrap();
+    let summary: Vec<_> = bands
+        .iter()
+        .map(|band| {
+            (
+                band.source,
+                band.min_tokens,
+                band.below_tokens,
+                band.totals.attempts,
+                band.totals.cost.complete.as_ref().map(|m| m.microdollars),
+            )
+        })
+        .collect();
+    // One dollar per million tokens: each reply costs its tokens in microdollars.
+    assert_eq!(
+        summary,
+        vec![
+            (Source::Chair, 400_000, None, 1, Some(450_010)),
+            (Source::Lane, 0, Some(50_000), 1, Some(10_015)),
+            (Source::Lane, 200_000, Some(400_000), 2, Some(510_030)),
+        ]
+    );
+}

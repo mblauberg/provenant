@@ -1218,6 +1218,10 @@ fn cache_report(
     })
 }
 
+#[path = "bands.rs"]
+mod bands;
+pub use bands::*;
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
