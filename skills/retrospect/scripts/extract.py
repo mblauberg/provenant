@@ -297,5 +297,15 @@ def extract(manifest):
                        and (row['graph'] is None or o['evidence'].get('graph') == row['graph'])]
             row['outcome'] = matches[0] if len(matches) == 1 else None
             # Same native history selected more than once contributes once.
-            rows.setdefault(row['id'], row)
-    return list(rows.values())
+            rows.setdefault(row['id'], []).append(row)
+    merged = []
+    for copies in rows.values():
+        result = {}
+        for field in copies[0]:
+            values = [copy[field] for copy in copies if copy[field] is not None]
+            if field == 'host' and 'lane' in values:
+                result[field] = 'lane'
+            else:
+                result[field] = values[0] if values and all(v == values[0] for v in values) else None
+        merged.append(result)
+    return merged

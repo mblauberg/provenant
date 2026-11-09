@@ -69,6 +69,17 @@ def _quantiles(values):
     return [values[int((len(values) - 1) * q)] for q in (.025, .975)]
 
 
+def _supported_sessions(rows, group, adjust):
+    categorical = [k for k in adjust if k != 'context' or not all(
+        r.get(k) is None or isinstance(r.get(k), (int, float)) for r in rows)]
+    strata = collections.defaultdict(set)
+    for r in rows:
+        strata[tuple(r.get(k) for k in categorical)].add(r[group])
+    supported_sessions = {r['session'] for r in rows
+                          if len(strata[tuple(r.get(k) for k in categorical)]) == 2}
+    return supported_sessions
+
+
 def compare(rows, group='experiment', metric='user_objection', adjust=ADJUST,
             iterations=499, seed=7):
     """Binary contrast, second level minus first; rank loss is not an effect."""
@@ -77,13 +88,7 @@ def compare(rows, group='experiment', metric='user_objection', adjust=ADJUST,
                 and math.isfinite(r[metric])]
     adjust = tuple(k for k in adjust if k != group)
     levels = sorted({r[group] for r in selected}, key=str)
-    categorical = [k for k in adjust if k != 'context' or not all(
-        r.get(k) is None or isinstance(r.get(k), (int, float)) for r in selected)]
-    strata = collections.defaultdict(set)
-    for r in selected:
-        strata[tuple(r.get(k) for k in categorical)].add(r[group])
-    supported_sessions = {r['session'] for r in selected
-                          if len(strata[tuple(r.get(k) for k in categorical)]) == 2}
+    supported_sessions = _supported_sessions(selected, group, adjust)
     result = dict(status='non_identifiable', raw_difference=None,
                   adjusted_difference=None, permutation_interval=None,
                   confidence_interval=None, p_value=None,
@@ -132,7 +137,9 @@ def compare(rows, group='experiment', metric='user_objection', adjust=ADJUST,
     for session in {r['session'] for r in selected}:
         subset = [r for r in selected if r['session'] != session]
         remaining = {r[group] for r in subset}
-        estimate = _fit(subset, group, metric, adjust, levels) if len(remaining) == 2 else None
+        estimate = (_fit(subset, group, metric, adjust, levels)
+                    if len(remaining) == 2 and _supported_sessions(subset, group, adjust)
+                    else None)
         if estimate is None:
             result['loso']['non_identifiable'] += 1
         else:

@@ -76,6 +76,23 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(sum((r['usage'] or {}).get('output') or 0 for r in rows), 7)
 
+    def test_duplicate_sources_merge_independently_of_order(self):
+        native = dict(source('claude'), project='native-project')
+        lane = dict(native, host='lane', project='lane-project',
+                    experiment='on', sample='sample', graph='graph')
+        outcome = {'evidence': {'sample': 'sample', 'graph': 'graph'}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'outcomes.json'
+            path.write_text(json.dumps({'rows': [outcome]}))
+            forward = extract({'sources': [native, lane], 'outcomes': str(path)})
+            reverse = extract({'sources': [lane, native], 'outcomes': str(path)})
+        self.assertEqual(forward, reverse)
+        for row in forward:
+            self.assertEqual(row['host'], 'lane')
+            self.assertEqual(row['experiment'], 'on')
+            self.assertEqual(row['outcome'], outcome)
+            self.assertIsNone(row['project'])
+
     def test_missing_usage_components_stay_unknown_and_known_totals_survive(self):
         claude = _usage({'input_tokens': 3, 'cache_creation_input_tokens': 9,
                          'output_tokens': 2}, True)

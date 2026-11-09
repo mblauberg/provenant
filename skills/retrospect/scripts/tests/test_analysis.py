@@ -44,6 +44,16 @@ class ComparisonAcceptance(unittest.TestCase):
         self.assertEqual(result["joint_overlap_sessions"], 0)
         self.assertIsNone(result["adjusted_difference"])
 
+    def test_loso_counts_loss_of_the_only_joint_overlap(self):
+        rows = [row("overlap", g, value, project="P0", period="D0")
+                for g, value in (("A", 0), ("B", 1))]
+        rows += [row("a", "A", 0, project="P1", period="D1"),
+                 row("b", "B", 1, project="P1", period="D2"),
+                 row("c", "A", 0, project="P0", period="D2")]
+        result = self.compare(rows)
+        self.assertEqual(result["status"], "identifiable")
+        self.assertEqual(result["loso"]["non_identifiable"], 1)
+
     def test_within_session_switch_does_not_adjust_for_derived_era(self):
         rows = [dict(row(f"s{i}", group, value), id=f"{i}-{group}",
                      within_session_era=era, user_objection=value)
