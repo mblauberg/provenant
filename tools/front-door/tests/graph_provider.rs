@@ -620,7 +620,7 @@ fn fixture() -> Result {
             )?;
         }
         let committed = std::process::Command::new("/bin/sh")
-            .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git commit -qm 'test: continue original brief'"])
+            .args(["-c", "git add auto-worktree.txt auto-finished.txt 2>/dev/null || git add auto-worktree.txt; git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: continue original brief'"])
             .output()?;
         assert!(
             committed.status.success(),
