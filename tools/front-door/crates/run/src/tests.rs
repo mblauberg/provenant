@@ -2743,7 +2743,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_version_ten_without_spacing() -> TestResult {
+fn the_store_initialises_at_current_version_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2756,7 +2756,7 @@ fn the_store_initialises_at_version_ten_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 10);
+    assert_eq!(version, crate::db::SCHEMA_VERSION);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -2776,7 +2776,7 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
     // Shape the store exactly as version 7 left it.
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
+        .execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     let store = RunStore::open(&context, &call)?;
     let version: i64 =
         store
@@ -2784,7 +2784,7 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 10);
+    assert_eq!(version, crate::db::SCHEMA_VERSION);
     let operation = OperationId::parse("admit-after-upgrade")?;
     assert!(store.admission_window(&operation, &call)?.is_none());
     let deadline = WallTime::from_micros(1_000_000)?;
@@ -3045,14 +3045,14 @@ fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResu
     let store = RunStore::open(&context, &call)?;
     store
         .db
-        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
+        .execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     drop(store);
 
     let store = RunStore::open(&context, &call)?;
     let version: i64 = store
         .db
         .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 10);
+    assert_eq!(version, crate::db::SCHEMA_VERSION);
     let backup = context.state_root.as_path().join(format!(
         "run.sqlite3.bak-{}",
         call.clock.wall_now()?.as_micros()

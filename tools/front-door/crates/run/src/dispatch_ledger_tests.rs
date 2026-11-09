@@ -218,7 +218,7 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             std::fs::rename(attempt, attempt.with_extension("moved"))?;
             std::os::unix::fs::symlink(attempt.with_extension("moved"), attempt)?;
         }
-        store.db.execute_batch("DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
+        store.db.execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
         drop(store);
 
         let store = RunStore::open(&context, &call)?;

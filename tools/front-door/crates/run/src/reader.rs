@@ -280,6 +280,7 @@ pub struct LaneTarget {
     pub attempt: Option<AttemptId>,
 }
 /// Optional lane filters: the submitting actor, and terminal lanes already seen.
+const RECENT_REFUSALS_SQL: &str = "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3";
 const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR run IN (SELECT run FROM operations WHERE project=?1 AND actor=?5)) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
 const UNSEEN_TARGET: &str = " AND (?7 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?7))";
 #[derive(Clone, Debug)]
@@ -310,6 +311,40 @@ pub struct LanePage {
 enum RecordRead {
     Durable,
     Observed,
+}
+/// Keep equality selectors and cursor bounds visible to SQLite. Optional-OR
+/// predicates here prevent an ordered index seek and make a small page scan
+/// retained history before returning any records.
+fn lane_page_sql(query: &LaneQuery, targeted: bool) -> String {
+    let mut sql = "SELECT sequence,id FROM attempts WHERE project=?1".to_owned();
+    if query.newest_first {
+        if query.after != 0 {
+            sql.push_str(" AND sequence<?2");
+        } else {
+            // Retain the cursor parameter even for an unbounded first page.
+            sql.push_str(" AND sequence>=?2");
+        }
+    } else {
+        sql.push_str(" AND sequence>?2");
+    }
+    if targeted {
+        sql.push_str(" AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)");
+        sql.push_str(UNSEEN_TARGET);
+    } else {
+        if !query.all {
+            sql.push_str(" AND terminal=0");
+        }
+        // ?3 keeps the same binding layout for active and history pages.
+        sql.push_str(" AND ?3 IN (0,1)");
+        sql.push_str(UNSEEN_OWNED);
+    }
+    sql.push_str(if query.newest_first {
+        " ORDER BY sequence DESC"
+    } else {
+        " ORDER BY sequence"
+    });
+    sql.push_str(if targeted { " LIMIT ?6" } else { " LIMIT ?4" });
+    sql
 }
 impl RunStore {
     /// Read only the stored prompt or result for a console search. Other
@@ -373,9 +408,7 @@ impl RunStore {
         if !(1..=100).contains(&limit) {
             return Err(RunError::Validation("refusal page limit"));
         }
-        let mut statement = self.db.prepare(
-            "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3",
-        )?;
+        let mut statement = self.db.prepare(RECENT_REFUSALS_SQL)?;
         let rows = statement.query_map(
             params![
                 self.context.project_id.to_string(),
@@ -984,11 +1017,7 @@ impl RunStore {
         let mut rows: Vec<(i64, String)> = {
             let mut found = Vec::new();
             if query.targets.is_empty() {
-                let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
-                } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
-                };
+                let sql = lane_page_sql(query, false);
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
                     params![project, after, query.all, fetch, owner, unseen],
@@ -999,11 +1028,7 @@ impl RunStore {
                 }
             }
             for target in &query.targets {
-                let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
-                } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
-                };
+                let sql = lane_page_sql(query, true);
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
                     params![
@@ -1342,5 +1367,125 @@ mod tests {
             )
         );
         assert_eq!(graph_labels(None), (None, None, None));
+    }
+}
+
+#[cfg(test)]
+mod listing_work_tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    #[test]
+    fn listing_pages_bound_sql_work_after_upgrade()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = crate::tests::context(temp.path())?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        // Populate index rows directly: this checks selection work, before any
+        // selected records are hydrated. A large history must not be visited.
+        store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        store.db.execute_batch(r#"INSERT INTO operations(project,actor,operation,digest,run,record) VALUES
+            ('p','actor','anchor-other','digest','other',x'7b7d'),('p','actor','anchor-target','digest','target',x'7b7d');
+            INSERT INTO runs(id,project,record) VALUES ('other','p',x'7b7d'),('target','p',x'7b7d');
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
+            INSERT INTO attempts(sequence,id,run,project,task,number,revision,terminal,record)
+            SELECT i,printf('attempt-%d',i),CASE WHEN i%100=0 THEN 'target' ELSE 'other' END,'p','task',i,1,i>11,x'7b7d' FROM n;
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100000)
+            INSERT INTO operations(project,actor,operation,digest,run,record)
+            SELECT 'p','actor',printf('op-%d',i),'digest',printf('run-%d',i),CAST(CASE WHEN i<=11 THEN '{"state":"refused"}' ELSE '{"state":"accepted"}' END AS BLOB) FROM n;"#)?;
+        // Exercise the actual upgrade on populated data, rather than relying
+        // only on indexes created for a brand-new store.
+        store.db.execute_batch("DROP INDEX project_attempt_sequence; DROP INDEX run_attempt_sequence; DROP INDEX refused_operations; PRAGMA user_version=10;")?;
+        drop(store);
+        let store = RunStore::open(&context, &call)?;
+        for all in [false, true] {
+            for newest_first in [false, true] {
+                for after in [0, 50000] {
+                    for limit in [1, 10] {
+                        let query = LaneQuery {
+                            targets: vec![],
+                            all,
+                            limit,
+                            after,
+                            newest_first,
+                            owner: None,
+                            unseen_after: None,
+                        };
+                        for targeted in [false, true] {
+                            let sql = lane_page_sql(&query, targeted);
+                            let mut statement = store.db.prepare(&sql)?;
+                            let fetch = (limit + 1) as i64;
+                            let params: Vec<rusqlite::types::Value> = if targeted {
+                                vec![
+                                    String::from("p").into(),
+                                    (after as i64).into(),
+                                    String::from("target").into(),
+                                    rusqlite::types::Value::Null,
+                                    rusqlite::types::Value::Null,
+                                    fetch.into(),
+                                    rusqlite::types::Value::Null,
+                                ]
+                            } else {
+                                vec![
+                                    String::from("p").into(),
+                                    (after as i64).into(),
+                                    i64::from(all).into(),
+                                    fetch.into(),
+                                    rusqlite::types::Value::Null,
+                                    rusqlite::types::Value::Null,
+                                ]
+                            };
+                            let rows = statement
+                                .query_map(rusqlite::params_from_iter(params), |row| {
+                                    row.get::<_, i64>(0)
+                                })?
+                                .collect::<rusqlite::Result<Vec<_>>>()?;
+                            let mut expected: Vec<i64> = (1..=100000)
+                                .filter(|i| {
+                                    (if newest_first {
+                                        after == 0 || *i < after as i64
+                                    } else {
+                                        *i > after as i64
+                                    }) && (if targeted {
+                                        i % 100 == 0
+                                    } else {
+                                        all || *i <= 11
+                                    })
+                                })
+                                .collect();
+                            if newest_first {
+                                expected.reverse();
+                            }
+                            expected.truncate(fetch as usize);
+                            assert_eq!(rows, expected);
+                            let steps = statement.get_status(StatementStatus::VmStep);
+                            assert!(
+                                steps < 1000,
+                                "page selection visited history: {steps} VM steps; {query:?}; targeted={targeted}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let mut statement = store.db.prepare(RECENT_REFUSALS_SQL)?;
+        let operations = statement
+            .query_map(params!["p", "actor", 10], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            operations,
+            (2..=11)
+                .rev()
+                .map(|i| format!("op-{i}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            statement.get_status(StatementStatus::VmStep) < 1000,
+            "refusal selection parsed retained operation records"
+        );
+        Ok(())
     }
 }
