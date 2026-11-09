@@ -738,6 +738,13 @@ shows the retained view, and full `gc` removes excess payloads. The optional
 `chair_log_replay_days` (7 to 3650) controls receipt retention and defaults to
 the larger of `chair_log_days` and 7 days. See the
 [chair log](session-checkpoints.md#chair-log) for replay and pruning behaviour.
+
+`[retention] payload_cap_bytes = 17179869184` (1 MiB to 1 PiB; default 16 GiB)
+bounds the reclaimable payload under `runs/`: provider state and history,
+scratch, and captures beyond their 64 KiB tails. When accounted bytes exceed the
+cap, [GC](gc.md#bound-run-payload-bytes) evicts the oldest eligible payloads
+until the total is at 75% of it. The daily tick measures sizes in the
+background; settlement collection reads that ledger and walks nothing.
 The last 64 KiB survives as `stdout.log.tail` or `stderr.log.tail`;
 results, exit evidence, recorded digests and small captures survive. The same
 rule applies inside child stores, whose databases and retained evidence stay.

@@ -378,6 +378,7 @@ fn assert_chair_log_retention_defaults_overrides_and_validation() {
         ("chair_log_days", 1..=3650),
         ("chair_log_entries", 1..=100_000),
         ("chair_log_bytes", 65_536..=1_073_741_824),
+        ("payload_cap_bytes", 1_048_576..=1_125_899_906_842_624),
     ] {
         assert!(range.contains(&default_values["retention"][key].as_u64().unwrap()));
     }
@@ -403,6 +404,7 @@ fn assert_chair_log_retention_defaults_overrides_and_validation() {
         ("chair_log_entries", "100001"),
         ("chair_log_bytes", "65535"),
         ("chair_log_bytes", "1073741825"),
+        ("payload_cap_bytes", "1048575"),
     ] {
         let text = format!("schema_version=1\n[retention]\n{key}={value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();

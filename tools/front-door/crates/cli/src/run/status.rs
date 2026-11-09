@@ -1136,6 +1136,13 @@ pub fn project_lane(
             stale: observe_host.then(|| run::holder_absent(root, lane)),
             result_path,
             transcript,
+            payload_evicted: observe_host
+                && artifact(
+                    root,
+                    lane,
+                    provenant_records::AttemptFile::PayloadEvicted.name(),
+                )
+                .exists(),
             cache_read_share: provenant_routing::cache_read_share(
                 lane.usage.uncached_input,
                 lane.usage.cache_read,

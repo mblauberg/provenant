@@ -671,6 +671,24 @@ fn output_read_part(
             format!("{reason}\n"),
         ));
     }
+    let evicted = status::artifact(
+        session.context.state_root.as_path(),
+        &record,
+        provenant_records::AttemptFile::PayloadEvicted.name(),
+    )
+    .exists();
+    if evicted && matches!(part, run::ArtifactPart::Transcript) {
+        return Ok((
+            json!({
+                "attempt_id": id, "state": state_and_reason(&record.state).0,
+                "payload": "evicted", "part": "transcript", "offset": 0, "next_offset": 0,
+                "length": null, "eof": true, "clipped": null, "complete": null,
+                "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
+                "selected": selected,
+            }),
+            "payload evicted by retention; the transcript is no longer retained\n".into(),
+        ));
+    }
     let mut chunk = session.service().output(id, part, range, call)?;
     let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
     if let Some(lines) = tail {
@@ -720,6 +738,14 @@ fn output_read_part(
             "digest": chunk.digest,
             "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
     });
+    if evicted {
+        // Retention removed the bulk payload; the record, result and capture
+        // tails remain.
+        data["payload"] = json!("evicted");
+        if matches!(command.part, Part::Stderr) && text.is_empty() {
+            text = "payload evicted by retention; the retained capture tail is empty\n".into();
+        }
+    }
     if let Some(lines) = tail {
         data["tail"] = json!(lines);
         data["tail_clamped"] = json!(command.tail != tail);

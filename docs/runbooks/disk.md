@@ -45,6 +45,10 @@ and GC preview below to investigate it.
    into one row per class. Each
    aggregate's `count` records the number of inventory rows it represents.
    Temporary directories, caches and worktrees keep their individual paths.
+   `data.payload` gives `pinned_bytes` (payload that custody keeps out of
+   eviction) and `reclaimed_bytes` (evicted over the store's lifetime) from
+   the last GC accounting; see [GC](gc.md#bound-run-payload-bytes). An evicted
+   attempt keeps its records and results but its payload is gone.
 
 4. Preview cleanup with `provenant gc --dry-run --json`; apply it with
    `provenant gc --apply --json`. In addition to lane caches, GC removes clean

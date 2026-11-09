@@ -109,6 +109,15 @@ impl DiskEntry {
     }
 }
 
+/// Run-payload retention accounting from the last GC pass.
+#[derive(Debug, Default, Serialize)]
+pub struct PayloadRetention {
+    /// Payload bytes that custody, age or a continuation keeps out of eviction.
+    pub pinned_bytes: u64,
+    /// Payload bytes evicted over the store's lifetime.
+    pub reclaimed_bytes: u64,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct DiskTotal {
     pub count: u64,
@@ -135,6 +144,8 @@ pub struct DiskReport {
     pub entries: Vec<DiskEntry>,
     pub totals: BTreeMap<String, DiskTotal>,
     pub errors: Vec<DiskError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PayloadRetention>,
     // Only multiply linked non-directories need inode deduplication.
     #[serde(skip)]
     seen: HashSet<(u64, u64)>,
@@ -159,6 +170,7 @@ impl DiskReport {
             entries: Vec::new(),
             totals: BTreeMap::new(),
             errors: Vec::new(),
+            payload: None,
             seen: HashSet::new(),
             measured_worktrees: BTreeMap::new(),
         }

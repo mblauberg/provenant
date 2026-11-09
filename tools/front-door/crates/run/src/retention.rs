@@ -8,6 +8,7 @@ use provenant_os::fs::{Directory, FileKind, LockGuard, LockMode, PayloadTree};
 use provenant_records::AttemptFile;
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::PathBuf,
 };
@@ -45,6 +46,8 @@ pub struct ProviderStateGc {
     pub expired_events: u64,
     pub kept: Vec<ProviderStateIssue>,
     pub errors: Vec<ProviderStateIssue>,
+    /// Byte-bounded eviction of bulk payload; see [`RunStore::gc_payloads`].
+    pub payload: PayloadReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,104 +224,15 @@ impl RunStore {
                 if call.cancel.is_cancelled() {
                     return Err(RunError::Cancelled);
                 }
-                let run = match self.run_dir(record.run_id, false) {
-                    Ok(run) => run,
-                    Err(error) if missing_directory(&error) => return Ok(()),
-                    Err(error) => return Err(error),
-                };
-                let _publication =
-                    run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
-                let continuing: bool = self.db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
-                    [&id], |row| row.get(0))?;
-                // Host retention spans attribution projects. Verify the sealed
-                // request against its own indexed run before following a writer's
-                // persisted source-project custody namespace.
-                let custody_project =
-                    match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)?
-                    {
-                        Some(raw) => {
-                            let indexed: Vec<u8> = self.db.query_row(
-                                "SELECT record FROM runs WHERE id=?1 AND project=?2",
-                                rusqlite::params![
-                                    record.run_id.to_string(),
-                                    record.project_id.to_string()
-                                ],
-                                |row| row.get(0),
-                            )?;
-                            let indexed: RunRecord = crate::db::decode(&indexed)?;
-                            let digest =
-                                provenant_records::stored_record_digest("run-request", 1, &raw)?;
-                            if indexed.run_id != record.run_id
-                                || indexed.project_id != record.project_id
-                                || indexed.request_digest != digest
-                            {
-                                return Err(RunError::Validation("retention request identity"));
-                            }
-                            let request: CanonicalRequest = crate::db::decode(&raw)?;
-                            request
-                                .tasks
-                                .iter()
-                                .find(|task| task.task_id == record.task_id)
-                                .and_then(|task| task.writer.as_ref())
-                                .map(|writer| {
-                                    crate::writer::writer_project_id(writer, record.project_id)
-                                })
-                                .transpose()?
-                                .unwrap_or(record.project_id)
-                        }
-                        None => return Err(RunError::Validation("retention request unavailable")),
-                    };
-                let reservations = self
-                    .writer_registry
-                    .join("worktrees")
-                    .join(custody_project.to_string());
-                match Directory::open_anchor(&reservations) {
-                    Ok(directory) => {
-                        let listing =
-                            provenant_supervisor::custody::list_writer_reservations(&directory)
-                                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                        if !listing.issues.is_empty()
-                            || listing.reservations.iter().any(|reservation| {
-                                reservation.scope.run == record.run_id
-                                    && reservation.scope.attempt == record.attempt_id
-                            })
-                        {
-                            return Err(RunError::Validation(
-                                "writer reservation retained or unreadable",
-                            ));
-                        }
-                    }
-                    Err(error) if error.is_not_found() => {}
-                    Err(error) => return Err(error.into()),
-                }
-                let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
-                    Ok(attempt) => attempt,
-                    Err(error) if missing_directory(&error) => return Ok(()),
-                    Err(error) => return Err(error),
-                };
-                if crate::settlement::abandoned(&attempt, Self::scope(&record))?.is_some()
-                    || crate::holder::object_import_refused(&attempt, Self::scope(&record))?
-                        .is_some()
-                {
+                let Some(Held {
+                    attempt,
+                    continuing,
+                    _publication,
+                    _writer,
+                }) = self.hold_attempt(&record, &id)?
+                else {
                     return Ok(());
-                }
-                let _writer = match attempt.try_lock_existing(
-                    OsStr::new(AttemptFile::WriterLock.name()),
-                    LockMode::Exclusive,
-                ) {
-                    Ok(lease) => Some(lease),
-                    Err(error) if error.is_not_found() => None,
-                    Err(error) => return Err(error.into()),
                 };
-                match provenant_supervisor::custody::reservation_present(
-                    &attempt,
-                    Self::scope(&record),
-                ) {
-                    Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
-                    Ok(false) => {}
-                    Err(error) => return Err(error.into()),
-                }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
                 let uncertain_loss = matches!(
                     record.state,
@@ -462,6 +376,527 @@ impl RunStore {
             }
         }
         Ok(report)
+    }
+}
+
+/// Every custody check that protects an attempt's payload: the publication
+/// and writer locks, writer reservations, abandonment and refused Git imports.
+/// `None` means the attempt is pinned or its directory is gone.
+struct Held {
+    attempt: Directory,
+    continuing: bool,
+    _publication: LockGuard,
+    _writer: Option<LockGuard>,
+}
+
+impl RunStore {
+    fn hold_attempt(&self, record: &AttemptRecord, id: &str) -> Result<Option<Held>> {
+        let run = match self.run_dir(record.run_id, false) {
+            Ok(run) => run,
+            Err(error) if missing_directory(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let _publication =
+            run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
+        let continuing: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
+            [&id], |row| row.get(0))?;
+        // Host retention spans attribution projects. Verify the sealed
+        // request against its own indexed run before following a writer's
+        // persisted source-project custody namespace.
+        let custody_project =
+            match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)? {
+                Some(raw) => {
+                    let indexed: Vec<u8> = self.db.query_row(
+                        "SELECT record FROM runs WHERE id=?1 AND project=?2",
+                        rusqlite::params![record.run_id.to_string(), record.project_id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    let indexed: RunRecord = crate::db::decode(&indexed)?;
+                    let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
+                    if indexed.run_id != record.run_id
+                        || indexed.project_id != record.project_id
+                        || indexed.request_digest != digest
+                    {
+                        return Err(RunError::Validation("retention request identity"));
+                    }
+                    let request: CanonicalRequest = crate::db::decode(&raw)?;
+                    request
+                        .tasks
+                        .iter()
+                        .find(|task| task.task_id == record.task_id)
+                        .and_then(|task| task.writer.as_ref())
+                        .map(|writer| crate::writer::writer_project_id(writer, record.project_id))
+                        .transpose()?
+                        .unwrap_or(record.project_id)
+                }
+                None => return Err(RunError::Validation("retention request unavailable")),
+            };
+        let reservations = self
+            .writer_registry
+            .join("worktrees")
+            .join(custody_project.to_string());
+        match Directory::open_anchor(&reservations) {
+            Ok(directory) => {
+                let listing = provenant_supervisor::custody::list_writer_reservations(&directory)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                if !listing.issues.is_empty()
+                    || listing.reservations.iter().any(|reservation| {
+                        reservation.scope.run == record.run_id
+                            && reservation.scope.attempt == record.attempt_id
+                    })
+                {
+                    return Err(RunError::Validation(
+                        "writer reservation retained or unreadable",
+                    ));
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+            Ok(attempt) => attempt,
+            Err(error) if missing_directory(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if crate::settlement::abandoned(&attempt, Self::scope(&record))?.is_some()
+            || crate::holder::object_import_refused(&attempt, Self::scope(&record))?.is_some()
+        {
+            return Ok(None);
+        }
+        let _writer = match attempt.try_lock_existing(
+            OsStr::new(AttemptFile::WriterLock.name()),
+            LockMode::Exclusive,
+        ) {
+            Ok(lease) => Some(lease),
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        };
+        match provenant_supervisor::custody::reservation_present(&attempt, Self::scope(&record)) {
+            Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
+            Ok(false) => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(Some(Held {
+            attempt,
+            continuing,
+            _publication,
+            _writer,
+        }))
+    }
+}
+
+const LEDGER: &str = "payload-ledger.json";
+const LEDGER_LIMIT: u64 = 64 * 1024 * 1024;
+const SCRATCH: &str = AttemptFile::Scratch.name();
+const EVICTED: &str = AttemptFile::PayloadEvicted.name();
+const LOG_TAIL: u64 = 64 * 1024;
+
+/// Background size accounting. A full collection walks payloads and rewrites
+/// this ledger; settlement-time pressure collection only reads it, so the
+/// settlement path never walks a directory tree to learn a size.
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct Ledger {
+    #[serde(default)]
+    measured_micros: i64,
+    #[serde(default)]
+    accounted_bytes: u64,
+    #[serde(default)]
+    pinned_bytes: u64,
+    /// Bytes reclaimed by eviction over the store's lifetime.
+    #[serde(default)]
+    reclaimed_bytes: u64,
+    #[serde(default)]
+    attempts: BTreeMap<String, LedgerEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct LedgerEntry {
+    run: String,
+    project: String,
+    finished_micros: i64,
+    bytes: u64,
+    /// Custody pinned it when measured: private Git objects, abandonment,
+    /// reservations, a continuation or unproven loss.
+    pinned: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct PayloadEviction {
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+/// Outcome of the byte bound. `pinned_bytes` cannot be evicted by age or
+/// pressure; `reclaimed_bytes` is this pass (planned, in a dry run) and
+/// `total_reclaimed_bytes` the store's lifetime figure.
+#[derive(Debug, Default, Serialize)]
+pub struct PayloadReport {
+    pub cap_bytes: u64,
+    pub low_water_bytes: u64,
+    pub accounted_bytes: u64,
+    pub pinned_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub total_reclaimed_bytes: u64,
+    pub evicted: Vec<PayloadEviction>,
+    pub kept: Vec<ProviderStateIssue>,
+    pub errors: Vec<ProviderStateIssue>,
+}
+
+impl PayloadReport {
+    pub fn absorb(&mut self, other: Self) {
+        self.cap_bytes = self.cap_bytes.max(other.cap_bytes);
+        self.low_water_bytes = self.low_water_bytes.max(other.low_water_bytes);
+        self.accounted_bytes = self.accounted_bytes.saturating_add(other.accounted_bytes);
+        self.pinned_bytes = self.pinned_bytes.saturating_add(other.pinned_bytes);
+        self.reclaimed_bytes = self.reclaimed_bytes.saturating_add(other.reclaimed_bytes);
+        self.total_reclaimed_bytes = self
+            .total_reclaimed_bytes
+            .saturating_add(other.total_reclaimed_bytes);
+        self.evicted.extend(other.evicted);
+        self.kept.extend(other.kept);
+        self.errors.extend(other.errors);
+    }
+}
+
+/// Pinned and lifetime-reclaimed bytes from the last accounting, for the disk report.
+pub fn payload_totals(root: &Directory) -> Option<(u64, u64)> {
+    let ledger = read_ledger(root);
+    (ledger.measured_micros != 0 || ledger.reclaimed_bytes != 0)
+        .then_some((ledger.pinned_bytes, ledger.reclaimed_bytes))
+}
+
+fn read_ledger(root: &Directory) -> Ledger {
+    root.read_bounded(OsStr::new(LEDGER), LEDGER_LIMIT)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_ledger(root: &Directory, ledger: &Ledger) -> Result<()> {
+    let raw = serde_json::to_vec(ledger).map_err(|_| RunError::Validation("payload ledger"))?;
+    root.atomic_write(
+        OsStr::new(LEDGER),
+        ".payload-ledger-",
+        &raw,
+        provenant_os::fs::PublishMode::Replace,
+    )?
+    .require_durable()
+    .map_err(RunError::Publication)
+}
+
+fn issue(report: &mut PayloadReport, path: PathBuf, error: &RunError) {
+    let entry = ProviderStateIssue {
+        path,
+        reason: error.to_string(),
+    };
+    if matches!(
+        error,
+        RunError::Validation(_)
+            | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
+    ) {
+        report.kept.push(entry);
+    } else {
+        report.errors.push(entry);
+    }
+}
+
+/// Whether the attempt's payload holds anything custody still needs. Callers
+/// hold the attempt's locks.
+fn pinned_payload(attempt: &Directory, record: &AttemptRecord) -> Result<bool> {
+    let uncertain_loss = matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Lost,
+            exit_code: None,
+            ..
+        }
+    ) && record.exit_evidence.is_none();
+    // Private Git objects live in `tmp` until their import settles.
+    let private_git = match attempt.metadata_at(OsStr::new(AttemptFile::Tmp.name()), false) {
+        Ok(_) => match attempt.metadata_at(OsStr::new("writer-objects.json"), false) {
+            Ok(_) => true,
+            Err(error) if error.is_not_found() => false,
+            Err(error) => return Err(error.into()),
+        },
+        Err(error) if error.is_not_found() => false,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(uncertain_loss || private_git)
+}
+
+/// Allocated bytes of the evictable payload: provider state and history,
+/// scratch, and capture bytes beyond the retained tail.
+fn payload_bytes(attempt: &Directory, path: &std::path::Path) -> u64 {
+    let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
+    let mut bytes = 0_u64;
+    for name in [STATE, HISTORY, SCRATCH] {
+        let name = OsStr::new(name);
+        if attempt.metadata_at(name, false).is_ok() {
+            restore_owned_temporary_directories(attempt, name);
+            measured.measure_at("payload", attempt, name, &path.join(name));
+        }
+    }
+    for entry in &measured.entries {
+        bytes = bytes.saturating_add(entry.allocated_bytes);
+    }
+    for name in [AttemptFile::Stdout.name(), AttemptFile::Stderr.name()] {
+        if let Ok(meta) = attempt.metadata_at(OsStr::new(name), false) {
+            bytes = bytes.saturating_add(meta.size.saturating_sub(LOG_TAIL));
+        }
+    }
+    bytes
+}
+
+impl RunStore {
+    /// Keep bulk payload under `cap_bytes`. Over the cap, the oldest eligible
+    /// payloads go first until the total is at 75% of it. Nothing younger than
+    /// 24 hours goes, and neither does an attempt that holds unique private Git
+    /// objects, is abandoned, reserved or a continuation source. Records,
+    /// results, exits, receipts and 64 KiB capture tails stay. Each eviction
+    /// runs under the attempt's publication and writer locks.
+    ///
+    /// `measure` walks payloads and rewrites the size ledger; leave it off on
+    /// the settlement path, which then reads the ledger only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gc_payloads(
+        &self,
+        expected: &Directory,
+        cap_bytes: u64,
+        now: WallTime,
+        dry_run: bool,
+        measure: bool,
+        projects: Option<&[provenant_core::ProjectId]>,
+        call: &Request<'_>,
+    ) -> Result<PayloadReport> {
+        if !self.root.metadata()?.same_identity(&expected.metadata()?) {
+            return Err(RunError::unsafe_path(".", PathCheck::Identity));
+        }
+        let low_water = (u128::from(cap_bytes) * 3 / 4) as u64;
+        let mut report = PayloadReport {
+            cap_bytes,
+            low_water_bytes: low_water,
+            ..Default::default()
+        };
+        let mut ledger = read_ledger(&self.root);
+        if measure {
+            self.measure_payloads(&mut ledger, now, &mut report, call)?;
+        }
+        let now_micros = now.as_micros();
+        let young =
+            |entry: &LedgerEntry| now_micros.saturating_sub(entry.finished_micros) < DAY_MICROS;
+        let mut total = ledger
+            .attempts
+            .values()
+            .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+        ledger.accounted_bytes = total;
+        ledger.pinned_bytes = ledger
+            .attempts
+            .values()
+            .filter(|entry| entry.pinned || young(entry))
+            .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+        let mut changed = measure;
+        if total > cap_bytes {
+            let mut order: Vec<(String, LedgerEntry)> = ledger
+                .attempts
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.bytes > 0
+                        && !entry.pinned
+                        && !young(entry)
+                        && projects.is_none_or(|projects| {
+                            projects.iter().any(|id| id.to_string() == entry.project)
+                        })
+                })
+                .map(|(id, entry)| (id.clone(), entry.clone()))
+                .collect();
+            order.sort_by(|a, b| (a.1.finished_micros, &a.0).cmp(&(b.1.finished_micros, &b.0)));
+            for (id, entry) in order {
+                if total <= low_water {
+                    break;
+                }
+                if call.cancel.is_cancelled() {
+                    break;
+                }
+                let path = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("runs/{}/attempts/{id}", entry.run));
+                match self.evict_attempt(&id, &entry, now, dry_run, &path) {
+                    Ok(true) => {
+                        total = total.saturating_sub(entry.bytes);
+                        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(entry.bytes);
+                        report.evicted.push(PayloadEviction {
+                            path,
+                            bytes: entry.bytes,
+                        });
+                        if !dry_run {
+                            ledger.attempts.remove(&id);
+                            ledger.reclaimed_bytes =
+                                ledger.reclaimed_bytes.saturating_add(entry.bytes);
+                            changed = true;
+                        }
+                    }
+                    Ok(false) => {
+                        if let Some(stored) = ledger.attempts.get_mut(&id) {
+                            stored.pinned = true;
+                            changed = true;
+                        }
+                    }
+                    Err(error) => issue(&mut report, path, &error),
+                }
+            }
+            ledger.accounted_bytes = total;
+            ledger.pinned_bytes = ledger
+                .attempts
+                .values()
+                .filter(|entry| entry.pinned || young(entry))
+                .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+        }
+        report.accounted_bytes = ledger.accounted_bytes;
+        report.pinned_bytes = ledger.pinned_bytes;
+        report.total_reclaimed_bytes = ledger.reclaimed_bytes;
+        if changed && !dry_run {
+            write_ledger(&self.root, &ledger)?;
+        }
+        Ok(report)
+    }
+
+    /// Rebuild the ledger from the terminal attempts that still hold payload.
+    fn measure_payloads(
+        &self,
+        ledger: &mut Ledger,
+        now: WallTime,
+        report: &mut PayloadReport,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let rows: Vec<(String, String, String, Vec<u8>)> = {
+            let mut query = self.db.prepare(
+                "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",
+            )?;
+            let rows = query.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut attempts = BTreeMap::new();
+        for (id, run, project, raw) in rows {
+            if call.cancel.is_cancelled() {
+                return Err(RunError::Cancelled);
+            }
+            let path = self
+                .context
+                .state_root
+                .as_path()
+                .join(format!("runs/{run}/attempts/{id}"));
+            let result = (|| -> Result<Option<LedgerEntry>> {
+                let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+                crate::reader::validate_attempt(&record)?;
+                if record.attempt_id.to_string() != id
+                    || record.run_id.to_string() != run
+                    || record.project_id.to_string() != project
+                {
+                    return Err(RunError::Validation("retention attempt index identity"));
+                }
+                let AttemptState::Terminal { finished_at, .. } = record.state else {
+                    return Ok(None);
+                };
+                let attempt = match self.attempt_dir(record.run_id, record.attempt_id, false) {
+                    Ok(attempt) => attempt,
+                    Err(error) if missing_directory(&error) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                match attempt.metadata_at(OsStr::new(EVICTED), false) {
+                    Ok(_) => return Ok(None),
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let (held, pinned) = match self.hold_attempt(&record, &id) {
+                    Ok(Some(held)) => {
+                        let pinned = held.continuing || pinned_payload(&held.attempt, &record)?;
+                        (Some(held), pinned)
+                    }
+                    Ok(None) => (None, true),
+                    // Reservations and held locks pin it; the payload still counts.
+                    Err(RunError::Validation(_))
+                    | Err(RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+                        ..
+                    })) => (None, true),
+                    Err(error) => return Err(error),
+                };
+                let bytes = payload_bytes(&attempt, &path);
+                drop(held);
+                Ok(Some(LedgerEntry {
+                    run: run.clone(),
+                    project: project.clone(),
+                    finished_micros: finished_at.as_micros(),
+                    bytes,
+                    pinned,
+                }))
+            })();
+            match result {
+                Ok(Some(entry)) => {
+                    attempts.insert(id, entry);
+                }
+                Ok(None) => {}
+                Err(error) => issue(report, path, &error),
+            }
+        }
+        ledger.attempts = attempts;
+        ledger.measured_micros = now.as_micros().max(1);
+        Ok(())
+    }
+
+    /// Evict one attempt's payload under its locks. `false` means custody
+    /// refused it on recheck and nothing changed.
+    fn evict_attempt(
+        &self,
+        id: &str,
+        entry: &LedgerEntry,
+        now: WallTime,
+        dry_run: bool,
+        path: &std::path::Path,
+    ) -> Result<bool> {
+        let raw: Vec<u8> = self.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
+            rusqlite::params![id, entry.run, entry.project],
+            |row| row.get(0),
+        )?;
+        let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+        crate::reader::validate_attempt(&record)?;
+        let AttemptState::Terminal { finished_at, .. } = record.state else {
+            return Ok(false);
+        };
+        if record.attempt_id.to_string() != id
+            || now.as_micros().saturating_sub(finished_at.as_micros()) < DAY_MICROS
+        {
+            return Ok(false);
+        }
+        let Some(held) = self.hold_attempt(&record, id)? else {
+            return Ok(false);
+        };
+        if held.continuing || pinned_payload(&held.attempt, &record)? {
+            return Ok(false);
+        }
+        let attempt = &held.attempt;
+        if dry_run {
+            return Ok(true);
+        }
+        // Resume is refused from here on, even if removal stops part-way.
+        seal(attempt, EXPIRED, b"{}\n", 64)?;
+        let mut removed = ProviderStateGc::default();
+        for name in [STATE, HISTORY, SCRATCH] {
+            retry_tombstones(attempt, &[name], false, &mut removed)?;
+            dispose(attempt, OsStr::new(name), false, &mut removed)?;
+        }
+        collect_logs(attempt, path, false, &mut removed)?;
+        if !removed.errors.is_empty() || !removed.kept.is_empty() {
+            return Err(RunError::Validation("payload removal incomplete"));
+        }
+        seal(attempt, EVICTED, b"{}\n", 64)?;
+        attempt.sync()?;
+        Ok(true)
     }
 }
 
@@ -2473,6 +2908,189 @@ mod tests {
             fs::read_to_string(attempt.join("provider-history/candidate-1/unknown-session"))?,
             "unknown transcript"
         );
+        Ok(())
+    }
+
+    struct Pair {
+        _temp: tempfile::TempDir,
+        context: ExecutionContext,
+        store: RunStore,
+        older: std::path::PathBuf,
+        newer: std::path::PathBuf,
+        newer_input: PreparedRun,
+    }
+
+    /// Two terminal attempts, each holding 256 KiB of provider state; the
+    /// first finished earlier.
+    fn pair() -> std::result::Result<Pair, Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let first = input();
+        let mut second = input();
+        second.run_id = provenant_core::RunId::from_bytes([14; 16]);
+        second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
+        second.attempts[0].attempt_id = AttemptId::from_bytes([16; 16]);
+        let mut paths = vec![];
+        for (index, prepared) in [&first, &second].into_iter().enumerate() {
+            store.create(prepared, &call)?;
+            let attempt = context.state_root.as_path().join(format!(
+                "runs/{}/attempts/{}",
+                prepared.run_id, prepared.attempts[0].attempt_id
+            ));
+            let candidate = attempt.join("provider-state/candidate-0");
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&candidate)?;
+            fs::write(candidate.join("provider.txt"), "codex")?;
+            fs::write(candidate.join("blob"), vec![7_u8; 262_144])?;
+            store.withdraw(
+                prepared.attempts[0].attempt_id,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                Outcome::Cancelled,
+                "fixture",
+                WallTime::from_micros(200 + index as i64 * 1_000)?,
+                &call,
+            )?;
+            paths.push(attempt);
+        }
+        let newer = paths.pop().ok_or("attempt")?;
+        let older = paths.pop().ok_or("attempt")?;
+        Ok(Pair {
+            _temp: temp,
+            context,
+            store,
+            older,
+            newer,
+            newer_input: second,
+        })
+    }
+
+    fn payload(
+        pair: &Pair,
+        cap: u64,
+        age: i64,
+        dry_run: bool,
+        measure: bool,
+    ) -> crate::Result<PayloadReport> {
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        pair.store.gc_payloads(
+            &Directory::open_anchor(pair.context.state_root.as_path())?,
+            cap,
+            WallTime::from_micros(200 + age).map_err(|_| RunError::Validation("fixture time"))?,
+            dry_run,
+            measure,
+            None,
+            &call,
+        )
+    }
+
+    #[test]
+    fn payload_pressure_evicts_oldest_first_down_to_low_water() -> TestResult {
+        let pair = pair()?;
+        let report = payload(&pair, 400_000, 8 * DAY_MICROS, false, true)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.low_water_bytes, 300_000);
+        assert_eq!(report.evicted.len(), 1, "{report:?}");
+        assert_eq!(report.evicted[0].path, pair.older);
+        assert!(report.reclaimed_bytes >= 262_144);
+        assert!(!pair.older.join("provider-state").exists());
+        assert!(pair.older.join("payload-evicted.json").exists());
+        assert!(pair.older.join("provider-state-expired.json").exists());
+        assert!(pair.newer.join("provider-state/candidate-0/blob").exists());
+        // Under the low-water mark nothing more goes, and a rerun is a no-op.
+        let again = payload(&pair, 400_000, 8 * DAY_MICROS, false, true)?;
+        assert!(again.evicted.is_empty());
+        assert_eq!(again.total_reclaimed_bytes, report.reclaimed_bytes);
+        assert_eq!(again.pinned_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_pressure_spares_recent_and_reports_them_pinned() -> TestResult {
+        let pair = pair()?;
+        let report = payload(&pair, 1_000, DAY_MICROS / 2, false, true)?;
+        assert!(report.evicted.is_empty());
+        assert!(report.accounted_bytes >= 524_288);
+        assert_eq!(report.pinned_bytes, report.accounted_bytes);
+        assert!(pair.older.join("provider-state/candidate-0/blob").exists());
+        assert!(pair.newer.join("provider-state/candidate-0/blob").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_pressure_never_evicts_private_git_or_dry_runs() -> TestResult {
+        let pair = pair()?;
+        fs::create_dir(pair.older.join("tmp"))?;
+        fs::write(pair.older.join("writer-objects.json"), "{}")?;
+        let preview = payload(&pair, 1_000, 8 * DAY_MICROS, true, true)?;
+        assert_eq!(preview.evicted.len(), 1, "{preview:?}");
+        assert_eq!(preview.evicted[0].path, pair.newer);
+        assert!(preview.pinned_bytes >= 262_144);
+        assert!(
+            pair.newer.join("provider-state").exists(),
+            "dry run removes nothing"
+        );
+        let report = payload(&pair, 1_000, 8 * DAY_MICROS, false, true)?;
+        assert_eq!(report.evicted.len(), 1);
+        assert!(pair.older.join("provider-state/candidate-0/blob").exists());
+        assert!(!pair.newer.join("provider-state").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_pressure_reads_the_ledger_without_measuring() -> TestResult {
+        let pair = pair()?;
+        let measured = payload(&pair, u64::MAX / 2, 8 * DAY_MICROS, false, true)?;
+        assert!(measured.evicted.is_empty());
+        // Growth after accounting is invisible to the ledger-only pass.
+        fs::write(
+            pair.older.join("provider-state/candidate-0/late"),
+            vec![1_u8; 1 << 20],
+        )?;
+        let report = payload(&pair, 400_000, 8 * DAY_MICROS, false, false)?;
+        assert_eq!(report.evicted.len(), 1, "{report:?}");
+        assert!(report.evicted[0].bytes < 600_000, "{report:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn evicted_payload_keeps_records_tails_and_refuses_resume() -> TestResult {
+        let pair = pair()?;
+        let directory = Directory::open_anchor(&pair.older)?;
+        crate::artifacts::seal(&directory, "stdout.log", &vec![b'x'; 200_000], 300_000)?;
+        let result = fs::read(pair.older.join("result.md"))?;
+        let report = payload(&pair, 400_000, 8 * DAY_MICROS, false, true)?;
+        assert_eq!(report.evicted.len(), 1, "{report:?}");
+        assert_eq!(fs::read(pair.older.join("stdout.log.tail"))?.len(), 65_536);
+        assert!(!pair.older.join("stdout.log").exists());
+        assert_eq!(fs::read(pair.older.join("result.md"))?, result);
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        assert!(matches!(
+            pair.store
+                .retain_provider_state(AttemptId::from_bytes([6; 16]), &call),
+            Err(RunError::ProviderStateExpired)
+        ));
+        assert!(
+            pair.store
+                .record(pair.newer_input.attempts[0].attempt_id, &call)
+                .is_ok()
+        );
+        assert!(
+            pair.store
+                .record(AttemptId::from_bytes([6; 16]), &call)
+                .is_ok()
+        );
+        let totals = payload_totals(&Directory::open_anchor(pair.context.state_root.as_path())?)
+            .ok_or("totals")?;
+        assert_eq!(totals.1, report.reclaimed_bytes);
         Ok(())
     }
 }
