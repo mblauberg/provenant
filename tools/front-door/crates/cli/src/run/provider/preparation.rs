@@ -3224,6 +3224,10 @@ pub(super) fn prepare_candidates(
             "max_continuations".into(),
             serde_json::json!(model_policy.lane.max_continuations.unwrap_or(0)),
         );
+        provider.extra.insert(
+            "resume_continuations".into(),
+            serde_json::json!(model_policy.lane.resume_continuations.unwrap_or(false)),
+        );
         provider.extra.insert("project_paths".into(), project_paths);
         provider.extra.insert(
             "argv_prompt_limit".into(),

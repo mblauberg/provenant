@@ -3312,14 +3312,19 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for fresh in [false, true] {
+    for (resume, fresh) in [(false, true), (true, false), (true, true)] {
         let rig = policy_codex_fixture()?;
         let cleanup = rig.process_cleanup();
         fs::write(
             rig.state.join("config.toml"),
             format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n",
-                if fresh { 1 } else { 100000 }
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n{}",
+                if resume && fresh { 1 } else { 100000 },
+                if resume {
+                    "[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6-luna'\n[domains.routing.model_policy.rules.policy.lane]\nresume_continuations=true\n"
+                } else {
+                    ""
+                }
             ),
         )?;
         let git = provenant_os::git::git_executable().ok_or("git")?;

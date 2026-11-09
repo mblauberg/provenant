@@ -1222,9 +1222,17 @@ impl RunStore {
                 temporary_alias: crate::short_temporary::ensure(&attempt),
             };
             // Keep retained state stable through provider preparation, as the
-            // manual continuation path does. Expiry selects a fresh session.
+            // manual continuation path does, only when model policy opts in.
+            // Expiry selects a fresh session.
             let automatic = record.continuation.as_deref() == Some("automatic");
-            let retained = if automatic {
+            let retained = if automatic
+                && resume
+                    .as_ref()
+                    .and_then(|prior| prior.applied_route.as_ref())
+                    .and_then(|route| route.extra.get("resume_continuations"))
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+            {
                 resume
                     .as_ref()
                     .and_then(|prior| self.retain_provider_state(prior.attempt_id, call).ok())

@@ -113,7 +113,7 @@ table. These are adjustable operating defaults:
 | Luna, Haiku 5.5 and Sonnet 5 | Cache read 0.10x |
 | DeepSeek v4.1 Flash on Go | 1M context, cache read 0.02x, no cache-write fee, output 4x input, read-heavy multiplier 3; 800k task-boundary window after at least 20 turns |
 | DeepSeek weekday peak | 2x price multiplier at 01–04 and 06–10 UTC, reducing its read-heavy preference to 1.5x |
-| All writer models | Up to two automatic continuations after an explicit `stopped_early` handoff |
+| All writer models | Up to two automatic continuations as fresh attempts after an explicit `stopped_early` handoff |
 | Gemini Flash and OpenCode free routes | Non-empty result check; one fallback to Luna at high effort for an empty answer |
 | All models | Advisory cache-read share target 90% |
 
@@ -156,11 +156,25 @@ Cache `ttl_seconds` and `min_prefix`, and lane `max_context` and `max_turns`, ar
 planning guidance supplied to the model. They do not change a provider's cache
 TTL or impose a process kill. Providers without an evidenced launch control
 receive guidance only. `stop_early_ok = false` asks for the shared schema v2 `handoff` fence. A
-`stopped_early` declaration automatically continues the retained session, or starts fresh
-on the same worktree when resume is unavailable, with `max_continuations`
+`stopped_early` declaration automatically starts a fresh attempt on the same worktree
+with the handoff and original brief, with `max_continuations`
 bounded to eight and defaulting to two across models. Two retries cover early stops
 without allowing an expensive open-ended chain. Set it to zero to disable automatic
-continuation; model and project overrides use the ordinary policy layers. `done` and `blocked` do not request automatic continuation.
+continuation; model and project overrides use the ordinary policy layers.
+`resume_continuations = true` opts a model into resuming its retained provider session
+when available, falling back to a fresh attempt when unavailable. The bundled
+`resume_continuations = false` default applies to every model. For example:
+
+```toml
+[[domains.routing.model_policy.rules]]
+model = "codex/gpt-6-luna"
+[domains.routing.model_policy.rules.policy.lane]
+resume_continuations = true
+```
+
+A writer that needs an owner decision or lacks a required capability declares
+`blocked`, never `stopped_early`, so it returns to the chair. `done` and `blocked`
+do not request automatic continuation.
 Missing or malformed blocks do not guess that more work is needed.
 
 Automatic writer continuation preserves each attempt in the same run, including

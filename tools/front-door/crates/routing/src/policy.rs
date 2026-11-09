@@ -84,6 +84,7 @@ pub struct LanePolicy {
     pub max_turns: Option<u64>,
     pub stop_early_ok: Option<bool>,
     pub max_continuations: Option<u8>,
+    pub resume_continuations: Option<bool>,
     pub read_only: Option<bool>,
     pub user_skills: Option<provenant_records::run::UserSkillsMode>,
 }
@@ -132,6 +133,7 @@ impl ModelPolicy {
             max_turns,
             stop_early_ok,
             max_continuations,
+            resume_continuations,
             read_only,
             user_skills,
         );
@@ -227,7 +229,7 @@ impl ModelPolicy {
             lines.push(format!("Finish or hand off within {turns} turns."));
         }
         if self.lane.stop_early_ok == Some(false) {
-            lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when work remains, or blocked when a decision or external change is needed.".into());
+            lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when work remains, or blocked when an owner decision, missing capability or external change prevents progress. Use blocked, not stopped_early, in those cases.".into());
         }
         if let Some(sections) = &self.result.sections
             && !sections.is_empty()
@@ -1057,6 +1059,21 @@ mod tests {
             );
         }
         assert_eq!(documented.as_str(), Some("2"));
+        assert_eq!(policies.defaults.lane.resume_continuations, Some(false));
+        assert_eq!(
+            knobs["host_model_policy_settings"]["settings"]["defaults.lane.resume_continuations"]["default"],
+            "false"
+        );
+        for model in crate::Catalogue::bundled()?.models() {
+            assert_eq!(
+                policies
+                    .effective(&model.model, None, at(0))
+                    .policy
+                    .lane
+                    .resume_continuations,
+                Some(false)
+            );
+        }
         assert!(!policies.rules.is_empty());
         let mut errors = Vec::new();
         policies.validate(&mut errors);
@@ -1107,6 +1124,7 @@ mod tests {
             [rules.policy.lane]
             stop_early_ok = true
             max_continuations = 0
+            resume_continuations = true
             [[rules]]
             adapter = "opencode"
             model_suffix = "-free"
@@ -1153,6 +1171,8 @@ mod tests {
             .policy;
         assert_eq!(terra.lane.stop_early_ok, Some(true));
         assert_eq!(terra.lane.max_continuations, Some(0));
+        assert_eq!(terra.lane.resume_continuations, Some(true));
+        assert_eq!(claude.lane.resume_continuations, Some(false));
         let free = policies
             .effective(
                 &ModelId::parse("opencode/unknown-free")?,
