@@ -99,7 +99,7 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"missing","coverage":{"nested":"bounded_tree_search","peer":"not_searched"}}),
         );
     };
-    let usage = serde_json::to_value(&record.usage).map_err(|_| Error::Encode)?;
+    let usage = serde_json::to_value(record.effective_usage()).map_err(|_| Error::Encode)?;
     let names = [
         "uncached_input",
         "cache_read",

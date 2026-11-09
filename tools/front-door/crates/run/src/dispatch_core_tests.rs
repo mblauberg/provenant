@@ -1312,3 +1312,50 @@ fn ledger_observes_without_locking_and_reclaims_without_a_new_guardian() -> Test
     assert!(store.set_child_wait_observed(other, false, &call, &probe)?);
     Ok(())
 }
+
+#[test]
+fn missing_prior_record_does_not_prevent_codex_finish() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let mut codex = route();
+    codex.provider = Some("codex".into());
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &codex,
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let mut record = store.claim(id, &clock, &call)?.ok_or("claim")?;
+    record.continuation = Some("automatic".into());
+    record.retry_of = Some(AttemptId::from_bytes([99; 16]));
+    store.db.execute(
+        "UPDATE attempts SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::attempt_bytes(&record)?, id.to_string()],
+    )?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    let observed = ExitObservation {
+        scope: RunStore::scope(&record),
+        ..exit()
+    };
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        codex_usage: Some(UsageRecord {
+            uncached_input: Some(42),
+            ..Default::default()
+        }),
+        ..Fake::default()
+    };
+    let finished = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(finished.state, AttemptState::Terminal { .. }));
+    assert_eq!(finished.usage.uncached_input, None);
+    assert_eq!(finished.usage.extra["session_total"]["uncached_input"], 42);
+    Ok(())
+}

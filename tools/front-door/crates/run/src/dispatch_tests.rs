@@ -225,6 +225,7 @@ pub(super) struct Fake {
     policy_task: Option<TaskId>,
     policy_resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub(super) observed: Option<RouteRecord>,
+    pub(super) codex_usage: Option<UsageRecord>,
     pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
@@ -291,7 +292,14 @@ impl Providers for Fake {
         _: &ExitObservation,
         _: &std::path::Path,
     ) -> std::result::Result<Decoded, String> {
-        assert_eq!(applied.provider, route().provider);
+        assert_eq!(
+            applied.provider.as_deref(),
+            Some(if self.codex_usage.is_some() {
+                "codex"
+            } else {
+                "fixture"
+            })
+        );
         assert_eq!(applied.model, route().model);
         assert_eq!(applied.effort, route().effort);
         self.decoded.set(self.decoded.get() + 1);
@@ -306,7 +314,7 @@ impl Providers for Fake {
                 matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired)
             }),
             observed_route: self.observed.clone(),
-            usage: UsageRecord::default(),
+            usage: self.codex_usage.clone().unwrap_or_default(),
             session: None,
             reason: None,
             partial_signals: self.partial.clone(),
