@@ -371,6 +371,17 @@ pub trait AttemptOwner {
             .map(|oid| oid.to_string()))
     }
 
+    /// Resolve a review base against the now-known subject. A host must
+    /// establish ancestry even for pinned IDs; unsupported hosts refuse.
+    fn resolve_review_merge_base(
+        &mut self,
+        _reference: &str,
+        _subject: &str,
+        _worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
+
     /// Pin the integration branch at the instant this node is first admitted.
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(None)
@@ -1284,31 +1295,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                 }
             }
-            // Pin named review bases while the admitted source locations are
-            // still the ones selected for this execution.
-            for index in 0..plan.nodes.len() {
-                if !checkpoint.nodes[index].review_base_pending {
-                    continue;
-                }
-                let node = &plan.nodes[index];
-                let location = source_worktree(node, &plan, &checkpoint, &positions);
-                if matches!(
-                    node.source,
-                    Some(SourceBinding::Node { .. } | SourceBinding::Head { .. })
-                ) && location.is_none()
-                {
-                    continue;
-                }
-                let reference = node
-                    .extra
-                    .get("review_base")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| GraphError::Invalid("node review base missing".into()))?;
-                let base = owner.resolve_review_base(reference, location).map_err(GraphError::Run)?
-                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
-                    .ok_or_else(|| GraphError::Refused(format!("node {}: review base could not be bound; correct the reference and rerun", node.id)))?;
-                transitions::apply_review_base(&mut checkpoint.nodes[index], base);
-            }
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             checkpoint
         }
@@ -1954,49 +1940,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 );
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
-            let requested_review_base = (node.access == AccessMode::ReadOnly)
-                .then(|| {
-                    node.extra
-                        .get("review_base")
-                        .and_then(serde_json::Value::as_str)
-                })
-                .flatten()
-                .filter(|base| !base.is_empty());
-            if let Some(reference) = requested_review_base {
-                let progress = &checkpoint.nodes[node_index];
-                if progress.review_base.is_none() && !progress.attempts.is_empty() {
-                    return Err(GraphError::BadCheckpoint {
-                        node: node.id.clone(),
-                        invariant: "node review base must be bound before its first attempt",
-                    });
-                }
-                if let Some(base) = &progress.review_base {
-                    if base.parse::<provenant_core::GitOid>().is_err() {
-                        return Err(GraphError::BadCheckpoint {
-                            node: node.id.clone(),
-                            invariant: "node review base must be a full object ID",
-                        });
-                    }
-                } else {
-                    let base = owner
-                        .resolve_review_base(
-                            reference,
-                            source_worktree(node, &plan, &checkpoint, &positions)
-                                .or(node.worktree.as_deref()),
-                        )
-                        .map_err(GraphError::Run)?;
-                    let Some(base) =
-                        base.filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
-                    else {
-                        return Err(GraphError::Refused(format!(
-                            "node {}: review base could not be bound; correct the reference and rerun",
-                            node.id
-                        )));
-                    };
-                    transitions::apply_review_base(&mut checkpoint.nodes[node_index], base);
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                }
-            }
             loop {
                 let (route_index, settlement_retries) = match decide_next_attempt(
                     node,
@@ -2310,23 +2253,96 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             break;
                         }
                     }
-                    if node.access == AccessMode::ReadOnly && template::review_node(node) {
+                    // The subject can be produced by an upstream node. Bind only
+                    // after source admission, and save the effective base before
+                    // any attempt so replay never re-resolves a moving reference.
+                    if node.access == AccessMode::ReadOnly {
                         let progress = &checkpoint.nodes[node_index];
-                        let base = progress
+                        let reference = node
+                            .extra
+                            .get("review_base")
+                            .and_then(serde_json::Value::as_str)
+                            .or_else(|| {
+                                progress
+                                    .source_commit
+                                    .as_ref()
+                                    .and(checkpoint.bound_review_base.as_deref())
+                            })
+                            .or_else(|| {
+                                progress
+                                    .source_commit
+                                    .as_ref()
+                                    .and(document.review_base.as_deref())
+                            });
+                        if progress.review_base.is_none() {
+                            if let Some(reference) = reference {
+                                if !progress.attempts.is_empty() {
+                                    return Err(GraphError::BadCheckpoint {
+                                        node: node.id.clone(),
+                                        invariant: "node review base must be bound before its first attempt",
+                                    });
+                                }
+                                let location =
+                                    source_worktree(node, &plan, &checkpoint, &positions)
+                                        .or(node.worktree.as_deref());
+                                let base = if let Some(subject) = progress.source_commit.as_deref()
+                                {
+                                    owner.resolve_review_merge_base(reference, subject, location)
+                                } else {
+                                    owner.resolve_review_base(reference, location)
+                                }
+                                .map_err(GraphError::Run)?;
+                                let Some(base) = base
+                                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                                else {
+                                    return Err(GraphError::Refused(format!(
+                                        "node {}: review base could not be bound; correct the reference and rerun",
+                                        node.id
+                                    )));
+                                };
+                                transitions::apply_review_base(
+                                    &mut checkpoint.nodes[node_index],
+                                    base,
+                                );
+                                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            }
+                        } else if progress
                             .review_base
                             .as_ref()
-                            .or(checkpoint.bound_review_base.as_ref());
-                        if base
-                            .zip(progress.source_commit.as_ref())
-                            .is_some_and(|(base, head)| base == head)
+                            .is_some_and(|base| base.parse::<provenant_core::GitOid>().is_err())
                         {
-                            transitions::fail_with(
-                                &mut checkpoint.nodes[node_index],
-                                "review_empty_range",
-                                "review range is empty; select a subject with changes".into(),
-                            );
-                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                            break;
+                            return Err(GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "node review base must be a full object ID",
+                            });
+                        }
+                        if template::review_node(node)
+                            || checkpoint.nodes[node_index].review_base.is_some()
+                        {
+                            let progress = &checkpoint.nodes[node_index];
+                            let failure = match (
+                                progress.review_base.as_ref(),
+                                progress.source_commit.as_ref(),
+                            ) {
+                                (None, Some(_)) => Some((
+                                    "review_base_unresolved",
+                                    "review requires an explicit base",
+                                )),
+                                (Some(base), Some(head)) if base == head => Some((
+                                    "review_empty_range",
+                                    "review range is empty; select a subject with changes",
+                                )),
+                                _ => None,
+                            };
+                            if let Some((code, message)) = failure {
+                                transitions::fail_with(
+                                    &mut checkpoint.nodes[node_index],
+                                    code,
+                                    message.into(),
+                                );
+                                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                break;
+                            }
                         }
                     }
                     let mut integration_valid = true;

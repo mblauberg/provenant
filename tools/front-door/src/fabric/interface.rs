@@ -1188,9 +1188,10 @@ impl Factory {
                 .ok_or(FacadeError::InvalidInput { detail: None })?;
             let head =
                 provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
-            let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
-            let base = provenant_run::review_merge_base_between(&git, &self.cwd, &head, &base)
-                .map_err(run_error)?;
+            let facts = provenant_confinement::worktrees::RepoFacts::default();
+            let base = self
+                .resolve_review_base_for_subject(&self.cwd, base, &head, &facts, cancel)?
+                .to_string();
             if base == head {
                 return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
             }

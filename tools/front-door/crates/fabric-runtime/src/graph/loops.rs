@@ -665,7 +665,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 writer_binding_pending: plans::writer(n),
                 review_base: None,
                 review_base_pending: n.access == AccessMode::ReadOnly
-                    && n.extra.contains_key("review_base"),
+                    && (n.extra.contains_key("review_base")
+                        || (n.source.is_some() && plan.review_base.is_some())),
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,

@@ -194,6 +194,15 @@ impl AttemptOwner for FakeOwner {
         }))
     }
 
+    fn resolve_review_merge_base(
+        &mut self,
+        reference: &str,
+        _subject: &str,
+        worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        self.resolve_review_base(reference, worktree)
+    }
+
     fn preparation_refusal_cause(
         &mut self,
         _: &AttemptKey,

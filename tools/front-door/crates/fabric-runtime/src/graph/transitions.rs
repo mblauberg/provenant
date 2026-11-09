@@ -558,7 +558,8 @@ pub(super) fn initial_checkpoint(
                 writer_binding_pending: plans::writer(node),
                 review_base: None,
                 review_base_pending: node.access == AccessMode::ReadOnly
-                    && node.extra.contains_key("review_base"),
+                    && (node.extra.contains_key("review_base")
+                        || (node.source.is_some() && document.review_base.is_some())),
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,

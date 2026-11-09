@@ -1354,6 +1354,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map(|base| Some(base.to_string()))
     }
 
+    fn resolve_review_merge_base(
+        &mut self,
+        reference: &str,
+        subject: &str,
+        worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        let directory = worktree.map_or_else(
+            || self.factory.cwd.clone(),
+            |path| self.factory.cwd.join(path),
+        );
+        self.factory
+            .resolve_review_base_for_subject(
+                &directory,
+                reference,
+                subject,
+                &self.repo_facts,
+                self.cancel,
+            )
+            .map(|base| Some(base.to_string()))
+    }
+
     fn take_launch_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.launch_warnings)
     }
@@ -2864,13 +2885,13 @@ impl BoundGraphOwner<'_> {
             } else {
                 None
             };
-            let review_subject_missing = provenant_fabric_runtime::graph::FileJournal::execution(
+            let execution = provenant_fabric_runtime::graph::FileJournal::execution(
                 &self.factory.context.roots.state,
                 self.factory.context.identity.project,
                 &key.graph_id,
             )
-            .map_err(graph_journal_error)?
-            .is_some_and(|execution| {
+            .map_err(graph_journal_error)?;
+            let review_subject_missing = execution.as_ref().is_some_and(|execution| {
                 execution
                     .document
                     .extra
@@ -2878,17 +2899,9 @@ impl BoundGraphOwner<'_> {
                     .and_then(|v| v.as_bool())
                     == Some(true)
             });
-            let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
-                provenant_fabric_runtime::graph::FileJournal::execution(
-                    &self.factory.context.roots.state,
-                    self.factory.context.identity.project,
-                    &key.graph_id,
-                )
-                .map_err(graph_journal_error)?
-                .and_then(|execution| execution.review_base)
-            } else {
-                None
-            };
+            let ordinary_reader = execution
+                .as_ref()
+                .is_some_and(|execution| !graph_review_node(&execution.document, &key.node_id));
             // Writer separation is mandatory; sibling diversity remains a preference.
             let enforced = node.require_distinct && !excluded_families.is_empty();
             let mut avoided_families = excluded_families;
@@ -2921,18 +2934,19 @@ impl BoundGraphOwner<'_> {
             } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                 && source_commit.is_some()
             {
-                node.review_base
-                    .map(str::to_owned)
-                    // A review base recorded with the graph execution comes next,
-                    // then the integration base.
-                    .or_else(|| review_base.map(|base| base.to_string()))
-                    .or_else(|| {
-                        self.integration_base
-                            .and_then(|bases| bases.integration)
-                            .map(|base| base.to_string())
-                    })
-                    // Preserve the prior fallback without requiring origin/HEAD.
-                    .or_else(|| source_commit.map(str::to_owned))
+                // Ordinary source readers may inspect the source itself. Review
+                // nodes must receive the effective base journaled by runtime.
+                let base = node
+                    .review_base
+                    .or_else(|| ordinary_reader.then_some(source_commit).flatten());
+                Some(
+                    base.ok_or_else(|| {
+                        FacadeError::invalid(InvalidInputDetail::Field(
+                            "review requires a bound review base".into(),
+                        ))
+                    })?
+                    .to_owned(),
+                )
             } else if foreign_writer {
                 source_commit.map(str::to_owned)
             } else {
@@ -3787,6 +3801,103 @@ mod cloud_refusal_tests {
 
 #[cfg(test)]
 mod journal_error_tests {
+    #[test]
+    fn graph_review_uses_merge_base_of_advanced_named_ref() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::*;
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+
+        // Stop at the persisted launch boundary so this exercises graph binding
+        // with the real Git owner without starting a provider.
+        #[derive(Default)]
+        struct BeforeLaunch(Option<graph::GraphCheckpoint>);
+        impl GraphJournal for BeforeLaunch {
+            type Error = std::io::Error;
+            fn load(&mut self, _: &str) -> Result<Option<graph::GraphCheckpoint>, Self::Error> {
+                Ok(self.0.clone())
+            }
+            fn save(&mut self, checkpoint: &graph::GraphCheckpoint) -> Result<(), Self::Error> {
+                self.0 = Some(checkpoint.clone());
+                if checkpoint.nodes[0].review_base.is_some() {
+                    return Err(std::io::Error::other("stop before provider launch"));
+                }
+                Ok(())
+            }
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let fork = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "subject"])?;
+        let subject = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", &fork])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "advanced target"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+        };
+        let cancel = CancelToken::new();
+        let mut owner = BoundGraphOwner {
+            writer_launch_budget: None,
+            admission_timeout: None,
+            factory: &factory,
+            repo_facts: Default::default(),
+            launch_warnings: Vec::new(),
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        for node_base in [false, true] {
+            let mut document = serde_json::json!({
+                "schema_version": 2, "graph_id": format!("advanced-review-{node_base}"),
+                "nodes": [{"id":"review", "role":"lens.correctness-spec",
+                    "prompt":"Review subject", "access":"read_only", "route":{"alias":"senior"},
+                    "source":{"type":"commit", "commit":subject}}]
+            });
+            if node_base {
+                document["nodes"][0]["review_base"] = serde_json::json!("review-target");
+            } else {
+                document["review_base"] = serde_json::json!("review-target");
+            }
+            let document: graph::GraphDocument = serde_json::from_value(document)?;
+            let mut journal = BeforeLaunch::default();
+            let result = graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+            );
+            assert!(matches!(result, Err(graph::GraphError::Journal(_))));
+            let checkpoint = journal.0.ok_or("checkpoint was not saved")?;
+            assert_eq!(
+                checkpoint.nodes[0].review_base.as_deref(),
+                Some(fork.as_str())
+            );
+            assert_eq!(
+                checkpoint.nodes[0].source_commit.as_deref(),
+                Some(subject.as_str())
+            );
+            assert!(checkpoint.nodes[0].attempts.is_empty());
+        }
+        Ok(())
+    }
+
     #[test]
     fn child_directory_preserves_scratch_and_refuses_state_and_credentials()
     -> Result<(), Box<dyn std::error::Error>> {

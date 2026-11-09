@@ -159,6 +159,25 @@ impl Factory {
             .map_err(|_| FacadeError::StateCorrupt)
     }
 
+    /// Resolve a named base and compare it against the pinned review subject.
+    /// Call only after the subject exists; persist the result for replay.
+    fn resolve_review_base_for_subject(
+        &self,
+        directory: &Path,
+        reference: &str,
+        subject: &str,
+        facts: &provenant_confinement::worktrees::RepoFacts,
+        cancel: &CancelToken,
+    ) -> Result<provenant_core::GitOid, FacadeError> {
+        let base = self.resolve_base(directory, reference, facts, cancel)?;
+        let git = provenant_os::git::git_executable()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        provenant_run::review_merge_base_between(&git, directory, subject, &base.to_string())
+            .map_err(run_error)?
+            .parse()
+            .map_err(|_| FacadeError::StateCorrupt)
+    }
+
     /// Reopen a retained graph directory without borrowing the caller's checkout.
     pub(crate) fn for_graph_directory(&self, directory: &Path) -> Result<Self, FacadeError> {
         let context = Context::open(self.context.roots.clone(), &self.home, directory)
