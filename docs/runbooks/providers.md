@@ -597,9 +597,10 @@ scripts, prompts or result artifacts.
 
 ## Cloud placement
 
-Cloud jobs run read-only verification. Install and log in to the selected
-provider CLI, and ensure the local Git `origin` refers to the intended
-repository. Do not put credentials in prompts or placement settings.
+Cloud jobs run either verification or a remote writer. Install and log in to
+the selected provider CLI, and ensure the local Git `origin` refers to the
+intended repository. Do not put credentials in prompts or placement settings;
+the provider environment's own GitHub access does the pushing.
 
 Provide the placement as a per-run `--set` value on the default task template.
 For hosted Claude, omit `environment`:
@@ -614,12 +615,37 @@ For Codex, supply its environment name or full ID:
 provenant run --file brief.md --mode read-only --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=1800}" --explain
 ```
 
+A writer takes `--mode worktree-write` and may take a delivery target:
+
+```sh
+provenant run --file brief.md --mode worktree-write --deliver push --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=3600}" --explain
+```
+
 Replace the repository, branch, model and environment with your own values.
+`branch` is the base branch the job starts from and may merge. A writer also
+gets a named branch, `work_branch`: set it in the placement, or dispatch
+takes the delivery branch, else the writer's lane branch. Dispatch refuses a
+writer without a named branch, a named branch equal to the base branch, and
+`work_branch` on a read-only task.
 Claude accepts an optional `environment` for a self-hosted pool (`ccpool_...`);
 omitting it selects hosted Claude. Remove `--explain` to submit. Explain shows
 the compiled node and placement without submitting a job. The graph runs at
 the current checkout's commit, so check out the intended commit before
-submitting. Cloud jobs cannot take a writer or delivery target.
+submitting, and push that commit to `origin` so the VM can fetch it.
+
+A writer job checks out the full starting commit on the named branch, may
+merge `origin/<base>`, commits, and pushes with `git push origin
+HEAD:refs/heads/<work_branch>`, never with force and never to the default
+branch. It may run heavy proof on the VM. Changed tracked files are its
+normal output. The owner settles a writer only after it verifies the push on
+`origin`: `git ls-remote` shows the reported branch at the reported full
+head, the head fetches with object checks, and it descends from the starting
+commit. A refused check fails with `cloud writer push not verified: ...`; an
+unreadable remote is observed again. The verified branch and head become the
+lane's result, so graph pull request and land nodes work on them. The owner
+does not itself push, open a pull request or integrate for a cloud writer.
+The push starts the required CI on that exact head; a cloud result never
+replaces it.
 
 ```sh
 provenant reconcile --id ATTEMPT_ID
@@ -632,13 +658,23 @@ The owner saves the intent before submission and the remote ID before waiting.
 After a restart, `reconcile` observes saved jobs; `status` and `output`
 show the saved observation and its result. Cloud lane states are prefixed
 `cloud_`. In JSON status, `cloud_state` and `cloud_jobs` describe the remote
-job; the underlying local attempt has no process exit. A changed tracked file
-makes the result fail. The views report the requested model separately from an
-unknown or different observed model. Unknown cost produces a warning.
+job; the underlying local attempt has no process exit. The views show the base
+branch, named branch, pushed branch and head, the session URL where known, and
+the requested model beside the observed model and `observed_model_status`.
+Unknown cost produces a warning.
 
-Claude has no status CLI: an unfinished job stays running until its deadline,
-then becomes unknown. It publishes a result-only commit on a `claude/*`
-branch, which the owner removes on a best-effort basis after saving the result.
+Claude has no status CLI. Its status signal is the job's own result commit:
+the job pushes a commit, empty if needed, whose message ends with
+`Provenant-Cloud-Result: <one-line JSON>`. The owner lists `claude/*` and the
+named branch with `git ls-remote`, fetches a new tip with object checks, and
+reads the trailer from the tip's message, so a finished job settles at the
+next `reconcile`. Hosted Claude may allow only `claude/*` branch names; the
+job then pushes its `claude/` branch and the record shows that real branch.
+An unfinished job past its deadline becomes `cloud_unknown` with
+`open https://claude.ai/code/session_<id> to read the session`. A
+verification job's result-only branch is removed on a best-effort basis after
+saving the result; a writer's branch is kept. The trailer commit stays in a
+writer's history. Submission passes `--model` and, when set, `--effort`.
 `claude --cloud` refuses a non-terminal (`Error: --cloud requires an
 interactive terminal.`, exit 1), so the owner runs only the submit under a
 pseudo-terminal through `script(1)` with stdin closed. Captured on Claude Code
@@ -657,7 +693,9 @@ An uncertain submission, including unparseable successful output, stays
 `submitting` for recovery.
 
 Codex defaults to the official `codex cloud exec/status/list` transport and
-returns the result in its cloud diff. It cannot request model or effort.
+returns the result as an uncommitted `.provenant-cloud-result.json` in its
+cloud diff; other changed files are allowed. It cannot request model or
+effort, so the request states them and the record reports what was observed.
 On the real host checked on 8 November 2026, official codex-cli 0.167.0 could
 not list a ready environment served by the newer cloud thread API; submission
 reported `no cloud environments are available for this workspace`.
@@ -673,14 +711,16 @@ command = "codex-cloud-task"
 The command is optional and defaults to `codex-cloud-task`; another installed
 client may implement the same interface. See
 [configuration](configuration.md#codex-cloud-transport).
-Thread submission runs `submit --env NAME_OR_ID --read-only` with the prompt
-on stdin. Observation uses `status THREAD_ID`: queued and in-progress turns
-remain running, completed turns supply the last agent message, and failed or
-cancelled turns report their detail. The thread client has no file-diff
-operation, so the job must include the contents of
-`.provenant-cloud-result.json` as JSON in its final agent message. The same
-job ID, nonce and commit checks apply; tracked-file changes are self-reported
-through `tracked_files_changed` rather than verified against a returned diff.
+Thread submission runs `submit --env NAME_OR_ID` with the prompt on stdin;
+Provenant adds no `--read-only`. Observation uses `status THREAD_ID`. The job
+puts its result JSON, with `branch` and `head` for a writer, in its final
+agent message. A completed turn supplies that message. A turn still reported
+in progress settles as soon as its final-answer message carries a result that
+passes this job's checks, because the service can post the final answer and
+leave the turn in progress; otherwise queued and in-progress turns remain
+running. Failed, cancelled and interrupted turns report their detail. The same
+job ID, nonce, commit and push checks apply. The thread's model is the
+observed model.
 The client's `list` returns environments, so it cannot recover a lost
 submission response by correlation marker. Such a submission remains unknown
 instead of being retried automatically.
@@ -690,7 +730,8 @@ reports a bounded excerpt of what was seen.
 
 One real verification run per provider was captured on 8 and 9 November 2026.
 Both ran `scripts/cloud-verify` for `test-check-adr-index` and settled
-`cloud_passed` with exit status 0, no failed tests and no tracked-file changes:
+`cloud_passed` with exit status 0 and no failed tests, under the earlier
+read-only rules:
 
 | Provider | Transport | Commit | Requested model | Observed model | Time |
 |---|---|---|---|---|---|
@@ -701,9 +742,9 @@ Neither recorded result carried a token count, so tokens per verified run
 remain unmeasured.
 
 The Claude CLI selects a hosted environment from the account, and its
-`--environment` option names only self-hosted pools. The requested model is a
-prompt instruction there, so compare `observed_model_status` before relying on
-a model. If the account's environment has a setup script tied to another
+`--environment` option names only self-hosted pools. The requested model is passed
+as `--model`, but that option is not yet confirmed on a live `--cloud` job, so
+compare `observed_model_status` before relying on a model. If the account's environment has a setup script tied to another
 repository, the remote session stops before Claude Code starts and pushes no
 result branch. Provenant cannot see that failure and reports `cloud_unknown`
 after the deadline; open the session URL to read the setup log.
@@ -711,7 +752,10 @@ after the deadline; open the session URL to read the setup log.
 The job can use `scripts/cloud-verify` to run its named verification command.
 It requires the job ID, nonce and full commit from the request, a test name,
 a local log file and a credential-free log location. It writes
-`.provenant-cloud-result.json` with the exit status and tracked-file status;
-`--observed-model` may record a model visible to the VM. The owner checks the
+`.provenant-cloud-result.json` with the exit status, the starting commit, the
+head after the command and the current branch; `--commit` must be the full
+starting commit and an ancestor of `HEAD`, so a writer can run it after
+committing. `--trailer` also prints the `Provenant-Cloud-Result:` line for a
+Claude result commit. `--observed-model` may record a model visible to the VM. The owner checks the
 job ID, nonce and commit. The nonce is advisory, not a credential or proof of
 origin. Cloud results do not replace exact-head required CI.

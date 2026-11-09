@@ -1533,6 +1533,42 @@ action where the host has an identifiable PR.
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
 - Owner: `crates/run/src/delivery.rs`, `crates/records/src/run.rs`, `crates/cli/src/run.rs`
 
+## Cloud writers
+
+A task with `attempt.cloud` runs on a provider VM instead of a local
+supervisor ([ADR 0038](../adr/0038-cloud-job-ownership.md); operator steps in
+[providers](../runbooks/providers.md#cloud-placement)). Any access mode may
+use it, including `worktree-write` and a delivery target. Dispatch seals the
+placement with the request. For a writer it also seals the named branch
+`work_branch`: an explicit `attempt.cloud.work_branch`, else the delivery
+branch, else the writer's own branch. It refuses a writer without a named
+branch, a named branch equal to the base branch, and a `work_branch` on a
+task without a writer.
+
+The job starts from the task's pinned full commit on the named branch. It may
+merge the base branch, commits and pushes without force to the named branch,
+and may run heavy proof there. Changed tracked files are a writer's normal
+output and never fail a result. Where the platform restricts branch names,
+as hosted Claude does with `claude/*`, the job pushes the branch it is allowed
+and the result names that branch.
+
+The owner settles a writer only after it verifies the push on `origin`: the
+reported branch exists, its head is the reported full head, and that head
+descends from the starting commit. A refused check fails the job with its
+reason; an unreadable or failed remote read settles nothing and is observed
+again. The verified branch and head become the graph node's `branch` and
+`commit` outputs, so pull request and land nodes work on the remote branch.
+The owner does not push, open a pull request or integrate for a cloud writer.
+A verification job without a writer has no named branch; Claude's
+result-only branch is deleted after the result is saved.
+
+Status and `cloud_jobs` show the base branch, named branch, pushed branch and
+head, session URL where the provider has one, and the requested and observed
+model with `observed_model_status` (`matches`, `differs` or `unknown`). A
+difference is shown, never hidden. Credentials never enter the prompt,
+placement or record. A cloud result never replaces required CI on the exact
+head; the push is what starts that CI.
+
 ## Fresh continuation fallback
 
 Resume defaults to a fresh attempt when no provider/session was launched or
