@@ -432,7 +432,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `"private"` |
-| `effect` | `"Whether a pinned read-only lane gets an immutable source view (private) or reads the live checkout (shared, no snapshot). Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with &#96;attempt.isolation&#96; or the &#96;light&#96; preset (&#96;attempt.preset&#96;), or per run with --knob."` |
+| `effect` | `"Whether a pinned read-only lane gets an immutable source view (private) or reads the live checkout (shared, no snapshot). Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with &#96;attempt.isolation&#96; or the &#96;light&#96; preset (&#96;attempt.preset&#96;),."` |
 | `reader` | `"tools/front-door/src/fabric/owner.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."` |
@@ -557,7 +557,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 |---|---|
 | `default` | `"delivery"` |
 | `effect` | `"Delivery requested by a writer always runs and records its outcome. Set per graph node with &#96;attempt.receipts&#96; or the &#96;light&#96; preset."` |
-| `reader` | `"tools/front-door/src/fabric/owner.rs"` |
+| `reader` | `"tools/front-door/crates/run/src/holder.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"none suits read-only or scratch work; nothing is published or recorded as delivered."` |
 | `type` | `"enum"` |

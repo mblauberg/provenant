@@ -500,7 +500,7 @@
       "default": "private",
       "status": "wired",
       "reader": "tools/front-door/src/fabric/owner.rs",
-      "effect": "Whether a pinned read-only lane gets an immutable source view (private) or reads the live checkout (shared, no snapshot). Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`), or per run with --knob.",
+      "effect": "Whether a pinned read-only lane gets an immutable source view (private) or reads the live checkout (shared, no snapshot). Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`),.",
       "trade_off": "shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."
     },
     "lanes.supervision": {
@@ -517,7 +517,7 @@
       "values": ["delivery", "none"],
       "default": "delivery",
       "status": "wired",
-      "reader": "tools/front-door/src/fabric/owner.rs",
+      "reader": "tools/front-door/crates/run/src/holder.rs",
       "effect": "Delivery requested by a writer always runs and records its outcome. Set per graph node with `attempt.receipts` or the `light` preset.",
       "trade_off": "none suits read-only or scratch work; nothing is published or recorded as delivered."
     },
