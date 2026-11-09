@@ -9,6 +9,37 @@ and resume trigger. Keep PR references as `PR #N` for the derived digest.
 Link live lanes and current criteria back to their owners instead of copying
 their changing status. A checkpoint grants no new authority.
 
+Open the checkpoint with the typed standing record in its frontmatter. Every
+field is required; empty lists are explicit:
+
+```yaml
+---
+provenant_standing:
+  schema_version: 1
+  goal: "Land issue 1234 with CI green"
+  grants:
+    - scope: "Land lane PRs into main once CI passes"
+      source: "owner:https://github.com/org/repo/issues/1234#issuecomment-1"
+      expires: none
+  obligations: ["Report each settled lane"]
+  waiting_on_owner: []
+---
+```
+
+A grant's `source` is one token, `owner:<ref>` for where the owner gave it
+(an issue comment, a transcript turn) or `rule:<ref>` for a durable rule (a
+repository path and anchor). Prose, or no source, shows the grant as
+unverified. `expires` is an RFC 3339 instant or `none`; an expired grant is not
+restored. Keep the scope as the owner bounded it. `waiting_on_owner` names each
+specific ask, or is empty when nothing waits. A save replaces the whole file, so
+carry the record forward in every save, dropping grants and asks that ended.
+The frontmatter shares an 8 KiB bound with the summary.
+
+Hooks restore the record ahead of the prose at session start, after
+compaction and in the new session after an account switch, and `provenant
+status` reports what waits on the owner. The session skill states how to act
+on it.
+
 Save through `provenant workflow session save SESSION --file checkpoint.md`,
 selecting the actual `--client` when needed to preserve the chair identity.
 Use the host-supplied key, never another session's latest file. Lanes cannot

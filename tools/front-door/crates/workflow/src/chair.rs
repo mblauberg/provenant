@@ -13,6 +13,9 @@ pub struct Handoff {
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
     pub state_handoff_file: Option<PathBuf>,
+    /// The source session's project, so the new session restores its
+    /// standing section from the source checkpoint.
+    pub project: Option<provenant_core::ProjectId>,
     pub created_unix: i64,
     pub open_lanes: Vec<String>,
     pub target_account: Option<String>,
@@ -35,6 +38,15 @@ pub struct HandoffStore {
 impl Handoff {
     fn live(&self, now: i64) -> bool {
         (0..=3600).contains(&now.saturating_sub(self.created_unix))
+    }
+    /// The source checkpoint's standing section as the consuming session sees
+    /// it: `None` when there is no project, checkpoint or standing section.
+    pub fn standing(&self, root: &StateRoot, now: provenant_core::UtcMicros) -> Option<String> {
+        let checkpoint =
+            crate::session::SessionStore::new(root.clone(), self.project?, self.session_id.clone())
+                .read()
+                .ok()??;
+        crate::session::restore_standing(&checkpoint.markdown, now, crate::session::STANDING_LIMIT)
     }
 }
 impl HandoffStore {
@@ -237,6 +249,7 @@ mod tests {
             cwd: base.clone(),
             transcript_path: Some(base.join("transcript.jsonl")),
             state_handoff_file: None,
+            project: None,
             created_unix: 1000,
             open_lanes: vec!["run/task/attempt".into()],
             target_account: Some("target".into()),

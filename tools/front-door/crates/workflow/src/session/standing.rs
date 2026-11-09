@@ -1,0 +1,309 @@
+//! The chair's standing record: goal, standing grants, open obligations and
+//! what waits on the owner. It is a typed `provenant_standing` key in the
+//! checkpoint frontmatter, beside `provenant_summary`, so it is saved, revised
+//! and restored with the checkpoint itself.
+//!
+//! The record never creates authority. A grant is a pointer: `owner:<ref>`
+//! names where the owner gave it and `rule:<ref>` a durable rule. A grant
+//! without such a source is shown as unverified and is not acted on; an
+//! expired one is not restored. Landing, publishing and chair-switching gates
+//! still check held authority themselves.
+use super::summary::{HEADER_LIMIT, empty_header, header_end, parse_header, strip_root_key};
+use provenant_core::UtcMicros;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const STANDING_KEY: &str = "provenant_standing";
+/// The most a restored standing section contributes to hook output. It shares
+/// the intent section's budget, so the hook output bound is unchanged.
+pub const STANDING_LIMIT: usize = 1536;
+const HEADING: &str = "## Standing";
+/// Longest grant scope, ask or obligation shown; a longer grant scope is not
+/// shown in part, since a cut scope could read as a wider grant.
+const ITEM_LIMIT: usize = 240;
+const SOURCE_LIMIT: usize = 512;
+/// Most entries shown per list before the rest are counted.
+const LIST_LIMIT: usize = 8;
+
+/// The typed section. Every field is required, so an omitted
+/// `waiting_on_owner` never reads as "nothing waits".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Standing {
+    pub schema_version: u64,
+    pub goal: String,
+    pub grants: Vec<Grant>,
+    pub obligations: Vec<String>,
+    /// The specific asks waiting on the owner; empty means nothing waits.
+    pub waiting_on_owner: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grant {
+    pub scope: String,
+    /// `owner:<ref>` or `rule:<ref>`, one token with no spaces. Anything
+    /// else, including prose, leaves the grant unverified.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// An RFC 3339 instant, or absent or `none` for a grant without expiry.
+    #[serde(default)]
+    pub expires: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantState {
+    Active,
+    Unverified,
+    Expired,
+}
+
+impl Grant {
+    pub fn state(&self, now: UtcMicros) -> GrantState {
+        let expiry = match self.expires.as_deref().map(str::trim) {
+            None | Some("none") => None,
+            Some(text) => match UtcMicros::parse_rfc3339(text) {
+                Ok(at) => Some(at),
+                Err(_) => return GrantState::Unverified,
+            },
+        };
+        if expiry.is_some_and(|at| at <= now) {
+            return GrantState::Expired;
+        }
+        let sourced = self.source.as_deref().is_some_and(|source| {
+            source.len() <= SOURCE_LIMIT
+                && !source.chars().any(|c| c.is_whitespace() || c.is_control())
+                && source
+                    .split_once(':')
+                    .is_some_and(|(kind, at)| matches!(kind, "owner" | "rule") && !at.is_empty())
+        });
+        let shown = !self.scope.trim().is_empty() && self.scope.len() <= ITEM_LIMIT;
+        if sourced && shown {
+            GrantState::Active
+        } else {
+            GrantState::Unverified
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("invalid or unsupported checkpoint standing section")]
+pub struct StandingError;
+
+/// Read the standing section from YAML frontmatter. A checkpoint without one
+/// is distinct from an invalid one.
+pub fn parse_standing(markdown: &str) -> Result<Option<Standing>, StandingError> {
+    let Some(end) = header_end(markdown).map_err(|_| StandingError)? else {
+        return Ok(None);
+    };
+    if end > HEADER_LIMIT {
+        return Err(StandingError);
+    }
+    if empty_header(markdown, end) {
+        return Ok(None);
+    }
+    let mut root = parse_header(markdown, end).map_err(|_| StandingError)?;
+    let Some(node) = root.remove(STANDING_KEY) else {
+        return Ok(None);
+    };
+    let standing: Standing = serde_json::from_value(node).map_err(|_| StandingError)?;
+    if standing.schema_version != 1 {
+        return Err(StandingError);
+    }
+    Ok(Some(standing))
+}
+
+/// The checkpoint without its standing section, for the prose excerpt: the
+/// section is restored on its own and is never shown raw beside it.
+pub fn without_standing(markdown: &str) -> String {
+    strip_root_key(markdown, STANDING_KEY).unwrap_or_else(|_| markdown.to_owned())
+}
+
+fn item(text: &str) -> String {
+    super::clean(text.trim(), ITEM_LIMIT)
+}
+
+fn list(lines: &mut Vec<String>, items: impl ExactSizeIterator<Item = String>) {
+    let total = items.len();
+    lines.extend(items.take(LIST_LIMIT).map(|text| format!("- {text}")));
+    if total > LIST_LIMIT {
+        lines.push(format!("- and {} more", total - LIST_LIMIT));
+    }
+}
+
+/// The section a restored chair sees, in whole lines within `limit` bytes.
+/// `None` when the checkpoint has no standing section.
+pub fn restore_standing(markdown: &str, now: UtcMicros, limit: usize) -> Option<String> {
+    let mut lines = vec![HEADING.to_owned()];
+    match parse_standing(markdown) {
+        Ok(None) => return None,
+        Err(_) => lines.push(
+            "The checkpoint's standing section is invalid, so no goal, grant or obligation is restored from it. Act on no grant from it until it is saved again with its source.".into(),
+        ),
+        Ok(Some(standing)) => {
+            lines.push("Restored from the typed record. Each grant points at where the owner gave it or at a durable rule and adds no authority; landing, publishing and chair-switch gates still check held authority.".into());
+            lines.push(format!(
+                "Goal: {}",
+                if standing.goal.trim().is_empty() {
+                    "not recorded".into()
+                } else {
+                    item(&standing.goal)
+                }
+            ));
+            if standing.waiting_on_owner.is_empty() {
+                lines.push("Waiting on owner: nothing".into());
+            } else {
+                lines.push("Waiting on owner:".into());
+                list(&mut lines, standing.waiting_on_owner.iter().map(|ask| item(ask)));
+            }
+            let by = |wanted| {
+                standing
+                    .grants
+                    .iter()
+                    .filter(move |grant| grant.state(now) == wanted)
+            };
+            let active: Vec<String> = by(GrantState::Active)
+                .map(|grant| {
+                    format!(
+                        "{} (source {}; expires {})",
+                        item(&grant.scope),
+                        super::clean(grant.source.as_deref().unwrap_or_default(), SOURCE_LIMIT),
+                        super::clean(grant.expires.as_deref().unwrap_or("none"), 64)
+                    )
+                })
+                .collect();
+            lines.push(if active.is_empty() {
+                "Standing grants: none".into()
+            } else {
+                "Standing grants (act within these without asking):".into()
+            });
+            list(&mut lines, active.into_iter());
+            let unverified: Vec<String> = by(GrantState::Unverified)
+                .map(|grant| {
+                    if grant.scope.len() > ITEM_LIMIT {
+                        "a grant whose scope is too long to show".into()
+                    } else {
+                        item(&grant.scope)
+                    }
+                })
+                .collect();
+            if !unverified.is_empty() {
+                lines.push("Unverified grants (no owner or rule source, or unreadable; do not act on these):".into());
+                list(&mut lines, unverified.into_iter());
+            }
+            let expired = by(GrantState::Expired).count();
+            if expired > 0 {
+                lines.push(format!("Expired grants not restored: {expired}"));
+            }
+            if standing.obligations.is_empty() {
+                lines.push("Open obligations: none".into());
+            } else {
+                lines.push("Open obligations:".into());
+                list(&mut lines, standing.obligations.iter().map(|text| item(text)));
+            }
+        }
+    }
+    let cut = "[standing cut; read the checkpoint for the rest]";
+    let mut text = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let room = if index + 1 == lines.len() {
+            0
+        } else {
+            cut.len() + 1
+        };
+        if text.len() + line.len() + 1 + room > limit {
+            text.push_str(cut);
+            return Some(text);
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    Some(text.trim_end().to_owned())
+}
+
+/// What `provenant status` reports as waiting on the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerWait {
+    /// No chair checkpoint, or one without a standing section.
+    NotRecorded,
+    Invalid,
+    Nothing,
+    Asks(Vec<String>),
+}
+
+impl OwnerWait {
+    pub fn from_checkpoint(markdown: Option<&str>) -> Self {
+        match markdown.map(parse_standing) {
+            None | Some(Ok(None)) => Self::NotRecorded,
+            Some(Err(_)) => Self::Invalid,
+            Some(Ok(Some(standing))) if standing.waiting_on_owner.is_empty() => Self::Nothing,
+            Some(Ok(Some(standing))) => Self::Asks(
+                standing
+                    .waiting_on_owner
+                    .iter()
+                    .map(|ask| item(ask))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub fn line(&self) -> String {
+        match self {
+            Self::NotRecorded => {
+                "waiting on owner: not recorded (no standing section in the chair checkpoint)"
+                    .into()
+            }
+            Self::Invalid => {
+                "waiting on owner: unknown (the chair checkpoint's standing section is invalid)"
+                    .into()
+            }
+            Self::Nothing => "waiting on owner: nothing".into(),
+            Self::Asks(asks) => {
+                let mut shown: Vec<_> = asks.iter().take(LIST_LIMIT).cloned().collect();
+                if asks.len() > LIST_LIMIT {
+                    shown.push(format!("and {} more", asks.len() - LIST_LIMIT));
+                }
+                format!("waiting on owner: {}", shown.join("; "))
+            }
+        }
+    }
+
+    pub fn value(&self) -> serde_json::Value {
+        let (state, asks): (&str, &[String]) = match self {
+            Self::NotRecorded => ("not_recorded", &[]),
+            Self::Invalid => ("invalid", &[]),
+            Self::Nothing => ("nothing", &[]),
+            Self::Asks(asks) => ("asks", asks),
+        };
+        serde_json::json!({"state": state, "asks": asks})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OwnerWait;
+
+    #[test]
+    fn status_reports_nothing_or_the_specific_ask() {
+        let record = |asks: &str| {
+            format!(
+                "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"G\"\n  grants: []\n  obligations: []\n  waiting_on_owner: {asks}\n---\nBody\n"
+            )
+        };
+        let nothing = OwnerWait::from_checkpoint(Some(&record("[]")));
+        assert_eq!(nothing.line(), "waiting on owner: nothing");
+        assert_eq!(nothing.value()["state"], "nothing");
+        let ask = OwnerWait::from_checkpoint(Some(&record("[\"Approve the release window\"]")));
+        assert_eq!(ask.line(), "waiting on owner: Approve the release window");
+        assert_eq!(ask.value()["asks"][0], "Approve the release window");
+        // An omitted field is invalid, never "nothing"; no section is not recorded.
+        let omitted = record("[]").replace("  waiting_on_owner: []\n", "");
+        assert_eq!(
+            OwnerWait::from_checkpoint(Some(&omitted)),
+            OwnerWait::Invalid
+        );
+        assert_eq!(
+            OwnerWait::from_checkpoint(Some("# Notes\n")),
+            OwnerWait::NotRecorded
+        );
+        assert_eq!(OwnerWait::from_checkpoint(None), OwnerWait::NotRecorded);
+    }
+}

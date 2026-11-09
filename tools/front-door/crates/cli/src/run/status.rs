@@ -71,6 +71,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 open_read_only(edge, &call)?
             };
             let (exempt, exempt_line) = review_exempt_view(&context);
+            let owner = command.id.is_none().then(|| owner_wait(&context));
             let native = if command.id.is_none() {
                 Some(provenant_telemetry::native_attempts::read(edge.roots))
             } else {
@@ -79,6 +80,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let Some(store) = store else {
                 let mut data = json!({"lanes": [], "next_cursor": null, "review_exempt": exempt});
                 let mut human = format!("no lanes\n{exempt_line}");
+                append_owner_wait(owner.as_ref(), &mut data, &mut human);
                 append_native_status(native, &mut data, &mut human);
                 return Ok((data, human));
             };
@@ -182,6 +184,10 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             let mut human = format!("{human}{exempt_line}");
+            if let Some(owner) = &owner {
+                compact.lines.push(owner.line());
+            }
+            append_owner_wait(owner.as_ref(), &mut data, &mut human);
             if let Some(object) = data.as_object_mut() {
                 object.remove("capacity_cooldowns");
             }
@@ -227,6 +233,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             "cloud_jobs",
             "operation",
             "refused_operations",
+            "waiting_on_owner",
         ] {
             if let Some(value) = out.result.data.get(key) {
                 data[key] = value.clone();
@@ -400,6 +407,33 @@ pub(super) fn append_refused_operations(
     }
     data["refused_operations"] = json!(refusals);
     Ok(true)
+}
+
+/// What the chair's standing record says waits on the owner. The chair is
+/// found as settlement finds it: the session this actor last saved.
+fn owner_wait(context: &run::ExecutionContext) -> provenant_workflow::session::OwnerWait {
+    use provenant_workflow::session::{OwnerWait, SessionStore, chair_session_for};
+    let markdown = chair_session_for(&context.state_root, context.project_id, context.actor_id)
+        .and_then(|session| {
+            SessionStore::new(context.state_root.clone(), context.project_id, session)
+                .read()
+                .ok()
+                .flatten()
+        })
+        .map(|checkpoint| checkpoint.markdown);
+    OwnerWait::from_checkpoint(markdown.as_deref())
+}
+
+fn append_owner_wait(
+    owner: Option<&provenant_workflow::session::OwnerWait>,
+    data: &mut Value,
+    human: &mut String,
+) {
+    if let Some(owner) = owner {
+        human.push_str(&owner.line());
+        human.push('\n');
+        data["waiting_on_owner"] = owner.value();
+    }
 }
 
 fn append_native_status(
