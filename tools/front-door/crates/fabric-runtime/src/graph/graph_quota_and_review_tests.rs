@@ -478,6 +478,31 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         if phase == 2 {
             assert_eq!(relay::pending_provisioning(&first.checkpoint).len(), 1);
         }
+        // A Running node without an attempt needs the whole persisted wait
+        // proof. Missing or inconsistent retry facts must still be refused.
+        let (plan, _) = validate_plan(&document).unwrap();
+        let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+            .unwrap().to_string();
+        let corruptions: [fn(&mut NodeProgress); 8] = [
+            |progress| progress.launch_retry = None,
+            |progress| progress.launch_retry.as_mut().unwrap().failures = 0,
+            |progress| progress.launch_retry.as_mut().unwrap().deadline = None,
+            |progress| progress.launch_retry.as_mut().unwrap().wake_at = None,
+            |progress| progress.launch_retry.as_mut().unwrap().wake_at = Some(at(3601)),
+            |progress| progress.launch_retry.as_mut().unwrap().reason = None,
+            |progress| progress.advance_owner_code = None,
+            |progress| progress.advance_owner_code = Some("home_unavailable".into()),
+        ];
+        for (case, corrupt) in corruptions.iter().enumerate() {
+            let mut invalid = first.checkpoint.clone();
+            corrupt(&mut invalid.nodes[0]);
+            assert!(matches!(
+                validate_checkpoint::<FacadeError, std::convert::Infallible>(
+                    &document, &invalid, &plan, &digest,
+                ),
+                Err(GraphError::BadCheckpoint { .. })
+            ), "phase {phase}, malformed wait {case}");
+        }
         let calls = owner.calls;
         owner.now = at(1);
         advance(&document, &mut owner, &mut journal).unwrap();

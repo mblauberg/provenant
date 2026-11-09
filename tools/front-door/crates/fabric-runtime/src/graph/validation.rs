@@ -1689,7 +1689,27 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         }))
                         && progress.attempts.len() < node.routes.len()
                 }
-                None => false,
+                // Writer binding and provisioning wait before the first
+                // attempt exists. Only the bounded contention state emitted by
+                // defer_launch_contention may replay as Running here.
+                None => {
+                    plans::writer(node)
+                        && progress.writer_binding_pending
+                        && progress.outputs.is_none()
+                        && progress.advance_error.is_none()
+                        && matches!(
+                            progress.advance_owner_code.as_deref(),
+                            Some("busy" | "writer_lock_busy" | "writer_unknown" | "writer_busy")
+                        )
+                        && progress.launch_retry.as_ref().is_some_and(|retry| {
+                            retry.failures > 0
+                                && matches!((retry.wake_at, retry.deadline),
+                                    (Some(wake), Some(deadline)) if wake <= deadline)
+                                && retry.reason.as_ref().is_some_and(|reason| {
+                                    !reason.is_empty() && reason.len() <= MAX_ADVANCE_ERROR_BYTES
+                                })
+                        })
+                }
             },
             // A planner whose failure was settled by its static fallback is
             // succeeded though its last attempt failed (or never launched).
