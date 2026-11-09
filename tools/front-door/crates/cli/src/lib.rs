@@ -1997,18 +1997,37 @@ mod tests {
                 repair.starts_with(expected_repair),
                 "{words:?}: expected repair starting with '{expected_repair}', got '{repair}'"
             );
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("set -- {repair}; printf '%s\\0' \"$@\""))
-                .output()
-                .expect("shell must run");
-            assert!(output.status.success(), "invalid shell syntax: {repair}");
-            let args: Vec<String> = output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|word| !word.is_empty())
-                .map(|word| String::from_utf8(word.to_vec()).unwrap())
-                .collect();
+            let mut args = Vec::new();
+            let mut word = String::new();
+            let mut quoted = false;
+            let mut started = false;
+            let mut chars = repair.chars();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\'' => {
+                        quoted = !quoted;
+                        started = true;
+                    }
+                    '\\' if !quoted => {
+                        word.push(chars.next().expect("escaped character"));
+                        started = true;
+                    }
+                    c if c.is_whitespace() && !quoted => {
+                        if started {
+                            args.push(std::mem::take(&mut word));
+                            started = false;
+                        }
+                    }
+                    c => {
+                        word.push(c);
+                        started = true;
+                    }
+                }
+            }
+            assert!(!quoted, "unterminated quote: {repair}");
+            if started {
+                args.push(word);
+            }
             assert_eq!(args.first().map(String::as_str), Some("provenant"));
             assert!(
                 matches!(
