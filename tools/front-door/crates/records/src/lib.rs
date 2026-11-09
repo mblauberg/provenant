@@ -21,6 +21,7 @@ mod json;
 mod jsonc;
 mod path_wire;
 mod source;
+pub mod telemetry_context;
 mod trace;
 
 pub use artifact_ref::ArtifactRef;

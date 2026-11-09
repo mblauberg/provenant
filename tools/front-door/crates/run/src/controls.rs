@@ -3521,7 +3521,7 @@ impl RunStore {
         if !matches!(record.state, AttemptState::Queued { .. })
             && self
                 .attempt_dir(record.run_id, id, false)
-                .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(&record)))
+                .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(&record), call))
         {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }

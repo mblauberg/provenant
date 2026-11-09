@@ -616,36 +616,28 @@ impl RunStore {
             Err(error) if error.is_not_found() && record.provider_launched == Some(false) => None,
             Err(error) => return Err(error.into()),
         };
-        let fences = self.writer_fence_listing()?;
-        if fences
-            .reservations
-            .iter()
-            .any(|fence| fence.scope == Self::scope(record))
-        {
-            return Ok(false);
-        }
-        if fences.issues.is_empty() {
-            return Ok(true);
-        }
-        // An unreadable reservation names no scope. It holds this attempt's
-        // custody only in this writer's directory; other entries block only
-        // a writer that needs them.
-        let request = self.request(record.run_id, call)?;
-        let Some(writer) = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.writer.as_ref())
-        else {
-            return Ok(true);
+        // Custody has one location: the reader's attempt or the writer's
+        // persisted worktree slot. Inventorying every slot here made each
+        // terminal row pay for the host's entire retained writer history.
+        let writer =
+            self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?;
+        // An inaccessible own slot or reservation cannot prove release, so it
+        // remains a fence rather than failing the caller. The supervisor owns
+        // the layout; predecessor and sibling slots are not evidence about
+        // this attempt's custody.
+        let slot = if let Some(writer) = writer {
+            match provenant_os::fs::Directory::open_anchor(&writer) {
+                Ok(slot) => slot,
+                Err(error) if error.is_not_found() => return Ok(true),
+                Err(_) => return Ok(false),
+            }
+        } else {
+            directory
         };
-        let slot = self.writer_slot(writer, record.project_id)?;
-        let evidence = slot
-            .join(record.attempt_id.to_string())
-            .join("reservation.json");
-        Ok(!fences.issues.iter().any(|issue| {
-            issue.reservation == evidence || issue.reservation == slot.join("reservation.json")
-        }))
+        Ok(matches!(
+            provenant_supervisor::custody::reservation_present(&slot, Self::scope(record)),
+            Ok(false)
+        ))
     }
     fn record_with_run(
         &self,

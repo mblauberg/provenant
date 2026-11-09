@@ -5,6 +5,7 @@
 
 mod chair;
 mod claude;
+pub mod context;
 pub mod experiments;
 pub mod ingest;
 pub mod mileage;
@@ -15,6 +16,7 @@ mod prices;
 mod reducer;
 pub mod refresh;
 pub mod route_outcomes;
+pub mod signals;
 pub mod study;
 pub mod suggest;
 mod trace;

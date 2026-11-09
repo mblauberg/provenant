@@ -1483,6 +1483,11 @@ fn stats_dispatch(command: &provenant_cli::Stats) -> StatsDispatch {
 #[allow(clippy::disallowed_methods)]
 pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     let started = std::time::Instant::now();
+    // Lets attempt context match an installed release without hashing the
+    // executable on the launch path; an unparsable identity stays unknown.
+    if let Ok(identity) = identity() {
+        provenant_run::set_build_identity(identity);
+    }
     let (verb, globals) = match &parsed {
         ParseOutcome::Invocation(inv) => (inv.leaf.as_str(), &inv.globals),
         ParseOutcome::Invalid { globals, .. } => ("parse", globals),
@@ -1533,13 +1538,20 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             globals,
         );
     }
+    let status_wait = match &parsed {
+        ParseOutcome::Invocation(inv) => match &inv.command {
+            Command::Status(args) if !args.stats && !args.session_stream => {
+                Some(args.wait.is_some())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
             matches!(&inv.command, Command::Run(args) if args.explain)
-                || matches!(
-                    &inv.command,
-                    Command::Templates(_) | Command::Status(_) | Command::Stats(_)
-                )
+                || (matches!(&inv.command, Command::Status(_)) && status_wait.is_none())
+                || matches!(&inv.command, Command::Templates(_) | Command::Stats(_))
         }
         _ => false,
     };
@@ -1620,13 +1632,18 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         },
     };
     if let Some(resolved) = usage_roots {
-        provenant_telemetry::usage::record_cli(
+        provenant_telemetry::usage::record_cli_context(
             &resolved.roots,
             &provenant_os::clock::SystemClock,
             &verb,
             status,
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             usage_project,
+            provenant_cli::fabric::current_session().as_deref(),
+            std::env::var(provenant_run::PARENT_ATTEMPT_ENV)
+                .ok()
+                .and_then(|id| id.parse().ok()),
+            status_wait,
         );
     }
     status

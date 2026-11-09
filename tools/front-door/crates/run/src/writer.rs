@@ -607,6 +607,27 @@ pub fn equivalent_writer(
 }
 
 impl crate::RunStore {
+    /// The persisted worktree slot holding one attempt's writer custody, or
+    /// `None` for a reader. Custody has no other location, so callers need
+    /// not inventory the host's slots.
+    pub(crate) fn attempt_writer_slot(
+        &self,
+        run: provenant_core::RunId,
+        task: provenant_core::TaskId,
+        project: ProjectId,
+        call: &crate::Request<'_>,
+    ) -> Result<Option<PathBuf>> {
+        let request = self.request(run, call)?;
+        request
+            .tasks
+            .iter()
+            .find(|candidate| candidate.task_id == task)
+            .ok_or(RunError::Validation("attempt task association"))?
+            .writer
+            .as_ref()
+            .map(|writer| self.writer_slot(writer, project))
+            .transpose()
+    }
     pub(crate) fn writer_slot(
         &self,
         writer: &WriterRequest,
@@ -709,8 +730,13 @@ pub fn prepare_writer_with_facts(
         .map_err(|error| anchor_filesystem(error, state))?;
     let project_state = crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
         .map_err(|error| anchor_filesystem(error, state))?;
-    let (directory, binding) =
-        worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
+    let (directory, binding) = worktrees::writer_custody(
+        &project_state,
+        &worktree,
+        &request.worktree,
+        &branch,
+        base,
+        || {
             facts.writer_inventory(
                 &repo,
                 &executor,
@@ -718,13 +744,14 @@ pub fn prepare_writer_with_facts(
                 budget().map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
                 &CancelToken::new(),
             )
-        })
-        .map_err(|error| match error {
-            worktrees::WorktreeError::NotFound => {
-                RunError::WorktreeUnregistered(request.worktree.clone())
-            }
-            other => other.into(),
-        })?;
+        },
+    )
+    .map_err(|error| match error {
+        worktrees::WorktreeError::NotFound => {
+            RunError::WorktreeUnregistered(request.worktree.clone())
+        }
+        other => other.into(),
+    })?;
     Ok(WriterLaunch {
         worktree,
         branch,

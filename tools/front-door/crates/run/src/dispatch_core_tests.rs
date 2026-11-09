@@ -187,13 +187,8 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         "another worktree's unreadable reservation is not this attempt's"
     );
     std::fs::remove_dir_all(&broken)?;
-    let writer = worktrees.join("retained");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&writer)?;
     let lease = provenant_supervisor::custody::acquire_reader(
-        Directory::open_anchor(&writer)?,
+        directory.try_clone()?,
         RunStore::scope(&record),
         call.lock_budget(),
         call.cancel,
@@ -202,7 +197,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     drop(lease);
     assert!(
         !store.custody_released(&record, &call)?,
-        "a free lock does not clear a retained writer fence"
+        "a free lock does not clear a retained reader fence"
     );
     record.state = AttemptState::Running {
         extra: Default::default(),
@@ -1357,5 +1352,68 @@ fn missing_prior_record_does_not_prevent_codex_finish() -> TestResult {
     assert!(matches!(finished.state, AttemptState::Terminal { .. }));
     assert_eq!(finished.usage.uncached_input, None);
     assert_eq!(finished.usage.extra["session_total"]["uncached_input"], 42);
+    Ok(())
+}
+/// Listing must touch directories for the rows it shows, not for the retained
+/// history of the host. The count is of directory enumerations, not time.
+#[test]
+fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult {
+    let mut scans = Vec::new();
+    for retained in [3_usize, 300] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        record.state = AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: record.queued_at,
+            reason: None,
+        };
+        record.provider_launched = Some(false);
+        // Retained history: other runs' attempt directories and other
+        // worktrees' reservations, none of which belong to the listed row.
+        let worktrees = store
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string());
+        for index in 0..retained {
+            let attempt = format!("{index:032x}");
+            std::fs::create_dir_all(
+                temp.path()
+                    .join(format!("runs/{attempt}/attempts/{attempt}")),
+            )?;
+            let slot = worktrees.join(format!("slot-{index}")).join(&attempt);
+            std::fs::create_dir_all(&slot)?;
+            std::fs::write(slot.join("reservation.json"), "{")?;
+        }
+        let before = provenant_os::fs::directory_scans();
+        let page = store.lanes(
+            &LaneQuery {
+                targets: vec![],
+                all: true,
+                limit: 1,
+                after: 0,
+                newest_first: true,
+                owner: None,
+                unseen_after: None,
+            },
+            &call,
+        )?;
+        assert_eq!(page.lanes.len(), 1);
+        assert!(store.custody_released(&record, &call)?);
+        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let _ = store.supervisor_stalled(&attempt, RunStore::scope(&record), &call);
+        scans.push(provenant_os::fs::directory_scans() - before);
+    }
+    assert_eq!(scans[0], scans[1], "scans grew with retained history");
+    assert_eq!(
+        scans[1], 0,
+        "a displayed reader row needs no directory scan"
+    );
     Ok(())
 }

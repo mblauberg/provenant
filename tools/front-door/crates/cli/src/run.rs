@@ -39,6 +39,7 @@ mod status;
 mod submit;
 mod targets;
 mod telemetry;
+mod telemetry_context;
 mod wait;
 mod watch;
 mod worktree;

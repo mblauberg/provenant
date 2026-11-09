@@ -464,6 +464,16 @@ pub struct Directory {
     // Leading components of `path` that precede the nearest `into_anchor` boundary.
     anchor_depth: usize,
 }
+thread_local! {
+    static DIRECTORY_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Directory enumerations started by this thread, so a caller can show that a
+/// view scans a number of directories bounded by what it displays.
+pub fn directory_scans() -> u64 {
+    DIRECTORY_SCANS.with(std::cell::Cell::get)
+}
+
 impl Directory {
     /// Open the signal itself as its lock, refusing links and replaced entries.
     pub(crate) fn signal_file(&self, name: &OsStr, write: bool) -> Result<File> {
@@ -1104,6 +1114,7 @@ impl Directory {
     }
     /// A fresh descriptor stream on each call, independent of prior enumeration.
     pub fn entries(&self) -> Result<Entries> {
+        DIRECTORY_SCANS.with(|scans| scans.set(scans.get() + 1));
         os::entries(&self.file)
             .map(|stream| Entries {
                 stream,

@@ -1668,8 +1668,13 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].revision, record.revision);
     // The edge supplied no host, so only that field stays unknown.
+    let captured =
+        provenant_records::telemetry_context::TelemetryContext::from_trace(&record.trace)
+            .expect("attempt context captured at creation");
+    assert!(captured.provenant_version.is_some());
+    assert!(captured.harness_version.is_none());
     let trace = provenant_records::Trace {
-        extra: Default::default(),
+        extra: record.trace.extra.clone(),
         host: None,
         project: Some(context.project_id),
         run: Some(run.run_id),

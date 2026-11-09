@@ -252,7 +252,12 @@ pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
 impl crate::RunStore {
     /// Only recorded identities can be checked; a worker stalled before publishing
     /// its identity retains the existing queued-marker expiry behavior.
-    pub(crate) fn supervisor_stalled(&self, attempt: &Directory, scope: Scope) -> bool {
+    pub(crate) fn supervisor_stalled(
+        &self,
+        attempt: &Directory,
+        scope: Scope,
+        call: &crate::Request<'_>,
+    ) -> bool {
         if host_stalled(attempt, scope) {
             return true;
         }
@@ -268,17 +273,26 @@ impl crate::RunStore {
         if check(attempt) {
             return true;
         }
-        self.writer_fences()
+        // Only this attempt's own slot can hold its guardian; sibling slots are
+        // not inventoried for each displayed row.
+        self.db
+            .query_row(
+                "SELECT task,project FROM attempts WHERE id=?1",
+                [scope.attempt.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
             .ok()
-            .into_iter()
-            .flatten()
-            .filter(|fence| fence.scope == scope)
-            .filter_map(|fence| {
-                fence
-                    .custody_directory()
-                    .and_then(|path| Directory::open_anchor(path).ok())
+            .and_then(|(task, project)| {
+                self.attempt_writer_slot(
+                    scope.run,
+                    provenant_core::TaskId::parse(&task).ok()?,
+                    provenant_core::ProjectId::parse(&project).ok()?,
+                    call,
+                )
+                .ok()?
             })
-            .any(|directory| check(&directory))
+            .and_then(|slot| Directory::open_anchor(&slot).ok())
+            .is_some_and(|slot| check(&slot))
     }
 }
 
@@ -901,7 +915,7 @@ mod tests {
             provenant_supervisor::custody::reservation_guardian(&attempt, scope)?,
             Some(guardian)
         );
-        assert!(store.supervisor_stalled(&attempt, scope));
+        assert!(store.supervisor_stalled(&attempt, scope, &call));
         assert!(matches!(
             store
                 .reconcile_with_observer(
@@ -923,7 +937,7 @@ mod tests {
         )?);
         TEST_PROCESS_STATE.with(|state| state.set(Some(Err(std::io::ErrorKind::PermissionDenied))));
         assert!(
-            !store.supervisor_stalled(&attempt, scope),
+            !store.supervisor_stalled(&attempt, scope, &call),
             "an unreadable probe is unknown"
         );
         let mut spawned = false;
@@ -2155,7 +2169,7 @@ impl crate::RunStore {
         explicit: bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.queue_reconcile_mode_with_probe(run, call, spawn, explicit, &|directory, scope| {
-            self.supervisor_stalled(directory, scope)
+            self.supervisor_stalled(directory, scope, call)
         })
     }
 
