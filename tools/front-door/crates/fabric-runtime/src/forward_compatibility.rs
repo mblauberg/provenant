@@ -7,8 +7,7 @@ use crate::{
     runs::{AttemptSummary, RunResult, SubmissionReceipt},
 };
 use provenant_fabric_store::{
-    ClaimFence, ClaimRequest, LandingRequest, MessageRef, PushOperation, TaskFence, TaskRef,
-    WorkScope,
+    ClaimFence, ClaimRequest, LandingRequest, MessageRef, PushOperation, WorkScope,
 };
 use provenant_records::CanonicalV1;
 use serde::{Serialize, de::DeserializeOwned};
@@ -49,7 +48,7 @@ fn landing_proof() -> Value {
 }
 fn mail() -> Value {
     json!({"op":"send","recipients":[ID],"kind":"note","body":"hello","artifacts":[{"path":{"encoding":"utf8","path":"out"},"digest":null}],
-        "reply_to":{"scope":"remote","host":ID,"id":ID},"task":{"scope":"local","id":ID}})
+        "reply_to":{"scope":"remote","host":ID,"id":ID}})
 }
 fn handoff() -> Value {
     json!({"operation_id":"handoff","account":"main","model":null,"prompt":"# Session hand-off\nContinue","branches":[],"attachments":[{"name":"note.md","base64":"aGVsbG8="}],"launch":false})
@@ -88,7 +87,6 @@ macro_rules! cases {
 fn request_shapes_preserve_unknown_fields() {
     cases! {
         PeerRequest => peer(json!({"action":"health"})), ["", "/project", "/trace", "/action"];
-        TaskInput => json!({"op":"create","objective":"work","note":null}), [""];
         EventsInput => json!({"op":"note","note":"work","dedup_key":null}), [""];
         ClaimInput => json!({"op":"claim_acquire","scope":scope(),"lease_seconds":1}), ["", "/scope"];
         LandingInput => json!({"op":"landing_verify","proof":landing_proof()}), ["", "/proof"];
@@ -105,15 +103,12 @@ fn request_shapes_preserve_unknown_fields() {
 #[test]
 fn reference_and_store_request_shapes_preserve_unknown_fields() {
     cases! {
-        TaskProof => json!({"task":ID,"generation":1,"token":TOKEN}), [""];
         ClaimProof => claim_proof(), [""];
         MessageRef => json!({"scope":"local","id":ID}), [""];
-        TaskRef => json!({"scope":"remote","host":ID,"id":ID}), [""];
         WorkScope => json!({"kind":"paths","paths":["/repo/src"]}), [""];
         WorkScope => json!({"kind":"worktree","path":"/repo"}), [""];
         ClaimRequest => json!({"id":ID,"project":ID,"actor":ID,"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"lease":1000000,"scope":scope()}), ["", "/scope"];
         ClaimFence => json!({"id":ID,"actor":ID,"generation":1,"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}), [""];
-        TaskFence => json!({"task":ID,"actor":ID,"generation":1,"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}), [""];
         LandingRequest => json!({"id":ID,"project":ID,"actor":ID,"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"reference":"refs/heads/work","expected":oid(),"candidate":oid(),"lease":1000000}), [""];
         PushOperation => json!({"header":{"schema_version":1},"id":"push","digest":digest(),"request":push_request(),"phase":"prepared","observed_remote":null,"updated_at":AT}), ["", "/header", "/request", "/request/header"];
     }
@@ -124,9 +119,6 @@ fn push_request() -> Value {
 
 fn push_operation() -> Value {
     json!({"header":{"schema_version":1},"id":"push","digest":digest(),"request":push_request(),"phase":"prepared","observed_remote":null,"updated_at":AT})
-}
-fn stored_task() -> Value {
-    json!({"header":{"schema_version":1},"project":ID,"id":ID,"objective":"work","state":"open","generation":0,"created_at":AT,"updated_at":AT})
 }
 fn stored_claim() -> Value {
     json!({"header":{"schema_version":1},"project":ID,"id":ID,"scope":scope(),"generation":1,"updated_at":AT})
@@ -197,8 +189,6 @@ fn coordination_reply_shapes_preserve_unknown_fields() {
         MailResult => json!({"result":"sent","id":ID}), [""];
         MailResult => json!({"result":"marked_read","cursor":1}), [""];
         MailResult => json!({"result":"read","page":{"items":[{"seq":1,"message":stored_message()}],"truncated":false},"cursor":1}), ["", "/page", "/page/items/0", "/page/items/0/message", "/page/items/0/message/header"];
-        TaskResult => json!({"result":"listed","page":{"items":[stored_task()],"truncated":false}}), ["", "/page", "/page/items/0"];
-        TaskResult => json!({"result":"claimed","proof":{"task":ID,"generation":1,"token":TOKEN}}), ["", "/proof"];
         EventsResult => json!({"result":"read","page":{"items":[stored_event()],"truncated":false},"cursor":1,"timed_out":false}), ["", "/page", "/page/items/0", "/page/items/0/record", "/page/items/0/record/header"];
         EventsResult => json!({"result":"noted","seq":1}), [""];
         ClaimResult => json!({"result":"acquired","proof":claim_proof(),"claim":stored_claim()}), ["", "/proof", "/claim", "/claim/scope"];
@@ -207,12 +197,6 @@ fn coordination_reply_shapes_preserve_unknown_fields() {
         LandingResult => json!({"result":"acquired","proof":landing_proof(),"landing":stored_landing()}), ["", "/proof", "/landing", "/landing/header"];
         LandingResult => json!({"result":"released","id":ID,"reference":"refs/heads/work"}), [""];
         LandingResult => json!({"result":"waited","landing":stored_landing(),"timed_out":false}), ["", "/landing"];
-    }
-    for result in ["created", "updated", "finished", "released"] {
-        round_trip_at::<TaskResult>(
-            json!({"result":result,"task":stored_task()}),
-            &["", "/task"],
-        );
     }
     for result in ["renewed", "verified"] {
         round_trip_at::<ClaimResult>(
@@ -226,7 +210,6 @@ fn coordination_reply_shapes_preserve_unknown_fields() {
     }
     for (domain, result) in [
         ("mail", json!({"result":"sent","id":ID})),
-        ("task", json!({"result":"created","task":stored_task()})),
         ("events", json!({"result":"noted","seq":1})),
         ("claim", json!({"result":"released","id":ID})),
         (
@@ -356,7 +339,6 @@ fn nested_peer_mail_fields_preserve_the_actual_request_digest() {
         "/action/input",
         "/action/input/input",
         "/action/input/input/reply_to",
-        "/action/input/input/task",
         "/action/input/input/artifacts/0",
         "/action/input/input/artifacts/0/path",
     ] {

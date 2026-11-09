@@ -60,7 +60,7 @@ authorise its proposal comments, so enable it only on the intended host.
 ## Delegation
 
 The chair gives each steward the repository, issue and PR links, the authorised
-actions and a stop condition. Before retrying any write, read current issues, PRs
-and Fabric tasks with `gh`: a local record cannot prove a remote write happened
+actions and a stop condition. Before retrying any write, read current issues and
+PRs with `gh`: a local record cannot prove a remote write happened
 exactly once. If the outcome stays uncertain, report it before writing again. A
 steward returns at most 15 lines: actions taken, links, no-ops, decisions needed.

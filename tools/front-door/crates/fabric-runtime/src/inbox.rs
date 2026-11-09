@@ -1027,7 +1027,6 @@ impl<'a> InboxService<'a> {
                 body,
                 artifacts: vec![],
                 reply_to: None,
-                task: None,
                 created_at: at,
             },
             request,
@@ -1243,7 +1242,6 @@ impl<'a> InboxService<'a> {
                     body,
                     artifacts: vec![],
                     reply_to: None,
-                    task: None,
                     created_at: at,
                 };
                 (

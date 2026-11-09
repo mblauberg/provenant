@@ -474,7 +474,7 @@ In that environment Fabric refuses coordination mutations
 graph submission, subtree stop and graph reads cross the attempt-bound host
 relay. `status`, `output` and `output --trace` select the calling graph or its
 children; journals and credentials stay on the host.
-- Why (default): a lane must not move shared tasks, claims or leases.
+- Why (default): a lane must not move claims or leases.
 - Test: `crates/providers/src/lane.rs::lane_mcp_entries_have_attempt_unique_agent_labels`
 - Owner: `crates/providers/src/lane.rs`
 

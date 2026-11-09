@@ -155,11 +155,6 @@ pub enum CoordinationInput {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
-    Task {
-        input: TaskInput,
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-    },
     Events {
         input: EventsInput,
         #[serde(flatten)]
@@ -183,10 +178,6 @@ impl CoordinationInput {
                 input: MailInput::Read { .. },
                 ..
             }
-            | Self::Task {
-                input: TaskInput::List { .. },
-                ..
-            }
             | Self::Events {
                 input: EventsInput::Read { .. },
                 ..
@@ -200,7 +191,6 @@ impl CoordinationInput {
                 ..
             } => None,
             Self::Mail { input: v, .. } => Some(Mutation::Mail(v.clone())),
-            Self::Task { input: v, .. } => Some(Mutation::Task(v.clone())),
             Self::Events { input: v, .. } => Some(Mutation::Events(v.clone())),
             Self::Claim { input: v, .. } => Some(Mutation::Claim(v.clone())),
             Self::Landing { input: v, .. } => Some(Mutation::Landing(v.clone())),
@@ -229,14 +219,6 @@ impl CoordinationInput {
                 service
                     .mail(v.clone(), budget, cancel)
                     .map(|data| CoordinationResult::Mail {
-                        result: data,
-                        extra: Default::default(),
-                    })
-            }
-            Self::Task { input: v, .. } => {
-                service
-                    .task(v.clone(), budget, cancel)
-                    .map(|data| CoordinationResult::Task {
                         result: data,
                         extra: Default::default(),
                     })
@@ -277,11 +259,6 @@ pub enum CoordinationResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
-    Task {
-        result: TaskResult,
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-    },
     Events {
         result: EventsResult,
         #[serde(flatten)]
@@ -315,7 +292,6 @@ impl CoordinationResult {
         }
         match input {
             Mutation::Mail(_) => decode!(Mail),
-            Mutation::Task(_) => decode!(Task),
             Mutation::Events(_) => decode!(Events),
             Mutation::Claim(_) => decode!(Claim),
             Mutation::Landing(_) => decode!(Landing),
@@ -326,10 +302,6 @@ impl From<MutationResult> for CoordinationResult {
     fn from(value: MutationResult) -> Self {
         match value {
             MutationResult::Mail(v) => Self::Mail {
-                result: v,
-                extra: Default::default(),
-            },
-            MutationResult::Task(v) => Self::Task {
                 result: v,
                 extra: Default::default(),
             },

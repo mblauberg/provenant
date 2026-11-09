@@ -14,7 +14,6 @@ pub const SCHEMA_VERSION: u64 = 2;
 pub(crate) enum ToolKind {
     Identity,
     Mail,
-    Task,
     Events,
     Claim,
     Run,
@@ -25,10 +24,9 @@ pub(crate) enum ToolKind {
     Chair,
 }
 
-pub(crate) const TOOL_NAMES: [(ToolKind, &str); 11] = [
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 10] = [
     (ToolKind::Identity, "fabric_context"),
     (ToolKind::Mail, "fabric_mail"),
-    (ToolKind::Task, "fabric_task"),
     (ToolKind::Events, "fabric_events"),
     (ToolKind::Claim, "fabric_lease"),
     (ToolKind::Run, "fabric_run"),
@@ -148,8 +146,8 @@ pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
     }
 }
 
-fn proof(key: &str, landing: bool) -> Value {
-    let mut fields = json!({key: reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")});
+fn proof(landing: bool) -> Value {
+    let mut fields = json!({"id": reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")});
     if landing {
         fields["reference"] = text(MAX_REFERENCE_BYTES);
     }
@@ -168,7 +166,7 @@ fn definitions() -> Value {
         "OperationId":pattern("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"),
         "GitOid":pattern("^(?:[0-9a-f]{40}|[0-9a-f]{64})$"),
         "AttemptTarget":object(json!({"attempt":reference("Id"),"host?":nullable(reference("Id"))})),
-        "TaskProof":proof("task",false),"ClaimProof":proof("id",false),"LandingProof":proof("id",true),
+        "ClaimProof":proof(false),"LandingProof":proof(true),
         "MessageRef":message_ref,
         "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(MAX_ARTIFACT_PATH_BYTES)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
         "ContextLabel":nullable(text(256)),
@@ -203,7 +201,7 @@ fn build_strict() -> Vec<Value> {
         "options?":array(object(json!({"id":reference("OperationId"),"label":text(256),"description":text(1024)})),0,16),
         "recommended_option_id?":nullable(reference("OperationId")),"proceeding_with?":nullable(text(1024))
     }));
-    let tools: [(&str, Value); 11] = [
+    let tools: [(&str, Value); 10] = [
         (
             "Inspect the authenticated Fabric identity or list peer hosts.",
             json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
@@ -211,18 +209,8 @@ fn build_strict() -> Vec<Value> {
         (
             "Send and read mail with explicit cursors.",
             json!({
-                "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts?":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
+                "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts?":artifacts,"reply_to?":nullable(reference("MessageRef"))},
                 "read":{"after?":nullable(seq.clone()),"limit":page.clone(),"session?":nullable(inbox_session.clone())},"mark_read":{"through":seq.clone(),"session?":nullable(inbox_session.clone())}
-            }),
-        ),
-        (
-            "Create and manage fenced project tasks.",
-            json!({
-                "create":{"objective":text(MAX_TEXT_BYTES),"note?":nullable(text(MAX_TEXT_BYTES))},
-                "list":{"state?":nullable(choices(&["open","done","cancelled"])),"after?":nullable(reference("Id")),"limit":page.clone()},
-                "claim":{"id":reference("Id"),"lease_seconds":lease.clone()},
-                "update":{"proof":reference("TaskProof"),"objective":text(MAX_TEXT_BYTES),"note?":nullable(text(MAX_TEXT_BYTES))},
-                "finish":{"proof":reference("TaskProof"),"state":choices(&["done","cancelled"])},"release":{"proof":reference("TaskProof")}
             }),
         ),
         (
@@ -257,7 +245,7 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Discover inbox, console, chair, graph, task, lease and event tools. Call discovered tools by name.",
+            "Discover inbox, console, chair, graph, lease and event tools. Call discovered tools by name.",
             json!({"discover":{}}),
         ),
         (
@@ -318,7 +306,6 @@ fn build_strict() -> Vec<Value> {
             if matches!(
                 kind,
                 ToolKind::Mail
-                    | ToolKind::Task
                     | ToolKind::Events
                     | ToolKind::Claim
             ) && let Some(variants) = input["oneOf"].as_array_mut()
@@ -330,10 +317,6 @@ fn build_strict() -> Vec<Value> {
                     let is_mutation = matches!(
                         (*kind, operation),
                         (ToolKind::Mail, Some("send" | "mark_read"))
-                            | (
-                                ToolKind::Task,
-                                Some("create" | "claim" | "update" | "finish" | "release")
-                            )
                             | (ToolKind::Events, Some("note"))
                             | (ToolKind::Claim, Some("claim_acquire" | "claim_renew" | "claim_release" | "landing_acquire" | "landing_renew" | "landing_release"))
                     );
@@ -525,14 +508,7 @@ pub fn catalogue() -> &'static [Value] {
 fn is_advanced(name: &Value) -> bool {
     matches!(
         name.as_str(),
-        Some(
-            "fabric_task"
-                | "fabric_events"
-                | "fabric_lease"
-                | "fabric_inbox"
-                | "fabric_console"
-                | "fabric_chair"
-        )
+        Some("fabric_events" | "fabric_lease" | "fabric_inbox" | "fabric_console" | "fabric_chair")
     )
 }
 

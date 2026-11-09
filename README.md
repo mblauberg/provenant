@@ -102,7 +102,7 @@ hand-written graph; `--explain` inspects it before launch.
 | **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
 | **Confined lanes** | Each lane runs `read-only` or `worktree-write` under a macOS sandbox profile. Writers get one registered worktree; network-open profiles can read the existing gh login. |
 | **Host-side delivery** | The host verifies a writer's final commit, pushes it to the branch you name and can open a pull request. |
-| **Fabric** | Messages, shared tasks, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
+| **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
 | **Telemetry** | Local cost and token reports, CLI and MCP usage counts, and timeline export for Perfetto, with no collector. |
 | **Skills** | 20 workflow skills (scope, implement, code review, diagnose, orchestrate and more) plus 8 library skills for specific tools and stacks, installed into each harness. |

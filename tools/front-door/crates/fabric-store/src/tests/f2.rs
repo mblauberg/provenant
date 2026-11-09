@@ -583,43 +583,6 @@ fn expired_claim_and_landing_refuse_renewal_but_allow_release() {
     store.release_landing(&guard, &fence, &f.request()).unwrap();
 }
 
-#[test]
-fn task_renew_and_verify_require_the_live_current_fence() {
-    let mut f = Fixture::new();
-    let store = f.open();
-    store.create_task(&task(&f), &f.request()).unwrap();
-    let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-    f.clock
-        .advance(DurationMicros::from_micros(999_999))
-        .unwrap();
-    store
-        .renew_task(
-            project(),
-            &fence,
-            DurationMicros::from_seconds(1).unwrap(),
-            &f.request(),
-        )
-        .unwrap();
-    f.clock.advance(DurationMicros::from_micros(1)).unwrap();
-    store.verify_task(project(), &fence, &f.request()).unwrap();
-    f.clock
-        .advance(DurationMicros::from_micros(999_999))
-        .unwrap();
-    assert!(matches!(
-        store.verify_task(project(), &fence, &f.request()),
-        Err(Error::StaleFence)
-    ));
-    assert!(matches!(
-        store.renew_task(
-            project(),
-            &fence,
-            DurationMicros::from_seconds(1).unwrap(),
-            &f.request()
-        ),
-        Err(Error::StaleFence)
-    ));
-}
-
 // Each stage runs with real SQLite allocation failure or a second connection's
 // RESERVED lock. Successful writes after the fault prove the connection recovers.
 #[derive(Debug, Clone, Copy)]
@@ -635,8 +598,6 @@ enum Mutation {
     Uncertain,
     Confirm,
     Reconcile,
-    TaskRenew,
-    TaskClose,
 }
 fn exercise_fault(stage: Mutation, full: bool) {
     let f = Fixture::new();
@@ -683,8 +644,6 @@ fn exercise_fault(stage: Mutation, full: bool) {
             )
             .unwrap();
     }
-    store.create_task(&task(&f), &f.request()).unwrap();
-    let task_fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
     let action = |req: &Request<'_>| -> Result<()> {
         match stage {
             Mutation::WorkAcquire => store.acquire_claim(&work(&f, 3), req).map(|_| ()),
@@ -734,13 +693,6 @@ fn exercise_fault(stage: Mutation, full: bool) {
                     )
                     .map(|_| ())
             }
-            Mutation::TaskRenew => store.renew_task(
-                project(),
-                &task_fence,
-                DurationMicros::from_seconds(2).unwrap(),
-                req,
-            ),
-            Mutation::TaskClose => store.finish_task(project(), &task_fence, TaskState::Done, req),
         }
     };
     let before = database_records(&store);
@@ -782,7 +734,7 @@ fn exercise_fault(stage: Mutation, full: bool) {
 }
 fn database_records(store: &Store) -> Vec<Vec<u8>> {
     let mut result = Vec::new();
-    for table in ["claims", "tasks", "operations", "events"] {
+    for table in ["claims", "operations", "events"] {
         let mut stmt = store
             .db
             .prepare(&format!("SELECT record FROM {table} ORDER BY record"))
@@ -828,8 +780,6 @@ fn full_and_busy_roll_back_every_new_mutation_and_its_event() {
             Mutation::Uncertain,
             Mutation::Confirm,
             Mutation::Reconcile,
-            Mutation::TaskRenew,
-            Mutation::TaskClose,
         ] {
             exercise_fault(stage, full);
         }
@@ -1012,51 +962,6 @@ fn reopened_store_keeps_unknown_push_pinned_after_owner_lock_closes() {
 }
 
 #[test]
-fn expired_task_close_and_takeover_are_serialised_across_connections() {
-    for state in [TaskState::Open, TaskState::Done, TaskState::Cancelled] {
-        let mut f = Fixture::new();
-        let store = f.open();
-        store.create_task(&task(&f), &f.request()).unwrap();
-        let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-        f.clock
-            .advance(DurationMicros::from_seconds(1).unwrap())
-            .unwrap();
-        let barrier = Arc::new(Barrier::new(2));
-        std::thread::scope(|s| {
-            let f = &f;
-            let b = barrier.clone();
-            let takeover = s.spawn(move || {
-                let store = f.open();
-                b.wait();
-                store.claim_task(&claim(f, 4), &f.request())
-            });
-            barrier.wait();
-            let closed = if state == TaskState::Open {
-                store.release_task(project(), &fence, &f.request())
-            } else {
-                store.finish_task(project(), &fence, state, &f.request())
-            };
-            let taken = takeover.join().unwrap();
-            let actual = store.task(project(), fence.task, &f.request()).unwrap();
-            match (closed, taken) {
-                (Err(Error::StaleFence), Ok(next)) | (Ok(()), Ok(next))
-                    if state == TaskState::Open || actual.state == TaskState::Active =>
-                {
-                    assert_eq!(actual.owner, Some(actor(4)));
-                    assert_eq!(actual.generation, next.generation);
-                    assert_eq!(next.generation, 2);
-                }
-                (Ok(()), Err(Error::Conflict)) => {
-                    assert_eq!(actual.state, state);
-                    assert_eq!(actual.owner, None);
-                }
-                other => panic!("invalid close/takeover outcomes: {other:?}"),
-            }
-        });
-    }
-}
-
-#[test]
 fn non_utf8_paths_and_exhausted_generations_return_typed_errors() {
     use std::os::unix::ffi::OsStringExt;
     let f = Fixture::new();
@@ -1167,12 +1072,10 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
         .unwrap();
     let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
     let work = store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
-    store.create_task(&task(&f), &f.request()).unwrap();
-    let task = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
     let clock = TickingClock(std::sync::Mutex::new(f.now().as_micros()));
     let mut req = f.request();
     req.clock = &clock;
-    for renew in 0..3 {
+    for renew in 0..2 {
         let (at, expires) = match renew {
             0 => {
                 store
@@ -1181,18 +1084,11 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
                 let row = store.verify_claim(project(), &work, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
-            1 => {
+            _ => {
                 store
                     .renew_landing(&guard, &fence, input.lease, &req)
                     .unwrap();
                 let row = store.verify_landing(&guard, &fence, &req).unwrap();
-                (row.updated_at, row.expires_at)
-            }
-            _ => {
-                store
-                    .renew_task(project(), &task, input.lease, &req)
-                    .unwrap();
-                let row = store.verify_task(project(), &task, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
         };

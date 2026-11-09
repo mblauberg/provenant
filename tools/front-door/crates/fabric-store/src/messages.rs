@@ -1,5 +1,5 @@
 use crate::*;
-use provenant_core::{HostId, MessageId, TaskId};
+use provenant_core::{HostId, MessageId};
 use provenant_records::{ArtifactRef, RecordHeader};
 use std::collections::BTreeSet;
 
@@ -26,21 +26,6 @@ pub enum MessageRef {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "snake_case")]
-pub enum TaskRef {
-    Local {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        id: TaskId,
-    },
-    Remote {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        host: HostId,
-        id: TaskId,
-    },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -54,7 +39,6 @@ pub struct Message {
     pub body: String,
     pub artifacts: Vec<ArtifactRef>,
     pub reply_to: Option<MessageRef>,
-    pub task: Option<TaskRef>,
     pub created_at: WallTime,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

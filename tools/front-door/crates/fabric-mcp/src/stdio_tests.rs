@@ -66,8 +66,8 @@ fn serve_splits_utf8_across_chunks_and_executes_typed_calls() {
     server.send(&initialized);
     let call = tool_call(
         "unicode",
-        "fabric_task",
-        json!({"op":"create","objective":"café 🦜"}),
+        "fabric_events",
+        json!({"op":"note","note":"café 🦜"}),
     );
     let line = encode_line(&call);
     let split = line
@@ -81,10 +81,7 @@ fn serve_splits_utf8_across_chunks_and_executes_typed_calls() {
     let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
     assert_eq!(frames[0]["id"], "init");
     assert_eq!(frames[1]["id"], "unicode");
-    assert_eq!(
-        frames[1]["result"]["structuredContent"]["task"]["objective"],
-        "café 🦜"
-    );
+    assert_eq!(frames[1]["result"]["structuredContent"]["result"], "noted");
     assert!(matches!(server.finish(), Ok(())));
 }
 
@@ -400,18 +397,15 @@ fn discovery_and_hidden_tool_are_callable() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| tool["name"] == "fabric_task")
+            .any(|tool| tool["name"] == "fabric_events")
     );
     server.send(&tool_call(
-        "task",
-        "fabric_task",
-        json!({"op":"create", "objective":"discovered"}),
+        "events",
+        "fabric_events",
+        json!({"op":"note", "note":"discovered"}),
     ));
     let frames = server.wait_for_frames(3, TEST_WAIT).unwrap();
-    assert_eq!(
-        frames[2]["result"]["structuredContent"]["task"]["objective"],
-        "discovered"
-    );
+    assert_eq!(frames[2]["result"]["structuredContent"]["result"], "noted");
     assert!(matches!(server.finish(), Ok(())));
 }
 

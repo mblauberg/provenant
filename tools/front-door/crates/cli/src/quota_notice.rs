@@ -151,7 +151,6 @@ fn send(
                 body,
                 artifacts: Vec::new(),
                 reply_to: None,
-                task: None,
             }),
             &operation,
             budget,

@@ -472,9 +472,9 @@ fn configured_limits_reject_typed_body_page_lease_and_output_values() {
     let limits = limits();
     for (tool, args, path) in [
         (
-            "fabric_task",
-            json!({"op":"create","objective":"12345","note":null}),
-            "objective",
+            "fabric_events",
+            json!({"op":"note","note":"12345","dedup_key":null}),
+            "note",
         ),
         (
             "fabric_mail",
@@ -596,23 +596,22 @@ fn run_page_shrinks_before_cursor_is_issued() {
 fn id_based_pages_preserve_last_id_for_continuation() {
     let mut limits = limits();
     limits.result_bytes = 300;
-    for tool in ["fabric_task", "fabric_lease"] {
-        let items: Vec<Value> = (1..=10)
-            .map(|id| json!({"id":format!("{id:032x}"),"description":"a long record"}))
-            .collect();
-        let reply = response(
-            tool,
-            json!({"result":"listed","page":{"items":items,"truncated":false}}),
-        )
-        .unwrap();
-        let result = limit_response(reply, &limits, false, false).unwrap();
-        let page = &result.structured_content["page"];
-        let items = page["items"].as_array().unwrap();
-        assert!(!items.is_empty() && items.len() < 10);
-        assert_eq!(items.last().unwrap()["id"], format!("{:032x}", items.len()));
-        assert_eq!(page["truncated"], true);
-        assert!(result.content[0].text.starts_with(tool));
-    }
+    let tool = "fabric_lease";
+    let items: Vec<Value> = (1..=10)
+        .map(|id| json!({"id":format!("{id:032x}"),"description":"a long record"}))
+        .collect();
+    let reply = response(
+        tool,
+        json!({"result":"listed","page":{"items":items,"truncated":false}}),
+    )
+    .unwrap();
+    let result = limit_response(reply, &limits, false, false).unwrap();
+    let page = &result.structured_content["page"];
+    let items = page["items"].as_array().unwrap();
+    assert!(!items.is_empty() && items.len() < 10);
+    assert_eq!(items.last().unwrap()["id"], format!("{:032x}", items.len()));
+    assert_eq!(page["truncated"], true);
+    assert!(result.content[0].text.starts_with(tool));
 }
 
 #[test]

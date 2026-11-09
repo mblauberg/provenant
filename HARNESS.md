@@ -26,7 +26,7 @@ brief through a child of the same graph, and its authority only narrows. It
 counts as an author of its children's output for review. Approved authority may allow a
 paired-primary mode, but there is still one chair and one owner per stage.
 
-Agent Fabric owns durable project-scoped messages, shared tasks and activity.
+Agent Fabric owns durable project-scoped messages, claims and activity.
 Fabric identity is the working directory (worktrees share their repository's);
 `PROVENANT_AGENT_LABEL` splits inboxes.
 Its thin MCP run front door delegates to the same orchestration

@@ -10,7 +10,7 @@ pub use input::{InputError, ValidateInput};
 
 use provenant_core::{
     ActorId, CancelToken, ClaimId, Clock, DurationMicros, GitOid, MessageId, ProjectId, StateRoot,
-    TaskId, WaitBudget, WaitTransport,
+    WaitBudget, WaitTransport,
 };
 use provenant_os::fs::FsError;
 use provenant_records::{ArtifactRef, RecordHeader};
@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use provenant_core::{Pause, ThreadPause};
-use provenant_fabric_store::{ClaimFence, ClaimRequest, LandingRequest, Request, Store, TaskClaim};
+use provenant_fabric_store::{ClaimFence, ClaimRequest, LandingRequest, Request, Store};
 pub use provenant_fabric_store::{
-    Delivery, Event, EventKind, EventRecord, Landing, Message, MessageKind, MessageRef, Page, Task,
-    TaskRef, TaskState, WorkClaim, WorkScope,
+    Delivery, Event, EventKind, EventRecord, Landing, Message, MessageKind, MessageRef, Page,
+    WorkClaim, WorkScope,
 };
 
 #[derive(Debug, Error)]
@@ -84,24 +84,6 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskProof {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub task: TaskId,
-    pub generation: u64,
-    #[serde(with = "input::hex_token")]
-    pub token: [u8; 16],
-}
-impl std::fmt::Debug for TaskProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskProof")
-            .field("task", &self.task)
-            .field("generation", &self.generation)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimProof {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -147,7 +129,6 @@ bounded_input! {
             body: String,
             artifacts: Vec<ArtifactRef>,
             reply_to: Option<MessageRef>,
-            task: Option<TaskRef>,
         },
         Read {
             after: Option<i64>,
@@ -180,60 +161,6 @@ pub enum MailResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         cursor: i64,
-    },
-}
-
-bounded_input! {
-    pub enum TaskInput as WireTaskInput {
-        Create { objective: String, note: Option<String> },
-        List {
-            state: Option<TaskState>,
-            after: Option<TaskId>,
-            limit: u64,
-        },
-        Claim { id: TaskId, lease_seconds: u64 },
-        Update {
-            proof: TaskProof,
-            objective: String,
-            note: Option<String>,
-        },
-        Finish { proof: TaskProof, state: TaskState },
-        Release { proof: TaskProof },
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum TaskResult {
-    Created {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        task: Task,
-    },
-    Listed {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        page: Page<Task>,
-    },
-    Claimed {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        proof: TaskProof,
-    },
-    Updated {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        task: Task,
-    },
-    Finished {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        task: Task,
-    },
-    Released {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        task: Task,
     },
 }
 
@@ -430,12 +357,6 @@ pub trait CoordinationApi {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<MailResult, CoordinationError>;
-    fn task(
-        &self,
-        input: TaskInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<TaskResult, CoordinationError>;
     fn events(
         &self,
         input: EventsInput,
@@ -565,16 +486,6 @@ impl<'a> LocalCoordination<'a> {
         provenant_os::fs::entropy_128().map_err(CoordinationError::Entropy)
     }
 
-    fn task_fence(&self, proof: &TaskProof) -> provenant_fabric_store::TaskFence {
-        provenant_fabric_store::TaskFence {
-            extra: Default::default(),
-            task: proof.task,
-            actor: self.actor,
-            generation: proof.generation,
-            token: proof.token,
-        }
-    }
-
     fn claim_fence(&self, proof: &ClaimProof) -> ClaimFence {
         ClaimFence {
             extra: Default::default(),
@@ -648,7 +559,6 @@ impl CoordinationApi for LocalCoordination<'_> {
                 body,
                 artifacts,
                 reply_to,
-                task,
                 ..
             } => {
                 let id = MessageId::from_bytes(Self::new_id_bytes()?);
@@ -664,7 +574,6 @@ impl CoordinationApi for LocalCoordination<'_> {
                     body,
                     artifacts,
                     reply_to,
-                    task,
                     created_at: self.clock.wall_now()?,
                 };
                 self.store.send(&message, &request)?;
@@ -706,119 +615,6 @@ impl CoordinationApi for LocalCoordination<'_> {
                 Ok(MailResult::MarkedRead {
                     extra: Default::default(),
                     cursor,
-                })
-            }
-        }
-    }
-
-    fn task(
-        &self,
-        input: TaskInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<TaskResult, CoordinationError> {
-        input.validate_input(WaitTransport::Cli)?;
-        self.ensure_active(budget, cancel)?;
-        let request = self.request(cancel);
-        match input {
-            TaskInput::Create {
-                objective, note, ..
-            } => {
-                let now = self.clock.wall_now()?;
-                let task = Task {
-                    extra: Default::default(),
-                    header: RecordHeader::V1,
-                    project: self.project,
-                    id: TaskId::from_bytes(Self::new_id_bytes()?),
-                    objective,
-                    note,
-                    state: TaskState::Open,
-                    owner: None,
-                    generation: 0,
-                    expires_at: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                self.store.create_task(&task, &request)?;
-                Ok(TaskResult::Created {
-                    extra: Default::default(),
-                    task,
-                })
-            }
-            TaskInput::List {
-                state,
-                after,
-                limit,
-                ..
-            } => {
-                let page = self
-                    .store
-                    .tasks(self.project, state, after, limit, &request)?;
-                Ok(TaskResult::Listed {
-                    extra: Default::default(),
-                    page: bounded_page(page.items, page.truncated)?,
-                })
-            }
-            TaskInput::Claim {
-                id, lease_seconds, ..
-            } => {
-                let fence = self.store.claim_task(
-                    &TaskClaim {
-                        project: self.project,
-                        task: id,
-                        actor: self.actor,
-                        token: Self::new_id_bytes()?,
-                        lease: Self::lease_duration(lease_seconds),
-                    },
-                    &request,
-                )?;
-                Ok(TaskResult::Claimed {
-                    extra: Default::default(),
-                    proof: TaskProof {
-                        extra: Default::default(),
-                        task: fence.task,
-                        generation: fence.generation,
-                        token: fence.token,
-                    },
-                })
-            }
-            TaskInput::Update {
-                proof,
-                objective,
-                note,
-                ..
-            } => {
-                let fence = self.task_fence(&proof);
-                self.store.update_task(
-                    self.project,
-                    &fence,
-                    &objective,
-                    note.as_deref(),
-                    &request,
-                )?;
-                let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Updated {
-                    extra: Default::default(),
-                    task,
-                })
-            }
-            TaskInput::Finish { proof, state, .. } => {
-                let fence = self.task_fence(&proof);
-                self.store
-                    .finish_task(self.project, &fence, state, &request)?;
-                let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Finished {
-                    extra: Default::default(),
-                    task,
-                })
-            }
-            TaskInput::Release { proof, .. } => {
-                let fence = self.task_fence(&proof);
-                self.store.release_task(self.project, &fence, &request)?;
-                let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Released {
-                    extra: Default::default(),
-                    task,
                 })
             }
         }
@@ -1185,14 +981,12 @@ impl LocalCoordination<'_> {
         }
         match input {
             Mutation::Mail(MailInput::Read { .. })
-            | Mutation::Task(TaskInput::List { .. })
             | Mutation::Events(EventsInput::Read { .. })
             | Mutation::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. })
             | Mutation::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }) => {
                 Err(CoordinationError::InvalidInput("read is an observation"))
             }
             Mutation::Mail(value) => record!(Mail, self.mail(value, budget, cancel)),
-            Mutation::Task(value) => record!(Task, self.task(value, budget, cancel)),
             Mutation::Events(value) => record!(Events, self.events(value, budget, cancel)),
             Mutation::Claim(value) => record!(Claim, self.claim(value, budget, cancel)),
             Mutation::Landing(value) => {
@@ -1219,7 +1013,6 @@ fn landing_reference(input: &LandingInput) -> Result<&str, CoordinationError> {
 #[serde(tag = "domain", content = "input", rename_all = "snake_case")]
 pub enum Mutation {
     Mail(MailInput),
-    Task(TaskInput),
     Events(EventsInput),
     Claim(ClaimInput),
     Landing(LandingInput),
@@ -1230,7 +1023,6 @@ pub enum Mutation {
 #[serde(untagged)]
 pub enum MutationResult {
     Mail(MailResult),
-    Task(TaskResult),
     Events(EventsResult),
     Claim(ClaimResult),
     Landing(LandingResult),
@@ -1326,16 +1118,19 @@ mod tests {
     }
 
     #[test]
-    fn newer_stored_task_reports_upgrade_required() {
+    fn newer_stored_message_reports_upgrade_required() {
         let f = Fixture::new();
         let service = f.service();
         let cancel = CancelToken::new();
         service
-            .task(
-                TaskInput::Create {
+            .mail(
+                MailInput::Send {
                     extra: Default::default(),
-                    objective: "future task".into(),
-                    note: None,
+                    recipients: vec![f.actor],
+                    kind: MessageKind::Request,
+                    body: "future message".into(),
+                    artifacts: Vec::new(),
+                    reply_to: None,
                 },
                 f.budget(),
                 &cancel,
@@ -1343,14 +1138,14 @@ mod tests {
             .unwrap();
         let db =
             rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
-        db.execute("UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.header.schema_version',2) AS BLOB)", []).unwrap();
+        db.execute("UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.header.schema_version',2) AS BLOB)", []).unwrap();
         let error = service
-            .task(
-                TaskInput::List {
+            .mail(
+                MailInput::Read {
                     extra: Default::default(),
-                    state: None,
-                    after: None,
+                    after: Some(0),
                     limit: 10,
+                    session: None,
                 },
                 f.budget(),
                 &cancel,
@@ -1382,73 +1177,12 @@ mod tests {
         assert_upgrade(&error, "database schema", version as u64);
     }
 
-    struct TickingClock(std::sync::Mutex<i64>);
-    impl Clock for TickingClock {
-        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
-            let mut value = self.0.lock().unwrap();
-            let now = *value;
-            *value += 1;
-            WallTime::from_micros(now)
-        }
-        fn mono_now(&self) -> MonoTime {
-            MonoTime::from_micros(0)
-        }
-        fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            unreachable!("fixed-time test clock never waits")
-        }
-    }
-
     #[test]
     fn coordination_time_errors_are_state_corrupt() {
         assert_eq!(
             CoordinationError::Time(provenant_core::TimeError::WallRange).code(),
             "state_corrupt"
         );
-    }
-
-    #[test]
-    fn task_create_uses_one_timestamp() {
-        let temporary = crate::test_support::tempdir().expect("temp root");
-        let base = temporary
-            .path()
-            .canonicalize()
-            .expect("canonical temp root");
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        let root = inputs
-            .resolve(&Resolver)
-            .expect("isolated state root")
-            .state;
-        let clock = TickingClock(std::sync::Mutex::new(2_000_000_000_000_000));
-        let backoff = ThreadPause;
-        let budget = WaitBudget::cli(clock.mono_now(), 5).expect("test budget");
-        let cancel = CancelToken::new();
-        let service = LocalCoordination::open(
-            &root,
-            ProjectId::from_bytes([31; 16]),
-            ActorId::from_bytes([32; 16]),
-            &clock,
-            &backoff,
-            &cancel,
-        )
-        .expect("open service");
-
-        let TaskResult::Created { task, .. } = service
-            .task(
-                TaskInput::Create {
-                    extra: Default::default(),
-                    objective: "single timestamp".into(),
-                    note: None,
-                },
-                budget,
-                &cancel,
-            )
-            .expect("create task")
-        else {
-            panic!("create result")
-        };
-
-        assert_eq!(task.created_at, task.updated_at);
     }
 
     struct AdvancingClock {
@@ -1579,7 +1313,6 @@ mod tests {
                     body: "please inspect".into(),
                     artifacts: Vec::new(),
                     reply_to: None,
-                    task: None,
                 },
                 fixture.budget(),
                 &cancel,
@@ -1683,84 +1416,6 @@ mod tests {
             panic!("events read")
         };
         assert!(page.items.is_empty());
-    }
-
-    #[test]
-    fn task_proofs_are_bound_to_authenticated_actor() {
-        let fixture = Fixture::new();
-        let service = fixture.service();
-        let cancel = CancelToken::new();
-        let TaskResult::Created { task, .. } = service
-            .task(
-                TaskInput::Create {
-                    extra: Default::default(),
-                    objective: "review change".into(),
-                    note: None,
-                },
-                fixture.budget(),
-                &cancel,
-            )
-            .expect("create task")
-        else {
-            panic!("create result")
-        };
-        let TaskResult::Claimed { proof, .. } = service
-            .task(
-                TaskInput::Claim {
-                    extra: Default::default(),
-                    id: task.id,
-                    lease_seconds: 5,
-                },
-                fixture.budget(),
-                &cancel,
-            )
-            .expect("claim task")
-        else {
-            panic!("claim result")
-        };
-        let TaskResult::Updated { task: updated, .. } = service
-            .task(
-                TaskInput::Update {
-                    extra: Default::default(),
-                    proof: proof.clone(),
-                    objective: "review and report".into(),
-                    note: Some("bounded".into()),
-                },
-                fixture.budget(),
-                &cancel,
-            )
-            .expect("update task")
-        else {
-            panic!("update result")
-        };
-        assert_eq!(updated.objective, "review and report");
-        let other = LocalCoordination::new(
-            Store::open(
-                &fixture.root,
-                &Request {
-                    clock: &fixture.clock,
-                    cancel: &cancel,
-                },
-            )
-            .expect("second connection"),
-            fixture.project,
-            ActorId::from_bytes([9; 16]),
-            &fixture.clock,
-            &fixture.backoff,
-        );
-        assert!(matches!(
-            other.task(
-                TaskInput::Release {
-                    extra: Default::default(),
-                    proof
-                },
-                fixture.budget(),
-                &cancel
-            ),
-            Err(CoordinationError::Store(
-                provenant_fabric_store::Error::StaleFence
-            ))
-        ));
     }
 
     #[test]

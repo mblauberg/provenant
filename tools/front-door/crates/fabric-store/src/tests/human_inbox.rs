@@ -11,7 +11,7 @@ fn viewer_state_migration_drops_rows_and_keeps_mail() {
     store
         .db
         .execute_batch(&format!(
-            "{} INSERT INTO viewer_requests(project,viewer,request,seen_revision,dismissed) VALUES('p','console','r',1,1); INSERT INTO viewer_summaries(project,viewer,session,revision) VALUES('p','console','chair',2); PRAGMA user_version=13;",
+            "{RESTORE_TASKS_TABLE} {} INSERT INTO viewer_requests(project,viewer,request,seen_revision,dismissed) VALUES('p','console','r',1,1); INSERT INTO viewer_summaries(project,viewer,session,revision) VALUES('p','console','chair',2); PRAGMA user_version=13;",
             include_str!("../migrations/013-viewer-state.sql")
         ))
         .unwrap();

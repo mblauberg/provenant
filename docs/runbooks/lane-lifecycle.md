@@ -75,7 +75,7 @@ build-heavy = 15
 Values range from 0 to 19, with higher values yielding more CPU time to other
 work. These are the defaults. A worktree-write lane uses `writer`; other lanes
 use `read-only`. Set `--build-heavy` to use `build-heavy` for either mode.
-Fabric tasks and manifests accept `"build_heavy": true`. `status --json` reports
+Graph nodes and manifests accept `"build_heavy": true`. `status --json` reports
 the applied value as `priority`, and `requested_priority` when it differs. The
 value is null before it is known and for older records without this evidence.
 If the guardian already has a higher nice value, the provider inherits that
