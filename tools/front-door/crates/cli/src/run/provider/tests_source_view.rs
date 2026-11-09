@@ -188,9 +188,11 @@ fn source_view_of_twenty_thousand_files_uses_batched_reads_within_budget()
     provenant_os::fixture::run_git(&fixture.project, &["add", "-A"])?;
     provenant_os::fixture::run_git(&fixture.project, &["commit", "-qm", "many"])?;
     let head = run::resolve_git_base(&fixture.git, &fixture.project, "HEAD")?;
-    let started = std::time::Instant::now();
+    use provenant_core::Clock;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 60)?;
     let view = fixture.snapshot(&fixture.project, &head)?;
-    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    assert!(budget.remaining(clock.mono_now()).as_micros() > 0);
     assert_eq!(std::fs::read(view.join("d99/f199.txt"))?, b"99/199\n");
     Ok(())
 }
