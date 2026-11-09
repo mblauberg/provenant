@@ -742,7 +742,13 @@ impl Factory {
         }
         bind_launch_controls(input, &mut node, &self.cwd)?;
         node["id"] = json!(key);
-        let resolvers = self.launch_resolvers(raw)?;
+        let resolvers = self.launch_resolvers_for_tier(
+            raw,
+            input
+                .get("tier")
+                .filter(|tier| !tier.is_null())
+                .or_else(|| raw.and_then(|document| document.get("tier"))),
+        )?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
@@ -4410,6 +4416,17 @@ mod tests {
             constrained, 2,
             "the actual review legs must retain their required family"
         );
+        let mut child = input.clone();
+        child["tier"] = json!("missing-family-pool");
+        let error = factory.child_request(&child).unwrap_err();
+        let FacadeError::DispatchRefused { reason, .. } = error else {
+            return Err(format!("expected child family refusal, received {error:?}").into());
+        };
+        assert!(
+            reason.contains(family) && reason.contains("count 2"),
+            "{reason}"
+        );
+        assert!(reason.contains("unknown named route"), "{reason}");
         let mut refused = input;
         refused["document"]["exclude"] = json!(["codex"]);
         let error = factory
