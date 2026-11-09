@@ -17,6 +17,12 @@ pub(crate) struct AutomaticContinuation {
     record: AttemptRecord,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ContinuationDecision {
+    schema_version: u64,
+    continuation: Option<AutomaticContinuation>,
+}
+
 impl RunStore {
     /// Decide once, before sealing terminal intent. Recovery replays this exact
     /// choice, including the policy allowance observed at the original launch.
@@ -138,6 +144,10 @@ impl RunStore {
         } else {
             None
         };
+        let decision = ContinuationDecision {
+            schema_version: 1,
+            continuation: decision,
+        };
         seal(
             attempt,
             DECISION,
@@ -152,7 +162,10 @@ impl RunStore {
     ) -> Result<Option<AutomaticContinuation>> {
         let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
         read_sealed(&attempt, DECISION, TERMINAL_RECORD_LIMIT)?
-            .map(|raw| crate::db::decode(&raw))
+            .map(|raw| {
+                let decision: ContinuationDecision = crate::db::decode(&raw)?;
+                Ok(decision.continuation)
+            })
             .transpose()
             .map(Option::flatten)
     }
@@ -286,6 +299,33 @@ mod tests {
                 store.replay_terminal(id, &call)?.superseded_by,
                 terminal.superseded_by
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_continuation_decision_schema_round_trips()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let record = store.record(input.attempts[0].attempt_id, &call)?;
+        for successor in [false, true] {
+            let continuation = successor.then(|| AutomaticContinuation {
+                record: record.clone(),
+            });
+            let decision = ContinuationDecision {
+                schema_version: 1,
+                continuation,
+            };
+            let bytes = crate::db::bytes(&decision)?;
+            let decoded: ContinuationDecision = crate::db::decode(&bytes)?;
+            assert_eq!(decoded.schema_version, 1);
+            assert_eq!(decoded.continuation.is_some(), successor);
         }
         Ok(())
     }
