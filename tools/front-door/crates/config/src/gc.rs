@@ -351,6 +351,8 @@ pub struct GcSettings {
     pub idle_days: u64,
     pub graph_checkpoint_days: u64,
     pub free_floor: Option<String>,
+    /// Total lane Cargo cache cap; defaults to 32 GiB.
+    pub lane_cargo_cache_max: Option<String>,
     pub alert_below: Option<String>,
     pub projects: BTreeMap<String, ProjectGcSettings>,
 }
@@ -362,6 +364,7 @@ impl Default for GcSettings {
             idle_days: 7,
             graph_checkpoint_days: 90,
             free_floor: None,
+            lane_cargo_cache_max: None,
             alert_below: None,
             projects: BTreeMap::new(),
         }
@@ -414,6 +417,16 @@ impl GcSettings {
             .map_err(std::io::Error::other)
     }
 
+    /// Total bound includes busy caches, which remain protected even above it.
+    pub fn lane_cargo_cache_max_bytes(&self) -> std::io::Result<u64> {
+        self.lane_cargo_cache_max
+            .as_deref()
+            .map(parse_cache_size)
+            .transpose()
+            .map(|cap| cap.unwrap_or(32 * 1024_u64.pow(3)))
+            .map_err(std::io::Error::other)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !(1..=3650).contains(&self.idle_days) {
             return Err("idle_days_range");
@@ -422,6 +435,9 @@ impl GcSettings {
             return Err("graph_checkpoint_days_range");
         }
         if let Some(size) = &self.free_floor {
+            parse_cache_size(size)?;
+        }
+        if let Some(size) = &self.lane_cargo_cache_max {
             parse_cache_size(size)?;
         }
         if let Some(size) = &self.alert_below {
@@ -676,6 +692,26 @@ mod tests {
                 .is_empty()
         );
         Ok(())
+    }
+
+    #[test]
+    fn lane_cache_cap_defaults_and_validates() {
+        assert_eq!(
+            super::GcSettings::default()
+                .lane_cargo_cache_max_bytes()
+                .unwrap(),
+            32 * 1024_u64.pow(3)
+        );
+        let configured: super::GcSettings =
+            toml_edit::de::from_str("lane_cargo_cache_max = '8G'").unwrap();
+        assert_eq!(
+            configured.lane_cargo_cache_max_bytes().unwrap(),
+            8 * 1024_u64.pow(3)
+        );
+        assert!(configured.validate().is_ok());
+        let invalid: super::GcSettings =
+            toml_edit::de::from_str("lane_cargo_cache_max = 'invalid'").unwrap();
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub enum CacheGcReason {
     Idle,
     /// Additional removal to reach the requested available disk space.
     FreeFloor,
+    /// Additional removal to reach the configured total cache bound.
+    TotalCap,
     /// A detached cache left by an interrupted sweep.
     Tombstone,
     /// An existing owner outside the selected project; always kept.
@@ -48,6 +50,8 @@ pub struct CacheGcPolicy {
     pub idle_before_ns: Option<i128>,
     /// After the usual pass, collect oldest caches until this floor is met.
     pub free_floor_bytes: Option<u64>,
+    /// Total cache byte bound, including protected caches.
+    pub max_total_bytes: Option<u64>,
     /// Report without deleting.
     pub dry_run: bool,
     /// Canonical worktrees listed by the selected project.
@@ -73,6 +77,10 @@ pub struct CacheGcReport {
     /// Caches kept because ownership or writer state prevents removal.
     pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
+    /// Preview measurements stopped at the shared entry or time bound.
+    pub bytes_estimated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes_after: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub free_bytes_before: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,6 +97,34 @@ pub struct CacheGcError {
     pub report: CacheGcReport,
     #[source]
     pub source: Box<PermissionError>,
+}
+
+/// Preview accounting is deliberately a lower bound. An incomplete newest-write
+/// observation is MAX, so it can never authorise idle eviction.
+struct MeasureBudget {
+    remaining: usize,
+    started: Option<std::time::Instant>,
+    limited: bool,
+}
+impl MeasureBudget {
+    #[allow(clippy::disallowed_methods)] // Wall-clock bound on read-only preview work.
+    fn new(preview: bool) -> Self {
+        Self {
+            remaining: if preview { 20_000 } else { usize::MAX },
+            started: preview.then(std::time::Instant::now),
+            limited: false,
+        }
+    }
+    fn exhausted(&mut self) -> bool {
+        if self.remaining == 0
+            || self
+                .started
+                .is_some_and(|started| started.elapsed() >= std::time::Duration::from_secs(1))
+        {
+            self.limited = true;
+        }
+        self.limited
+    }
 }
 
 /// Remove marked orphan caches and retry detached remnants from earlier sweeps.
@@ -122,6 +158,7 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
         &mut CacheGcReport::default(),
         &mut |path| Err(missing_custody(path)),
         false,
+        &mut MeasureBudget::new(false),
     )
 }
 
@@ -176,6 +213,7 @@ fn gc_caches_with_free_space(
         dry_run: policy.dry_run,
         ..CacheGcReport::default()
     };
+    let mut measurement = MeasureBudget::new(policy.dry_run);
     let sweep = (|| {
         validate_absolute(home)?;
         let cache_root = home.join("Library/Caches/provenant-lane-cargo");
@@ -190,7 +228,14 @@ fn gc_caches_with_free_space(
             report.free_bytes_after = report.free_bytes_before;
             report.free_bytes_estimated = policy.dry_run;
         }
-        sweep_cache_root(&root, &cache_root, policy, &mut report, &mut writer_guard)?;
+        sweep_cache_root(
+            &root,
+            &cache_root,
+            policy,
+            &mut report,
+            &mut writer_guard,
+            &mut measurement,
+        )?;
         if let Some(floor) = policy.free_floor_bytes {
             let mut available = if policy.dry_run {
                 report
@@ -234,10 +279,16 @@ fn gc_caches_with_free_space(
                     let Some(owner) = read_cache_owner(&cache, Path::new(&name))? else {
                         continue;
                     };
-                    if cache_gc_reason(&cache, Path::new(&name), &owner, &pressure)?
-                        == Some(CacheGcReason::Idle)
+                    if cache_gc_reason(
+                        &cache,
+                        Path::new(&name),
+                        &owner,
+                        &pressure,
+                        &mut measurement,
+                    )? == Some(CacheGcReason::Idle)
                     {
-                        let (_, newest) = measure_cache(&cache, Path::new(&name), 0)?;
+                        let (_, newest) =
+                            measure_cache(&cache, Path::new(&name), 0, &mut measurement)?;
                         candidates.push((newest, name));
                     }
                 }
@@ -258,6 +309,7 @@ fn gc_caches_with_free_space(
                         &mut report,
                         &mut writer_guard,
                         true,
+                        &mut measurement,
                     )?;
                     if report.removed.len() == removed {
                         continue;
@@ -273,8 +325,28 @@ fn gc_caches_with_free_space(
                 }
             }
         }
+        collect_total_cap(
+            &root,
+            &cache_root,
+            policy,
+            &mut report,
+            &mut writer_guard,
+            &mut measurement,
+        )?;
+        if policy.max_total_bytes.is_some() && policy.free_floor_bytes.is_some() {
+            report.free_bytes_after = Some(if policy.dry_run {
+                report
+                    .free_bytes_before
+                    .unwrap_or(0)
+                    .saturating_add(report.bytes_freed)
+            } else {
+                free_space(&cache_root)
+                    .map_err(|error| cache_io_error("read free space", &cache_root, error))?
+            });
+        }
         Ok(())
     })();
+    report.bytes_estimated = measurement.limited;
     match sweep {
         Ok(()) => Ok(report),
         Err(source) => Err(CacheGcError {
@@ -282,6 +354,82 @@ fn gc_caches_with_free_space(
             source: Box::new(source),
         }),
     }
+}
+
+/// Apply the total bound after ordinary orphan/age collection. Count protected
+/// and foreign caches too, but only the existing writer-guarded idle path may
+/// detach an extant worktree's cache.
+fn collect_total_cap(
+    root: &Directory,
+    cache_root: &Path,
+    policy: &CacheGcPolicy,
+    report: &mut CacheGcReport,
+    writer_guard: &mut CacheWriterGuard<'_>,
+    measurement: &mut MeasureBudget,
+) -> Result<(), PermissionError> {
+    let Some(cap) = policy.max_total_bytes else {
+        return Ok(());
+    };
+    let mut pressure = policy.clone();
+    pressure.idle_before_ns = Some(i128::MAX);
+    pressure.free_floor_bytes = None;
+    let mut total = 0_u64;
+    let mut candidates = Vec::new();
+    for name in provenant_os::fs::entry_names(root, MAX_CACHE_DIRECTORY_ENTRIES)
+        .map_err(cache_fs_error("readdir", Path::new(".")))?
+    {
+        let path = cache_root.join(&name);
+        if !name
+            .to_str()
+            .is_some_and(|name| is_cache_digest(name) || cache_tombstone(name).is_some())
+            || report.removed.iter().any(|entry| entry.path == path)
+        {
+            continue;
+        }
+        let metadata = root
+            .metadata_at(&name, false)
+            .map_err(cache_fs_error("stat", Path::new(&name)))?;
+        if metadata.kind != FileKind::Directory {
+            continue;
+        }
+        let cache = root
+            .open_verified_directory(&name)
+            .map_err(cache_fs_error("open verified directory", Path::new(&name)))?;
+        let (bytes, newest) = measure_cache(&cache, Path::new(&name), 0, measurement)?;
+        total = total.saturating_add(bytes);
+        if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o7777 != 0o700 {
+            continue;
+        }
+        let Some(owner) = read_cache_owner(&cache, Path::new(&name))? else {
+            continue;
+        };
+        if cache_gc_reason_with_newest(Path::new(&name), &owner, &pressure, || Ok(newest))?
+            == Some(CacheGcReason::Idle)
+        {
+            candidates.push((newest, name));
+        }
+    }
+    candidates.sort();
+    for (newest, name) in candidates {
+        if total <= cap {
+            break;
+        }
+        pressure.idle_before_ns = Some(newest.saturating_add(1));
+        let before = report.bytes_freed;
+        prune_worktree_cache(
+            root,
+            cache_root,
+            &name,
+            &pressure,
+            report,
+            writer_guard,
+            true,
+            measurement,
+        )?;
+        total = total.saturating_sub(report.bytes_freed.saturating_sub(before));
+    }
+    report.total_bytes_after = Some(total);
+    Ok(())
 }
 
 fn open_cache_root(
@@ -335,6 +483,7 @@ fn sweep_cache_root(
     policy: &CacheGcPolicy,
     report: &mut CacheGcReport,
     writer_guard: &mut CacheWriterGuard<'_>,
+    measurement: &mut MeasureBudget,
 ) -> Result<(), PermissionError> {
     let mut failures = Vec::new();
     // Snapshot names so newly detached tombstones are retried on a later run.
@@ -357,9 +506,16 @@ fn sweep_cache_root(
                 continue;
             }
         };
-        if let Err(error) =
-            prune_worktree_cache(root, cache_root, &name, policy, report, writer_guard, false)
-        {
+        if let Err(error) = prune_worktree_cache(
+            root,
+            cache_root,
+            &name,
+            policy,
+            report,
+            writer_guard,
+            false,
+            measurement,
+        ) {
             failures.push((Some(name), error));
         }
     }
@@ -399,9 +555,16 @@ fn prune_worktree_cache(
     report: &mut CacheGcReport,
     writer_guard: &mut CacheWriterGuard<'_>,
     free_floor: bool,
+    measurement: &mut MeasureBudget,
 ) -> Result<(), PermissionError> {
     let pressure_reason = |reason| match reason {
-        Some(CacheGcReason::Idle) if free_floor => Some(CacheGcReason::FreeFloor),
+        Some(CacheGcReason::Idle) if free_floor => Some(
+            if policy.max_total_bytes.is_some() && policy.free_floor_bytes.is_none() {
+                CacheGcReason::TotalCap
+            } else {
+                CacheGcReason::FreeFloor
+            },
+        ),
         other => other,
     };
     let Some(digest) = name.to_str() else {
@@ -480,9 +643,13 @@ fn prune_worktree_cache(
         let Some(owner) = owner.as_ref() else {
             return Ok(());
         };
-        let Some(reason) =
-            pressure_reason(cache_gc_reason(&cache, Path::new(name), owner, policy)?)
-        else {
+        let Some(reason) = pressure_reason(cache_gc_reason(
+            &cache,
+            Path::new(name),
+            owner,
+            policy,
+            measurement,
+        )?) else {
             if let Some(state) = policy.protected_owners.get(&owner.path) {
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
@@ -506,9 +673,12 @@ fn prune_worktree_cache(
         }
         reason
     };
-    let (bytes, _) = measure_cache(&cache, Path::new(name), 0)?;
+    let (bytes, _) = measure_cache(&cache, Path::new(name), 0, measurement)?;
     if policy.dry_run {
-        if matches!(reason, CacheGcReason::Idle | CacheGcReason::FreeFloor) {
+        if matches!(
+            reason,
+            CacheGcReason::Idle | CacheGcReason::FreeFloor | CacheGcReason::TotalCap
+        ) {
             let owner = owner.as_ref().ok_or(PermissionError::AnchorMismatch)?;
             // Probe only: a dry run never needs to hold writer exclusion.
             if let Err(state) = writer_guard(&owner.path) {
@@ -534,7 +704,10 @@ fn prune_worktree_cache(
                 cache_owner_fingerprint(original_owner),
                 std::process::id()
             ));
-            let idle_guard = if matches!(reason, CacheGcReason::Idle | CacheGcReason::FreeFloor) {
+            let idle_guard = if matches!(
+                reason,
+                CacheGcReason::Idle | CacheGcReason::FreeFloor | CacheGcReason::TotalCap
+            ) {
                 match writer_guard(&original_owner.path)
                     .and_then(|guard| guard.ok_or_else(|| missing_custody(&original_owner.path)))
                 {
@@ -561,6 +734,7 @@ fn prune_worktree_cache(
                 Path::new(name),
                 original_owner,
                 policy,
+                measurement,
             )?);
             if current_reason == Some(CacheGcReason::Foreign) {
                 report.kept.push(CacheGcEntry {
@@ -784,9 +958,10 @@ fn cache_gc_reason(
     relative: &Path,
     owner: &CacheOwner,
     policy: &CacheGcPolicy,
+    measurement: &mut MeasureBudget,
 ) -> Result<Option<CacheGcReason>, PermissionError> {
     cache_gc_reason_with_newest(relative, owner, policy, || {
-        measure_cache(cache, relative, 0).map(|(_, newest)| newest)
+        measure_cache(cache, relative, 0, measurement).map(|(_, newest)| newest)
     })
 }
 
@@ -832,9 +1007,13 @@ fn measure_cache(
     directory: &provenant_os::fs::Directory,
     relative: &Path,
     depth: usize,
+    budget: &mut MeasureBudget,
 ) -> Result<(u64, i128), PermissionError> {
     if depth >= MAX_CACHE_SWEEP_DEPTH {
         return Err(PermissionError::CacheSweepDepth);
+    }
+    if budget.exhausted() {
+        return Ok((0, i128::MAX));
     }
     let mut bytes = 0_u64;
     let mut newest = directory
@@ -844,6 +1023,10 @@ fn measure_cache(
     for entry in
         cache_gc_entries(directory, relative).map_err(cache_fs_error("opendir", relative))?
     {
+        if budget.exhausted() {
+            return Ok((bytes, i128::MAX));
+        }
+        budget.remaining = budget.remaining.saturating_sub(1);
         let name = entry.map_err(cache_fs_error("readdir", relative))?;
         let path = relative.join(&name);
         let metadata = cache_gc_operation("stat", &relative.join(&name), || {
@@ -857,7 +1040,7 @@ fn measure_cache(
                 directory.open_verified_directory(&name)
             })
             .map_err(cache_fs_error("open verified directory", &path))?;
-            let (child_bytes, child_newest) = measure_cache(&child, &path, depth + 1)?;
+            let (child_bytes, child_newest) = measure_cache(&child, &path, depth + 1, budget)?;
             bytes = bytes.saturating_add(child_bytes);
             newest = newest.max(child_newest);
         }
@@ -1144,7 +1327,16 @@ mod tests {
             let _event = CacheGcEvent::install(path.clone(), event);
             let result = Directory::open_anchor(&path)
                 .map_err(PermissionError::Filesystem)
-                .and_then(|root| sweep_cache_root(&root, &path, policy, &mut report, writer_guard));
+                .and_then(|root| {
+                    sweep_cache_root(
+                        &root,
+                        &path,
+                        policy,
+                        &mut report,
+                        writer_guard,
+                        &mut MeasureBudget::new(policy.dry_run),
+                    )
+                });
             result
                 .map(|()| report.clone())
                 .map_err(|source| CacheGcError {
@@ -1165,6 +1357,105 @@ mod tests {
             std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
             std::fs::write(path.join("artifact"), b"cached build")?;
             Ok(path)
+        }
+
+        #[test]
+        fn total_cap_evicts_oldest_and_counts_protected_and_foreign_caches()
+        -> Result<(), Box<dyn std::error::Error>> {
+            for dry_run in [true, false] {
+                let temporary = tempfile::tempdir()?;
+                let home = temporary.path();
+                let locks = test_writer_lock(home)?;
+                let mut paths = Vec::new();
+                let mut owners = Vec::new();
+                let mut sizes = Vec::new();
+                for (letter, seconds) in [("a", 30), ("b", 10), ("c", 1), ("d", 2)] {
+                    let owner = home.join(letter);
+                    std::fs::create_dir(&owner)?;
+                    let path = cache(home, &letter.repeat(64), &owner)?;
+                    for item in [&path, &path.join(CARGO_CACHE_OWNER), &path.join("artifact")] {
+                        std::fs::File::open(item)?.set_modified(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                        )?;
+                    }
+                    let directory = Directory::open_anchor(&path)?;
+                    sizes.push(
+                        measure_cache(
+                            &directory,
+                            Path::new("."),
+                            0,
+                            &mut MeasureBudget::new(false),
+                        )?
+                        .0,
+                    );
+                    paths.push(path);
+                    owners.push(owner);
+                }
+                let total: u64 = sizes.iter().sum();
+                let cap = total - sizes[1];
+                let policy = CacheGcPolicy {
+                    max_total_bytes: Some(cap),
+                    dry_run,
+                    project_owners: owners[..3].iter().cloned().collect(),
+                    protected_owners: [(owners[2].clone(), Occupancy::Observed { process: None })]
+                        .into(),
+                    ..Default::default()
+                };
+                let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |owner| {
+                    assert_ne!(owner, owners[2]);
+                    assert_ne!(owner, owners[3]);
+                    locks
+                        .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map(Some)
+                        .map_err(|_| missing_custody(owner))
+                })?;
+                assert_eq!(report.removed.len(), 1);
+                assert_eq!(report.removed[0].path, paths[1]);
+                assert_eq!(report.removed[0].reason, CacheGcReason::TotalCap);
+                assert_eq!(report.total_bytes_after, Some(cap));
+                assert_eq!(paths[1].exists(), dry_run);
+                assert!(paths[0].exists() && paths[2].exists() && paths[3].exists());
+                // When protected caches alone exceed the cap, writer custody
+                // still wins; the report exposes the unattainable bound.
+                let policy = CacheGcPolicy {
+                    max_total_bytes: Some(0),
+                    dry_run: false,
+                    ..policy
+                };
+                let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |owner| {
+                    Err(missing_custody(owner))
+                })?;
+                assert!(report.removed.is_empty());
+                assert!(report.total_bytes_after.is_some_and(|bytes| bytes > 0));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn incomplete_preview_never_authorises_idle_eviction()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let owner_path = home.join("owner");
+            std::fs::create_dir(&owner_path)?;
+            let path = cache(home, &"a".repeat(64), &owner_path)?;
+            let directory = Directory::open_anchor(&path)?;
+            let owner = read_cache_owner(&directory, Path::new("."))?.ok_or("owner")?;
+            let policy = CacheGcPolicy {
+                idle_before_ns: Some(i128::MAX),
+                project_owners: [owner_path].into(),
+                dry_run: true,
+                ..Default::default()
+            };
+            let mut budget = MeasureBudget::new(true);
+            budget.remaining = 0;
+            assert_eq!(
+                cache_gc_reason(&directory, Path::new("."), &owner, &policy, &mut budget)?,
+                None
+            );
+            assert!(budget.limited);
+            assert!(path.join("artifact").exists());
+            Ok(())
         }
 
         #[test]
@@ -1487,6 +1778,7 @@ mod tests {
                         protected_owners: [(owner.clone(), state.clone())].into(),
                         selected_only: false,
                         free_floor_bytes: None,
+                        max_total_bytes: None,
                     };
                     let mut probes = 0;
                     let report =
@@ -2183,6 +2475,7 @@ mod tests {
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
             protected_owners: [(caches[2].1.clone(), Occupancy::Observed { process: None })].into(),
             free_floor_bytes: None,
+            max_total_bytes: None,
             selected_only: false,
         };
 

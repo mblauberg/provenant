@@ -68,9 +68,8 @@ and GC preview below to investigate it.
    dip. GC does not sweep arbitrary `/private/tmp/provenant-*` paths.
 
 Every `target` directory is sized, including nested attempt targets and
-`parts.target` in lane caches. Build artefacts are never parsed. Each measured
-path has a budget of 1,000,000 entries and ten seconds, checked between
-filesystem operations; depth is capped at 256. Reaching a limit reports an
+`parts.target` in lane caches. Build artefacts are never parsed. The whole report shares a budget of 50,000 entries and two seconds, checked
+between filesystem operations; depth is capped at 256. Reaching a limit reports an
 error and the bytes observed so far. Files that disappear during the walk are
 skipped without an error. A worktree's
 `merged` fact describes containment in the main checkout's observed HEAD and
@@ -90,9 +89,8 @@ No rollback is needed because reporting changes no durable state. Preserve the
 JSON in your own chosen destination if evidence is required; investigate
 remaining errors with the owner of each reported path.
 
-Writer admission honours `gc.schedule=false`. Admission and settlement
-pressure collection select the launching project. Settlement collection runs
-only below `gc.free_floor` and is capped at five seconds.
+Writer admission honours `gc.schedule=false`. Admission pressure collection selects the launching project and is capped at
+five seconds. Fabric settlement defers recursive cleanup to GC.
 Pressure sweeps prune declared idle output, with a one-day floor below the
 configured free-space floor, while retaining worktrees and skipping fetches.
 

@@ -126,26 +126,32 @@ tombstone.
 
 On macOS, the installed default-state host tick runs every 60 seconds and
 collects when its persisted daily deadline is due.
-`[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
-cache pruning remain available. See
+`[gc] schedule = false` disables scheduled sweeps; manual GC remains available. See
 [configuration](configuration.md#lane-cache-collection) for tick installation
 and logs. Other installations can schedule `provenant tick` explicitly.
 
-Writer admission and lane settlement use pressure collection without network
-fetches or worktree removal. Each caps its single attempt at five seconds
-and rechecks every output volume once. Applied full and pressure sweeps share
+Writer admission uses pressure collection without network fetches or worktree
+removal, capped at five seconds. Applied full and pressure sweeps share
 `<state>/gc/collection.lock`; a busy collector is skipped, not queued.
-Manual `gc --pressure` prints a notice when the project
-is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
-Lane settlement collects that lane's declared ignored output and Cargo cache,
-including when its worktree is retained for delivery pickup. Successful
-settlement, delivery integration and `land` also prune eligible worktrees
-and their caches through the existing custody checks. These event passes share
-the collection lock, apply no idle delay and leave foreign worktrees alone.
-Kept files, live writers and reservations still prevent removal. A busy
-collector skips settlement collection; the daily backstop retries eligible
-data. Provider-cache and temporary cleanup at settlement remain scoped to
-their owner. `gc.schedule = false` leaves settlement and landing cleanup enabled.
+Manual `gc --pressure` prints a notice when the project is transient or no
+eligible data is in scope; JSON exposes the reason as `notice`.
+
+Fabric settlement records `cleanup_deferred = true` and leaves worktree,
+ignored-output and Cargo-cache collection to manual or scheduled GC. Settlement
+fetches no refs and walks no payload trees. `land` retains its explicit cleanup.
+Kept files, live writers and reservations still prevent removal.
+
+`gc --dry-run` uses the existing run-size ledger and shared bounded filesystem
+samples. It does not refresh upstream refs or survey build profiles and target
+seeds; `notice` identifies these deferred surveys. Incomplete cache sizes set
+`data.bytes_estimated = true`, and an incomplete newest-write observation
+cannot mark a cache idle. Applied GC obtains the full proof before deletion.
+
+`gc.lane_cargo_cache_max` bounds the total lane Cargo cache at 32 GiB by default.
+After orphan and idle collection, GC evicts remaining eligible caches oldest
+first. It counts live and foreign caches towards the total while retaining them;
+`data.total_bytes_after` may therefore exceed the cap. Existing worktrees need
+writer exclusion before detachment; unknown custody retains the cache.
 
 Declared ignored output in an idle linked worktree no longer needs a terminal
 lane. It still needs free writer custody and no live lane. Undeclared ignored
