@@ -282,12 +282,51 @@ fn pull_for_branch_with(
         .into()),
     }
 }
+/// How long `pr watch` waits for CI to report its first check, and how often
+/// it asks. A push is followed by a gap before any workflow registers.
+const UNREPORTED_WAIT: Duration = Duration::from_secs(180);
+const UNREPORTED_POLL: Duration = Duration::from_secs(10);
+
+/// `gh pr checks` fails, rather than waits, until a check has been reported.
+fn unreported(output: &ExecOutcome) -> bool {
+    output.termination != Termination::Exit(0)
+        && String::from_utf8_lossy(&output.stderr.bytes)
+            .to_ascii_lowercase()
+            .contains("no checks reported")
+}
+/// Run a `gh pr checks` read, retrying while no check has been reported yet
+/// and giving up with a clear message once `UNREPORTED_WAIT` has passed.
+fn when_reported(
+    run: &dyn Fn() -> Result<ExecOutcome>,
+    sleep: &dyn Fn(Duration),
+    number: &str,
+) -> Result<ExecOutcome> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let output = run()?;
+        if !unreported(&output) {
+            return Ok(output);
+        }
+        if waited >= UNREPORTED_WAIT {
+            return Err(wait::failure(
+                "CI_NOT_SCHEDULED",
+                format!(
+                    "no checks were reported for #{number} within {}s; next: check the workflow triggers or push an empty commit to start CI",
+                    UNREPORTED_WAIT.as_secs()
+                ),
+            ));
+        }
+        sleep(UNREPORTED_POLL);
+        waited += UNREPORTED_POLL;
+    }
+}
+#[allow(clippy::disallowed_methods)]
 fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()> {
     if watch {
-        successful(execute(
-            project,
-            &["gh", "pr", "checks", number, "--watch"],
-            true,
+        successful(when_reported(
+            &|| execute(project, &["gh", "pr", "checks", number, "--watch"], true),
+            &std::thread::sleep,
+            number,
         )?)?;
     }
     #[derive(Deserialize)]
@@ -529,5 +568,88 @@ mod branch_pull_tests {
             "{ambiguous}"
         );
         assert!(select(serde_json::json!([pull(9, "OPEN", HEAD, true)])).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod unreported_checks_tests {
+    use super::*;
+    use provenant_os::exec::CapturedStream;
+    use std::cell::Cell;
+
+    fn outcome(code: i64, stderr: &str) -> ExecOutcome {
+        ExecOutcome {
+            termination: Termination::Exit(code),
+            stdout: CapturedStream::default(),
+            stderr: CapturedStream {
+                bytes: stderr.as_bytes().to_vec(),
+                ..Default::default()
+            },
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        }
+    }
+
+    #[test]
+    fn watch_waits_while_no_check_is_reported_then_proceeds() {
+        let reads = Cell::new(0);
+        let slept = Cell::new(Duration::ZERO);
+        let result = when_reported(
+            &|| {
+                reads.set(reads.get() + 1);
+                Ok(if reads.get() < 4 {
+                    outcome(1, "no checks reported on the 'feature' branch\n")
+                } else {
+                    outcome(0, "")
+                })
+            },
+            &|delay| slept.set(slept.get() + delay),
+            "7",
+        )
+        .expect("checks registered after three empty reads");
+        assert_eq!(result.termination, Termination::Exit(0));
+        assert_eq!(reads.get(), 4);
+        assert_eq!(slept.get(), UNREPORTED_POLL * 3);
+    }
+
+    #[test]
+    fn watch_reports_unscheduled_checks_at_the_bound() {
+        let slept = Cell::new(Duration::ZERO);
+        let error = when_reported(
+            &|| Ok(outcome(1, "no checks reported on the 'feature' branch\n")),
+            &|delay| slept.set(slept.get() + delay),
+            "7",
+        )
+        .expect_err("checks never registered");
+        assert_eq!(slept.get(), UNREPORTED_WAIT);
+        let failure = error
+            .downcast_ref::<wait::Failure>()
+            .expect("typed failure");
+        assert_eq!(failure.code, "CI_NOT_SCHEDULED");
+        assert!(
+            failure
+                .message
+                .contains("no checks were reported for #7 within 180s")
+        );
+    }
+
+    #[test]
+    fn watch_does_not_retry_other_failures() {
+        let reads = Cell::new(0);
+        let result = when_reported(
+            &|| {
+                reads.set(reads.get() + 1);
+                Ok(outcome(1, "HTTP 502 Bad Gateway"))
+            },
+            &|_| panic!("a failed check must not wait"),
+            "7",
+        )
+        .expect("the failure is handed to the caller");
+        assert_eq!(result.termination, Termination::Exit(1));
+        assert_eq!(reads.get(), 1);
     }
 }

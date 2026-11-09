@@ -451,6 +451,74 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
         assert_eq!(progress.advance_error_code, None);
     }
 
+    /// A long review ending in one verdict, a blank line and a pretty-printed
+    /// handoff block is one verdict. Size alone (past the run store's head
+    /// window) costs the findings, never the verdict.
+    #[test]
+    fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
+        let overlong = format!("Traced {} to its call sites.", "a/b/c ".repeat(400));
+        let sections = (1..=40)
+            .map(|index| format!("{index}. Checked the boundary of module {index}: nothing found."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let handoff = serde_json::to_string_pretty(&json!({
+            "schema_version": 2, "status": "done", "note": "Reviewed",
+            "remaining": [], "decisions": ["Read the diff in full"],
+            "verify": ["Ran the focused tests"]
+        }))
+        .unwrap();
+        let response = format!(
+            "# Review\n\n{overlong}\n\n{sections}\n\n{}\nVERDICT: PASS\n\n```handoff\n{handoff}\n```\n",
+            answer(json!([]), "").trim_end()
+        );
+        assert!(response.len() > 4096 && overlong.len() > 1024);
+        for source_truncated in [false, true] {
+            let mut node = review("review.tests", "review");
+            node.required_verdict = None;
+            let mut result = capture(&response);
+            assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
+            assert!(!result.verdict_invalid && result.handoff.is_ok());
+            result.source_truncated = source_truncated;
+            let mut owner = FakeOwner {
+                observations: [AttemptObservation::Terminal {
+                    attempt_ref: None,
+                    outcome: AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: Some(Box::new(result)),
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                }]
+                .into(),
+                ..Default::default()
+            };
+            let run = advance(
+                &graph(vec![node]),
+                &mut owner,
+                &mut MemoryJournal::default(),
+            )
+            .unwrap();
+            let progress = &run.checkpoint.nodes[0];
+            assert_eq!(
+                progress.outputs.as_ref().unwrap().verdict.as_deref(),
+                Some("VERDICT: PASS"),
+                "{source_truncated}"
+            );
+            assert_ne!(
+                progress.advance_error_code.as_deref(),
+                Some("review_verdict_invalid"),
+                "{source_truncated}"
+            );
+            assert_eq!(
+                progress.state == NodeState::Succeeded,
+                !source_truncated,
+                "{source_truncated}: {:?}",
+                progress.advance_error_code
+            );
+        }
+    }
+
     #[test]
     fn verifier_requires_a_reasoned_assessment_of_every_finding() {
         for entries in [
