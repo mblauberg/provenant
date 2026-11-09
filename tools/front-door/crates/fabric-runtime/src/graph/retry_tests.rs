@@ -1830,7 +1830,7 @@ fn public_retry_preserves_live_spawn_only_children() {
 #[test]
 fn no_work_writer_continues_once_in_place_and_records_the_patch() {
     for final_outcome in [AttemptOutcome::StoppedNoWork, AttemptOutcome::Succeeded] {
-        let mut work = node("work", route("first"));
+        let mut work = node("work", pool_route("junior"));
         work.access = AccessMode::WorktreeWrite;
         work.worktree = Some(".worktrees/work".into());
         work.write_scope = vec!["src".into()];
@@ -1904,7 +1904,7 @@ fn no_work_continuation_requires_enabled_writer_and_proven_unchanged_head() {
         (AccessMode::WorktreeWrite, None, Some("b".repeat(40))),
         (AccessMode::WorktreeWrite, None, None),
     ] {
-        let mut work = node("work", route("first"));
+        let mut work = node("work", pool_route("junior"));
         work.access = access;
         work.worktree = (access == AccessMode::WorktreeWrite).then(|| ".worktrees/work".into());
         work.auto_continue_no_work = enabled;
@@ -1946,7 +1946,7 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
             Ok(())
         }
     }
-    let mut work = node("work", route("first"));
+    let mut work = node("work", pool_route("junior"));
     work.access = AccessMode::WorktreeWrite;
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
@@ -2049,7 +2049,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
             Ok(())
         }
     }
-    let mut work = node("work", route("first"));
+    let mut work = node("work", pool_route("junior"));
     work.access = AccessMode::WorktreeWrite;
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
@@ -2131,7 +2131,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
 #[test]
 fn no_work_continuations_share_the_graph_budget_and_resume_after_extension() {
     let writer = |id| {
-        let mut work = node(id, route("first"));
+        let mut work = node(id, pool_route("junior"));
         work.access = AccessMode::WorktreeWrite;
         work.worktree = Some(format!(".worktrees/{id}"));
         work
@@ -2182,7 +2182,7 @@ fn no_work_continuations_share_the_graph_budget_and_resume_after_extension() {
 
 #[test]
 fn no_work_continuation_retains_sealed_quota_retry_spending_and_models() {
-    let mut alias = route("first");
+    let mut alias = pool_route("junior");
     alias.adapter = None;
     alias.model = None;
     alias.alias = Some("junior".into());
@@ -2233,11 +2233,11 @@ fn no_work_continuation_retains_sealed_quota_retry_spending_and_models() {
 #[test]
 fn no_work_repair_continues_after_upstream_advanced_its_worktree() {
     use provenant_records::run::DeliveryMode;
-    let mut write = node("write", route("first"));
+    let mut write = node("write", pool_route("junior"));
     write.access = AccessMode::WorktreeWrite;
     write.worktree = Some(".worktrees/work".into());
     write.delivery = Some(DeliveryMode::Push);
-    let mut repair = node("repair", route("first"));
+    let mut repair = node("repair", pool_route("junior"));
     repair.access = AccessMode::WorktreeWrite;
     repair.worktree = write.worktree.clone();
     repair.continues = Some("write".into());
@@ -2270,4 +2270,77 @@ fn no_work_repair_continues_after_upstream_advanced_its_worktree() {
     assert_eq!(owner.permissions[1], owner.permissions[2]);
     assert!(owner.fast_forward_only[2]);
     assert_eq!(run.checkpoint.nodes[1].previous_attempts.len(), 1);
+}
+
+#[test]
+fn stopped_writer_restarts_fresh_on_another_route_with_its_handoff() {
+    let mut work = node("work", route("first"));
+    work.route = None;
+    work.routes = Some(vec![route("first"), route("second")]);
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut stop = no_work_stop(Some(&"a".repeat(40)));
+    let note = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Parser is ready; finish renderer\",\"remaining\":[\"Finish renderer\"],\"decisions\":[\"Keep parser API\"],\"verify\":[]}\n```";
+    if let AttemptObservation::Terminal { result, .. } = &mut stop {
+        *result = Some(Box::new(capture(note)));
+    }
+    let mut owner = FakeOwner { observations: [stop, done_as("finished")].into(), ..Default::default() };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0].1, route("first"));
+    assert_eq!(owner.calls[1].1, route("second"));
+    assert_ne!(owner.calls[0].0, owner.calls[1].0);
+    assert_eq!(owner.stored_refs, [None, None]);
+    assert!(owner.prompts[1].contains("Finish renderer"));
+    assert!(owner.prompts[1].contains("Keep parser API"));
+    assert_eq!(owner.permissions[0], owner.permissions[1]);
+}
+
+#[test]
+fn stopped_writer_without_another_route_returns_to_the_chair() {
+    let mut work = node("work", route("first"));
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut owner = FakeOwner { observations: [no_work_stop(Some(&"a".repeat(40)))].into(), ..Default::default() };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(owner.calls.len(), 1);
+    assert!(run.checkpoint.expansions.is_empty());
+    assert!(!no_work::pending(&document, &run.checkpoint));
+    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch() {
+    for note in ["Owner must choose the release target", "Missing capability: network access is required"] {
+        for outcome in [AttemptOutcome::Succeeded, AttemptOutcome::DeclaredStop, AttemptOutcome::StoppedNoWork] {
+            let no_work = outcome == AttemptOutcome::StoppedNoWork;
+            let mut work = node("work", pool_route("senior"));
+            work.access = AccessMode::WorktreeWrite;
+            work.worktree = Some(".worktrees/work".into());
+            let document = graph(vec![work]);
+            let handoff = format!("```handoff\n{}\n```", serde_json::json!({"schema_version":2,"status":"blocked","note":note,"remaining":["Finish accepted brief"],"decisions":[],"verify":[]}));
+            let mut observation = if no_work { no_work_stop(Some(&"a".repeat(40))) } else { done_as("blocked") };
+            if let AttemptObservation::Terminal { result, outcome: observed, .. } = &mut observation {
+                *observed = outcome;
+                *result = Some(Box::new(capture(&handoff)));
+            }
+            let mut owner = FakeOwner { observations: [observation].into(), ..Default::default() };
+            let mut journal = MemoryJournal::default();
+            let run = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(run.status, GraphStatus::Paused, "{note}, no_work={no_work}");
+            assert_eq!(owner.calls.len(), 1);
+            assert!(run.checkpoint.expansions.is_empty());
+            assert!(run.checkpoint.nodes[0].handoff.as_deref().unwrap().contains(note));
+            assert!(!no_work::pending(&document, &run.checkpoint));
+            assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
+            assert_eq!(owner.calls.len(), 1);
+        }
+    }
 }

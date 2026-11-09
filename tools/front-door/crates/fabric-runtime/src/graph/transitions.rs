@@ -390,6 +390,17 @@ pub(super) fn apply_attempt_observation(
                     AttemptOutcome::TaskFailed
                 } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
                     AttemptOutcome::Succeeded
+                } else if outcome == AttemptOutcome::DeclaredStop
+                    && !warned
+                    && launched
+                    && plans::writer(node)
+                    && result
+                        .as_ref()
+                        .is_some_and(|capture| plans::handoff(capture).ok().flatten().is_some())
+                {
+                    // A typed unfinished writer handoff is settled work whose
+                    // continuation must be admitted (or returned to the chair).
+                    AttemptOutcome::Succeeded
                 } else if !warned
                     && launched
                     && node.access == AccessMode::WorktreeWrite
@@ -423,6 +434,14 @@ pub(super) fn apply_attempt_observation(
                 {
                     progress.advance_error_code = Some(code.into());
                     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                }
+                if node.access == AccessMode::WorktreeWrite {
+                    progress.handoff = result
+                        .as_ref()
+                        .and_then(|capture| capture.handoff.as_ref().ok())
+                        .and_then(|handoff| handoff.as_ref())
+                        .filter(|handoff| handoff.unfinished())
+                        .map(provenant_records::handoff::Handoff::fenced);
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);

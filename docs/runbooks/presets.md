@@ -46,12 +46,30 @@ time, so allowances longer than 55 seconds still return a receipt or named refus
 `writer_lock_busy` with retry advice, before creating a branch or worktree.
 Writer nodes default to `auto_continue_no_work = true`. When a writer declares
 unfinished work and its host-pinned head equals its starting head, the graph
-continues it once in the same worktree with the original brief and a short
-continuation instruction. The graph retains the first attempt and records the
-continuation in patch history before launching. A second stop stays failed.
-Set `auto_continue_no_work = false` on a writer node, or in a leaf template's
+starts a fresh attempt in the same worktree, with the original brief and its
+handoff as context. It selects another eligible route from the pool; if no
+alternative is available, it returns control to the chair. A handoff naming an
+owner decision or a missing capability uses `status = "blocked"` and also
+returns to the chair without a launch. Session continuation is used only when the model's continuation policy
+explicitly selects resume. The graph retains the first attempt and records the
+continuation in patch history before launching. Set
+`auto_continue_no_work = false` on a writer node, or in a leaf template's
 `[node]` table, to disable this continuation. A stop with commits, uncommitted
 edits, missing Git evidence, cancellation or a graph pause does not trigger it.
+
+Bundled pools offer `codex/gpt-6.1-terra` only at low or medium effort. This
+applies to both writer and read-only pool requests; an exact route or a user
+pool can still request higher effort. Route comparisons should use the outcome
+measures in `provenant telemetry stats`, checking the sample size and whether
+assignments came from a hash-drawn pool before changing weights.
+The `route_outcomes` rows group terminal attempts by route, access, effort and
+pool assignment. Success requires a successful settlement without a retained
+partial-completion signal. Cost per success uses the whole group's estimated
+API-equivalent spend, including failures; time per success uses the whole
+group's recorded provider milliseconds. Missing costs or times remain unknown,
+and a group with no successes has no cost or time per success. Preference
+choices, fallback draws and exact routes are marked observational. The success
+rate is an attempt outcome, not evidence that a delivered change passed review.
 
 The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`,
 `templates`, `land` and `quota`; `help --all` reveals the rest.

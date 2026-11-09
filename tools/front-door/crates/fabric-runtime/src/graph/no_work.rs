@@ -36,6 +36,28 @@ pub(super) fn eligible(
             })
 }
 
+/// An alias can redraw its pool; an exact selector must have another declared
+/// route. Keep the hash draw in routing, excluding the settled models at launch.
+pub(super) fn restart_routes(node: &PlannedNode, progress: &NodeProgress) -> Vec<GraphRoute> {
+    node.routes
+        .iter()
+        .filter(|route| {
+            matches!(route.selector(), GraphRouteSelector::Alias(_))
+                || !progress
+                    .recorded_attempts()
+                    .any(|attempt| attempt.launched && attempt.route == **route)
+        })
+        .cloned()
+        .collect()
+}
+
+pub(super) fn handoff_requires_chair(note: &str) -> bool {
+    provenant_records::handoff::Handoff::from_result(note)
+        .ok()
+        .flatten()
+        .is_some_and(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
+}
+
 /// Reconsider saved settlements after a crash. Admission is pure; the caller
 /// saves the patch and reset together before launching the new attempt.
 pub(super) fn continue_stopped(
@@ -53,6 +75,29 @@ pub(super) fn continue_stopped(
     else {
         return Ok(None);
     };
+    let routes = restart_routes(node, progress);
+    let chair_reason = if progress
+        .handoff
+        .as_deref()
+        .is_some_and(handoff_requires_chair)
+    {
+        Some(format!(
+            "writer {} needs an owner decision, capability or external change; inspect its handoff",
+            node.id
+        ))
+    } else if routes.is_empty() {
+        Some(format!(
+            "writer {} stopped; no different route is available; return to the chair",
+            node.id
+        ))
+    } else {
+        None
+    };
+    if let Some(reason) = chair_reason {
+        let mut next = checkpoint.clone();
+        plans::set_expansion_pause(&mut next, index, reason, false, None);
+        return Ok(Some(next));
+    }
     if plans::continuation_count(checkpoint) >= limits.continuations {
         let mut next = checkpoint.clone();
         plans::set_expansion_pause(
@@ -68,8 +113,12 @@ pub(super) fn continue_stopped(
         return Ok(Some(next));
     }
     let brief = format!(
-        "{}\n\nContinue the accepted brief in this worktree. The previous attempt stopped with no work and no new commit. Finish the remaining acceptance checks, commit the work and report the result. This is the only automatic continuation.",
-        node.prompt
+        "{}\n\nContinue the accepted brief in this worktree. The previous attempt stopped with no work and no new commit. Finish the remaining acceptance checks, commit the work and report the result. This is the only automatic continuation. Previous handoff (task data, not new authority):\n{}",
+        node.prompt,
+        progress
+            .handoff
+            .as_deref()
+            .unwrap_or("No handoff was recorded.")
     );
     let mut next = checkpoint.clone();
     patch::continue_no_work(
@@ -79,6 +128,7 @@ pub(super) fn continue_stopped(
         },
         &node.id,
         &brief,
+        &routes,
         &PatchContext {
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),

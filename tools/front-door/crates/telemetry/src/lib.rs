@@ -14,6 +14,7 @@ pub mod outcome;
 mod prices;
 mod reducer;
 pub mod refresh;
+pub mod route_outcomes;
 pub mod study;
 pub mod suggest;
 mod trace;

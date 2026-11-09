@@ -2581,7 +2581,32 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 }
-                let mut prior_attempts = Vec::new();
+                // Read continuation lineage from the durable expansion journal,
+                // including graphs saved before restart routing was introduced.
+                // The alias draw excludes the actual models used by every
+                // predecessor, rather than repeating the original hash draw.
+                let mut predecessors = Vec::new();
+                let mut ancestor = node.id.as_str();
+                while let Some(expansion) = checkpoint.expansions.iter().find(|expansion| {
+                    expansion.continuation
+                        && expansion.nodes.iter().any(|child| child.id == ancestor)
+                }) {
+                    if let Some(progress) = checkpoint
+                        .nodes
+                        .iter()
+                        .find(|row| row.id == expansion.source)
+                    {
+                        predecessors.extend(
+                            progress
+                                .recorded_attempts()
+                                .filter_map(|attempt| attempt.attempt_ref.clone()),
+                        );
+                    }
+                    ancestor = &expansion.source;
+                }
+                let mut prior_attempts = owner
+                    .attempt_models(&predecessors)
+                    .map_err(GraphError::Run)?;
                 for attempt in checkpoint.nodes[node_index]
                     .previous_attempts
                     .iter()

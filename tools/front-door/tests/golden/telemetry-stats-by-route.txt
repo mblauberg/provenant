@@ -4,3 +4,4 @@ by route: 1 groups
 codex/gpt-6-luna@low  input=>=1000 (2 unknown) output=>=200 (1 unknown)  1 attempts, est. API-equivalent at least $0.000200 (0 of 1 attempts priced)
 next: inspect group totals with --json
 cache-read share: unknown (incomplete input categories)
+outcomes codex/gpt-6-luna access=read-only effort=low n=1 successes=0 success_rate=0.000 cost/success_microdollars=unknown time/success_ms=unknown comparison=observational_not_hash_assigned pool=none cost_basis=api_equivalent_estimate

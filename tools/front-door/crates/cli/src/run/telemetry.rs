@@ -228,6 +228,52 @@ pub(super) fn stats_inner(
         context.project_id,
     )?;
     let partial = partial_signal_counts(&selected, store.as_ref(), &call)?;
+    let mut route_evidence = Vec::new();
+    let mut requests = BTreeMap::new();
+    for fact in &selected {
+        let record = store
+            .as_ref()
+            .and_then(|store| store.record(fact.attempt_id, &call).ok());
+        let access = record.as_ref().and_then(|record| {
+            let store = store.as_ref()?;
+            let request = requests
+                .entry(record.run_id)
+                .or_insert_with(|| store.request(record.run_id, &call).ok());
+            let task = request
+                .as_ref()?
+                .tasks
+                .iter()
+                .find(|task| task.task_id == fact.task_id)?;
+            Some(
+                if task.writer.is_some() {
+                    "worktree-write"
+                } else if !task.access.write_roots.is_empty() {
+                    "scratch-write"
+                } else {
+                    "read-only"
+                }
+                .to_owned(),
+            )
+        });
+        let pool = record
+            .as_ref()
+            .and_then(|record| record.resolved_route.as_ref())
+            .and_then(|route| route.pool_selection.as_ref())
+            .filter(|selection| provenant_telemetry::route_outcomes::hash_assigned(selection))
+            .map(|selection| selection.pool.clone());
+        route_evidence.push(provenant_telemetry::route_outcomes::Evidence {
+            fact: (**fact).clone(),
+            access,
+            pool,
+            // Missing evidence cannot certify a complete success.
+            partial: record
+                .as_ref()
+                .is_none_or(|record| !record.partial_signals.is_empty()),
+        });
+    }
+    let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence, &prices)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
+
     let decision_ids = command.detail.then(|| {
         selected
             .iter()
@@ -513,6 +559,22 @@ pub(super) fn stats_inner(
     }
     data["plan_value"] = json!(plan_value);
     data["graph_quality"] = json!(graph_quality);
+    for row in &route_outcomes {
+        let number = |value: Option<f64>| {
+            value
+                .map(|n| format!("{n:.3}"))
+                .unwrap_or_else(|| "unknown".into())
+        };
+        human.push_str(&format!(
+            "outcomes {} access={} effort={} n={} successes={} success_rate={} cost/success_microdollars={} time/success_ms={} comparison={} pool={} cost_basis={}\n",
+            plain_text(&row.route, 256), row.access, row.effort,
+            row.samples, row.successes, number(row.success_rate),
+            number(row.cost_per_success_microdollars), number(row.time_per_success_ms),
+            row.comparison, row.pool.as_deref().unwrap_or("none"), row.cost_basis,
+        ));
+    }
+    data["route_outcomes"] = json!(route_outcomes);
+
     // Every grouping reports partial finishes, not only graph groups.
     if !partial.is_empty() {
         human.push_str(&format!(
