@@ -253,7 +253,7 @@ struct ReviewRequest {
 struct RiskInput {
     factors: RiskFactors,
     tier: RiskTier,
-    downgrade_approval: Option<ApprovalInput>,
+    downgrade_approval: Option<ChairDowngrade>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -312,6 +312,7 @@ fn input_warnings(data: &mut Value, warnings: Vec<provenant_records::InputWarnin
 }
 
 struct Edge {
+    cwd: std::path::PathBuf,
     roots: Roots,
     project: ProjectId,
     actor: ActorId,
@@ -371,6 +372,22 @@ impl Edge {
         facts: &[ReviewFact],
         blockers: Vec<BlockerInput>,
     ) -> Result<coverage::ValidationReport, Error> {
+        let paths = receipt.risk().changed_paths();
+        if receipt.risk().downgrade_approval().is_some() && paths.is_empty() {
+            return Err(invalid(
+                "receipt downgrade has no recorded paths; re-save with workflow receipt save",
+            ));
+        }
+        let config = provenant_config::read_with_domains(&self.roots, &crate::domains::SECTIONS)
+            .map_err(|e| invalid(e.to_string()))?;
+        let policy = config.domains.routing.review.workflow_risk_policy(paths);
+        risk::validate(
+            receipt.risk(),
+            &policy,
+            receipt.risk().downgrade_approval(),
+            paths,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
         let blockers: Vec<_> = blockers
             .into_iter()
             .map(|b| LegBlocker {
@@ -469,6 +486,7 @@ fn execute(
     let project = context.identity.project;
     let roots = context.roots;
     let edge = Edge {
+        cwd: globals.project.as_deref().unwrap_or(cwd).to_owned(),
         roots,
         project,
         actor,
@@ -750,6 +768,127 @@ fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error
         _ => unreachable_read(),
     }
 }
+/// Obtain the PR's actual base and verify its head before reading local objects.
+fn subject_changed_paths(
+    cwd: &Path,
+    subject: &Subject,
+    cancel: &CancelToken,
+) -> Result<Vec<String>, Error> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime, run_read_utility};
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{ffi::OsString, time::Duration};
+    let Subject::Pr { number, head, .. } = subject else {
+        return Ok(Vec::new());
+    };
+    let executor = SystemExecutor::new(1).map_err(|e| invalid(e.to_string()))?;
+    let argv: Vec<OsString> = [
+        "gh",
+        "pr",
+        "view",
+        &number.to_string(),
+        "--json",
+        "baseRefOid,headRefOid",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let out = executor
+        .execute(options)
+        .map_err(|e| invalid(e.to_string()))?;
+    if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {
+        return Err(invalid("cannot establish PR diff: gh pr view failed"));
+    }
+    let metadata: Value =
+        serde_json::from_slice(&out.stdout.bytes).map_err(|e| invalid(e.to_string()))?;
+    let oid = |key: &str| {
+        provenant_core::GitOid::parse(metadata[key].as_str().unwrap_or_default())
+            .map_err(|e| invalid(e.to_string()))
+    };
+    if oid("headRefOid")? != *head {
+        return Err(invalid("PR head differs from receipt subject"));
+    }
+    let base = oid("baseRefOid")?;
+    let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
+    let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
+    let budget =
+        UtilityBudget::bounded(Duration::from_secs(30)).map_err(|e| invalid(e.to_string()))?;
+    let repo = runtime
+        .open_read_repo(&executor, cwd, budget, cancel)
+        .map_err(|e| invalid(e.to_string()))?;
+    diff_paths(base, *head, &mut |operation| {
+        let out = run_read_utility(&executor, operation, &repo, &runtime, budget, cancel)
+            .map_err(|e| invalid(e.to_string()))?;
+        if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {
+            return Err(invalid(
+                "cannot establish complete PR diff; fetch the PR base and head commits",
+            ));
+        }
+        Ok(out.stdout.bytes)
+    })
+}
+
+fn diff_paths(
+    base: provenant_core::GitOid,
+    head: provenant_core::GitOid,
+    read: &mut dyn FnMut(provenant_confinement::GitRead) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<String>, Error> {
+    use provenant_confinement::GitRead;
+    let merge = read(GitRead::MergeBase {
+        left: base,
+        right: head,
+    })?;
+    let merge = std::str::from_utf8(&merge).map_err(|e| invalid(e.to_string()))?;
+    let base = provenant_core::GitOid::parse(merge.trim()).map_err(|e| invalid(e.to_string()))?;
+    // ChangedPaths uses --no-renames: both deleted and added names survive.
+    let bytes = read(GitRead::ChangedPaths { base, head })?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| invalid(e.to_string()))?;
+    if !text.is_empty() && !text.ends_with('\0') {
+        return Err(invalid("incomplete changed path list"));
+    }
+    let mut paths: Vec<_> = text.split_terminator('\0').map(str::to_owned).collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Only sub-terminal PR saves can gain a stricter tier from a path floor.
+fn save_changed_paths(
+    subject: &Subject,
+    tier: provenant_records::workflow::RiskTier,
+    is_downgrade: bool,
+    stored: Option<&DeliveryReceipt>,
+    read: impl FnOnce() -> Result<Vec<String>, Error>,
+) -> Result<(Vec<String>, Vec<String>), Error> {
+    use provenant_records::workflow::RiskTier;
+    let Subject::Pr { head, .. } = subject else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    if tier == RiskTier::Terminal {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if let Some(receipt) = stored
+        && matches!(receipt.subject(), Subject::Pr { head: saved, .. } if saved == head)
+        && !receipt.risk().changed_paths().is_empty()
+    {
+        return Ok((receipt.risk().changed_paths().to_vec(), Vec::new()));
+    }
+    match read() {
+        Ok(paths) => Ok((paths, Vec::new())),
+        Err(error) if is_downgrade => Err(invalid(format!(
+            "cannot establish paths for downgrade: {error}"
+        ))),
+        Err(error) => Ok((
+            Vec::new(),
+            vec![format!(
+                "cannot record PR changed paths; keeping chosen tier: {error}"
+            )],
+        )),
+    }
+}
+
 fn save(
     edge: &Edge,
     delivery: DeliveryId,
@@ -757,10 +896,40 @@ fn save(
     req: SaveRequest,
 ) -> Result<Value, Error> {
     let now = edge.clock.wall_now()?;
-    let policy = provenant_records::workflow::RiskPolicy::default();
-    let downgrade: Option<UserApproval> = req.risk.downgrade_approval.map(Into::into);
-    let risk = risk::assess(req.risk.factors, req.risk.tier, &policy, downgrade.as_ref())
+    let config = provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?;
+    let store = ReceiptStore::new(edge.roots.state.clone(), edge.project, delivery);
+    let stored = store.read()?;
+    let initial_policy = config.domains.routing.review.workflow_risk_policy(&[]);
+    let is_downgrade = req.risk.tier < risk::minimum(&req.risk.factors, &initial_policy);
+    let (changed_paths, warnings) = save_changed_paths(
+        &req.subject,
+        req.risk.tier,
+        is_downgrade,
+        stored.as_ref(),
+        || subject_changed_paths(&edge.cwd, &req.subject, &edge.cancel),
+    )?;
+    let policy = config
+        .domains
+        .routing
+        .review
+        .workflow_risk_policy(&changed_paths);
+    if !matches!(req.subject, Subject::Pr { .. })
+        && req.risk.tier < risk::minimum(&req.risk.factors, &policy)
+    {
+        return Err(invalid(
+            "cannot downgrade a non-PR subject: no diffable commits to establish boundary floors",
+        ));
+    }
+    let downgrade = req.risk.downgrade_approval;
+    let risk = risk::assess(
+        req.risk.factors,
+        req.risk.tier,
+        &policy,
+        downgrade.as_ref(),
+        &changed_paths,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
     let mut candidate = receipt::new(
         ReceiptInput {
             delivery_id: delivery,
@@ -819,7 +988,7 @@ fn save(
     if let Some(blocker) = earliest_blocker {
         valid_until = valid_until.min(blocker);
     }
-    let saved = ReceiptStore::new(edge.roots.state.clone(), edge.project, delivery).save(
+    let saved = store.save(
         &candidate,
         expected,
         SaveContext {
@@ -827,6 +996,7 @@ fn save(
             valid_until,
             risk_policy: &policy,
             downgrade_approval: downgrade.as_ref(),
+            changed_paths: &changed_paths,
         },
         edge.budget()?,
         &edge.cancel,
@@ -836,9 +1006,11 @@ fn save(
     struct Saved {
         receipt: DeliveryReceipt,
         clock_regression: Option<bool>,
+        warnings: Vec<String>,
     }
     serde_json::to_value(Saved {
         receipt: saved.receipt,
+        warnings,
         clock_regression: saved.clock_regression.map(|_| true),
     })
     .map_err(|e| invalid(e.to_string()))
@@ -1006,6 +1178,80 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    fn risk_input() -> super::RiskInput {
+        serde_json::from_value(serde_json::json!({
+            "factors": {"blast_radius":"local", "reversibility":"easy",
+                "data_sensitivity":"public", "migration":"none", "oracle_quality":"weak",
+                "external_effects":"none", "critical_surface":"none"},
+            "tier":"routine", "downgrade_approval": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn real_diff_boundary_omitted_from_input_still_gets_floor() {
+        use provenant_confinement::GitRead;
+        use provenant_records::workflow::RiskTier;
+        let input = risk_input(); // No caller path list exists.
+        let base = provenant_core::GitOid::Sha1([1; 20]);
+        let head = provenant_core::GitOid::Sha1([2; 20]);
+        let merge = provenant_core::GitOid::Sha1([3; 20]);
+        let paths = super::diff_paths(base, head, &mut |op| match op {
+            GitRead::MergeBase { left, right } => {
+                assert_eq!((left, right), (base, head));
+                Ok(format!("{merge}\n").into_bytes())
+            }
+            GitRead::ChangedPaths { base, head: actual } => {
+                assert_eq!((base, actual), (merge, head));
+                // The old boundary name and its new name both enter policy.
+                Ok(b"src/credentials/store.rs\0src/plain.rs\0".to_vec())
+            }
+            _ => panic!("unexpected Git operation"),
+        })
+        .unwrap();
+        let policy = provenant_routing::ReviewConfig::default().workflow_risk_policy(&paths);
+        assert_eq!(
+            policy.boundary_floors["src/credentials/store.rs"],
+            RiskTier::Crucial
+        );
+        assert!(matches!(
+            provenant_workflow::risk::assess(input.factors, input.tier, &policy, None, &paths),
+            Err(provenant_workflow::risk::RiskError::BoundaryPath(_))
+        ));
+    }
+
+    #[test]
+    fn removing_bundled_floor_allows_chair_downgrade() {
+        use provenant_records::workflow::ChairDowngrade;
+        let input = risk_input();
+        let paths = vec!["src/credentials/store.rs".into()];
+        let mut review = provenant_routing::ReviewConfig::default();
+        review.floors.remove("security");
+        let policy = review.workflow_risk_policy(&paths);
+        let approval = ChairDowngrade {
+            actor_id: provenant_core::ActorId::from_bytes([1; 16]),
+            evidence: provenant_records::workflow::EvidenceRef {
+                extra: Default::default(),
+                path: provenant_records::PathWire::from_relative(
+                    &provenant_core::RelativePath::parse("authority/approval.json").unwrap(),
+                )
+                .unwrap(),
+                digest: provenant_core::Digest::from_bytes([2; 32]),
+            },
+            reason: "owner removed this floor".into(),
+        };
+        assert!(
+            provenant_workflow::risk::assess(
+                input.factors,
+                input.tier,
+                &policy,
+                Some(&approval),
+                &paths
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn checkpoint_advisories_are_soft_and_ignore_unavailable_references() {
         let large = vec![b'x'; 8 * 1024 + 1];

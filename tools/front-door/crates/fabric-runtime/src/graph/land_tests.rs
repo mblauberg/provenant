@@ -205,14 +205,20 @@ impl AttemptOwner for Owner {
             "write" | "delivery--implement" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
-                (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD))
+                let mut capture = crate::result_capture::ResultCapture::new(None);
+                capture.push(b"```findings\n{\"schema_version\":1,\"findings\":[],\"repair_items\":[{\"id\":\"input handling\",\"status\":\"fixed\",\"reason\":\"Removed the observed defect\"}]}\n```\n");
+                (
+                    Some(capture.finish()),
+                    replay.branch.map(str::to_owned),
+                    Some(REPAIR_HEAD),
+                )
             }
             _ => {
                 let verdict = if self.repair_fixture
                     && (key.node_id == "initial--lens"
                         || key.node_id == "delivery--initial-review--lenses--correctness")
                 {
-                    "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"open\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\"}]}\n```\nVERDICT: FAIL"
+                    "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"open\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\",\"trigger\":{\"sequence\":\"Default invocation\",\"reach\":\"default_path\",\"observed\":true},\"triage\":{\"decision\":\"confirmed\",\"reason\":\"Observed at the checked caller\",\"worth_fixing\":true,\"root_cause\":\"input handling\",\"blocking_class\":\"default_path_defect\"}}]}\n```\nVERDICT: FAIL"
                 } else if self.repair_fixture
                     && (key.node_id == "initial--synthesis"
                         || key.node_id == "delivery--initial-review--synthesis")

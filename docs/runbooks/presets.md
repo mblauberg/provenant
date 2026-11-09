@@ -154,8 +154,31 @@ reduce the lens and verifier verdicts together. A composite template may set
 ## Host-native repairs
 
 `deliver` and `batch` collect qualified findings before repair: id, raising
-lens, severity, file and line, evidence and proposed fix. Synthesis retains
-these fields and their qualified identities, including when it uses a model.
+lens, severity, file and line, evidence, proposed fix and a `trigger` with
+`sequence`, `reach` and `observed`. Reach is `default_path`, `operator_mistake`
+or `attacker_or_unreachable`; absent triggers parse as notes. Verification and
+synthesis check each finding against the code, recording `triage`: `decision`
+(`confirmed` or `rejected`), `reason`, `worth_fixing`, `root_cause`,
+`blocking_class` and `shared_flaw`. Rejected findings stay in the record.
+Writers receive only eligible confirmed findings, grouped by `root_cause` into
+fix items, with the invariant under repair. Repair eligibility has one owner,
+`graph/repair.rs#blocking`: checked blocking classes or medium/should-fix
+findings with a default-path trigger. ADR 0035 boundaries and data loss remain
+eligible regardless of reach; `kind = "spec_defect"` goes to the chair instead.
+
+A repair writer reports `repair_items` in its findings block, each with an `id`
+and `status`: `fixed`, `removed-the-case`, `disputed` (with a reason), or
+`design-cannot-hold` (with an alternative). Disputes go to synthesis for judgement
+rather than automatically counting as unresolved. Regression checks apply where
+behaviour is observable. Writers can also report typed handoff `spec_concerns`
+with criterion, claim, evidence, proposed_change and status (`as_written`,
+`diverged` or `stopped`); graph status exposes these and spec-defect findings to
+the chair.
+
+Checkpoint concern previews share the bounded handoff projection with remaining
+work. When previews are clipped, status keeps the full count, reports how many
+entries are shown and points to the complete result; the typed handoff retains
+every concern.
 
 Set `max_repair_cycles` to one, two or three (default three). This counts repairs
 after the first review and is separate from CI's `max_iterations`. Each repair
@@ -169,8 +192,9 @@ Blocking findings from a replanned panel feed the next repair round within the
 same cycle cap. Later repair commits re-resolve that broader panel, so newly
 selected lenses also review closure.
 
-An evidenced `design_defect` or a recurring blocking finding escalates early.
-Exhausting the repair limit takes the same read-only principal `design` path,
+A checked shared flaw, an evidenced `design_defect`, a recurring blocking
+finding or a writer's `design-cannot-hold` report escalates early. A third
+review round takes the same read-only principal `design` path,
 returning the root constraint, two or three options, a comparison of the
 structural fix with the small one with a recommendation, and acceptance
 evidence. Its findings block includes `repair_design` with
@@ -182,8 +206,9 @@ no one-way door. Changed scope, a one-way door or a missing assessment waits for
 the owner; choosing hold prevents further writing. The decision request includes
 the principal report. A continuation planner uses the bound `repair-slice`
 template within the original literal write authority; approval alone does not
-expand those paths. Review repair loops cannot be extended or accepted as
-is to bypass the cap. The final CI, review, acceptance and exact-head landing
+expand those paths. Round count prompts design judgement; it does not end the
+work. The principal may recommend further repair through the continuation.
+The final CI, review, acceptance and exact-head landing
 checks still apply to the delivered head.
 
 ## Composition rules

@@ -1,6 +1,6 @@
-doc = "Reconcile the input review findings."
+doc = "Check dispositions against the code and group confirmed worthwhile findings by the invariant and shared root cause. Retain rejected findings in the record; send only grouped checked repair-eligible items to a writer."
 review = "synthesis"
-brief = "Reconcile the input review findings."
+brief = "Check dispositions against the code and group confirmed worthwhile findings by the invariant and shared root cause. Retain rejected findings in the record; send only grouped checked repair-eligible items to a writer."
 tier = "senior"
 access = "read_only"
 outputs = ["result", "findings", "verdict"]

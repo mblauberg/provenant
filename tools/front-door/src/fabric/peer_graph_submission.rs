@@ -74,7 +74,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
         }))?;
-        bound.observe_or_start(&key, graph::NodeInput {
+        bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
             distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
@@ -554,7 +554,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
     };
     let actor = bound.actor();
-    bound.observe_or_start(&key, graph::NodeInput {
+    bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&key), read_roots: &[],
         distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
@@ -578,7 +578,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
     }))?;
     let actor = bound.actor();
-    bound.observe_or_start(&second, graph::NodeInput {
+    bound.observe_or_start(&second, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&second), read_roots: &[],
         distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
@@ -631,8 +631,13 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let budget = WaitBudget::cli(detached_factory.clock.mono_now(), 30)?;
     let run = detached_factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
     let node = &run.checkpoint.nodes[0];
-    assert!(node.advance_error.is_none(), "{node:#?}");
-    let key = &node.attempts.first().ok_or("review attempt missing")?.key;
+    // The fixture has no runnable provider. Admission of the detached reader
+    // reaches preparation, whose refusal now has an explicit graph cause.
+    assert_eq!(node.advance_error_code.as_deref(), Some("preparation_refused"), "{node:#?}");
+    let attempt = node.attempts.first().ok_or("review attempt missing")?;
+    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::PreparationRefused)), "{node:#?}");
+    assert!(!attempt.launched, "{node:#?}");
+    let key = &attempt.key;
     let operation = graph_operation("graph-attempt-operation", key)?;
     let owner = BinaryRunOwner { factory: &detached_factory, allow_remote: true, actor: None, chair: None };
     assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some(), "review was not submitted");

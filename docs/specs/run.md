@@ -22,7 +22,7 @@ An opted-in writer on a filesystem that clones may seed its private Cargo regist
 the host stores independently. It must never replace an existing store or publish
 a partially cloned tree. Unsupported entries or clone failures must fall back without
 blocking the lane. Each attempt reports the seed outcome and reason on a best-effort basis.
-- Why: a seed must preserve lane isolation and leave Cargo usable when cloning
+- Why (default): a seed must preserve lane isolation and leave Cargo usable when cloning
   is unavailable, while making the outcome observable.
 - Test: `crates/run/src/cargo_seed.rs::existing_registry_is_never_replaced`;
   `crates/run/src/cargo_seed.rs::failed_clone_removes_partial_tree`;
@@ -76,7 +76,7 @@ measured it, is kept. The grace covers only recent writes: a binary that runs lo
 stops there; removal holds the host admission lock, so no lane is admitted
 mid-removal, and probes each candidate again. Collection runs when a lane
 settles, when admission finds the disk below the floor, and in `provenant gc`.
-- Why: disposable build output must stay bounded without deleting active builds.
+- Why (default): disposable build output must stay bounded without deleting active builds.
 - Test: `crates/run/src/build_dir_gc.rs::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`;
   `crates/run/src/build_dir_gc.rs::least_recently_used_goes_first_and_the_cap_stops_collection`;
   `crates/run/src/build_dir_gc.rs::the_free_space_floor_is_honoured_and_no_more_is_removed`;
@@ -92,7 +92,7 @@ operation kind and a digest of the prompt, route, authority and execution
 controls. Reader waits are excluded from the digest. The same ID and digest
 return the recorded outcome without repeating effects. The same ID with a
 different digest fails with `operation_conflict` (exit 2).
-- Why: lost replies and concurrent duplicates, including resume, must never
+- Why (default): lost replies and concurrent duplicates, including resume, must never
   launch twice.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;
   `crates/run/src/service_tests.rs::dispatch_replay_output_and_cancel_share_the_service`
@@ -115,7 +115,7 @@ pre-admission refusal is evidence that no provider was accepted, so it can be
 retried or cancelled without treating it as uncertain custody. It never has an
 admitted run to read. Refusal notices reuse one message identity per operation;
 notice recovery cannot create a second message or change the stored outcome.
-- Why: a dirty writer must remain observable after the caller disconnects, and
+- Why (default): a dirty writer must remain observable after the caller disconnects, and
   a lost reply must not turn its replay into a second launch.
 - Test: `tests/refused_operation.rs::dirty_writer_refusal_is_durable_visible_and_notified_once`;
   `src/fabric/owner.rs::graph_refusal_replays_before_preparation_and_rejects_changed_intent`
@@ -273,7 +273,7 @@ no caller-supplied store locator. Configured grants cannot expose the host index
 its companions or lock. Membership survives lane-local record removal. Index
 growth is unbounded and is not counted towards the disk floor.
 
-- Why: caller claims cannot establish membership or hide a known contradiction,
+- Why (default): caller claims cannot establish membership or hide a known contradiction,
   and a waiting index reader must not block unrelated Fabric writers.
 - Test: `crates/run/src/correlation.rs::tests`;
   `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`
@@ -392,7 +392,7 @@ settlement or changes the execution state. Resume of progress clears that
 observation. The [admission owner](../../tools/front-door/crates/run/src/ledger.rs)
 owns lease persistence and defaults.
 
-- Why: an accepted receipt must mean durable admission, and read-only lanes
+- Why (default): an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::live_guardian_fences_busy_replaced_and_corrupt_store`;
@@ -412,7 +412,7 @@ An inherited higher nice value is preserved. Failure to read or change priority
 must never refuse a lane: launch proceeds and the reason is recorded. Launch
 evidence reports the applied value when known and the requested value when it
 differs.
-- Why: lanes should yield CPU without requiring new privileges or preventing
+- Why (default): lanes should yield CPU without requiring new privileges or preventing
   nested work from starting.
 - Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
   `crates/supervisor/src/process_os/provider.rs::priority_failures_degrade_and_preserve_evidence`;
@@ -427,7 +427,7 @@ linked by `retry_of`, and the latest is the highest attempt number, never
 the latest timestamp. Read-only fallback needs explicit opt-in and a typed
 transient failure. A writer (an attempt that may edit files) is never replayed automatically, and two writers
 never share a worktree.
-- Why: evidence must not be rewritten, and replaying a writer clobbers edits.
+- Why (default): evidence must not be rewritten, and replaying a writer clobbers edits.
 - Test: `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
   `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::writer_limit_after_launch_never_tries_a_second_route`
 - Owner: `crates/run/src/store.rs`, `crates/run/src/launch.rs`
@@ -600,7 +600,7 @@ and worker exclusion deduplicate concurrent requests; a queued claim expires
 after ten minutes if no worker starts. Reconcile promptly reports pending
 settlement. Neither CLI waits for object transfer
 or an existing settlement owner; the supervisor owns this work after return.
-- Why: each phase records enough evidence to resume without holding a writer
+- Why (default): each phase records enough evidence to resume without holding a writer
   lock through Git, and cancellation must remain available during import.
 - Test: `crates/run/src/settlement.rs::tests`;
   `crates/run/src/objects_tests.rs::cancellation_kills_a_blocking_import_promptly`;
@@ -622,7 +622,7 @@ hooks and provider control roots can never be listed. Run reads no provider
 transcript except Codex's post-exit identity projection. A read-only lane (no
 `writer`) whose complete, validated, non-empty answer is present settles
 `succeeded` without a handoff; only a writer must also report one.
-- Why: a crash, truncation or impostor must never read as success.
+- Why (default): a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
   `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
@@ -708,7 +708,7 @@ original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
 The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
 an unfinished result; the initial attempt is separate.
-- Why: a lane that did part of its brief must not read as one that did all of it.
+- Why (default): a lane that did part of its brief must not read as one that did all of it.
 - Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`;
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests_stream_outcomes.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
@@ -747,7 +747,7 @@ or rebase in progress is left uncommitted like a merge, with a settlement note.
 Time a lane spends queued for
 a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
 (default 7200) in total.
-- Why: a long writer should stop on what it spends, and a stuck lane must not
+- Why (default): a long writer should stop on what it spends, and a stuck lane must not
   wait or run forever.
 - Test: `crates/supervisor/src/machine.rs::a_token_budget_stop_is_a_typed_stop`;
   `crates/providers/src/claude.rs::live_usage_counts_each_call_once_with_fresh_input`;
@@ -769,7 +769,7 @@ a `--stat` summary and one patch slice per changed file (at most 400, in
 stat and the slices before the whole patch. When `slices_complete` is false the
 prompt says so and lists the changed files with no slice. Reviewers must report inputs they
 could not read, truncated captures and `slices_complete: false`.
-- Why: repository config is hostile input, and a lane must not run on input
+- Why (default): repository config is hostile input, and a lane must not run on input
   the host could not verify; slices are navigation aids into the patch, and a
   reviewer still reads the surrounding code in the checkout.
 - Test: `crates/run/src/dispatch_custody_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
@@ -826,7 +826,7 @@ the entry name and configuration source alongside the actual provider route.
 Host-native attempts retain model-policy result refusals but do not automatically
 retry as ordinary model routes or resume a session. Explicit resume may fall
 back to a fresh named launch under the existing resume policy.
-- Why: optional host features must declare their lane contract and keep its
+- Why (default): optional host features must declare their lane contract and keep its
   confinement and provenance through execution and recovery.
 - Test: `crates/records/src/adapters.rs::host_native_declares_a_fresh_named_writer_contract`;
   `tests/graph_provider.rs::host_native_preparation_uses_the_provider_contract`;
@@ -840,7 +840,7 @@ Launch prompts are bounded to 1 MiB. Argv adapters take up to the
 larger top-level prompt is sealed as `prompt.md` and replaced by a pointer to it, while
 nested argv attempts refuse it because the parent lane can write their
 directory. Prompt digests cover the full text in `prompt.txt`.
-- Why: a spill file a lane can rewrite would change its child's task.
+- Why (default): a spill file a lane can rewrite would change its child's task.
 - Test: `crates/cli/src/run/provider/tests_provider_auth_setup.rs::launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
   `crates/cli/src/run/provider/tests_provider_auth_setup.rs::nested_argv_prompt_respects_configured_byte_limit`;
   `crates/cli/src/run/provider/tests_provider_auth_setup.rs::launch_prompt_refuses_symlinked_attempt_ancestors`
@@ -853,7 +853,7 @@ exceptions for existing directories, given relative to the verified repository
 root.
 Absolute paths, traversal, symlinks and Git or provider configuration are
 refused, and the attempt records every granted path.
-- Why: only the user widens a read-only lane.
+- Why (default): only the user widens a read-only lane.
 - Test: `crates/confinement/src/plan/read_only.rs::policy_defaults_and_refuses_escape_control_paths_and_symlinks`;
   `crates/run/src/dispatch_recovery_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
@@ -877,7 +877,7 @@ executable and its linked libraries read access and grants only that executable
 permission to run.
 Lane Git output is never trusted host evidence; the host uses its own pinned
 Git and environment for evidence and settlement.
-- Why: a read grant must not permit mutations of shared Git metadata.
+- Why (default): a read grant must not permit mutations of shared Git metadata.
 - Test: `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
 - Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
 
@@ -1015,7 +1015,7 @@ with instructions to recover its commits on the host and start a fresh run.
 There is no legacy verifier or separate settlement path. Terminal refusals
 release live custody and the reservation while preserving private Git evidence
 for host recovery.
-- Why: Git already owns the receive boundary; private Git state removes the
+- Why (default): Git already owns the receive boundary; private Git state removes the
   fragile list of individual write exceptions under the shared repository.
 - Test: `crates/confinement/tests/lane_git_conformance.rs`;
   `crates/run/src/objects_tests.rs`
@@ -1031,7 +1031,7 @@ defaults to empty. When publishing is available, the lane's `gh` shim refuses
 matching calls with the policy key on standard error. This is an accidental-use
 guard, not a security boundary: a lane can invoke the real `gh` directly.
 
-- Why: projects can reserve GitHub actions for people or workflows without
+- Why (default): projects can reserve GitHub actions for people or workflows without
   relying on instructions in a lane's prompt.
 - Test: `crates/config/src/tests.rs::github_policy_is_scoped_to_project_and_defaults_only_when_absent`;
   `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
@@ -1059,7 +1059,7 @@ outside the tree, and launch does not look for it. Host code that seeds a lane t
 from a shared store. The Cargo target and registry seeds clone, retained
 provider state is copied with hard-link refusal, and the pnpm store is
 read-only to the lane, so no host path creates such a link today.
-- Why: a writable hard link could modify data outside the granted tree, but
+- Why (default): a writable hard link could modify data outside the granted tree, but
   only a link made by something other than the lane can exist, and only the
   Git control files make such a link dangerous; refusing whole build trees cost
   launches without protecting anything.
@@ -1086,7 +1086,7 @@ reservation blocks removal. Deletion never follows links, checks identity first 
 unlinks symlinks themselves. Lock files may be removed only below a terminal,
 unreserved `tmp/`; owner locks such as `writer.lock`,
 `publication.lock` and the run store lock keep their inodes.
-- Why: unlinking an owner lock lets two owners lock different inodes, and
+- Why (default): unlinking an owner lock lets two owners lock different inodes, and
   deleting under a reservation destroys a writer's work.
 - Test: `crates/run/src/holder.rs::writer_recovery_accepts_only_matching_terminal_absence`;
   `crates/run/src/dispatch_temporary_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
@@ -1107,7 +1107,7 @@ Every file and directory sync made by `provenant-os` flushes the storage device
 read once per process and passed on to the guardian, makes macOS use plain `fsync`
 instead. Relaxed state survives a process crash but not power loss; it is for
 disposable test and CI state, and any other value or none keeps the full flush.
-- Why: a corrupt or foreign store must never be repaired into evidence.
+- Why (default): a corrupt or foreign store must never be repaired into evidence.
 - Test: `crates/run/src/tests.rs::opens_refuse_unsafe_database_companions`;
   `crates/run/src/tests.rs::oversize_is_refused_before_publication_or_read`
 - Owner: `crates/run/src/db.rs`
@@ -1193,7 +1193,7 @@ older artifacts. Its offsets and digest refer to those filtered bytes. Prompt
 reads are lossless and need dispatch-equivalent authority. A terminal attempt with no requested
 output is `NOT_FOUND`. [CLI](cli.md#waits-are-readers) owns wait budgets and
 reader cancellation; a wait selection excludes the caller and its ancestors.
-- Why: attention must never wait behind a running sibling.
+- Why (default): attention must never wait behind a running sibling.
 - Test: `crates/run/src/tests.rs::create_publish_and_read_exact_bounded_facts`;
   `crates/fabric-runtime/src/runs.rs::input_required_wakes_all_without_waiting_for_a_sibling`
 - Owner: `crates/run/src/reader.rs`
@@ -1224,7 +1224,7 @@ never changes which graph its attempt-bound relay serves.
 The host preserves typed admission causes in refusals so the caller can repair
 its launch request. Credential roots, state roots and overlapping worktree
 write roots retain the ordinary launch protections.
-- Why: any agent must be able to launch children and collect their results and
+- Why (default): any agent must be able to launch children and collect their results and
   failure causes without gaining direct access to host journals or credentials.
 - Test: `src/fabric/interface.rs::explicit_writer_children_use_their_selected_project_custody`
 - Owner: `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/unified.rs`
@@ -1268,7 +1268,7 @@ Tracking-ref refresh in the worker is best effort, bounded and outside the colle
 Failure cannot change the attempt outcome or an adopted tree's receipt. The
 [lifecycle policy](../worktrees.md) owns operational guidance.
 
-- Why: cleanup may reclaim only owned work proven retained elsewhere.
+- Why (default): cleanup may reclaim only owned work proven retained elsewhere.
 - Test: `crates/cli/src/run/worktree.rs::worktree_access_preserves_writer_and_implicit_reader_rules`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
   `src/fabric/peer_writer_delivery.rs::settlement_defers_tracking_ref_refresh`
@@ -1302,7 +1302,7 @@ the authorised root, which contains the last integration commit. A rewritten
 target, a missing commit or any broken link is unproven, which retains. Tree
 and patch-id equality are never evidence. Named and merged removal, GC, owned
 lane pruning and delivery's already-integrated test all use it.
-- Why: cleanup may only remove refs Provenant made, and only once their work
+- Why (default): cleanup may only remove refs Provenant made, and only once their work
   is proven to have landed.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`;
   `crates/confinement/src/worktrees/landed.rs::tests`;
@@ -1347,7 +1347,7 @@ retries abandoned claims after their durable backoff. Requeuing publishes fresh
 pending intent independently of any claimed record, including an exhausted one.
 Exhaustion renames the complete claimed record into diagnostics in one operation;
 there is no separate retry file or orphan reconciliation.
-- Why: finished lanes leave nothing behind once their work has landed, and
+- Why (default): finished lanes leave nothing behind once their work has landed, and
   never take a ref Provenant did not make.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`
   (`leased_ref_deletion_keeps_a_moved_or_checked_out_branch`,
@@ -1417,7 +1417,7 @@ open or merged PR is reused only at the delivered head and expected base. A
 failed lookup, ambiguous list, base mismatch or unmerged closed PR stops
 delivery; a moved head refuses verification. The failure gives an inspection
 action where the host has an identifiable PR.
-- Why: delivery is host authority attached to a verified result, and a later
+- Why (default): delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
 - Test: `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_fast_forwards_merges_and_replays`;
   `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
@@ -1502,7 +1502,7 @@ replaced by adoption. Older attempts without launch evidence retain compatibilit
 with explicit worktrees, but a current foreign lane owner always refuses. Missing or
 reassigned worktrees require a new owned checkout for fresh fallback;
 `--no-fallback` refuses them.
-- Why: a missing provider handle should not require the chair to reconstruct
+- Why (default): a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
 - Test: `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
   `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;

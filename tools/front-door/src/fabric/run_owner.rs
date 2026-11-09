@@ -86,6 +86,15 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    if let provenant_run::RunError::Writer(writer) = &error
+        && let Some((operation, lock_failure)) = writer.mutation_failure()
+    {
+        return FacadeError::GitMutationFailed {
+            operation,
+            lock_failure,
+        };
+    }
+
     if matches!(
         &error,
         provenant_run::RunError::Writer(

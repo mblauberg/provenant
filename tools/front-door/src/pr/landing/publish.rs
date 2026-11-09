@@ -79,18 +79,35 @@ pub fn revalidate(
     forge: &mut dyn Forge,
     candidate: &Candidate,
 ) -> Result<Vec<EligiblePr>, LandingError> {
+    Ok(revalidate_with_reasons(forge, candidate)?
+        .into_iter()
+        .map(|(pr, _)| pr)
+        .collect())
+}
+
+pub fn revalidate_with_reasons(
+    forge: &mut dyn Forge,
+    candidate: &Candidate,
+) -> Result<Vec<(EligiblePr, String)>, LandingError> {
     let mut excluded = Vec::new();
     for step in &candidate.steps {
         let pr = &step.pr;
         let head = forge.head(pr.number)?;
-        if forge.pull_request(pr.number)?.base_branch != pr.base_branch
-            || head != pr.head
-            || !forge
-                .approvals(pr.number, &pr.head)?
-                .iter()
-                .any(|approval| approval.reference == pr.approval)
+        let reason = if forge.pull_request(pr.number)?.base_branch != pr.base_branch {
+            Some("base branch changed")
+        } else if head != pr.head {
+            Some("head changed")
+        } else if !forge
+            .approvals(pr.number, &pr.head)?
+            .iter()
+            .any(|approval| approval.reference == pr.approval)
         {
-            excluded.push(pr.clone());
+            Some("approval for the pinned head changed")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            excluded.push((pr.clone(), reason.to_owned()));
         }
     }
     Ok(excluded)

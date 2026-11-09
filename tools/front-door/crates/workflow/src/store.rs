@@ -4,7 +4,7 @@ use provenant_core::{CancelToken, Clock, DeliveryId, ProjectId, StateRoot, UtcMi
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode};
 use provenant_records::{
     DecodeError,
-    workflow::{DeliveryReceipt, RiskPolicy, Subject, UserApproval},
+    workflow::{ChairDowngrade, DeliveryReceipt, RiskPolicy, Subject},
 };
 use std::{ffi::OsStr, io};
 use thiserror::Error;
@@ -118,7 +118,9 @@ pub struct SaveContext<'a> {
     pub subject: &'a Subject,
     pub valid_until: UtcMicros,
     pub risk_policy: &'a RiskPolicy,
-    pub downgrade_approval: Option<&'a UserApproval>,
+    pub downgrade_approval: Option<&'a ChairDowngrade>,
+    /// Complete changed paths, including both sides of renames, from the edge.
+    pub changed_paths: &'a [String],
 }
 pub struct ReceiptStore {
     root: StateRoot,
@@ -248,6 +250,7 @@ impl ReceiptStore {
             candidate.risk(),
             context.risk_policy,
             context.downgrade_approval,
+            context.changed_paths,
         )?;
         // Wall time is sampled only after acquiring the lock. The binding layer
         // must use actual now for expiry, never this clamped persistence time.

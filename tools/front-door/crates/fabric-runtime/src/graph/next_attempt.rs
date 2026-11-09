@@ -287,7 +287,9 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
     match outcome {
         AttemptOutcome::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
         AttemptOutcome::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
-        AttemptOutcome::AdapterUnavailable => {
+        // Keep the pre-launch refusal's existing route policy. Its graph
+        // outcome carries the real cause; this is only fallback eligibility.
+        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
         }
         _ => provenant_routing::FallbackOutcome::Other,
@@ -307,6 +309,7 @@ pub(crate) fn fallback_candidate(
             AttemptOutcome::AuthRequired
                 | AttemptOutcome::UsageLimited
                 | AttemptOutcome::AdapterUnavailable
+                | AttemptOutcome::PreparationRefused(_)
         )
 }
 
@@ -406,6 +409,7 @@ pub(crate) fn fallback_denial(
         AttemptOutcome::AuthRequired => "The lane requires authentication.",
         AttemptOutcome::UsageLimited => "The lane reached a usage limit.",
         AttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
+        AttemptOutcome::PreparationRefused(cause) => cause.detail(),
         _ => "The lane failed.",
     };
     let detail = cause.map(provenant_routing::exclusion_detail);
@@ -745,9 +749,21 @@ pub(super) fn settlement_fallback_decision(
         || route_index + 1 == node.routes.len()
         || review_limit_reached
     {
-        let mut advance_error_code = None;
-        let mut advance_error = None;
-
+        let (mut advance_error_code, mut advance_error) = match outcome {
+            AttemptOutcome::PreparationRefused(cause) => (
+                Some("preparation_refused".into()),
+                Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
+            ),
+            AttemptOutcome::AuthRequired => (
+                Some("auth_required".into()),
+                Some("The lane requires authentication.".into()),
+            ),
+            AttemptOutcome::AdapterUnavailable => (
+                Some("adapter_unavailable".into()),
+                Some("The lane's adapter is unavailable.".into()),
+            ),
+            _ => (None, None),
+        };
         if outcome == AttemptOutcome::UsageLimited {
             advance_error_code = Some("usage_limited".into());
             let pool = route
@@ -1010,7 +1026,7 @@ mod tests {
             Some("the review returned no verdict")
         );
 
-        // The last route fails without a fallback reason of its own.
+        // The last route retains its cause even without a fallback route.
         let single = planned(serde_json::json!({
             "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
             "routes": [{"adapter": "a", "model": "a/m"}]
@@ -1030,8 +1046,8 @@ mod tests {
         assert_eq!(
             decision,
             SettlementFallback::Fail {
-                code: None,
-                message: None
+                code: Some("auth_required".into()),
+                message: Some("The lane requires authentication.".into())
             }
         );
         let SettlementFallback::Fail { code, message } = decision else {
@@ -1043,8 +1059,11 @@ mod tests {
         );
         fail_node(&mut settled, code, message);
         assert_eq!(settled.state, NodeState::Failed);
-        assert_eq!(settled.advance_error_code.as_deref(), Some("earlier"));
-        assert_eq!(settled.advance_error.as_deref(), Some("kept"));
+        assert_eq!(settled.advance_error_code.as_deref(), Some("auth_required"));
+        assert_eq!(
+            settled.advance_error.as_deref(),
+            Some("The lane requires authentication.")
+        );
     }
 
     #[test]

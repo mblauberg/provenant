@@ -970,6 +970,9 @@ pub(crate) fn peer_submit_graph(
           "route":route,"attempt":attempt,"context":origin,"require_skill_location":task.require_skill_location,
           "settlement_retries":retry}],
     })).map_err(|_| FacadeError::StateCorrupt)?;
+    // Preserve the origin's semantic role so review launches use the same
+    // comparison-base path as local graph nodes, including exact model routes.
+    document.nodes[0].role = origin.role.clone();
     document.review_base = task.base.clone();
     document.nodes[0].source =
         task.head.as_ref().map(

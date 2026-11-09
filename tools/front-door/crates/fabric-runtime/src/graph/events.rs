@@ -228,7 +228,10 @@ pub(super) fn append_changes(
                     cache_read_tokens: metrics.and_then(|m| m.get("cache_read_tokens")).and_then(Value::as_u64),
                     input_tokens: metrics.and_then(|m| m.get("input_tokens")).and_then(Value::as_u64),
                     queue_time_ms: metrics.and_then(|m| m.get("queue_time_ms")).and_then(Value::as_u64),
-                    outcome: metrics.and_then(|m| m.get("outcome")).and_then(Value::as_str).map(str::to_owned).or_else(|| serde_json::to_value(attempt.outcome).ok()?.as_str().map(str::to_owned)),
+                    outcome: metrics.and_then(|m| m.get("outcome")).and_then(Value::as_str).map(str::to_owned).or_else(|| match attempt.outcome? {
+                        AttemptOutcome::PreparationRefused(_) => Some("preparation_refused".into()),
+                        outcome => serde_json::to_value(outcome).ok()?.as_str().map(str::to_owned),
+                    }),
                     route: metrics.and_then(|m| m.get("resolved_route")).cloned().unwrap_or_else(|| serde_json::json!({"adapter":attempt.route.adapter,"model":attempt.route.model,"name":attempt.route.name,"alias":attempt.route.alias,"effort":attempt.route.effort})),
                 });
                 events.push(observation);

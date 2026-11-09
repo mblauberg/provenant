@@ -1,6 +1,120 @@
 use super::*;
 
 #[test]
+fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>> {
+    struct PreparationProbe<'a> {
+        inner: &'a dyn Executor,
+        common: &'a Directory,
+        writer: &'a Directory,
+        artifact: PathBuf,
+        preparation_seen: std::sync::atomic::AtomicBool,
+        mutation_seen: std::sync::atomic::AtomicBool,
+    }
+    impl Executor for PreparationProbe<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            use std::sync::atomic::Ordering;
+            if options.argv.iter().any(|arg| arg == "status")
+                && self.artifact.exists()
+                && matches!(
+                    self.writer
+                        .try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+                    Err(FsError::LockTimeout { .. })
+                )
+            {
+                // Preparation checks ignored output under writer custody. A
+                // launch in another tree must still be able to take Shared.
+                let launch = self
+                    .common
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Shared);
+                assert!(
+                    launch.is_ok(),
+                    "launch blocked during output preparation: {launch:?}"
+                );
+                self.preparation_seen.store(true, Ordering::SeqCst);
+            }
+            if options.argv.iter().any(|arg| arg == "worktree")
+                && options.argv.iter().any(|arg| arg == "remove")
+            {
+                assert!(matches!(
+                    self.common
+                        .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Shared),
+                    Err(FsError::LockTimeout { .. })
+                ));
+                self.mutation_seen.store(true, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "removal-launch-lock".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let artifact = info.path.join("target/artifact");
+    fs::create_dir(info.path.join("target"))?;
+    fs::write(&artifact, "output")?;
+    let writer = context
+        .project_state
+        .open_verified_directory(&state_dir_name(&info.path))?;
+    let probe = PreparationProbe {
+        inner: context.executor,
+        common: context.repo.common_dir(),
+        writer: &writer,
+        artifact,
+        preparation_seen: Default::default(),
+        mutation_seen: Default::default(),
+    };
+    context.executor = &probe;
+    let workers = LockProbeWorkers {
+        common: context.repo.common_dir(),
+        repository_held: Default::default(),
+    };
+    context.workers = &workers;
+    let result = remove_with_output(
+        &context,
+        WorktreeRemove::Name {
+            name: "removal-launch-lock".into(),
+            discard: false,
+            integration: None,
+            expected_head: None,
+        },
+        &cancel(),
+        &provenant_config::ProjectGcSettings {
+            regenerable: vec!["target".into()],
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(result.removed.len(), 1);
+    assert!(
+        probe
+            .preparation_seen
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(
+        probe
+            .mutation_seen
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    let observed = workers.repository_held.lock().unwrap();
+    assert!(!observed.is_empty());
+    assert!(
+        observed.iter().all(|held| !held),
+        "census held repository lock: {observed:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Error>> {
     struct AppearingAfterPreparation {
         artifact: PathBuf,

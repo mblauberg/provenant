@@ -23,7 +23,7 @@ checkout or a pre-1.0 root, or contains `.agent-run`; existing ancestor
 aliases are resolved first. The contents of a pre-1.0 root are never opened.
 Reads, help and `root` create no state; writes create directories with mode
 0700 and files with mode 0600.
-- Why: a wrong root mixes or destroys another installation's state.
+- Why (default): a wrong root mixes or destroys another installation's state.
 - Test: `crates/core/src/roots.rs::roots_refuse_home_checkout_old_roots_and_any_agent_run_component`;
   `tests/parser.rs::root_uses_release_location_and_explicit_state_without_creating_it`
 - Owner: `crates/core/src/roots.rs`, `src/roots.rs`
@@ -36,7 +36,7 @@ absolute components, `.` and `..`, and durable paths use tagged `PathWire`,
 never lossy text. `WallTime` is UTC integer microseconds with one rendering. Durations use
 checked arithmetic. `CancelToken` is never serialised and never used as a
 provider signal.
-- Why: a value that normalises two ways lets one record alias another.
+- Why (default): a value that normalises two ways lets one record alias another.
 - Test: `crates/core/src/ids.rs::identifiers_are_validated_at_the_wire_boundary`;
   `crates/core/src/paths.rs::relative_paths_reject_normalisation_and_parent_traversal`
 - Owner: `crates/core/src/`
@@ -76,7 +76,7 @@ numbers and out-of-range integers, caps the bytes it reads (1 MiB for config,
 8 MiB for records) and the nesting depth (64), and never repeats the rejected
 value in its error. Edge-built
 facts are `Serialize` only, so deserialisation cannot manufacture evidence.
-- Why: ambiguous JSON parses differently in different readers, and a forged
+- Why (default): ambiguous JSON parses differently in different readers, and a forged
   file must not become evidence.
 - Test: `crates/records/tests/contracts.rs::bounded_decode_fails_closed_for_duplicates_utf8_trailing_and_integer_overflow`;
   `crates/records/tests/contracts.rs::typed_decode_errors_do_not_disclose_rejected_values`;
@@ -91,7 +91,7 @@ normalisation, shortest decimal integers and no floats; it is not RFC 8785 (the 
 `record_digest(kind, version, bytes)` hashes a fixed domain prefix, kind,
 version and canonical bytes as `sha256:<64 hex>`. `FileDigest` hashes raw
 bytes as a separate type. Domain owners choose which fields enter a digest.
-- Why: a digest is an identity only if every writer computes the same bytes.
+- Why (default): a digest is an identity only if every writer computes the same bytes.
 - Test: `crates/records/tests/contracts.rs::canonical_v1_sorts_keys_uses_required_escapes_and_separates_digest_domains`;
   `crates/records/src/canonical.rs::record_digest_uses_exact_domain_framing_and_canonical_input_bytes`
 - Owner: `crates/records/src/canonical.rs`
@@ -101,7 +101,7 @@ bytes as a separate type. Domain owners choose which fields enter a digest.
 Session summaries use a bounded YAML frontmatter header parsed with
 serde-saphyr and validated against the summary schema. Repository skill
 frontmatter and agent sidecars are checked by `scripts/check-harness`.
-- Why: validate metadata using maintained YAML parsers.
+- Why (default): validate metadata using maintained YAML parsers.
 - Test: `crates/workflow/src/session/summary.rs::tests`
 - Owner: `crates/workflow/src/session/summary.rs`, `scripts/check-harness`
 
@@ -112,7 +112,7 @@ frontmatter and agent sidecars are checked by `scripts/check-harness`.
 The per-host Cargo seed switch must default on and must have no
 effect outside macOS. Its scope and manual configuration are described in
 the [worktree guide](../worktrees.md).
-- Why: cloning is a host-specific optimisation that falls back to an empty
+- Why (default): cloning is a host-specific optimisation that falls back to an empty
   store when unavailable, and a host may turn it off; it is never a
   prerequisite for running a lane.
 - Test: `crates/fabric-runtime/src/config.rs::tests::lane_priority_defaults_and_bounds`;
@@ -151,7 +151,7 @@ become permission. Unknown optional keys survive an unrelated edit; `config set`
 validates the requested value and publishes atomically. `config show` redacts
 secrets and never rewrites the file. The [config reference](../reference/config-keys.md)
 owns keys and defaults.
-- Why: configuration errors need visible remedies without silently expanding
+- Why (default): configuration errors need visible remedies without silently expanding
   authority or discarding unrelated user settings.
 - Test: `crates/config/src/tests.rs::config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoing_input`;
   `crates/config/src/tests.rs::config_filesystem_boundary_refuses_links_non_files_and_unreadable_roots`;
@@ -169,7 +169,7 @@ fails `PROVIDER_STATE_EXPIRED` before spending. GC does not wait for locks,
 spares reservations and pending continuations, deletes only through
 identity-checked tombstones, never follows links and writes nothing on a dry
 run ([ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md)).
-- Why: freeing credentials and space must not destroy evidence or a session
+- Why (default): freeing credentials and space must not destroy evidence or a session
   in use.
 - Test: `crates/run/src/retention.rs::gc_spares_nonterminal_attempts_and_contention_and_reservations`;
   `crates/run/src/retention.rs::gc_retries_only_authorised_tombstones_and_never_follows_links`
@@ -185,7 +185,7 @@ configuration, the release packager and bundled assets. Names are sorted
 workspace-relative POSIX paths, framed by lengths, under the prefix
 `provenant-source-v1`. Duplicate, missing, symlinked or escaping inputs are
 rejected and there is no override; test-only edits do not change it.
-- Why: the digest is the installed binary's identity.
+- Why (default): the digest is the installed binary's identity.
 - Test: `crates/records/src/source.rs::hashes_sorted_framed_names_and_exact_contents`;
   `build.rs::member_test_edits_do_not_change_the_source_digest`
 - Owner: `build.rs`, `crates/records/src/source.rs`
@@ -197,7 +197,7 @@ binary before trusting a release. `release.json` is published last; the
 release is then immutable and never repaired. Equal digests with different
 manifests fail `ReleaseConflict`. A digest proves identity, not publisher
 trust.
-- Why: a partial or swapped release must never run.
+- Why (default): a partial or swapped release must never run.
 - Test: `crates/config/src/managed_tests.rs::bytes_and_modes_are_verified_and_existing_release_is_immutable`;
   `crates/config/src/managed_tests.rs::interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_staging_file`
 - Owner: `crates/config/src/release.rs`
@@ -211,7 +211,7 @@ preview prevents writes, and `--dry-run` creates no root, lock or receipt.
 Identity and bytes are rechecked before each atomic publication, and drift
 stops the install. Locks hold back only other installers, not running
 harness clients, so quit those clients first.
-- Why: the user's harness config changes only in view.
+- Why (default): the user's harness config changes only in view.
 - Test: `crates/config/src/managed_tests.rs::dry_run_and_broken_preview_create_nothing`;
   `crates/config/src/managed_tests.rs::drift_between_preview_and_apply_refuses_before_file_writes`
 - Owner: `crates/config/src/managed.rs`
@@ -224,7 +224,7 @@ and the running binary stay. `--adopt-existing` never authorises deletion
 and refuses symlinked executables, foreign directories and inline secret
 environment variables. Protected destinations and paths under a mount point are refused before
 any read.
-- Why: install must never delete what it cannot prove it wrote.
+- Why (default): install must never delete what it cannot prove it wrote.
 - Test: `crates/config/src/managed_tests.rs::uninstall_keeps_edited_links_and_unmanaged_siblings_and_binary`;
   `crates/config/src/managed_tests.rs::mcp_conflict_does_not_adopt_foreign_env_or_create_state`
 - Owner: `crates/config/src/managed.rs`
@@ -237,7 +237,7 @@ or ambiguous containers are rejected unchanged, the full user config is
 never logged, and symlinked configs are refused. Each MCP entry runs the
 absolute stable binary with `--state-dir ABS fabric mcp --client NAME` and
 no secret environment, matching the recorded contract for each client.
-- Why: a harness config holds the user's other tools and secrets.
+- Why (default): a harness config holds the user's other tools and secrets.
 - Test: `crates/config/src/managed_tests.rs::five_client_install_preserves_foreign_hooks_comments_and_reapplies`;
   `crates/config/src/managed_tests.rs::mcp_registry_matches_recorded_client_config_contracts`
 - Owner: `crates/config/src/splice.rs`, `crates/config/src/harness.rs`
@@ -248,7 +248,7 @@ Omitting `--hooks` refreshes unchanged owned hooks and releases ownership of edi
 ones; a first install leaves hooks off. `--hooks on` refuses edited Claude
 hooks, and its error names `--hooks off` as the recovery, which removes exact owned
 matches. A user's own Codex `hooks = true` is kept.
-- Why: a user's hook edits outrank the installer's.
+- Why (default): a user's hook edits outrank the installer's.
 - Test: `crates/config/src/managed_tests.rs::edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery`;
   `tests/install.rs::hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it`
 - Owner: `crates/config/src/hooks.rs`
@@ -258,7 +258,7 @@ matches. A user's own Codex `hooks = true` is kept.
 After a home or state-root move, stale entries produce findings without
 their paths being inspected or changed; uninstall forgets selected stale
 ownership and reinstall leaves dangling links for manual cleanup.
-- Why: an old path may now belong to something else.
+- Why (default): an old path may now belong to something else.
 - Test: `crates/config/src/managed_tests.rs::uninstall_after_home_rename_never_acts_on_old_paths`;
   `crates/config/src/managed_tests.rs::check_after_home_rename_never_inspects_old_config_paths`
 - Owner: `crates/config/src/managed.rs`
@@ -271,7 +271,7 @@ or any parent and stages with `O_NOFOLLOW | O_EXCL`. The peer agent's PATH
 never includes a directory inside a registered project's worktree. A failed
 bootout (unloading the agent) keeps the plist owned, and an older plist is
 adopted only if its bytes match the template exactly.
-- Why: a LaunchAgent runs unattended at login with the user's authority.
+- Why (default): a LaunchAgent runs unattended at login with the user's authority.
 - Test: `crates/config/src/managed_tests.rs::peer_agent_refuses_symlinked_plist_and_parent_before_writes`;
   `crates/fabric-runtime/src/peer_agent.rs::provider_path_skips_a_registered_project_and_clones_nested_in_it`
 - Owner: `crates/config/src/managed.rs`, `src/tick_agent.rs`
@@ -283,7 +283,7 @@ remaining actions, and re-running the same `install` recovers it, even with
 no receipt published. There are no rollback journals, saved binaries or
 displaced user files, and a full disk (ENOSPC) or an uncertain publication returns a typed
 failure.
-- Why: one idempotent path is easier to trust than a rollback engine.
+- Why (default): one idempotent path is easier to trust than a rollback engine.
 - Test: `crates/config/src/managed_tests.rs::crash_after_any_publication_reapplies_without_a_receipt`;
   `crates/config/src/managed_tests.rs::receipt_publish_failure_reports_partial_actions_and_reapplies`
 - Owner: `crates/config/src/managed.rs`

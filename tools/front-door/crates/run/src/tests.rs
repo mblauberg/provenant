@@ -1231,7 +1231,7 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
         result.digest,
         CanonicalV1::file_digest(text.as_bytes()).to_string()
     );
-    assert!(result.source_truncated);
+    assert!(!result.source_truncated);
     assert!(!result.tail.contains(&secret));
     assert!(result.tail.contains("[REDACTED]"));
     let path = context

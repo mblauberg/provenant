@@ -77,6 +77,12 @@ fn graph_writer_initialisation_error(
     error: provenant_confinement::worktrees::WorktreeError,
 ) -> FacadeError {
     use provenant_confinement::worktrees::WorktreeError;
+    if let Some((operation, lock_failure)) = error.mutation_failure() {
+        return FacadeError::GitMutationFailed {
+            operation,
+            lock_failure,
+        };
+    }
     match error {
         WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy,
         WorktreeError::LockBusy => FacadeError::WriterBusy { holder: None },
@@ -157,6 +163,32 @@ impl Factory {
             })?
             .parse()
             .map_err(|_| FacadeError::StateCorrupt)
+    }
+
+    /// Derive a review's comparison range from its bound inputs at launch.
+    fn review_comparison_base(
+        &self,
+        directory: &Path,
+        base: Option<&str>,
+        subject: &str,
+    ) -> Result<String, FacadeError> {
+        let empty = || {
+            FacadeError::invalid(InvalidInputDetail::Field(
+            "review_empty_range: base and subject resolve to the same commit; select a subject with changes".into(),
+        ))
+        };
+        let base = base.ok_or_else(empty)?;
+        if base == subject {
+            return Err(empty());
+        }
+        let git = provenant_os::git::git_executable()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        let base = provenant_run::review_merge_base_between(&git, directory, subject, base)
+            .map_err(run_error)?;
+        if base == subject {
+            return Err(empty());
+        }
+        Ok(base)
     }
 
     /// Reopen a retained graph directory without borrowing the caller's checkout.

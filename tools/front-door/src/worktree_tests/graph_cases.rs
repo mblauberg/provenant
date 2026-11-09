@@ -69,7 +69,16 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
     let reader_node = &reader_value["data"]["checkpoint"]["nodes"][0];
     assert_eq!(reader_node["state"], "failed", "{reader_value}");
     assert_eq!(
-        reader_node["attempts"][0]["outcome"], "adapter_unavailable",
+        reader_node["attempts"][0]["outcome"],
+        serde_json::json!({"preparation_refused":"route_resolution_refused"}),
+        "{reader_value}"
+    );
+    assert_eq!(
+        reader_node["advance_error_code"], "preparation_refused",
+        "{reader_value}"
+    );
+    assert_eq!(
+        reader_node["attempts"][0]["launched"], false,
         "{reader_value}"
     );
     assert!(

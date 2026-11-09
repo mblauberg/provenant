@@ -156,7 +156,7 @@ fn batch_response(
     let failure = failure.or_else(|| {
         report.outcomes.iter().find_map(|(number, outcome)| {
             (*outcome == model::Outcome::Excluded)
-                .then(|| LandingError::Refused(format!("pull request #{number} was excluded")))
+                .then(|| LandingError::Refused(format!("pull request #{number} was excluded: {}; inspect the pull request, correct the issue and rerun `provenant land {number}`", report.exclusion_reasons.get(number).map(String::as_str).unwrap_or("eligibility could not be established"))))
         })
     });
     let (status, code) = match failure.as_ref() {
@@ -511,10 +511,17 @@ mod response_tests {
     fn excluded_pr_has_error_envelope() {
         let report = driver::Report {
             outcomes: std::collections::BTreeMap::from([(7, model::Outcome::Excluded)]),
+            exclusion_reasons: std::collections::BTreeMap::from([(
+                7,
+                "no independent approval for the current head".into(),
+            )]),
             ..Default::default()
         };
         let response = batch_response(report, None);
-        assert_eq!(response.error.unwrap().code, "LAND_REFUSED");
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "LAND_REFUSED");
+        assert!(error.message.contains("no independent approval"));
+        assert!(error.message.contains("provenant land 7"));
     }
 
     #[test]

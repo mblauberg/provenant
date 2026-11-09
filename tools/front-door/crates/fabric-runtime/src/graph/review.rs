@@ -71,12 +71,29 @@ pub(super) fn mark_partial(outputs: &mut NodeOutputs) {
     }
 }
 
+fn contradicts_pass(finding: &Finding) -> bool {
+    if finding.boundary_or_data_loss() {
+        return !finding.falsified_with_evidence();
+    }
+    !finding.spec_defect()
+        && !matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
+        && !matches!(
+            finding.disposition.as_deref(),
+            Some("rejected" | "resolved" | "fixed" | "disputed" | "removed-the-case")
+        )
+        && finding.default_path()
+        && repair::blocking_severity(finding)
+}
+
 pub(super) fn contract_error(
     node: &PlannedNode,
     upstream: &[Finding],
     outputs: &NodeOutputs,
 ) -> Option<(&'static str, String)> {
-    template::review_behaviour(node)?;
+    let repair_triage = node.extra.get("repair_triage") == Some(&serde_json::Value::Bool(true));
+    if template::review_behaviour(node).is_none() && !repair_triage {
+        return None;
+    }
     // ResultCapture has already validated uniqueness and final position while
     // allowing the shared trailing handoff fence. `verdict_error` also carries
     // source truncation, which is diagnosed by findings availability below;
@@ -135,16 +152,45 @@ pub(super) fn contract_error(
             }
         }
     }
+    if repair_triage
+        || matches!(
+            template::review_behaviour(node),
+            Some(template::ReviewBehaviour::Verify | template::ReviewBehaviour::Synthesis)
+        )
+    {
+        for finding in &outputs.findings {
+            let valid = finding.triage().is_some_and(|triage| {
+                matches!(triage.decision.as_str(), "confirmed" | "rejected")
+                    && !triage.reason.trim().is_empty()
+                    && !triage.root_cause.trim().is_empty()
+                    && triage.root_cause.len() <= OUTPUT_FIELD_BYTES
+                    && triage.reason.len() <= OUTPUT_FIELD_BYTES
+                    && matches!(
+                        triage.blocking_class.as_str(),
+                        "acceptance" | "default_path_defect" | "boundary" | "data_loss" | "none"
+                    )
+            });
+            if !valid {
+                return Some((
+                    "review_triage_missing",
+                    format!(
+                        "finding {} needs checked triage: decision, reason, worth_fixing, root_cause, blocking_class",
+                        finding.id
+                    ),
+                ));
+            }
+        }
+    }
     if outputs.verdict.as_deref() == Some("VERDICT: PASS")
         && outputs.findings.iter().any(|finding| {
-            (repair::blocking(finding)
+            (contradicts_pass(finding)
                 && !(upstream.iter().any(|source| source.id == finding.id)
                     && finding
                         .extra
                         .get("verification")
                         .and_then(serde_json::Value::as_str)
-                        == Some("falsified")))
-                || finding.disposition.as_deref() == Some("accepted")
+                        == Some("falsified")
+                    && finding.falsified_with_evidence()))
                 || finding
                     .extra
                     .get("verification")
@@ -155,6 +201,53 @@ pub(super) fn contract_error(
         return Some((
             "review_verdict_conflict",
             "PASS contradicts unresolved blocking, accepted or unverifiable findings".into(),
+        ));
+    }
+    None
+}
+
+/// Every grouped item must return a typed outcome, including disputes.
+pub(super) fn repair_result_error(
+    node: &PlannedNode,
+    upstream: &[Finding],
+    outputs: &NodeOutputs,
+) -> Option<(&'static str, String)> {
+    if !repair_writer(node) {
+        return None;
+    }
+    let required: std::collections::BTreeSet<_> = upstream
+        .iter()
+        .filter(|finding| repair::blocking(finding))
+        .filter_map(Finding::triage)
+        .map(|triage| triage.root_cause)
+        .collect();
+    let Some(items) = outputs
+        .extra
+        .get("repair_items")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Some((
+            "repair_items_missing",
+            "repair writer must report every grouped item with a typed outcome".into(),
+        ));
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !required.contains(id) || !seen.insert(id.to_owned()) {
+            return Some((
+                "repair_items_invalid",
+                "repair outcomes must name each grouped item exactly once".into(),
+            ));
+        }
+    }
+    if seen != required {
+        return Some((
+            "repair_items_incomplete",
+            "every grouped fix item needs a repair outcome".into(),
         ));
     }
     None
