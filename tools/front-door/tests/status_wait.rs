@@ -11,7 +11,7 @@ use provenant_run::{
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     os::unix::fs::PermissionsExt,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -140,6 +140,33 @@ fn fake_gh(rig: &mut TestRig, blocking: bool) -> Result {
     fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.wait]\ntimeout_seconds=1\nlocal_interval_ms=10\npr_interval_ms=10\n",
+    )?;
+    Ok(())
+}
+fn fake_gh_dynamic(rig: &mut TestRig) -> Result {
+    let bin = rig.root.join("bin");
+    fs::create_dir_all(&bin)?;
+    fs::write(
+        bin.join("gh"),
+        format!(
+            "#!/bin/sh\ncat '{}'\ntouch '{}'\n",
+            rig.root.join("pr.json").display(),
+            rig.root.join("gh-started").display()
+        ),
+    )?;
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    fs::write(
+        rig.root.join("pr.json"),
+        json!({"state":"OPEN","headRefOid":"abc","statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"IN_PROGRESS","conclusion":null}]}).to_string(),
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.wait]\ntimeout_seconds=2\nlocal_interval_ms=10\npr_interval_ms=10\n",
     )?;
     Ok(())
 }
@@ -330,6 +357,36 @@ fn mixed_status_wait_returns_on_fake_lane_while_pr_read_is_blocked() -> Result {
     assert_eq!(lines[0]["target"], target);
     assert_eq!(lines[0]["terminal"], true);
     assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+    Ok(())
+}
+#[test]
+fn default_single_target_wait_ignores_nonterminal_transition() -> Result {
+    let mut rig = TestRig::new()?;
+    fake_gh_dynamic(&mut rig)?;
+    let mut child = spawn(&rig, &["status", "--wait=2s", "--target", "pr:1", "--json"])?;
+    provenant_test_support::wait_for(
+        "initial PR snapshot",
+        Duration::from_secs(5),
+        || rig.root.join("gh-started").exists(),
+        |ready| *ready,
+    )?;
+    fs::write(
+        rig.root.join("pr.json"),
+        json!({"state":"OPEN","headRefOid":"abc","statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}).to_string(),
+    )?;
+    let mut stdout = BufReader::new(child.stdout.take().ok_or("stdout")?);
+    let mut output = Vec::new();
+    stdout.read_to_end(&mut output)?;
+    let status = child.wait()?;
+    assert_eq!(status.code(), Some(124));
+    let lines = events(&output)?;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["event"] == "transition" && line["terminal"] == false),
+        "expected a non-terminal transition: {lines:?}"
+    );
+    assert_eq!(lines.last().ok_or("end")?["timed_out"], true);
     Ok(())
 }
 #[test]

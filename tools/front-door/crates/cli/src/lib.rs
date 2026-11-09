@@ -1738,6 +1738,12 @@ mod tests {
     }
     #[test]
     fn bounded_waits_counts_and_byte_windows() {
+        let Command::Status(default_wait) =
+            valid(&["status", "--wait", "--target", "pr:2721"]).command
+        else {
+            panic!("expected status")
+        };
+        assert!(matches!(default_wait.until, Condition::All));
         valid(&[
             "status", "--wait", "--target", "pr:2721", "--until", "all", "--follow",
         ]);
