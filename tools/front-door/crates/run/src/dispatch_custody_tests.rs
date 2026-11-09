@@ -17,7 +17,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     std::fs::DirBuilder::new().mode(0o700).create(&host)?;
     std::fs::write(
         host.join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\nmax_project_lanes = 32\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes = 32\nmax_project_lanes = 32\n",
     )?;
     for name in ["first", "second"] {
         std::fs::create_dir(base.join(name))?;

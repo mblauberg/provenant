@@ -620,6 +620,11 @@ require class C; add project-specific exclusions with
 relative to the repository root; `*` matches within a component and `**`
 across components. These extra patterns do not remove the bundled exclusions.
 
+### Lane verification
+
+Before handing off, push the commit and run `scripts/lane-check <branch-or-sha>`.
+Optionally run `scripts/pre-push` for documentation headers and blob sizes without compiling.
+
 ### Rust build cache
 
 Each Rust cache step caches `$GITHUB_WORKSPACE/tools/front-door/target`,

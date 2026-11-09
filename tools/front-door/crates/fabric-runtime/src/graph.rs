@@ -1244,6 +1244,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     // A loop round's worktree is advanced by earlier rounds;
                     // its starting head becomes known only at that round.
                     if plans::writer(node)
+                        && node
+                            .extra
+                            .get("provision_worktree")
+                            .and_then(serde_json::Value::as_bool)
+                            != Some(true)
                         && node.round.is_none()
                         && node
                             .attempt
