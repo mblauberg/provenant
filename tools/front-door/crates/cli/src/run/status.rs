@@ -1865,7 +1865,29 @@ pub(super) fn attach_cloud_jobs(
             });
         }
         if let Some(model) = value["observed_model_status"].as_str() {
-            human.push_str(&format!(", observed model {model}"));
+            // Name both models so a substitution is never hidden.
+            human.push_str(&format!(
+                ", requested model {}, observed {} ({model})",
+                plain_text(
+                    value["requested_model"].as_str().unwrap_or("unknown"),
+                    usize::MAX
+                ),
+                plain_text(
+                    value["observed_model"].as_str().unwrap_or("unknown"),
+                    usize::MAX
+                ),
+            ));
+        }
+        if let Some(branch) = value["result_branch"].as_str() {
+            human.push_str(&format!(", pushed {}", plain_text(branch, usize::MAX)));
+            if let Some(head) = value["result_head"].as_str() {
+                human.push_str(&format!(" at {}", plain_text(head, usize::MAX)));
+            }
+        } else if let Some(branch) = value["work_branch"].as_str() {
+            human.push_str(&format!(", branch {}", plain_text(branch, usize::MAX)));
+        }
+        if let Some(url) = value["session_url"].as_str() {
+            human.push_str(&format!(", session {}", plain_text(url, usize::MAX)));
         }
         if let Some(detail) = value["state"]["detail"].as_str() {
             human.push_str(&format!(": {}", plain_text(detail, usize::MAX)));

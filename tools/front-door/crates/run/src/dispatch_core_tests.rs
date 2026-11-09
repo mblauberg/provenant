@@ -57,6 +57,7 @@ fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
         model: "model".into(),
         effort: None,
         deadline_seconds: 3600,
+        work_branch: None,
     });
     store.create(&input, &call)?;
     let fake = Fake {

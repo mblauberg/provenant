@@ -2321,16 +2321,6 @@ impl BoundGraphOwner<'_> {
             {
                 return Err(FacadeError::WorktreeNotApplicable);
             }
-            if node
-                .attempt
-                .and_then(|spec| spec.placement.as_ref())
-                .is_some()
-                && access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-            {
-                return Err(FacadeError::invalid(InvalidInputDetail::CloudPlacement(
-                    provenant_fabric_runtime::coordination::facade::CloudPlacementIssue::Access,
-                )));
-            }
             if let Some(cloud) = node.attempt.and_then(|spec| spec.placement.as_ref()) {
                 use provenant_fabric_runtime::coordination::facade::CloudPlacementIssue as Issue;
                 let invalid =

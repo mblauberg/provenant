@@ -1,4 +1,4 @@
-//! Provider-independent evidence returned by a cloud verification job.
+//! Provider-independent evidence returned by a cloud job.
 //!
 //! This module does not dispatch jobs or authenticate result channels. A caller
 //! must obtain the envelope through a channel authorised for the job before
@@ -6,8 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The remote job's report. `commit` is the full object ID of the checkout
-/// that was tested, not a branch name or the commit requested in the prompt.
+/// The remote job's report. `commit` is the full object ID the job started
+/// from, not a branch name. A writer also reports the branch it pushed and
+/// that branch's full head, which the owner verifies against the remote.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudResult {
     pub job_id: String,
@@ -17,8 +18,13 @@ pub struct CloudResult {
     pub tests_run: Vec<String>,
     pub tests_failed: Vec<String>,
     pub log_location: String,
-    pub tracked_files_changed: bool,
     pub observed_model: Option<String>,
+    /// The branch the job pushed, as the platform actually named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Full object ID of the pushed branch head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,7 +35,7 @@ pub enum ModelObservation {
 }
 
 /// A result bound to the caller's expected commit. A successful exit alone is
-/// insufficient when the job changed tracked files or reported failed tests.
+/// insufficient when the job reported failed tests or incomplete evidence.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CheckedCloudResult {
     pub result: CloudResult,
@@ -50,7 +56,7 @@ pub enum CloudResultError {
     CommitMismatch,
 }
 
-fn full_oid(s: &str) -> bool {
+pub fn full_oid(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -84,10 +90,7 @@ impl CloudResult {
         let evidence_complete = self.tests_run.iter().all(|test| !test.trim().is_empty())
             && self.tests_failed.iter().all(|test| !test.trim().is_empty())
             && !self.log_location.trim().is_empty();
-        let passed = evidence_complete
-            && self.exit_status == 0
-            && self.tests_failed.is_empty()
-            && !self.tracked_files_changed;
+        let passed = evidence_complete && self.exit_status == 0 && self.tests_failed.is_empty();
         Ok(CheckedCloudResult {
             result: self,
             requested_model: requested_model.to_owned(),
@@ -111,8 +114,9 @@ mod tests {
             tests_run: vec!["targeted test".into()],
             tests_failed: vec![],
             log_location: "https://example.invalid/log".into(),
-            tracked_files_changed: false,
             observed_model: Some("requested".into()),
+            branch: None,
+            head: None,
         }
     }
 
@@ -183,18 +187,17 @@ mod tests {
     }
 
     #[test]
-    fn cloud_result_reports_failures_changes_and_model_observation() {
+    fn cloud_result_reports_failures_and_model_observation() {
         let mut result = report();
-        result.tracked_files_changed = true;
         result.observed_model = None;
         let checked = result
             .clone()
             .check("job", "nonce", &"a".repeat(40), "requested")
             .unwrap();
-        assert!(!checked.passed);
+        // Changed files are a writer's normal output, not a failure.
+        assert!(checked.passed);
         assert_eq!(checked.model, ModelObservation::Unknown);
         assert_eq!(checked.requested_model, "requested");
-        result.tracked_files_changed = false;
         result.tests_failed.push("failed test".into());
         result.observed_model = Some("other".into());
         let checked = result
@@ -224,8 +227,16 @@ pub struct RemoteJob {
     pub target: String,
     pub environment: String,
     pub repository: String,
+    /// Base branch the job starts from and may merge.
     pub branch: String,
+    /// Named branch a writer commits to and pushes without force. None for a
+    /// verification job, which changes no remote branch it keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_branch: Option<String>,
     pub remote_id: String,
+    /// Where a person can open the remote session, when the provider has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_url: Option<String>,
     pub commit: String,
     pub requested_model: String,
     pub requested_effort: Option<String>,
@@ -260,7 +271,42 @@ pub struct EnvironmentDiagnostic<'a> {
 const ENVIRONMENT_REMEDY: &str =
     "Create or repair the named provider environment and select the repository, then retry.";
 
+/// A branch name the owner may pass to Git and show as a result. This is a
+/// conservative subset of `git check-ref-format --branch`.
+pub fn valid_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("@{")
+        && !name.contains("/.")
+        && name
+            .chars()
+            .all(|c| !c.is_control() && !c.is_whitespace() && !"~^:?*[\\".contains(c))
+}
+
 impl RemoteJob {
+    /// Check a result against this job. A writer passes only when it reports
+    /// a valid pushed branch and full head; the provider verifies both
+    /// against the remote before it returns a finished state.
+    pub fn check(&self, result: &CloudResult) -> Result<CheckedCloudResult, CloudResultError> {
+        let mut checked = result.clone().check(
+            &self.job_id,
+            &self.nonce,
+            &self.commit,
+            &self.requested_model,
+        )?;
+        if self.work_branch.is_some() {
+            let pushed = checked.result.branch.as_deref().is_some_and(valid_branch)
+                && checked.result.head.as_deref().is_some_and(full_oid);
+            checked.evidence_complete &= pushed;
+            checked.passed &= pushed;
+        }
+        Ok(checked)
+    }
     /// An unresolved submission settled as unknown, with no remote identity.
     pub fn is_unresolved_submission(&self) -> bool {
         matches!(self.state, RemoteState::Unknown { .. }) && self.remote_id.trim().is_empty()
@@ -333,6 +379,10 @@ pub trait CloudProvider {
     /// Check the target before a model turn when the provider supports it.
     fn check_environment(&mut self, request: CloudSubmission<'_>) -> Result<(), Self::Error>;
     fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
+    /// A link a person can open for the remote session, derived from its ID.
+    fn session_url(&self, _remote_id: &str) -> Option<String> {
+        None
+    }
     /// Bounded text explaining a failed submission, saved with the job.
     fn failure_detail(&self, _error: &Self::Error) -> Option<String> {
         None
@@ -434,6 +484,7 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     if job.remote_id.trim().is_empty() {
         return Err(CloudJobError::SubmissionUnknown);
     }
+    job.session_url = provider.session_url(&job.remote_id);
     job.state = RemoteState::Running;
     store
         .save(&job)
@@ -460,6 +511,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
             .filter(|id| !id.trim().is_empty())
             .ok_or(CloudJobError::SubmissionUnknown)?;
         let mut recovered = job.clone();
+        recovered.session_url = provider.session_url(&id);
         recovered.remote_id = id;
         recovered.state = RemoteState::Running;
         recovered.submit_error = None;
@@ -475,10 +527,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
         state = RemoteState::CancellationUnconfirmed;
     }
     if let RemoteState::Finished { result } = &state {
-        result
-            .clone()
-            .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
-            .map_err(CloudJobError::Result)?;
+        job.check(result).map_err(CloudJobError::Result)?;
     }
     let mut updated = job.clone();
     updated.state = state;
@@ -583,7 +632,9 @@ mod lifecycle_tests {
             environment: "env".into(),
             repository: "owner/repo".into(),
             branch: "main".into(),
+            work_branch: None,
             remote_id: String::new(),
+            session_url: None,
             commit: "a".repeat(40),
             requested_model: "model".into(),
             requested_effort: Some("low".into()),
@@ -603,8 +654,31 @@ mod lifecycle_tests {
             tests_run: vec!["test".into()],
             tests_failed: vec![],
             log_location: "log".into(),
-            tracked_files_changed: false,
             observed_model: None,
+            branch: None,
+            head: None,
+        }
+    }
+
+    #[test]
+    fn cloud_writer_result_needs_a_valid_pushed_branch_and_head() {
+        let mut writer = job();
+        writer.work_branch = Some("lane/cloud".into());
+        let mut report = result(&"a".repeat(40));
+        assert!(job().check(&report).unwrap().passed);
+        assert!(!writer.check(&report).unwrap().passed);
+        report.branch = Some("claude/lane-cloud-x1".into());
+        report.head = Some("c".repeat(40));
+        assert!(writer.check(&report).unwrap().passed);
+        report.head = Some("c".repeat(12));
+        assert!(!writer.check(&report).unwrap().evidence_complete);
+        for name in ["lane/cloud", "claude/x-1", "release/v1.2"] {
+            assert!(valid_branch(name), "{name}");
+        }
+        for name in [
+            "", "-x", "a..b", "a b", "a/", "x.lock", "a~1", "@{u}", "/a", "a/.b",
+        ] {
+            assert!(!valid_branch(name), "{name}");
         }
     }
 

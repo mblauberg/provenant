@@ -326,7 +326,6 @@ pub enum InvalidInputDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudPlacementIssue {
-    Access,
     Target,
     Provider,
     Environment,
@@ -362,7 +361,6 @@ impl InvalidInputDetail {
     fn safe_text(&self) -> Option<String> {
         match self {
             Self::CloudPlacement(issue) => Some(match issue {
-                CloudPlacementIssue::Access => "invalid input field `attempt.cloud`: cloud placement requires read-only access",
                 CloudPlacementIssue::Target => "invalid input field `attempt.cloud.target`: must not be empty",
                 CloudPlacementIssue::Provider => "invalid input field `attempt.cloud.provider`: must name a supported cloud provider",
                 CloudPlacementIssue::Environment => "invalid input field `attempt.cloud.environment`: Codex requires an environment",
@@ -1848,7 +1846,6 @@ mod diagnostic_tests {
     fn cloud_placement_diagnostics_survive_transport_without_values() {
         use super::{CloudPlacementIssue as Issue, InvalidInputDetail};
         for (issue, field, reason) in [
-            (Issue::Access, "attempt.cloud", "read-only"),
             (Issue::Target, "attempt.cloud.target", "empty"),
             (Issue::Provider, "attempt.cloud.provider", "supported"),
             (Issue::Environment, "attempt.cloud.environment", "requires"),

@@ -16,6 +16,7 @@ fn node_attempt_spec_reaches_the_launch() {
             model: "model".into(),
             effort: None,
             deadline_seconds: 60,
+            work_branch: None,
         }),
         build_heavy: true,
         capabilities: vec!["postgres".into()],

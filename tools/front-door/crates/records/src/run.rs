@@ -286,10 +286,16 @@ pub struct CloudPlacement {
     #[serde(default)]
     pub environment: String,
     pub repository: String,
+    /// Base branch the job starts from and may merge.
     pub branch: String,
     pub model: String,
     pub effort: Option<String>,
     pub deadline_seconds: u64,
+    /// Named branch a writer job commits to and pushes without force. Dispatch
+    /// fills it from the delivery branch or the writer's branch; a platform
+    /// that restricts names may push elsewhere, and the result says where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_branch: Option<String>,
 }
 
 /// Network reach for a lane's provider and the tools it runs.

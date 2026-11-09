@@ -568,8 +568,9 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
                     tests_run: vec!["targeted".into()],
                     tests_failed: vec![],
                     log_location: "log".into(),
-                    tracked_files_changed: false,
                     observed_model: Some("small".into()),
+                    branch: None,
+                    head: None,
                 },
             })
         }
@@ -598,6 +599,7 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
         model: "small".into(),
         effort: None,
         deadline_seconds: 3600,
+        work_branch: None,
     });
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
