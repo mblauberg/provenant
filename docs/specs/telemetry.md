@@ -187,6 +187,9 @@ run identity; request proposals and provider session identifiers cannot supply
 that join. Graph and node labels come from existing work context. Each field
 reports known and unknown coverage. Missing historical context is never filled
 from the reporting host's current release or instructions.
+Each attempt context row includes that exact attempt's usage and API-equivalent
+cost from the existing reducer beside its chair and graph binding. These are
+individually rounded breakdowns; use report totals for aggregate cost.
 
 Native reply rows retain structural event enums separately from inferred
 trigger labels. Narrow status questions and recognised notification/error

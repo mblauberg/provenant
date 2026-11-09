@@ -250,7 +250,8 @@ pub(super) fn stats_inner(
             }
         }
     }
-    let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings);
+    let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings, &prices)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let task_context = super::telemetry_context::report(&selected, &graph_quality, edge, &prices)?;
     let decision_ids = command.detail.then(|| {
         selected

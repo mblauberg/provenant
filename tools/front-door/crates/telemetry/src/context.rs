@@ -12,6 +12,7 @@ pub struct Coverage {
 #[derive(Debug, Serialize)]
 pub struct AttemptContext {
     pub attempt: AttemptId,
+    pub lane: crate::Totals,
     pub chair_session: Option<String>,
     pub graph: Option<String>,
     pub node: Option<String>,
@@ -25,7 +26,11 @@ pub struct Report {
 }
 
 /// Chair bindings must come from the existing host-owned ChairIndex, never a request proposal.
-pub fn report(facts: &[&AttemptFact], chairs: &BTreeMap<RunId, String>) -> Report {
+pub fn report(
+    facts: &[&AttemptFact],
+    chairs: &BTreeMap<RunId, String>,
+    prices: &crate::PriceTable,
+) -> Result<Report, crate::TelemetryError> {
     let mut coverage = BTreeMap::<_, Coverage>::new();
     let attempts = facts
         .iter()
@@ -69,8 +74,10 @@ pub fn report(facts: &[&AttemptFact], chairs: &BTreeMap<RunId, String>) -> Repor
                     count.unknown += 1;
                 }
             }
-            AttemptContext {
+            let lane = crate::stats([(**fact).clone()], prices, crate::Window::default())?.totals;
+            Ok(AttemptContext {
                 attempt: fact.attempt_id,
+                lane,
                 chair_session,
                 graph,
                 node: fact
@@ -78,12 +85,12 @@ pub fn report(facts: &[&AttemptFact], chairs: &BTreeMap<RunId, String>) -> Repor
                     .as_ref()
                     .and_then(|context| context.node_id.clone()),
                 context,
-            }
+            })
         })
-        .collect();
-    Report {
+        .collect::<Result<Vec<_>, crate::TelemetryError>>()?;
+    Ok(Report {
         attempts,
         coverage,
         comparability: "Observational comparisons cannot separate release, harness experiments, task difficulty and user interaction when their joint coverage is missing or they change together. Observed AGENTS.md bytes are not proof of the full effective instructions.",
-    }
+    })
 }

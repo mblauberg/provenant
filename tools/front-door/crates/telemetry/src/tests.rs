@@ -1375,13 +1375,24 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
         lane.trace.run.ok_or("fixture run")?,
         "fixture-chair".to_owned(),
     )]);
-    let report = crate::context::report(&[&lane], &chairs);
+    let report = crate::context::report(&[&lane], &chairs, &prices(Some(1_000_000)))?;
     assert_eq!(report.attempts[0].attempt, lane.attempt_id);
     assert_eq!(
         report.attempts[0].chair_session.as_deref(),
         Some("fixture-chair")
     );
     assert_eq!(report.attempts[0].graph.as_deref(), Some("fixture-graph"));
+    assert_eq!(
+        report.attempts[0]
+            .lane
+            .cost
+            .complete
+            .as_ref()
+            .ok_or("known fixture lane cost")?
+            .microdollars,
+        42
+    );
+    assert_eq!(report.attempts[0].lane.usage.uncached_input.known, 42);
     assert_eq!(report.coverage["provenant_digest"].known, 1);
     assert_eq!(report.coverage["instructions"].known, 1);
     assert_eq!(report.coverage["harness_version"].known, 1);
@@ -1390,7 +1401,9 @@ fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn s
     // A pre-enrichment pending trace still decodes, without backfilling history.
     let legacy: provenant_records::Trace = serde_json::from_str("{}")?;
     lane.trace = legacy;
-    let historical = crate::context::report(&[&lane], &chairs);
+    let historical = crate::context::report(&[&lane], &chairs, &prices(None))?;
+    assert!(historical.attempts[0].lane.cost.complete.is_none());
+    assert_eq!(historical.attempts[0].lane.cost.missing_attempts, 1);
     assert_eq!(historical.coverage["provenant_version"].unknown, 1);
     assert_eq!(historical.coverage["chair_join"].unknown, 1);
     assert_eq!(lane.usage.uncached_input, Some(42));
