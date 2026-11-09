@@ -610,6 +610,15 @@ pub(super) fn validate_flat_plan(
         {
             return Err(node_plan_error(node, "route requires an adapter or alias"));
         }
+        for route in &routes {
+            if matches!(route.selector(), GraphRouteSelector::Alias(Some(alias)) if provenant_routing::RouteName::parse(alias).is_err())
+            {
+                return Err(node_plan_error(
+                    node,
+                    "route alias must be an identifier; exact models require an adapter or --model",
+                ));
+            }
+        }
         if routes
             .iter()
             .any(|route| (route.model.is_some() || route.name.is_some()) && route.adapter.is_none())
@@ -975,17 +984,11 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
         .adapter
         .as_deref()
         .is_none_or(|value| field(value, 128))
-        && [
-            route.model.is_some(),
-            route.alias.is_some(),
-            route.name.is_some(),
-        ]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count()
-            == 1
+        && (route.model.is_some() || route.alias.is_some() || route.name.is_some())
+        && !(route.name.is_some() && (route.model.is_some() || route.alias.is_some()))
         && route.name.as_deref().is_none_or(|value| field(value, 128))
-        && (route.name.is_none() || (route.effort.is_none() && route.account.is_none()))
+        && (!matches!(route.selector(), GraphRouteSelector::Adapter(_))
+            || (route.effort.is_none() && route.account.is_none()))
         && route.model.as_deref().is_none_or(|value| field(value, 256))
         && route.alias.as_deref().is_none_or(|value| field(value, 128))
         && route.effort.as_deref().is_none_or(|value| field(value, 64))

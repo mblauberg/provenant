@@ -79,8 +79,8 @@ pub struct GraphDocument {
     pub nodes: Vec<GraphNode>,
 }
 
-/// Exactly one of `model`, `alias` and `name` selects a route. A named
-/// model-less entry requires `adapter`, as does a model route.
+/// Selects `model`, then `name`, then `alias`. A named model-less entry
+/// requires `adapter`, as does a model route.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRoute {
     #[serde(flatten)]
@@ -98,6 +98,23 @@ pub struct GraphRoute {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+}
+
+/// The selector used when launching a graph route.
+pub enum GraphRouteSelector<'a> {
+    Model(&'a str),
+    Adapter(&'a str),
+    Alias(Option<&'a str>),
+}
+
+impl GraphRoute {
+    pub fn selector(&self) -> GraphRouteSelector<'_> {
+        match (self.model.as_deref(), self.name.as_deref()) {
+            (Some(model), _) => GraphRouteSelector::Model(model),
+            (None, Some(name)) => GraphRouteSelector::Adapter(name),
+            (None, None) => GraphRouteSelector::Alias(self.alias.as_deref()),
+        }
+    }
 }
 
 /// Host-only inputs retained for advancement after the submitting process exits.
