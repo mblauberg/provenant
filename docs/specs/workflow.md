@@ -118,7 +118,7 @@ rechecks derived risk and the complete changed paths (both sides of renames).
 A downgrade uses a chair record with actor, evidence and a nonblank reason of
 at most 4096 bytes, stored alongside the path snapshot. The edge supplies current
 paths again on save; a changed snapshot invalidates the prior assessment.
-Any path matching a bundled crucial or terminal floor refuses the downgrade and
+Any path matching a bundled or configured crucial or terminal floor refuses the downgrade and
 names the path. Auth/security and irreversible external-effect floors remain
 binding, including with owner approval. Owner decision approvals remain separate.
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.

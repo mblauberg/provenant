@@ -16,6 +16,25 @@ pub enum RiskError {
     #[error("stored risk does not match the current factors and policy")]
     Mismatch,
 }
+/// Compile effective configured boundary floors without replacing the bundled ones.
+pub fn policy_for_review(review: &provenant_routing::ReviewConfig) -> RiskPolicy {
+    let mut policy = RiskPolicy::default();
+    for floor in review.floors.values() {
+        let tier = match floor.tier.as_str() {
+            "terminal" => RiskTier::Terminal,
+            "crucial" => RiskTier::Crucial,
+            _ => continue,
+        };
+        for pattern in &floor.paths {
+            policy
+                .boundary_floors
+                .entry(pattern.clone())
+                .and_modify(|current| *current = std::cmp::max(*current, tier))
+                .or_insert(tier);
+        }
+    }
+    policy
+}
 pub fn minimum(factors: &RiskFactors, policy: &RiskPolicy) -> RiskTier {
     [
         policy.minimum,
@@ -36,14 +55,28 @@ pub fn assess(
     changed_paths: &[String],
 ) -> Result<RiskRecord, RiskError> {
     let review = provenant_routing::ReviewConfig::default();
-    let boundary = changed_paths.iter().find_map(|path| {
-        let floor = review.path_floors(std::slice::from_ref(path));
-        match floor.tier.as_deref() {
-            Some("terminal") => Some((path, RiskTier::Terminal)),
-            Some("crucial") => Some((path, RiskTier::Crucial)),
-            _ => None,
-        }
-    });
+    let boundary = changed_paths
+        .iter()
+        .filter_map(|path| {
+            let floor = review.path_floors(std::slice::from_ref(path));
+            let bundled = match floor.tier.as_deref() {
+                Some("terminal") => RiskTier::Terminal,
+                Some("crucial") => RiskTier::Crucial,
+                _ => RiskTier::Routine,
+            };
+            let configured = policy
+                .boundary_floors
+                .iter()
+                .filter(|(pattern, tier)| {
+                    **tier >= RiskTier::Crucial && provenant_routing::path_matches(pattern, path)
+                })
+                .map(|(_, tier)| *tier)
+                .max()
+                .unwrap_or(RiskTier::Routine);
+            let tier = std::cmp::max(bundled, configured);
+            (tier >= RiskTier::Crucial).then_some((path, tier))
+        })
+        .max_by_key(|(_, tier)| *tier);
     let derived = std::cmp::max(
         minimum(&factors, policy),
         boundary.map_or(RiskTier::Routine, |(_, floor)| floor),
@@ -153,7 +186,8 @@ mod tests {
             minimum(
                 &factors(),
                 &RiskPolicy {
-                    minimum: RiskTier::Terminal
+                    minimum: RiskTier::Terminal,
+                    ..RiskPolicy::default()
                 }
             ),
             RiskTier::Terminal
@@ -285,6 +319,21 @@ mod approval_tests {
                 Err(RiskError::BoundaryPath(path.into()))
             );
         }
+        let mut review = provenant_routing::ReviewConfig::default();
+        let mut custom = review.floors["security"].clone();
+        custom.paths = vec!["**/special/**".into()];
+        review.floors.insert("custom".into(), custom);
+        let policy = policy_for_review(&review);
+        assert_eq!(
+            assess(
+                factors.clone(),
+                RiskTier::Routine,
+                &policy,
+                Some(&approval),
+                &["src/special/a.rs".into()]
+            ),
+            Err(RiskError::BoundaryPath("src/special/a.rs".into()))
+        );
         let mut routine = factors.clone();
         routine.oracle_quality = OracleQuality::Strong;
         assert_eq!(

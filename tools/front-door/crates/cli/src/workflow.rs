@@ -760,7 +760,9 @@ fn save(
     req: SaveRequest,
 ) -> Result<Value, Error> {
     let now = edge.clock.wall_now()?;
-    let policy = provenant_records::workflow::RiskPolicy::default();
+    let config = provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
+        .map_err(|e| invalid(e.to_string()))?;
+    let policy = risk::policy_for_review(&config.domains.routing.review);
     let downgrade = req.risk.downgrade_approval;
     let risk = risk::assess(
         req.risk.factors,

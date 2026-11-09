@@ -54,11 +54,15 @@ pub struct RiskFactors {
 #[serde(deny_unknown_fields)]
 pub struct RiskPolicy {
     pub minimum: RiskTier,
+    /// Compiled configured boundary patterns; bundled floors remain binding.
+    #[serde(default)]
+    pub boundary_floors: std::collections::BTreeMap<String, RiskTier>,
 }
 impl Default for RiskPolicy {
     fn default() -> Self {
         Self {
             minimum: RiskTier::Routine,
+            boundary_floors: Default::default(),
         }
     }
 }

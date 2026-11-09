@@ -588,6 +588,7 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
     let first = save(&store, &r, 0, 20).unwrap();
     let policy = RiskPolicy {
         minimum: RiskTier::Terminal,
+        ..RiskPolicy::default()
     };
     let clock = clock(30);
     let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
