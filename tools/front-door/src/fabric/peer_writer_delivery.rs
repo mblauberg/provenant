@@ -16,7 +16,7 @@ fn completion_gc_retries_busy_collection_and_requeued_exhausted_request()
     let retry_path = fixture.roots.state.as_path().join("gc/completion-retries").join(name);
     let retry = std::fs::read(&retry_path)?;
     let lock = crate::worktrees::collection_lock(&fixture.roots)?;
-    let old_wait = gc_cleanup::COLLECTION_WAIT_SECONDS.replace(0);
+    let old_wait = gc_cleanup::COLLECTION_WAIT_SECONDS.replace(1);
     let result = gc_cleanup::run(&request, &FreeWorkers);
     gc_cleanup::COLLECTION_WAIT_SECONDS.set(old_wait);
     result?;
