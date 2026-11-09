@@ -443,18 +443,12 @@ impl StreamState {
     }
 }
 pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ProviderError> {
-    // Frames echo foreign content inside events the adapter otherwise ignores:
-    // Codex `web_search` items repeat an `id`, and a tool result can carry a JSON
-    // Schema whose bound is u64::MAX printed as a float (18446744073709552000).
-    // Only those two cases fall back to plain serde_json, which keeps the last
-    // member and reads a wide integer as f64; the line is already length-bounded,
-    // and a typed field such as a usage count still refuses a value it cannot hold.
-    match provenant_records::decode(bytes, provenant_records::Limits::CONFIG) {
-        Ok(value) => Ok(value),
-        Err(
-            provenant_records::DecodeError::DuplicateMember { .. }
-            | provenant_records::DecodeError::IntegerOutOfRange { .. },
-        ) => serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed),
-        Err(_) => Err(ProviderError::Malformed),
-    }
+    // Provider frames are foreign content, not Provenant records, so strict record
+    // decoding does not apply: it rejects shapes (repeated members, wide integers,
+    // deep or large nesting) inside frames the adapter ignores, and failing a
+    // finished lane over them is wrong. The resource limit is the line bound
+    // (`MAX_LINE_BYTES`, enforced in `observe` before a line reaches here);
+    // `serde_json` adds its own recursion limit. Typed fields still refuse values
+    // they cannot hold.
+    serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed)
 }

@@ -576,6 +576,17 @@ fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream()
         replay(&codex::Codex, stream, EXIT)?.1.status(),
         OutcomeStatus::Success
     );
+    // An ignored frame nested deeper than the strict record limit of 64 levels,
+    // still within serde_json's own limit, followed by a successful result.
+    let deep = format!("{}1{}", "[".repeat(100), "]".repeat(100));
+    let stream = format!(
+        "{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}}\n\
+         {{\"type\":\"user\",\"parent_tool_use_id\":null,\"session_id\":\"s\",\"message\":{{\"role\":\"user\",\"content\":[{{\"tool_use_id\":\"t\",\"type\":\"tool_result\",\"content\":\"listed\"}}]}},\"tool_use_result\":{deep}}}\n\
+         {{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\"}}\n"
+    );
+    let (events, outcome) = replay(&claude::Claude, &stream, EXIT)?;
+    assert_eq!(outcome.status(), OutcomeStatus::Success);
+    assert!(events.contains(&ProviderEvent::Text("answer".into())));
     Ok(())
 }
 
