@@ -2424,10 +2424,6 @@ mod result_tests {
         let run = super::graph_snapshot(checkpoint.clone());
         assert_eq!(run.status, GraphStatus::Complete);
         assert!(run.checkpoint.pause_reason.is_none());
-        // A saved writer stop that still owes its host restart is not complete.
-        let owing = super::graph_snapshot_owing(run.checkpoint.clone(), true);
-        assert_eq!(owing.status, GraphStatus::Pending);
-        assert!(owing.outcome.is_none());
 
         checkpoint.nodes[0].state = NodeState::Running;
         assert_eq!(

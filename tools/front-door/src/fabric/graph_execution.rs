@@ -606,29 +606,26 @@ impl Factory {
             }
         };
         if matches!(input, GraphInput::Status { .. }) {
-            let (mut checkpoint, restart_owed) =
-                match FileJournal::read_status_checkpoint_owing_restart(
-                    &self.context.roots.state,
-                    self.context.identity.project,
-                    id,
-                ) {
-                    Ok(read) => read.ok_or(FacadeError::NotFound)?,
-                    Err(error) if error.is_unreadable() => {
-                        return Ok(unreadable_snapshot(
-                            provenant_fabric_runtime::graph::unreadable_graph_explanation(
-                                id, &error,
-                            ),
-                        ));
-                    }
-                    Err(error) => return Err(graph_journal_error(error)),
-                };
+            let mut checkpoint = match FileJournal::read_status_checkpoint(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+            ) {
+                Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
+                Err(error) if error.is_unreadable() => {
+                    return Ok(unreadable_snapshot(
+                        provenant_fabric_runtime::graph::unreadable_graph_explanation(id, &error),
+                    ));
+                }
+                Err(error) => return Err(graph_journal_error(error)),
+            };
             if let (Ok(boot), Ok(now)) = (
                 self.clock.boot_identity(),
                 self.clock.host_monotonic_micros(),
             ) {
                 graph_status_elapsed(&mut checkpoint, &boot, now);
             }
-            let mut run = graph_snapshot_owing(checkpoint, restart_owed);
+            let mut run = graph_snapshot(checkpoint);
             let sidecar_error = FileJournal::read_advance_error(
                 &self.context.roots.state,
                 self.context.identity.project,

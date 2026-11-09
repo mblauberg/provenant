@@ -1963,7 +1963,13 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let mut owner = FakeOwner {
-        observations: [no_work_stop(Some(&"a".repeat(40))), done_as("finished")].into(),
+        // The stop is observed again after the failed save, then the restart.
+        observations: [
+            no_work_stop(Some(&"a".repeat(40))),
+            no_work_stop(Some(&"a".repeat(40))),
+            done_as("finished"),
+        ]
+        .into(),
         ..Default::default()
     };
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
@@ -1996,6 +2002,8 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
         Err(GraphError::Journal(_))
     ));
     assert_eq!(owner.calls.len(), 1);
+    // The stop and its restart patch are one save, so the failed save keeps
+    // the stop out of the journal too: the writer still reads as running.
     assert_eq!(
         journal
             .saved
@@ -2004,27 +2012,26 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
             .unwrap()
             .nodes[0]
             .state,
-        NodeState::Failed
+        NodeState::Running
     );
     drop(journal);
     // Ordinary tick and settlement replay use this API to discover work.
-    // The failed node must remain pending even before its retry patch exists.
     assert!(
         FileJournal::pending_execution(&root, project, &document.graph_id)
             .unwrap()
             .is_some()
     );
-    // Every node looks settled here, but status must not call the graph
-    // complete: a waiter would return the stopped attempt as final.
-    let (stopped, owing) =
-        FileJournal::read_status_checkpoint_owing_restart(&root, project, &document.graph_id)
-            .unwrap()
-            .unwrap();
-    assert!(stopped.nodes.iter().all(|node| node.state.settled()));
-    assert!(owing);
+    // No reader can see the stop without its restart, so status never
+    // reports the stopped attempt as the node's final one.
+    let status = FileJournal::read_status_checkpoint(&root, project, &document.graph_id)
+        .unwrap()
+        .unwrap();
+    assert!(!status.nodes.iter().all(|node| node.state.settled()));
     let mut journal = open();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.calls[0].0, owner.calls[1].0);
+    assert_ne!(owner.calls[1].0, owner.calls[2].0);
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(
         run.checkpoint
@@ -2040,12 +2047,6 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
             .unwrap()
             .is_none()
     );
-    assert!(
-        !FileJournal::read_status_checkpoint_owing_restart(&root, project, &document.graph_id)
-            .unwrap()
-            .unwrap()
-            .1
-    );
     let events = FileJournal::read_events(&root, project, &document.graph_id).unwrap();
     assert_eq!(
         events
@@ -2058,29 +2059,15 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
 
 #[test]
 fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
-    struct FailPatch {
-        saved: FileJournal,
-        fail: bool,
-    }
-    impl GraphJournal for FailPatch {
-        type Error = std::io::Error;
-        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
-            self.saved.load(id).map_err(std::io::Error::other)
-        }
-        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
-            if self.fail && !checkpoint.expansions.is_empty() {
-                return Err(std::io::Error::other("injected patch save failure"));
-            }
-            self.saved.save(checkpoint).map_err(std::io::Error::other)?;
-            Ok(())
-        }
-    }
-    let mut work = node("work", pool_route("junior"));
+    // One exact route: the restart has nowhere else to go, so the stop is
+    // saved with a chair pause. The chair then resumes, leaving an unfenced
+    // stop that owes a restart, the state an earlier host saved alone.
+    let mut work = node("work", route("first"));
     work.access = AccessMode::WorktreeWrite;
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let mut owner = FakeOwner {
-        observations: [no_work_stop(Some(&"a".repeat(40))), done_as("finished")].into(),
+        observations: [no_work_stop(Some(&"a".repeat(40)))].into(),
         ..Default::default()
     };
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
@@ -2107,23 +2094,16 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
             document: document.clone(),
         })
         .unwrap();
-    let mut journal = FailPatch { saved, fail: true };
-    assert!(matches!(
-        advance(&document, &mut owner, &mut journal),
-        Err(GraphError::Journal(_))
-    ));
-    assert_eq!(owner.calls.len(), 1);
+    let mut journal = saved;
     assert_eq!(
-        journal
-            .saved
-            .load(&document.graph_id)
-            .unwrap()
-            .unwrap()
-            .nodes[0]
-            .state,
-        NodeState::Failed
+        advance(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Paused
     );
-    let mut checkpoint = journal.saved.load(&document.graph_id).unwrap().unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    let mut checkpoint = journal.load(&document.graph_id).unwrap().unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Failed);
+    plans::clear_expansion_pause(&mut checkpoint, 0, true);
+    assert!(checkpoint.pause_reason.is_none());
     let original = checkpoint.nodes[0].clone();
     assert_eq!(original.advance_error_code.as_deref(), Some("stopped_no_work"));
     assert!(no_work::pending(&document, &checkpoint));
@@ -2132,7 +2112,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     assert_eq!(checkpoint.nodes[0].state, original.state);
     assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
     assert_eq!(checkpoint.nodes[0].advance_error_code, original.advance_error_code);
-    journal.saved.save(&checkpoint).unwrap();
+    journal.save(&checkpoint).unwrap();
     drop(journal);
 
     assert!(FileJournal::pending_execution(&root, project, &document.graph_id)
@@ -2323,6 +2303,72 @@ fn stopped_writer_restarts_fresh_on_another_route_with_its_handoff() {
     assert!(owner.prompts[1].contains("Finish renderer"));
     assert!(owner.prompts[1].contains("Keep parser API"));
     assert_eq!(owner.permissions[0], owner.permissions[1]);
+}
+
+#[test]
+fn no_work_stop_is_never_saved_without_its_restart() {
+    // Every reader, status included, sees the saved checkpoints only. None of
+    // them may hold a stop that still owes its restart.
+    struct Watch<'a>(MemoryJournal, &'a GraphDocument, usize);
+    impl GraphJournal for Watch<'_> {
+        type Error = std::convert::Infallible;
+        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            self.0.load(id)
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            assert!(!no_work::pending(self.1, checkpoint));
+            self.2 += 1;
+            self.0.save(checkpoint)
+        }
+    }
+    let mut work = node("work", pool_route("junior"));
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut owner = FakeOwner {
+        observations: [no_work_stop(Some(&"a".repeat(40))), done_as("finished")].into(),
+        ..Default::default()
+    };
+    let mut journal = Watch(MemoryJournal::default(), &document, 0);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert!(journal.2 > 0);
+}
+
+#[test]
+fn no_work_restart_refused_before_planning_saves_a_chair_pause_with_the_stop() {
+    // The handoff lands in the restart brief, and patch admission scans the
+    // brief for secrets, so this restart is refused before it can be planned.
+    let mut work = node("work", route("first"));
+    work.route = None;
+    work.routes = Some(vec![route("first"), route("second")]);
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut stop = no_work_stop(Some(&"a".repeat(40)));
+    let note = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"token ghp_abcdefghijklmnopqrstuvwxyz0123456789\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";
+    if let AttemptObservation::Terminal { result, .. } = &mut stop {
+        *result = Some(Box::new(capture(note)));
+    }
+    let mut owner = FakeOwner { observations: [stop].into(), ..Default::default() };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    // Settled at Paused, not Pending: the stop and its chair pause are one save.
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(owner.calls.len(), 1);
+    assert!(run.checkpoint.expansions.is_empty());
+    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    assert!(reason.contains("writer work stopped; its restart was refused"), "{reason}");
+    assert!(reason.contains("secret"), "{reason}");
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert!(!no_work::pending(&document, &run.checkpoint));
+    let saved = journal.load(&document.graph_id).unwrap().unwrap();
+    assert_eq!(saved.pause_reason, run.checkpoint.pause_reason);
+    assert_eq!(saved.nodes[0].state, NodeState::Failed);
+    // Another advance stays paused and launches nothing.
+    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
+    assert_eq!(owner.calls.len(), 1);
 }
 
 #[test]

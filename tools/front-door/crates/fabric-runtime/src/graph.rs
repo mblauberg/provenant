@@ -992,6 +992,52 @@ fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (Stri
 }
 
 /// Fence one node and its attached descendants before stopping their attempts.
+/// The checkpoint that settles a stopped writer, with its plan: the restart
+/// patch, or a chair pause when admission, planning or the owner refuses the
+/// restart. Never an error, so a refused restart cannot leave the stop owing.
+#[allow(clippy::type_complexity)]
+fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    limits: &crate::config::GraphLimits,
+) -> Result<
+    Option<(
+        GraphCheckpoint,
+        GraphDocument,
+        PlannedGraph,
+        std::collections::BTreeMap<String, usize>,
+    )>,
+    GraphError<R::Error, J::Error>,
+> {
+    let Some(next) = no_work::continue_stopped(document, plan, checkpoint, limits) else {
+        return Ok(None);
+    };
+    let planned = plans::expand(document, &next.extensions, &next.expansions, limits)
+        .and_then(|expanded| {
+            let (plan, positions) =
+                validate_flat_plan(&expanded, limits).map_err(|error| error.to_string())?;
+            owner
+                .validate_expansion(&expanded, &next)
+                .map_err(|error| error.to_string())?;
+            Ok((expanded, plan, positions))
+        });
+    let (next, (expanded, plan, positions)) = match planned {
+        Ok(planned) => (next, planned),
+        Err(reason) => {
+            // The pause keeps the saved expansions, which already planned.
+            let paused = no_work::refused(plan, checkpoint, &reason);
+            let expanded = plans::expand(document, &paused.extensions, &paused.expansions, limits)
+                .map_err(GraphError::Invalid)?;
+            let (plan, positions) = validate_flat_plan(&expanded, limits)
+                .map_err(|error| GraphError::Invalid(error.to_string()))?;
+            (paused, (expanded, plan, positions))
+        }
+    };
+    Ok(Some((next, expanded, plan, positions)))
+}
+
 pub fn cancel_node_subtree(
     document: &GraphDocument,
     checkpoint: &mut GraphCheckpoint,
@@ -1489,10 +1535,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
         if let Some(next) = review::correct_verdict(document, &plan, &checkpoint, limits)
-            .and_then(|next| match next {
-                Some(next) => Ok(Some(next)),
-                None => no_work::continue_stopped(document, &plan, &checkpoint, limits),
-            })
             .map_err(|error| GraphError::Refused(error.to_string()))?
         {
             let next_expanded = plans::expand(document, &next.extensions, &next.expansions, limits)
@@ -1502,6 +1544,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             owner
                 .validate_expansion(&next_expanded, &next)
                 .map_err(GraphError::Run)?;
+            journal.save(&next).map_err(GraphError::Journal)?;
+            checkpoint = next;
+            (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+            resume = false;
+            continue 'schedule;
+        }
+        if let Some((next, next_expanded, next_plan, next_positions)) =
+            settle_stopped_writer::<R, J>(document, owner, &plan, &checkpoint, limits)?
+        {
+            // A stop saved by an earlier host, or one the chair resumed.
             journal.save(&next).map_err(GraphError::Journal)?;
             checkpoint = next;
             (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
@@ -3028,6 +3080,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .validate_expansion(next_expanded, &checkpoint)
                         .map_err(GraphError::Run)?;
                 }
+                // Save a writer's stop in the same transition as its restart
+                // or chair pause: a stop saved alone reads as settled work.
+                let stopped = if appended.is_none() {
+                    settle_stopped_writer::<R, J>(document, owner, &plan, &checkpoint, limits)?
+                } else {
+                    None
+                };
+                if let Some((next, next_expanded, next_plan, next_positions)) = stopped {
+                    journal.save(&next).map_err(GraphError::Journal)?;
+                    checkpoint = next;
+                    (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                    resume = false;
+                    continue 'schedule;
+                }
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 if let Some((next_expanded, next_plan, next_positions)) = appended {
                     (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
@@ -3036,7 +3102,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 if checkpoint.nodes[node_index].advance_error_code.as_deref()
                     == Some("review_verdict_invalid")
-                    || no_work::eligible(node, &checkpoint.nodes[node_index], &checkpoint)
                 {
                     resume = false;
                     continue 'schedule;

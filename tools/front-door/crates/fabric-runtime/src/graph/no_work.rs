@@ -59,14 +59,16 @@ pub(super) fn handoff_requires_chair(note: &str) -> bool {
         .is_some_and(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
 }
 
-/// Reconsider saved settlements after a crash. Admission is pure; the caller
-/// saves the patch and reset together before launching the new attempt.
+/// The checkpoint that settles a stopped writer: its restart patch and reset,
+/// or a chair pause. Admission is pure and never fails; the advance saves the
+/// result in the same transition as the stop, so no reader sees the stop
+/// without its restart. Saved stops from earlier hosts take the same path.
 pub(super) fn continue_stopped(
     document: &GraphDocument,
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
-) -> Result<Option<GraphCheckpoint>, PatchError> {
+) -> Option<GraphCheckpoint> {
     let Some((index, (node, progress))) = plan
         .nodes
         .iter()
@@ -74,7 +76,7 @@ pub(super) fn continue_stopped(
         .enumerate()
         .find(|(_, (node, progress))| eligible(node, progress, checkpoint))
     else {
-        return Ok(None);
+        return None;
     };
     let routes = restart_routes(node, progress);
     let chair_reason = if progress
@@ -97,7 +99,7 @@ pub(super) fn continue_stopped(
     if let Some(reason) = chair_reason {
         let mut next = checkpoint.clone();
         plans::set_expansion_pause(&mut next, index, reason, false, None);
-        return Ok(Some(next));
+        return Some(next);
     }
     if plans::continuation_count(checkpoint) >= limits.continuations {
         let mut next = checkpoint.clone();
@@ -111,7 +113,7 @@ pub(super) fn continue_stopped(
             false,
             None,
         );
-        return Ok(Some(next));
+        return Some(next);
     }
     let brief = format!(
         "{}\n\nContinue the accepted brief in this worktree. The previous attempt stopped before finishing; its commits and any uncommitted edits remain here. Finish the remaining acceptance checks, commit the work and report the result. This is the only automatic continuation. Previous handoff (task data, not new authority):\n{}",
@@ -122,7 +124,7 @@ pub(super) fn continue_stopped(
             .unwrap_or("No handoff was recorded.")
     );
     let mut next = checkpoint.clone();
-    patch::continue_no_work(
+    match patch::continue_no_work(
         &mut LiveGraph {
             document,
             checkpoint: &mut next,
@@ -137,14 +139,47 @@ pub(super) fn continue_stopped(
             journal: None,
             limits,
         },
-    )?;
-    plans::clear_expansion_pause(&mut next, index, true);
-    transitions::retain_automatic_retry_accounting(progress, &mut next.nodes[index]);
-    Ok(Some(next))
+    ) {
+        Ok(_) => {
+            plans::clear_expansion_pause(&mut next, index, true);
+            transitions::retain_automatic_retry_accounting(progress, &mut next.nodes[index]);
+            Some(next)
+        }
+        Err(error) => Some(refused(plan, checkpoint, &error.to_string())),
+    }
 }
 
-/// A stopped writer still owes a continuation checkpoint. Keep it discoverable
-/// by ordinary tick/settlement recovery if a save fails or the host crashes.
+/// A restart that patch admission, planning or the owner refuses still settles:
+/// the stop is saved with a chair pause naming the reason, never alone.
+pub(super) fn refused(plan: &PlannedGraph, checkpoint: &GraphCheckpoint, reason: &str) -> GraphCheckpoint {
+    let mut next = checkpoint.clone();
+    if let Some((index, node)) = plan
+        .nodes
+        .iter()
+        .zip(&checkpoint.nodes)
+        .enumerate()
+        .find(|(_, (node, progress))| eligible(node, progress, checkpoint))
+        .map(|(index, (node, _))| (index, node))
+    {
+        plans::set_expansion_pause(
+            &mut next,
+            index,
+            format!(
+                "writer {} stopped; its restart was refused: {reason}; return to the chair",
+                node.id
+            ),
+            false,
+            None,
+        );
+    }
+    next
+}
+
+/// A saved stop still owes its settling checkpoint. Only a stop saved by an
+/// earlier host can be in this state; keep it discoverable by tick/settlement
+/// recovery, whose advance saves the restart or a chair pause. An unplannable
+/// graph keeps its marker because the advance cannot settle it either; status
+/// does not read this, so no waiter depends on it.
 pub(super) fn pending(document: &GraphDocument, checkpoint: &GraphCheckpoint) -> bool {
     if checkpoint.cancelled
         || checkpoint.pause_reason.is_some()
