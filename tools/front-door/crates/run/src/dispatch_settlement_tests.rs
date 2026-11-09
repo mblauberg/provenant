@@ -646,6 +646,39 @@ fn a_declared_stop_settles_review_required() -> TestResult {
     Ok(())
 }
 #[test]
+fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult {
+    use provenant_records::handoff::TurnEnd;
+    let first = format!("Done: parser.\n\n{STOPPED_EARLY}");
+    let answer = format!("{first}\nThe wait was redundant; nothing changed.");
+    let turn = |at, tool_activity| TurnEnd { at, tool_activity };
+    // The declaration ended the first turn; the reply ran no tool.
+    let record = settle_with_turns(
+        &answer,
+        Some(Outcome::Succeeded),
+        Vec::new(),
+        None,
+        vec![turn(first.len(), true), turn(answer.len(), false)],
+    )?;
+    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            ..
+        }
+    ));
+    // Without boundaries, or after later tool work, the trailing text
+    // displaces it as before.
+    for turns in [
+        Vec::new(),
+        vec![turn(first.len(), true), turn(answer.len(), true)],
+    ] {
+        let record = settle_with_turns(&answer, Some(Outcome::Succeeded), Vec::new(), None, turns)?;
+        assert!(record.partial_signals.is_empty());
+    }
+    Ok(())
+}
+#[test]
 fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
     // `input()` is a read-only task, so its complete answer is its proof.
     for answer in [
@@ -935,5 +968,55 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     // The clock moved only by the waits, and stopped at the deadline.
     assert_eq!(clock.wall_now()?, WallTime::from_micros(1_000_100)?);
     assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
+    Ok(())
+}
+#[test]
+fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestResult {
+    use provenant_records::handoff::TurnEnd;
+    let first = format!("Done: parser.\n\n{STOPPED_EARLY}");
+    let answer = format!("{first}\nThe wait was redundant; nothing changed.");
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Succeeded),
+        answer: Some(answer.clone()),
+        turns: vec![
+            TurnEnd {
+                at: first.len(),
+                tool_activity: true,
+            },
+            TurnEnd {
+                at: answer.len(),
+                tool_activity: false,
+            },
+        ],
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    // The text ends with an acknowledgement, which the whole-answer rule
+    // would call "no handoff"; the graph's capture carries the settled one.
+    let capture = store.stream_result(id, &call, None)?;
+    let sealed = store.handoff(&record)?.ok_or("sealed handoff")?;
+    assert_eq!(capture.handoff, Ok(Some(sealed)));
     Ok(())
 }

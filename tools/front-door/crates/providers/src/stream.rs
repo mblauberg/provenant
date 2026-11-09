@@ -66,6 +66,12 @@ pub enum ProviderEvent {
     ToolActivity,
     /// The final result was empty, so the last assistant text stands in for it.
     ResultFallback,
+    /// The provider completed a turn; text before it was that turn's answer.
+    /// Decoders emit `tool_activity: false`; the stream state records whether
+    /// a tool ran since the previous turn ended.
+    TurnEnd {
+        tool_activity: bool,
+    },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExitObservation {
@@ -154,6 +160,7 @@ pub struct StreamState {
     last_assistant_text: Option<String>,
     result_text_seen: bool,
     early_stop: bool,
+    turn_tool_activity: bool,
 }
 impl StreamState {
     pub(crate) fn new(adapter: &'static str, decoder: Decoder) -> Self {
@@ -178,6 +185,7 @@ impl StreamState {
             last_assistant_text: None,
             result_text_seen: false,
             early_stop: false,
+            turn_tool_activity: false,
         }
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
@@ -314,6 +322,15 @@ impl StreamState {
                 _ => {}
             }
         }
+        for event in &mut events {
+            match event {
+                ProviderEvent::ToolActivity => self.turn_tool_activity = true,
+                ProviderEvent::TurnEnd { tool_activity } => {
+                    *tool_activity = std::mem::take(&mut self.turn_tool_activity);
+                }
+                _ => {}
+            }
+        }
         events.retain(|event| {
             !matches!(
                 event,
@@ -412,6 +429,14 @@ impl StreamState {
         } else {
             OutcomeStatus::Partial
         };
+        // A turn that ran a tool and never produced its own `result` (an error
+        // result, a kill or a timeout) is still a turn: record its boundary so
+        // an earlier turn's handoff does not stand over unfinished work.
+        if std::mem::take(&mut self.turn_tool_activity) {
+            final_events.push(ProviderEvent::TurnEnd {
+                tool_activity: true,
+            });
+        }
         // Recover only a clean, complete terminal stream, using the same
         // answer identity checks as an ordinary result event.
         if self.adapter == "claude"

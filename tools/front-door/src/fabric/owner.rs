@@ -3509,6 +3509,12 @@ impl BoundGraphOwner<'_> {
                                     // Output pages prove the redacted stream. Graph evidence
                                     // still identifies the peer's sealed original artifact.
                                     result.digest = artifact.digest.to_string();
+                                    // The peer's sealed settlement handoff, carried in its
+                                    // status; the output pages hold only text.
+                                    result.handoff = peer_handoff(
+                                        attempt.extra.get("graph_handoff"),
+                                        std::mem::replace(&mut result.handoff, Ok(None)),
+                                    );
                                 }
                                 (Some(Box::new(result)), None)
                             }
@@ -4489,6 +4495,32 @@ mod journal_error_tests {
 
 /// Stream the result through the existing authenticated, bounded output API.
 /// The serving host verifies each artifact read; capture remains on the chair.
+/// A peer's handoff is untrusted at this boundary: validate it as any decoded
+/// handoff, then redact it, before a continuation prompt can carry it.
+/// An absent key means a peer that predates `graph_handoff`; only then is the
+/// handoff from that peer's own whole-answer text capture kept (also redacted).
+/// That is the old peer's result as it was, not a turn rule of this chair.
+fn peer_handoff(
+    sealed: Option<&serde_json::Value>,
+    captured: Result<Option<provenant_records::handoff::Handoff>, &'static str>,
+) -> Result<Option<provenant_records::handoff::Handoff>, &'static str> {
+    let handoff = match sealed {
+        Some(serde_json::Value::Null) => return Ok(None),
+        Some(value) => {
+            let bytes = serde_json::to_vec(value).map_err(|_| "peer handoff unreadable")?;
+            provenant_records::handoff::Handoff::from_json(&bytes)
+                .map_err(|_| "peer handoff unreadable")?
+        }
+        None => match captured? {
+            Some(handoff) => handoff,
+            None => return Ok(None),
+        },
+    };
+    provenant_run::sanitise_handoff(&handoff)
+        .map(Some)
+        .map_err(|_| "peer handoff unreadable")
+}
+
 fn remote_graph_result(
     owner: &mut BinaryRunOwner<'_>,
     target: &AttemptTarget,
@@ -4556,20 +4588,43 @@ fn capture_graph_output(
         capture.push(&bytes);
         offset = next_offset;
         if eof {
-            let mut result = capture.finish();
+            let result = capture.finish();
             if result.digest != digest.to_string() {
                 return Err(FacadeError::StateCorrupt);
             }
-            result.handoff = result.handoff.and_then(|handoff| {
-                handoff
-                    .map(|handoff| {
-                        provenant_run::sanitise_handoff(&handoff)
-                            .map_err(|_| "handoff sanitisation failed")
-                    })
-                    .transpose()
-            });
             return Ok(result);
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_handoff_tests {
+    #[allow(
+        unused_imports,
+        reason = "the custom worktree driver includes this module without libtest"
+    )]
+    use super::*;
+    #[test]
+    fn peer_handoff_is_validated_and_redacted_before_it_reaches_the_capture() {
+        let sealed = |note: &str| {
+            serde_json::json!({"schema_version":2,"status":"done","note":note,
+                "remaining":[],"decisions":[],"verify":[]})
+        };
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let clean = peer_handoff(Some(&sealed(&format!("key {token}"))), Ok(None));
+        let note = clean.unwrap().unwrap().note;
+        assert!(!note.contains(token));
+        let mut bad = sealed("x");
+        bad["schema_version"] = 1.into();
+        assert!(peer_handoff(Some(&bad), Ok(None)).is_err());
+        assert!(peer_handoff(Some(&sealed(" ")), Ok(None)).is_err());
+        assert!(peer_handoff(Some(&sealed(&"n".repeat(5000))), Ok(None)).is_err());
+        let old = provenant_records::handoff::Handoff::from_json(
+            sealed(&format!("old {token}")).to_string().as_bytes(),
+        )
+        .unwrap();
+        let kept = peer_handoff(None, Ok(Some(old))).unwrap().unwrap();
+        assert!(!kept.note.contains(token));
     }
 }
 
