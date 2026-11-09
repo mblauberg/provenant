@@ -1408,3 +1408,19 @@ pub(super) fn skipped_by_patch(checkpoint: &GraphCheckpoint, id: &str) -> bool {
         .filter_map(|expansion| expansion.patch.as_ref())
         .any(|record| record.skipped.iter().any(|skipped| skipped == id))
 }
+
+pub(super) fn correct_review_verdict(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    brief: &str,
+    context: &PatchContext<'_>,
+) -> Result<Admitted, PatchError> {
+    retry_node_scope(
+        graph,
+        id,
+        Some(brief),
+        context,
+        false,
+        Some(&format!("correct review verdict {id}")),
+    )
+}

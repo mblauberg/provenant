@@ -521,7 +521,9 @@ and may be null. Independent IDs cannot repeat. Invalid replies settle
 `review_propagation_invalid` or `review_verdict_conflict`; disposition and verification errors retain their
 specific codes. `verdict_error` records the code and `advance_error` explains it.
 A PASS with unresolved blocking, accepted or unverifiable findings is a contract
-failure. A valid FAIL remains a completed review execution.
+failure. A valid FAIL remains a completed review execution. A lens with
+`review_verdict_invalid` receives one isolated retry with the required final
+verdict correction; a second invalid reply leaves that lens unavailable.
 
 `review.verify` must account for every selected finding with `upheld`, `falsified`
 or `unverifiable` and a non-empty evidence reason; a new finding uses
@@ -541,6 +543,8 @@ Approval becomes INCONCLUSIVE while a negative verdict remains negative.
 Selected inconclusive review evidence also prevents a downstream approval. An
 overflow proof can cover truncated findings but cannot replace an unavailable
 reviewer. Shapes without synthesis reduce both lens and verifier verdicts.
+Below the coverage minimum, review composite outputs still retain returned
+findings and unavailable-member reasons; the boundary fails and cannot approve.
 A blocked node reports its blocking upstream node and state in status.
 
 A composite may declare `reduce_verdict = true`. It computes a verdict without
@@ -1066,7 +1070,9 @@ A disposing node may instead emit `{ "id": "member:F1", "disposition": "rejected
 selected upstream finding. Explicit fields still undergo normal validation.
 Composite exports qualify ids as `<member-node-id>:<id>`, using the expanded
 member node id at each composite boundary. An overlong qualified id fails the
-composite. If the combined export exceeds the count or byte limit, the composite
+composite. Aggregation uses the inherited disposition projection budget
+(128 KiB canonical JSON), rather than the single-reply 9216-byte budget,
+with at most 32 findings. If the combined export exceeds either limit, the composite
 keeps a severity-ranked subset, reserving each member's strongest finding when
 all such reservations fit. Severity ranks critical/blocking/P0, high/P1,
 medium/P2, low/P3, then informational/P4; unreadable labels are treated as blocking.

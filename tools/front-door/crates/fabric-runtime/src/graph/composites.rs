@@ -574,7 +574,7 @@ fn outputs(
         return Err("composite exported findings exceed cap".into());
     }
     let total = selected.findings.len();
-    if total > MAX_FINDINGS || canonical_len(&selected.findings) > FINDINGS_BYTES {
+    if total > MAX_FINDINGS || canonical_len(&selected.findings) > DISPOSITION_FINDINGS_BYTES {
         selected.findings_available = Some(false);
         selected.findings = bounded_findings(std::mem::take(&mut selected.findings));
         let dropped = total - selected.findings.len();
@@ -587,7 +587,7 @@ fn outputs(
             .collect::<Vec<_>>()
             .join("; ");
         let warning = format!(
-            "composite findings truncated: {dropped} dropped; full member results in staged inputs: {members}"
+            "composite findings truncated: {dropped} dropped; limits: {MAX_FINDINGS} entries or {DISPOSITION_FINDINGS_BYTES} canonical bytes; read full member results in staged inputs and emit DISPOSITION lines for every finding: {members}"
         );
         let mut rest = warning.as_str();
         let mut notices = Vec::new();
@@ -737,7 +737,7 @@ fn bounded_findings(findings: Vec<Finding>) -> Vec<Finding> {
     let fits = |indices: &[usize]| {
         indices.len() <= MAX_FINDINGS
             && canonical_len(&indices.iter().map(|&i| &findings[i]).collect::<Vec<_>>())
-                <= FINDINGS_BYTES
+                <= DISPOSITION_FINDINGS_BYTES
     };
     let mut kept = if fits(&reserved) {
         reserved
@@ -896,9 +896,16 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     }
     let mut exported = None;
     let mut export_error = None;
-    if state == NodeState::Succeeded {
+    if state == NodeState::Succeeded
+        || (shortfall.is_some() && review::composite_review(spec, plan, positions))
+    {
         match outputs(spec, plan, checkpoint, positions, false) {
-            Ok(value) => exported = Some(value),
+            Ok(mut value) => {
+                if state == NodeState::Failed {
+                    review::mark_partial(&mut value.0);
+                }
+                exported = Some(value);
+            }
             Err(reason) => {
                 state = NodeState::Failed;
                 export_error = Some(reason);
@@ -915,12 +922,12 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         progress.state = state;
         progress.outputs = exported;
         progress.truncation_cause = truncation_cause;
-        if let Some(reason) = export_error {
-            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
-            progress.advance_error = Some(reason);
-        } else if let Some(reason) = shortfall {
+        if let Some(reason) = shortfall {
             progress.advance_error_code = Some("coverage_below_minimum".into());
             progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        } else if let Some(reason) = export_error {
+            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
+            progress.advance_error = Some(reason);
         }
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
@@ -1032,6 +1039,9 @@ pub(super) fn validate_progress(
         .composite
         .as_ref()
         .map(|spec| outputs(spec, plan, checkpoint, positions, false));
+    if failed_for_coverage && let Some(Ok((output, _))) = &mut export {
+        review::mark_partial(output);
+    }
     if progress
         .outputs
         .as_ref()
@@ -1047,14 +1057,24 @@ pub(super) fn validate_progress(
         && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
         && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
-        && (progress.state == NodeState::Succeeded || progress.truncation_cause.is_none())
+        && (progress.state == NodeState::Succeeded
+            || failed_for_coverage
+            || progress.truncation_cause.is_none())
         && progress.gate.is_none()
         && progress.ci.is_none()
         && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
         && progress.source_commit.is_none()
         && match progress.state {
             NodeState::Failed => {
-                (failed_for_coverage || failed_for_export) && progress.outputs.is_none()
+                (failed_for_coverage
+                    && export
+                        .as_ref()
+                        .and_then(|value| value.as_ref().ok())
+                        .is_some_and(|(output, cause)| {
+                            progress.outputs.as_ref() == Some(output)
+                                && progress.truncation_cause == *cause
+                        }))
+                    || ((failed_for_coverage || failed_for_export) && progress.outputs.is_none())
             }
             NodeState::Pending => progress.outputs.is_none(),
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
@@ -1100,7 +1120,7 @@ mod tests {
         assert_eq!(selected.len(), MAX_FINDINGS);
         assert!(selected.iter().any(|f| f.id == "b:F1"));
         assert_eq!(selected.iter().filter(|f| f.severity == "high").count(), 31);
-        assert!(canonical_len(&selected) <= FINDINGS_BYTES);
+        assert!(canonical_len(&selected) <= DISPOSITION_FINDINGS_BYTES);
     }
     #[test]
     fn member_coverage_uses_smaller_entries_when_strongest_do_not_fit() {
@@ -1120,7 +1140,7 @@ mod tests {
             findings.push(finding(&format!("m{member}:small"), "low", "s".into()));
         }
         let kept = bounded_findings(findings);
-        assert!(canonical_len(&kept) <= FINDINGS_BYTES);
+        assert!(canonical_len(&kept) <= DISPOSITION_FINDINGS_BYTES);
         for member in 0..10 {
             assert!(
                 kept.iter()
