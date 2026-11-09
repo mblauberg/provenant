@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Warn on unresolved inline provenant commands, long flags, repo paths and ADRs.
 
-Reference warnings are advisory; deleted commands in current command guides fail.
+Reference warnings are advisory; explicit evidence and inventory can fail CI.
 Fenced examples, runtime absolute paths and templates are
 excluded. Commands scope flags to
 their own help; flags are checked only after a provenant command. Lines that
@@ -178,24 +178,102 @@ def check_references(root, document, commands, adrs, gone):
 
 
 def check_test_citations(root, document):
-    """Check explicit Rust path::symbol citations on Test lines and continuations."""
+    """Resolve explicit, grouped and same-file shorthand Rust Test citations."""
     count = 0
-    in_test = False
-    for number, line in enumerate(document.read_text().splitlines(), 1):
-        if re.match(r"^\s*(?:[-*]\s*)?(?:\*\*)?Test:(?:\*\*)?", line):
-            in_test = True
-        elif not line.strip() or re.match(r"^\s*(?:[-*]\s*)?(?:\*\*)?(?:Why|Owner):", line):
-            in_test = False
-        if not in_test:
-            continue
-        for path, symbol in re.findall(r"`([^`\s]+\.rs)::([A-Za-z_][A-Za-z_0-9:]*)`", line):
-            candidates = [base / path for base in (root, document.parent, root / "tools/front-door")]
-            source = next((candidate for candidate in candidates if candidate.is_file()), None)
-            name = symbol.split("::")[-1]
-            if source is None or not re.search(r"\b(?:fn|mod)\s+" + re.escape(name) + r"\b", source.read_text()):
-                warn(document.relative_to(root), number, "test citation", f"{path}::{symbol}")
-                count += 1
+    text = document.read_text()
+    blocks = re.finditer(
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?Tests?:(?:\*\*)?([^\n]*(?:\n(?!\s*$|\s*(?:[-*]\s*)?(?:\*\*)?(?:Why|Owner):)[^\n]*)*)",
+        text, re.M,
+    )
+    for block in blocks:
+        current_path = None
+        for citation in re.finditer(r"`([^`]+)`", block[1]):
+            reference = " ".join(citation[1].split())
+            match = re.fullmatch(r"([^ ]+\.rs)(?:::|#)(.+)", reference)
+            if match:
+                current_path, symbols = match.groups()
+            elif reference.startswith("::"):
+                symbols = reference[2:]
+            elif reference.endswith(".rs"):
+                if not any((base / reference).is_file() for base in
+                           (root, document.parent, root / "tools/front-door")):
+                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
+                    warn(document.relative_to(root), line, "test citation", reference)
+                    count += 1
+                current_path = reference
+                continue
+            else:
+                continue
+            # tests::{one, two} is a same-file list, never a wildcard family.
+            names = symbols.split("{", 1)[-1].rstrip("}").split(",")
+            source = next((base / current_path for base in
+                           (root, document.parent, root / "tools/front-door")
+                           if current_path and (base / current_path).is_file()), None)
+            for symbol in names:
+                name = symbol.strip().split("::")[-1]
+                if (source is None or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name)
+                        or not re.search(r"\b(?:fn|mod)\s+" + re.escape(name) + r"\b", source.read_text())):
+                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
+                    warn(document.relative_to(root), line, "test citation",
+                         f"{current_path or '(no preceding path)'}::{symbol.strip()}")
+                    count += 1
     return count
+
+
+def check_anchors(root, document):
+    """Resolve paths in the opening Anchor, including Markdown link targets."""
+    lines = document.read_text().splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("Anchor:")), None)
+    if start is None:
+        return 0  # Missing headers are reported by inventory().
+    block = [lines[start]]
+    for line in lines[start + 1:]:
+        if not line.strip() or not (line.startswith(("`", "[", " ", "\t"))
+                                    or block[-1].rstrip().endswith((",", ";"))):
+            break
+        block.append(line)
+    text = " ".join(block)
+    targets = re.findall(r"\]\(([^)]+)\)", text)
+    # Remove links first: their labels may name symbols rather than paths.
+    text = re.sub(r"\[[^\]]*\]\([^)]+\)", "", text)
+    targets += [word.strip("`;, ") for word in text.removeprefix("Anchor:").split()]
+    missing = 0
+    for target in dict.fromkeys(targets):
+        path = path_reference(target)
+        if path and not resolves_path(root, document, path, {path}):
+            warn(document.relative_to(root), start + 1, "Anchor path", target)
+            missing += 1
+    return missing
+
+
+def check_spec_index(root):
+    """Every living area spec must be reachable from its directory index."""
+    index = root / "docs/specs/README.md"
+    if not index.exists():
+        return 0
+    targets = {target.split("#", 1)[0] for target in
+               re.findall(r"\]\(([^)]+)\)", index.read_text())}
+    missing = 0
+    for spec in sorted(index.parent.glob("*.md")):
+        if spec != index and spec.name not in targets:
+            warn(index.relative_to(root), 1, "spec index entry", spec.name)
+            missing += 1
+    return missing
+
+
+def check_diagrams(root, document):
+    """Mermaid accessibility metadata is structural; visual review is separate."""
+    missing = 0
+    text = document.read_text()
+    for match in re.finditer(r"^```mermaid\n(.*?)^```", text, re.M | re.S):
+        for field in ("accTitle", "accDescr"):
+            description = re.search(r"^\s*accDescr\s*\{([^}]+)\}", match[1], re.M | re.S)
+            multiline = field == "accDescr" and description and description[1].strip()
+            if not multiline and not re.search(r"^\s*" + field + r"\s*:[ \t]*\S", match[1], re.M):
+                warn(document.relative_to(root), text.count("\n", 0, match.start()) + 1,
+                     "diagram metadata", field)
+                missing += 1
+    return missing
 
 
 def inventory(root, document):
@@ -221,9 +299,7 @@ def inventory(root, document):
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
-    "README.md", "docs/worktrees.md", "docs/specs/cli.md", "docs/specs/fabric.md",
-    "docs/specs/run.md", "docs/specs/workflow.md", "docs/specs/routing.md",
-    "docs/specs/supervisor.md", "docs/reference/schemas.md",
+    "README.md", "docs/worktrees.md", "docs/reference/schemas.md",
     "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
 )
 DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"
@@ -265,7 +341,8 @@ def deleted_command(reference):
 def check_deleted_commands(root):
     """Fail on command uses, keeping template names, wire fields and prose valid."""
     count = 0
-    for relative in COMMAND_GUIDES:
+    for relative in sorted(set(COMMAND_GUIDES) |
+                           {str(path.relative_to(root)) for path in (root / "docs/specs").glob("*.md")}):
         document = root / relative
         if not document.exists():
             continue
@@ -303,15 +380,21 @@ def check_deleted_commands(root):
     return count
 
 
+# Reserved parallel batches; remove entries when their spec repairs land.
+RESERVED_SPECS = ("docs/specs/supervisor.md", "docs/specs/disk.md")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
-    parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved explicit test citations")
-    parser.add_argument("--inventory-only", action="store_true", help="check Owner/Anchor headers and deleted commands only")
-    parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers; reference warnings remain advisory")
+    parser.add_argument("--exclude-reserved", action="store_true",
+                        help="exclude the reserved parallel-batch specs from evidence checks")
+    parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved Rust Test citations")
+    parser.add_argument("--inventory-only", action="store_true", help="check documentation evidence without loading the CLI catalogue")
+    parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers, Anchor paths, spec index entries or diagram metadata")
     args = parser.parse_args()
     root = args.root.resolve()
     command_errors = check_deleted_commands(root)
@@ -333,11 +416,21 @@ def main():
     except (OSError, subprocess.CalledProcessError):
         pass
     documents = sorted((root / "docs/runbooks").glob("*.md")) + sorted((root / "docs/specs").glob("*.md"))
-    missing = sum(inventory(root, document) for document in documents)
-    citations = sum(check_test_citations(root, document) for document in sorted((root / "docs/specs").glob("*.md")))
+    maintained = [root / "docs/worktrees.md", root / "docs/ARCHITECTURE.md", root / "docs/glossary.md"]
+    maintained = [path for path in maintained if path.exists()]
+    evidence = [document for document in documents + maintained
+                if str(document.relative_to(root)) not in (RESERVED_SPECS if args.exclude_reserved else ())]
+    missing = sum(inventory(root, document) for document in evidence
+                  if document in documents or document.name == "worktrees.md")
+    missing += sum(check_anchors(root, document) for document in evidence)
+    missing += check_spec_index(root)
+    adr_documents = sorted((root / "docs/adr").glob("*.md"))
+    missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
+    citations = sum(check_test_citations(root, document) for document in evidence
+                    if document.parent == root / "docs/specs")
     if not args.inventory_only:
         agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
-        for document in [path for path in agents if path.exists()] + documents:
+        for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
             check_references(root, document, commands, adrs, gone)
     return int(bool(command_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 

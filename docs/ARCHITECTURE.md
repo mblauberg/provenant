@@ -16,29 +16,9 @@ harness without rediscovering it from individual skills.
 
 ## System map
 
-The `provenant` binary is the CLI and composition edge. Crates under `tools/front-door/crates/` have the boundaries below. The
-[workspace table](specs/rust-workspace.md#crate-layering) owns allowed dependencies.
-
-| Crate | Owns |
-|---|---|
-| `cli` | Argument parsing, help and bounded result rendering |
-| `core` | Identities, paths, time values and cancellation |
-| `records` | Record codecs, canonical digests and shared serialised facts |
-| `config` | The user-owned `config.toml`, release stamping, packaging and managed install |
-| `os` | Operating-system primitives, filesystem and bounded utility execution |
-| `supervisor` | Process policy, provider supervision and worktree custody |
-| `confinement` | Access plans, write roots and protected paths for each lane |
-| `providers` | Launch forms and output decoding for Claude, Codex, Cursor, Agy and OpenCode |
-| `quota` | Quota observations, account status and admission decisions |
-| `routing` | Named weighted pools, provider pacing and explicit resolution |
-| `run` | Dispatch, attempts, run records and reconcile |
-| `telemetry` | Usage and cost reduction, and trace export |
-| `workflow` | Review coverage, delivery receipts and session checkpoints |
-| `fabric-store` | Project-scoped mail, tasks and events in SQLite |
-| `fabric-runtime` | Fabric identity, home-host coordination and peer hosts |
-| `fabric-mcp` | The Fabric MCP stdio server |
-| `sqlite` | Shared SQLite support |
-| `test-support` | Test-only utilities |
+The `provenant` binary is the CLI and composition edge. The
+[workspace policy](specs/rust-workspace.md#crate-layering) owns allowed crate
+dependencies; manifests own the declared members and edges.
 
 The diagram shows conceptual execution flow; arrows are not crate dependency declarations.
 
@@ -71,252 +51,37 @@ flowchart TB
     Records --> Core["core"]
 ```
 
-### State root
+## Trust boundaries
 
-All machine-local state lives under one root, `~/.local/share/provenant/v1` by
-default. `--state-dir` or `PROVENANT_STATE_DIR` selects another absolute root.
+The [constitution](../HARNESS.md) owns lifecycle, risk, review independence,
+authority and user gates. Skills own the procedures. The architecture separates
+three kinds of evidence:
 
-| Path | Owner |
-|---|---|
-| `config.toml` | The user; read by `config` |
-| `releases/<digest>/` and `install/receipt.json` | `config`: the immutable installed release and its receipt |
-| `runs/`, `run.sqlite3` | `run`: runs, attempts and output |
-| `worktrees/` | `supervisor` and `confinement`: writer leases and reservations |
-| `fabric/` | `fabric-store`: the Fabric database |
-| `quota/`, `workflow/projects/<id>/` | Their owning crates |
-| `usage.jsonl` | Local usage counters for `telemetry stats --usage` |
+- Run records describe execution, route lineage, custody and observed outcomes.
+- Workflow receipts bind a subject, authors, risk, review attempts and a delivery
+  decision. They do not contain typed verification, evaluation, release or
+  observation gate records. The record owner is
+  [`workflow.rs#DeliveryReceipt`](../tools/front-door/crates/records/src/workflow.rs).
+- Release evidence proves an authorised external action against its target;
+  an accepted delivery does not grant that authority.
 
-Fabric MCP reaches the same run service as the CLI through the Fabric runtime.
-Confined lanes run through `confinement` and `supervisor`; the CLI never grants
-a lane more than its access plan. The menu bar app reads the CLI's reports and
-never reads credentials. The subsystem contracts are in the
-[specifications](specs/README.md).
+CLI and Fabric MCP use the same execution services. Confinement compiles the
+host-derived access plan, providers prepare launches, supervisor owns process
+custody, and run owns attempts and terminal evidence. Neither the transport nor
+the provider's success certifies delivery acceptance. See
+[ADR 0021](adr/0021-configured-workspace-dispatch-boundaries.md) and
+[ADR 0022](adr/0022-thin-fabric-mcp-execution-facade.md).
 
-## Lifecycle and user gates
+A graph coordinates attempts and deterministic actions through one patch and
+checkpoint owner. Replay prevents duplicate launches. Children undergo ordinary
+host admission; their sandbox may differ from the parent's, but delegation
+cannot widen the user-approved authority envelope. Peer hosts retain their own
+custody and journals. [ADR 0039](adr/0039-graph-of-templates.md) owns that boundary.
 
-Review pressure follows the [`HARNESS.md` Review ladder](../HARNESS.md#review-ladder).
-The planner-led policy requires one independent reviewer for routine, two for
-substantial, two or more for crucial and three or more including an adversarial
-reviewer for terminal work. The shared ladder checker currently enforces lower
-counts for some tiers; the chair supplies the missing policy coverage.
-
-Gold gates reserve scope and one-way doors, any required explicit acceptance,
-and external-action authority for the user. Objective checks and tier-required
-review meet delivery acceptance; the chair reports the outcome and the user
-may still reject it. Explicit user acceptance is required only for `terminal`
-work or when the approved scope asks for it. A project may name its landing
-gate as acceptance.
-
-The tier is derived rather than declared. `scope` rates each compiled risk
-factor; the highest floor is the minimum tier, and a lower declared tier needs
-user-approved evidence. The criteria live in [`HARNESS.md`](../HARNESS.md).
-Disclosure is a separate route constraint.
-
-
-One palette carries the whole document. Every diagram below uses it, and no
-colour means two things:
-
-| Colour | Meaning |
-|---|---|
-| Gold | a user decides here |
-| Green | a blocking leg: it can stop the run |
-| Purple | an advisory leg: it never blocks, and a skipped leg is recorded |
-| Blue | a participant that authors or decides, and so may never certify |
-| Teal | transport |
-| Red | an interrupt: it suspends a run, and recovery resumes the interrupted state |
-| Grey | inert: stopped, closed, or observing only |
-
-Green covers `verify`, `evaluate` and the independent review coverage required
-by the tier, because each can stop a run. Purple marks additional advisory
-pressure beyond the required coverage; a provider family's role depends on the
-run's ladder rather than a fixed colour.
-
-```mermaid
-flowchart TB
-    accTitle: The full delivery lifecycle and its user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, test-design, refactor or diagnose, then deterministic verification, an optional conditional evaluate gate and independent review in fresh contexts. Coverage follows the HARNESS.md Review ladder, with an adversarial lens added at terminal. Failed checks and blocking findings return to execute under the repair guidance in the delivery skills; no runtime repair budget is enforced. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs separate user authorisation before release and observation. A failed observation opens diagnose. Returns to scope converge on one back-to-scope collector.
-    SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
-    SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
-    G1 -. "send back" .-> SC
-    G1 == "authority" ==> DEL
-
-    subgraph DEL["Delivery lifecycle and its gates"]
-      direction TB
-      EX["execute<br/>implement, test-design, refactor, diagnose"] --> VF["verify<br/>deterministic checks"]
-      VF -. "failed" .-> EX
-      VF --> Q{"behaviour stochastic<br/>or judgement bearing?"}
-      Q -- "no" --> RV
-      Q == "yes" ==> EV["evaluate<br/>repeatable judgement gate"]
-      EV -. "failed" .-> EX
-      EV --> RV["review<br/>independent, fresh context<br/>risk-scaled HARNESS.md ladder"]
-      RV -. "repair guidance" .-> EX
-    end
-
-    RV --> AC["acceptance<br/>checks + required review or project landing"]
-    AC --> Q2{"terminal or explicit acceptance<br/>required by approved scope?"}
-    Q2 -- "yes" --> G2{{"USER GATE<br/>explicit acceptance"}}
-    Q2 -- "no" --> OUT["chair reports outcome"]
-    G2 -- "accept" --> OUT
-    G2 -. "stop" .-> HALT(["stop"])
-    OUT --> RT["retrospect"]
-    OUT == "external action" ==> G3{{"USER GATE<br/>authorise the external action"}}
-    G3 --> RL["release and observe"]
-    RL -. "observation failed" .-> DG["diagnose"]
-    RL --> RT
-
-    RV -. "structural finding" .-> RS
-    G2 -. "rescope" .-> RS
-    DG -. "evidence" .-> RS
-    RT == "flywheel: next cycle" ==> RS
-    RS(["back to scope"]) ==> SC
-
-    classDef user fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
-    classDef blocking fill:#2c6e49,stroke:#8fd0aa,color:#ffffff,stroke-width:2px
-    classDef inert fill:#57606a,stroke:#adb5bd,color:#ffffff,stroke-width:2px
-    class G1,G3 user
-    class G2 blocking
-    class VF,EV,RV blocking
-    class HALT inert
-    style DEL fill:none,stroke:#6e7781,stroke-width:1px
-```
-
-Four paths return work to `scope`: a structural review finding, a rescope at the
-acceptance gate, evidence from a failed observation, and the retrospect
-flywheel. They converge on one `back to scope` collector so the picture carries
-one return edge into `scope` instead of five crossing the canvas.
-
-Two orderings in that picture are load-bearing. Deterministic verification runs
-first and always. `evaluate` is a separate conditional gate that runs only when
-behaviour is stochastic or judgement bearing, so deterministic checks come
-before judgement and the two are never fused into one box. Review is independent:
-reviewers never author the surface they certify. A receipt reaching acceptance
-without its tier's passing review coverage, or without a reasoned blocker when
-cross-family coverage is unavailable, fails the machine gate. Failed legs count
-as neither reviews nor blocker records.
-
-The lifecycle loops. A failed check returns to execution; a structural review
-finding may return to scope; production evidence may open a diagnosis and a new
-implementation run. `retrospect` closes the quality flywheel by benchmarking
-the completed trajectory, clustering root causes, proposing small
-evidence-backed harness changes, adding regression gates and monitoring the
-next comparable run. It promotes durable learning into canonical project docs
-instead of accumulating retrospective logs. `session` carries crash-safe
-continuity for long run-until-STOP work, but does not replace the ordinary
-delivery loop.
-
-User approval is required for:
-
-- the specification and unresolved acceptance criteria;
-- one-way-door architecture and risk-tier downgrades;
-- destructive, irreversible or externally visible actions;
-- external communications and production promotion;
-- final acceptance for `terminal` work or when the approved scope asks for it.
-
-Routine reversible implementation inside approved authority does not need a
-stream of micro-approvals.
-
-## Neutral delivery kernel
-
-`deliver` is the cross-domain lifecycle front door. The current
-`DeliveryReceipt` record contains a subject, authors, risk record, review
-attempts, a decision (`pending`, `accepted` or `abandoned`) and timestamps.
-`provenant workflow review` binds review attempts from run custody and checks
-coverage against the risk tier. The receipt records those claims; it does not
-contain release, observation or retrospective gates.
-
-Software execution composes bounded techniques rather than duplicating
-lifecycle owners: `test-design` for choosing and pruning tests, `refactor` for
-approved behaviour-preserving structural work, and `diagnose` when root cause is
-unknown. `code-review` remains source-read-only and independent. SOLID,
-information hiding, cohesion, coupling, simplicity, idempotency and similar
-principles are hypothesis generators; a finding still needs a concrete failure
-mechanism, impact, evidence and validation route.
-
-Frontend authority is similarly split: `ui-ux-design`'s design/make branch
-supplies authorised design mutation methods inside `implement`, while its
-review branch owns read-only UX, visual, accessibility and responsive
-evidence. `scope` owns the
-design decision and `engineering-docs` owns canonical placement.
-
-`release` promotes one digest- or Git-revision-bound, accepted artifact through a separately
-authorised `deploy`, `publish`, `share`, `send` or `activate` action. Targets are
-typed as environments, recipients or audiences; execution may use an approved
-command, connector or named user operation. Completion requires target-visible
-proof and an observation/reversal contract; a successful command by itself is
-not proof.
-
-## Equal primaries, accountable ownership
-
-Claude Code and Codex are equal primary orchestrators. Whichever harness the
-user starts is the session chair and owns authority, user communication, run
-state and synthesis. It may combine native same-family subagents for parallel
-authoring with fresh independent reviewers for the tier's required coverage.
-The chair and authoring subagents cannot certify their own work. Independent
-reviews count by provider family and lens rather than receipt role.
-
-Every passing review needs a non-blank lens and a distinct reviewer. When required
-cross-family coverage is unavailable, each missing non-chair family records an
-unavailable or omitted leg with a non-empty reason and receives an independent
-same-family replacement. At crucial and terminal risk, fallback still needs two
-passing reviews with distinct lens sets covering at least two lenses. A blocker
-for the chair's family or an already passing family supplies no missing-family
-coverage. A failed leg supplies neither coverage nor a blocker record. Projects
-may set their own ladders while retaining the constitution's minimum independence.
-
-Provider-backed external workers, including the other primary and
-distinct families, are dispatched through Fabric MCP or the direct command
-line. Both front doors delegate to the same `orchestrate` owners; Fabric does
-not implement provider mechanics. Dispatching a worker and claiming
-independence are separate things: ordinary dispatch records that it makes no
-independence claim. A review leg that must carry an independence claim uses
-`--delivery-id` and `provenant workflow review` ([ADR
-0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
-0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
-
-The picture below separates authorship, required review and additional advice.
-
-```mermaid
-flowchart TB
-    accTitle: Independent review coverage and advisory pressure
-    accDescr: The user starts one client as session chair. Native authoring subagents provide parallel depth but cannot certify their own work. Independent reviewers run in fresh contexts through native tools or cross-provider dispatch coordinated by Fabric. Their passing legs count by family and lens under the HARNESS.md Review ladder. Additional advice and Herdr steering do not decide the outcome. The chair adjudicates against evidence.
-    HU(["user"]) ==> CH
-    CH["session chair<br/>owns authority, run state and synthesis<br/>cannot certify its own work"]
-    CH ==> SUB["native authoring subagents<br/>parallel depth<br/>cannot certify their own work"]
-    SUB ==> CH
-    CH ==> NRV["independent reviewers<br/>fresh context, authored nothing"]
-    CH ==> AF["cross-provider dispatch<br/>coordinated through Fabric"]
-    AF ==> NRV
-    NRV ==> CERT{{"required review coverage<br/>HARNESS.md ladder by family and lens<br/>record cross-family blockers"}}
-    AF -. "additional advice" .-> ADV["dissent and blind-spot pressure"]
-    ADV -. "evidence for adjudication" .-> CH
-    CERT ==> CH
-    HD["Herdr<br/>panes and advisory steering"] -. "observes and steers, never decides" .-> CH
-
-    classDef user fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
-    classDef actor fill:#1f5f8b,stroke:#7fb3d5,color:#ffffff,stroke-width:2px
-    classDef transport fill:#2a6b7c,stroke:#8fcfdd,color:#ffffff,stroke-width:2px
-    classDef blocking fill:#2c6e49,stroke:#8fd0aa,color:#ffffff,stroke-width:2px
-    classDef advisory fill:#5a4b8a,stroke:#c0a8e8,color:#ffffff,stroke-width:2px
-    classDef inert fill:#57606a,stroke:#adb5bd,color:#ffffff,stroke-width:2px
-    class HU user
-    class CH,SUB actor
-    class AF transport
-    class NRV,CERT blocking
-    class ADV advisory
-    class HD inert
-```
-
-Solid legs carry required coverage; dashed legs supply additional advice.
-Workflow coverage excludes authors and decision makers, never counts unknown
-provenance and takes the reviewer family from the observed attempt. Policy
-still disqualifies the chair and authoring subagents from certifying their own
-work. Herdr sits outside the decision path entirely.
-
-Paired-primary mode lets Claude and Codex rotate stage ownership, coordinated
-through Fabric, which carries the messages, shared tasks and activity log
-between them.
-It still has one chair and one active owner per stage, namespaced artifacts and
-non-overlapping write scopes. Pane transcripts are transport, not durable state.
+Machine-local layout belongs to the [state spec](specs/state.md). Shared-worktree
+ownership belongs to [worktrees.md](worktrees.md); worktrees isolate writers but
+do not grant authority. Durable project knowledge stays in shared project docs;
+private harness memory follows the constitution.
 
 ## Routing, adapters and receipts
 
@@ -325,63 +90,13 @@ The Rust router separates route policy from execution. The catalogue at
 pools. `provenant-routing` combines those weights with provider pacing and
 eligibility; `provenant-quota` supplies account quota status and admission
 decisions. `provenant-run` owns dispatch and records the resolved route and
-provider result. `provenant-providers` supplies the Claude, Codex, Cursor, Agy,
-and OpenCode adapters.
+provider result. `provenant-providers` owns the adapter registry and native wire forms.
 
-`provenant route list` shows pool membership and configured weights; it does
-not probe, and pacing and readiness apply at dispatch. `provenant route set`,
-`remove`, and `reset` manage pool overrides; `provenant route pacing` selects
-a provider policy (`pace`, `spend`, or `max`). Ready candidates are selected
-using their configured weight and pacing factor. Availability and quota
-eligibility are checked before dispatch. Route names and model identifiers are
-explicit; the router does not infer a route from a role or synonym.
+The [routing spec](specs/routing.md) owns selection and fallback intent; the
+[generated command reference](reference/cli-all.md) owns operator interfaces.
 
 Run records retain requested and resolved model identity, effort, and any
 fallback substitution.
-
-## Review as a council, not a vote
-
-The review system borrows the useful parts of council-style workflows:
-independent first passes, deliberately different lenses, anonymised challenge
-where anchoring matters, and a fresh reducer that adjudicates against evidence.
-It rejects majority voting and repetitive reviewers.
-
-The review lead chooses lenses proportional to the work: correctness, security,
-performance, reliability/concurrency, state and type boundaries, test coverage,
-spec alignment, readability/maintainability and larger structural
-simplification. Findings are adjudicated against evidence.
-
-## Authority and concurrency
-
-Authority is a machine-readable envelope: allowed source and artifact paths,
-prohibited paths/actions, disclosure, secrets, deployment, irreversible
-actions, expiry and approver. Delegation may only narrow it.
-
-There is no overlapping concurrent source writing. Partition ownership, use
-artifact-only workers, or have one serial integrator apply patches. Worktrees
-are visibility and isolation aids, not permission boundaries; their shared
-location and lifecycle are defined in [worktrees.md](worktrees.md).
-
-## Context and durable memory
-
-Project knowledge must remain visible to every family. Durable facts therefore
-live in specifications, ADRs ([adr/](adr/)), runbooks and context digests.
-Private harness memory is limited to cross-project user preferences. For this
-repository, the `Repository process` declaration names the scope/story and
-workflow-state owners: GitHub issues own the current owner, dependencies and
-user gates; Project Status owns workflow state. Other repositories declare
-their own owners. A project-local effort map exists only for a declared
-project-docs, unavailable-tracker or cross-tracker route; it never mirrors live
-work. Retention follows project and risk policy plus bounded run-artifact rules.
-No canonical backlog contract, cross-store migration or god manifest is
-introduced. The governing decisions are recorded in the [ADR index](adr/README.md).
-
-Workers return compressed findings and artifact paths. Session hygiene checks
-freshness, size, duplication, stale logs, scratch manifests and handoff quality.
-Pruning is conservative: delete only proven run-owned ephemeral data, compact
-rather than blindly append, and merge or split curated documents when their
-retrieval cost signals demand it. Sibling `.worktrees` are protected and
-excluded from context scans.
 
 ## Release and managed installation
 
@@ -390,35 +105,11 @@ verifies its bytes and modes, then installs into the immutable
 `<state>/releases/<SourceDigest>/` directory. Under the install lock it applies
 managed entries and publishes the single `<state>/install/receipt.json` last.
 
-An exact desired file or link is a no-op, including after a crash before receipt
-publication. `install --dry-run` creates no state root, lock or receipt. `check
-install` compares the installed release digest without repairing it, and
-`uninstall` removes only unchanged receipt-owned entries. Unmanaged paths are
-preserved and conflicts are refused.
-
-The CLI wires `install`, `check install` and `uninstall` to these library
-entrypoints. It handles explicit harness selection and client MCP, hook and
-skill edits. Every registered account directory is an install target, so
-`install`, `accounts register` and `accounts sync` keep their managed content
-identical, and `check install`, `accounts list` and `hosts doctor` report drift
-per account. Operators follow the [install runbook](runbooks/install.md).
+Installation is idempotent across an interrupted receipt publication. Managed
+ownership never authorises overwriting unrelated files or uninstalling changed
+user content. The [install runbook](runbooks/install.md) owns operations.
 Product files, instance-owned files and machine-local derived state retain
 separate ownership under [ADR 0019](adr/0019-installed-file-class-ownership.md).
-
-The canonical skill catalogue is also a constrained interface. Every skill has
-balanced positive, negative and boundary routes; descriptions place the trigger
-and nearest exclusion early and the complete rendered catalogue stays inside
-the provider discovery budget. A skill carries occasional judgement-rich
-procedure, a script/hook enforces deterministic policy, an MCP/app adds an
-external capability, and a plugin distributes a stable coherent bundle. Public
-packs are research inputs, not wholesale imports.
-
-## Completion evidence
-
-Substantial runs record risk and authority, chair/stage ownership, actual model
-lineage, checks and evals, reviewer independence, repair cycles, disagreements,
-degradation, retained artifacts and user-gate state. Deterministic checks come
-before judgement. A fluent answer without trajectory evidence is not complete.
 
 ## Design constraints for maintainers
 

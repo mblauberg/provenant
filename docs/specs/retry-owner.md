@@ -1,57 +1,44 @@
 # Retry owner
 
-Owner: run, routing, confinement and fabric-runtime
-Anchor: `crates/run/src/dispatch_temporary_tests.rs`
+Owner: `crates/fabric-runtime` (graph recovery), `crates/run` (attempt custody),
+`crates/routing` (allowance and exclusions), `crates/confinement` (writer census)
+Anchor: `crates/routing/src/retry.rs`,
+`crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs`,
+`crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs`
 
-A retry lineage preserves each terminal receipt and its `retry_of` links. The
-version 2 sealed policy decision requires a typed cause and action. Drain
-active runs before upgrading; prior decision records are not read. Terminal
-publication and successor insertion are atomic. A stop decision is recorded even without a successor.
-Any unavoidable migration must be forward-only, idempotent and
-preceded by a timestamped, WAL-aware store backup.
+## One allowance per lineage
 
-One cumulative infrastructure-successor allowance per lineage uses
-`settlement_retries` (shipped default 2), overridden by preset then node
-`retry.retries`; the effective value carries its origin. Graph and run must not
-multiply the allowance. Observation, admission reprobes and verified pre-launch
-preparation fallbacks spend no settlement retries. Scoped account refusals apply
-only at their evidenced scope. Route switches require a verified local
-preparation failure and released custody; launched or uncertain attempts do not
-switch routes. A quota-stopped writer may continue on another eligible account
-with an unfinished handoff.
+Recovery preserves terminal receipts and predecessor links. Node, template and
+host allowances resolve once with their origin; graph and run must not multiply
+or renew that allowance. Observation replay and proven pre-launch preparation
+fallbacks spend no settlement retries. Scoped account refusals remain scoped.
+The [configuration reference](../reference/config-keys.md) owns defaults.
+- Why: retries must remain bounded and explainable across restart.
+- Test: `crates/routing/src/retry.rs::tests::allowance_precedence_and_origin`;
+  `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::cumulative_allowance_counts_graph_attempts_and_survives_observation_replay`;
+  `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`
 
-Admission keeps `--wait` as settlement observation timeout. `--admission-timeout`
-defaults from the run admission policy. A shorter `--wait` shortens the window to
-no less than 60 seconds, so a short observation does not refuse a lane over lock
-contention. An admission window has one persisted absolute deadline and next wake under the same
-operation key; restart and reprobe do not renew it or allocate an attempt.
-Typed lock contention and scoped uncertainty may use bounded backoff; live
-foreign writers, dirty trees and unknown ownership remain fail-closed. Census
-uncertainty narrows only with evidence that a process cannot occupy the root.
+## Admission is distinct from observation
 
-Recovery uses resume, operation replay and unique continuations, with stable
-identity per graph, node, terminal attempt and generation. Budgets survive
-resumption; terminal receipts remain immutable. Only descendants blocked solely
-by the recovered node reopen. Graph outcome is reported beside settledness.
+A settlement wait observes work; it does not renew admission. Each admission
+window persists one deadline and next wake under the same operation identity.
+Transient, typed contention may back off within that window. An uncertain
+handoff reobserves the same guardian and route rather than launching a second
+provider. Unknown writer ownership remains fail-closed.
+- Why: polling or process restart must not create more time or writer authority.
+- Test: `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_errors_retry_until_the_persisted_deadline`;
+  `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::uncertain_handoff_reobserves_one_guardian_on_the_same_route`
 
-A same-node writer policy continuation pins to its predecessor's settled head
-when that head descends from the node source. `source_head` retains the original
-pin even when the predecessor did not move HEAD; the lens diff base stays the
-node source. Preparation reports uncommitted predecessor paths and preserves
-their edits. A failed Git status refuses preparation.
+## Recovery preserves work and budget
 
-There is no generic reason/action language, separate scheduler, duplicate
-journal, counter or exclusion system, speculative crash restart, or long
-automatic quota-reset wait. Partial fan-in minimums are separate work.
+A writer continuation retains predecessor work and the original review diff
+base. Budgets survive resumption; terminal receipts remain immutable. Recovery
+reopens selected consumers without restarting unrelated work.
+- Why: a retry must neither discard useful work nor erase the cost of failure.
+- Test: `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source`;
+  `crates/fabric-runtime/src/graph/retry_tests.rs::node_redo_retains_spent_budget_and_unknown_usage_across_attempt_generations`;
+  `crates/fabric-runtime/src/graph/retry_tests.rs::retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work`
 
-**Why:** A single owner and allowance make recovery traceable without expanding
-writer authority or multiplying retries.
-
-**Test:** `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state` covers continuation lineage; other requirements are review gates where no test pins them.
-
-The run continuation driver and graph worktree driver cover real successor
-custody, launch and guardian settlement. Native confinement is required for
-those launch checks; unavailable local backends report a skip.
-
-**Owner:** run owns decisions and publication; routing owns budget and
-exclusions; confinement owns census; fabric-runtime owns graph recovery.
+Test: none (gap) for atomic terminal publication and successor insertion across
+all owners, and for every real-provider custody failure. Those requirements
+remain review gates; unit recovery evidence does not prove native enforcement.

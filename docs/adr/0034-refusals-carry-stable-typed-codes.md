@@ -35,5 +35,4 @@ boundary class; a generic code alone cannot classify an ambiguous guard.
 ## Consequences
 
 A code is public surface: renaming one is a breaking change, so add rather than
-reuse. Message wording is free to improve. Remaining coarse codes are converted
-as owners are touched. See the [CLI spec](../specs/cli.md#each-refusal-has-a-stable-code).
+reuse. Message wording is free to improve. See the [CLI spec](../specs/cli.md#each-refusal-has-a-stable-code).

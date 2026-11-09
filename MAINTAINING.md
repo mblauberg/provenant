@@ -61,8 +61,9 @@ cross-tracker routes, not a second current-work owner.
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: harness asset checks for retained runtime-graph projections;
-  other prose is review-checked
+- Drift gate: `scripts/check-doc-truth` checks spec indexes, Owner/Anchor
+  headers, Anchor paths, Test citations and diagram metadata; harness asset
+  checks cover retained runtime-graph projections. Other prose is review-checked
 
 ### Merge policy
 

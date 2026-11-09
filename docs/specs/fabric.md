@@ -58,9 +58,8 @@ and `peer-agent` remain unavailable to lanes. The socket is removed on normal
 teardown; on restart, a stale socket directory is removed only if it is a real directory owned by the current user with mode 0700.
 - Why: a lane must not forge records that the host or another agent trusts.
 - Test: `crates/providers/src/seatbelt_snapshots.rs::fabric_profiles_only_read_database_and_allow_only_the_attempt_socket`;
-  `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`;
-  `tests/fabric_lane.rs`.
-- Owner: `crates/cli/src/run/provider.rs`, `crates/fabric-mcp/src/lane.rs`,
+  `crates/fabric-mcp/src/coordination_tests.rs::lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal`
+- Owner: `crates/cli/src/run/provider/mod.rs`, `crates/fabric-mcp/src/lane.rs`,
   `crates/fabric-store/src/db.rs`
 
 ### Private, versioned database
@@ -268,8 +267,7 @@ Chair log appends generate an operation ID when omitted and return it in the
 receipt; a generated ID also encodes the original issuance time. A generated ID
 protects only retries made after that receipt arrives. To survive a lost
 response, choose the ID before the first call and send the same ID, content and
-`issued_at` on every retry. Summary updates use revision compare-and-set and
-have no operation ID yet (#2149).
+`issued_at` on every retry. Summary updates use revision compare-and-set rather than operation IDs.
 
 ### Strict tool input
 
@@ -280,8 +278,7 @@ text with the field path, before side effects. MCP graph submission uses the sam
 CLI. A node retry may replace its brief; a graph retry may raise a limit or budget.
 Both retain the graph authority.
 - Why: a lenient parser turns a model's typo into a different request.
-- Test: `crates/fabric-mcp/src/schema_tests.rs::generated_schema_values_match_strict_serde_for_every_operation_and_field`;
-  `::peer_worktree_requests_are_not_mcp_submit_inputs`
+- Test: `crates/fabric-mcp/src/schema_tests.rs::generated_schema_values_match_strict_serde_for_every_operation_and_field`
 - Owner: `crates/fabric-mcp/src/`
 
 ### Lossless, bounded output
@@ -295,7 +292,7 @@ path traversal, and verifies a manifest digest before atomic publication.
 - Why: agents must read every byte, never lose a receipt and never import a
   peer's link.
 - Test: `crates/fabric-mcp/src/tools_tests.rs::result_limit_preserves_mutation_receipts_and_rejects_oversized_observations`;
-  `::run_page_shrinks_before_cursor_is_issued`;
+  `crates/fabric-mcp/src/tools_tests.rs::run_page_shrinks_before_cursor_is_issued`;
   `crates/fabric-runtime/src/fetch.rs::refuses_traversal_digest_mismatch_and_non_contiguous_chunks_before_publish`
 - Owner: `crates/fabric-mcp/src/`, `crates/fabric-runtime/src/fetch.rs`
 
@@ -308,7 +305,7 @@ typed busy error. Cancellation suppresses the late reply and never cancels a
 launched run; on EOF accepted work drains for at most 55 s.
 - Why: a disconnected or cancelling client must never kill lanes.
 - Test: `crates/fabric-mcp/src/stdio_tests.rs::cancellation_suppresses_late_observations_without_cancelling_runs`;
-  `::four_workers_and_queue_capacity_return_busy_after_thirty_six_calls`
+  `crates/fabric-mcp/src/stdio_tests.rs::four_workers_and_queue_capacity_return_busy_after_thirty_six_calls`
 - Owner: `crates/fabric-mcp/src/stdio.rs`
 
 ### One error meaning at both edges
@@ -328,7 +325,7 @@ operation to inspect instead of directing a new launch.
 
 ## Bounded graphs and route fallback
 
-The graph runtime owns static admission for presets, raw documents and planner
+The graph runtime owns static admission for templates, raw documents and planner
 fragments. It validates schema capability, the configured structural limits,
 the expanded plan, the worst-case checkpoint envelope and selected output
 kinds before submission. Recovery uses the same schema-capability predicate.
@@ -377,8 +374,8 @@ backoff are fixed with the attempt from the configured knobs. A launch retry
 requires a wall clock to record its wake: if that clock or the computed deadline
 is unavailable, advancement returns a refusal and leaves the prior checkpoint.
 - Test: `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
-  `::launch_retry_kinds_are_decided_from_the_typed_error_only`;
-  `::launch_retry_policy_limits_failures_and_persists_the_source`
+  `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_retry_kinds_are_decided_from_the_typed_error_only`;
+  `crates/fabric-runtime/src/graph/graph_launch_retry_tests.rs::launch_retry_policy_limits_failures_and_persists_the_source`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 
@@ -406,14 +403,12 @@ parameter, `--tier` selects a route tier, and `--over` supplies named items.
 `--explain` prints the compiled graph without starting work. `run --file GRAPH`
 also accepts a hand-written graph document. `status`, `output --trace`, `steer`,
 `stop`, `retry` and revisioned `edit --file PATCH` operate on the retained graph.
-Old presets must be ported by hand; there is no converter.
 
 A graph must obey the configured structural limits and budgets. Each attempt
 is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#configure-hosts)
 describes defaults, ceilings, budget telemetry and resuming a paused graph.
 The ordinary dependency-depth limit remains four; the default host ceiling is
-64 so a preset can request an explicit compatible depth. `big-batch` requests
-64. A lower configured ceiling still caps that request and appears in explain.
+64 so a template can request an explicit compatible depth. A lower configured ceiling caps explicit requests and appears in explain.
 
 Each node has an optional task `title`, defaulting to its ID; titles use the
 shared task title validation and appear in lanes and graph status. A node may
@@ -574,8 +569,8 @@ namespace rules.
 - Why: scouting can share read access while combined review and repair retain
   one immutable Git subject.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_reviews_the_newest_continuation_and_lands_it`;
-  `::a_head_source_inside_a_composite_names_an_outer_writer`;
-  `::a_head_source_must_name_an_upstream_writer`.
+  `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_inside_a_composite_names_an_outer_writer`;
+  `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_must_name_an_upstream_writer`
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`,
   `crates/confinement/src/worktrees.rs`
 
@@ -605,9 +600,9 @@ writers. In a composite, `continues` follows the same local-name rules as
 - Why: a repair must land on the reviewed PR, not open a second branch, and
   the host must never rewrite a branch someone else moved.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::repair_reuses_the_writer_worktree_and_pushes_only_to_its_branch`;
-  `::a_repair_without_a_delivered_branch_fails_before_launch`;
-  `::continuation_and_land_wiring_is_checked_before_launch`;
-  `crates/run/src/delivery_tests/prepare.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`.
+  `crates/fabric-runtime/src/graph/land_tests.rs::a_repair_without_a_delivered_branch_fails_before_launch`;
+  `crates/fabric-runtime/src/graph/land_tests.rs::continuation_and_land_wiring_is_checked_before_launch`;
+  `crates/run/src/delivery_tests/prepare.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`
 - Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/fabric.rs`,
   `crates/run/src/delivery.rs`
 
@@ -637,134 +632,53 @@ as a task. Omitting `kind`, or setting it to `task`, preserves task behaviour.
 
 - Why: one configurable agent can combine results for different purposes without
   adding a node kind for each purpose.
-- Test: `crates/fabric-runtime/src/graph.rs::synthesise_receives_selected_reviewer_findings_and_emits_typed_output`;
+- Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::synthesise_retains_selected_reviewer_findings_when_model_omits_them`;
   `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::synthesise_requires_selected_inputs`;
-  `crates/fabric-runtime/src/graph.rs::synthesise_json_preserves_purpose_and_rejects_unknown_configuration`.
+  `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::synthesise_json_preserves_purpose_and_rejects_unknown_kinds`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Deterministic gates
 
-A `gate` must evaluate its condition without a model or attempt. Verdict gates
-must compare selected direct dependencies' review verdicts by canonical token
-(as defined under [typed node outputs](#typed-node-outputs)), falling back to exact strings
-when either value is outside the review vocabulary, with missing
-verdicts counting as non-matches. Malformed, repeated or non-final verdicts
-must fail the gate regardless of its threshold. Majority requires strictly more than half;
-count requires at least the configured positive count. Budget gates must check
-settled attempt usage at evaluation time against the effective host budgets, including saved
-extensions, and fail on unknown or partial usage for a configured metric.
-CI gates check the configured pull request or branch through the host's check
-status interface. A string `condition.target` names that pull request or branch.
-`condition.target = { node = "write" }` instead resolves the upstream node's
-delivered branch and pins its current head SHA. The target must be an upstream
-dependency exposing a delivered branch. The host queries checks for that exact
-SHA and checks the branch again before accepting a result. A newer push supersedes the
-pin, discards stale check evidence and restarts the timeout for the new head;
-a result for the previous head must not pass the gate. An observation without
-a head SHA keeps the pinned head and restarts nothing; only a different known
-SHA supersedes it. Explicitly named checks
-must pass. Without named checks, the
-host uses required checks from branch protection or rulesets if resolvable;
-otherwise every reported check must pass or be skipped, with at least one pass.
-The evidence records the applied policy. Failed checks fail. Checks still
-registering, including explicitly named checks that have not appeared, leave
-the gate waiting; an unavailable host or API, or an invalid check policy, fails
-with reason `unavailable`. Pending checks leave the gate waiting,
-and fail with reason `timeout` after the configured timeout (two hours by
-default). The checkpoint retains the first observation time, last state,
-`head_sha`, check names, elapsed seconds and check summary. The compact and full
-graph status show a running CI gate's check names, head SHA and elapsed time.
-Status refreshes elapsed time from the same host boot's monotonic clock without
-querying CI or saving a new checkpoint. Timeout uses the host's monotonic clock,
-so wall clock changes do not affect it. If the host boot changes or the monotonic clock moves backwards,
-the gate re-anchors its timeout to the new host stamp. The checkpoint retains
-the re-anchor count; after three re-anchors, another such change settles the
-gate as `timeout` with a reason naming the re-anchor limit. Replay restores
-waiting without querying the host; explicit graph advance, resume and attempt
-settlement re-evaluate the gate. Graph status reads the saved snapshot.
-Pending CI gates persist their next `wake_at` and observation count in the
-checkpoint. The graph's `wake_at` is the earliest running CI deadline or open
-node ask deadline. The host's `provenant tick` advances pending graphs whose
-deadline is due or absent, checks the deadline again under the graph journal
-lock, and honours each gate's own deadline when several gates share a graph.
-Cancelled graphs with pending or running nodes are also advanced. Restart
-resumes from the stored deadlines without an in-process timer.
+A gate evaluates without a model or attempt and saves its decision before
+dependants run. Replay retains that evidence even when budgets change. Verdict
+gates use the [typed review vocabulary](#typed-node-outputs), with exact comparison
+for other tokens. Missing verdicts are non-matches; malformed, repeated or
+non-final declarations fail regardless of the threshold. A majority is strictly
+more than half. Budget gates fail on unknown or partial configured metrics.
 
-`domains.fabric.graph.ci_poll_backoff` controls `initial_seconds` and
-`max_seconds`, both zero by default, making pending gates eligible on every tick. A positive
-initial delay doubles after each pending observation up to the maximum, capped
-by the remaining CI timeout.
-`domains.fabric.graph.ci_poll_overrides.<node_id>` overrides that policy for a
-named gate. Host configuration inspection reports effective values and their
-origins. Explicit advancement can re-check a gate before its deadline.
-For example, set both `initial_seconds = 60` and `max_seconds = 300` in
-`[domains.fabric.graph.ci_poll_backoff]` to poll after 60, 120, 240 and then
-300 seconds of continued waiting, rounded up to the next tick.
-On macOS, one `dev.provenant.tick` LaunchAgent runs every 60 seconds and at
-login. It also attempts GC daily, with the next daily deadline persisted under
-`tick/cadence.json`; `gc.schedule = false` disables that task alone.
-Daily collection runs in a detached one-shot worker under the collector's
-existing lock, so slow fetches and cache walks do not delay the next tick.
-`tick/gc-result.json` retains its queued, running, complete or failed state;
-spawn failures stay due and are retried on the next tick.
-Ticks detect interrupted workers through the worker lock and retain an error;
-skipped projects and failed upstream observations are reported as incomplete.
-Notice batch flushing and opportunistic quota refresh are reserved tick tasks with
-no effect until their respective implementations land. Scheduler installation
-is a platform seam; a Linux timer is deferred.
-Gates must save their decision before dependants run and retain it on replay,
-even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
-The CI observation also carries `failed_checks`, each with a `name`, optional
-`url` and `excerpt`. `condition.failed_checks_max_bytes` defaults to 16384 bytes
-and `condition.max_failed_checks` defaults to 20; values in the project graph
-override those built-in defaults. Checkpoint `ci.failed_checks_policy` records
-the effective byte and count values and whether each came from the condition
-or the default layer. The byte cap includes the encoded failed
-check records, and `truncated` records omitted or shortened evidence. Both caps
-are evidence retention policy and may be adjusted per gate. Failed CI gates
-map those checks into typed `findings` outputs, allowing a repair node to
-select them with `inputs = [{ node = "ci", outputs = ["findings"] }]`. A passing
-gate has no failure findings. Gates never launch a model or create an attempt.
+CI gates pin the selected branch or upstream delivered branch to its observed
+head and query checks for that exact SHA. A changed known head discards stale
+evidence and restarts its timeout; an observation without a SHA restarts nothing.
+Named checks must pass. Otherwise resolvable required-check policy applies;
+without it, every observed check must pass or be skipped and at least one must
+pass. Failed checks fail; incomplete registration waits; unavailable host/API or
+invalid policy fails explicitly. The retained evidence names the applied policy.
 
-A failure target named by `on_fail` must depend on its gate, so ordinary cycle
-and edge limits cover the failure path. Only that target may follow a failed
-gate; other dependants and inactive failure paths must be skipped. An unhandled
-failure or failed recovery must prevent graph delivery. Dependencies requiring
-both outcomes of a gate must be rejected as unreachable. A recovered graph may
-deliver once its active paths succeed, with gate evidence and skipped nodes
-recorded in the final PR body.
+Timeout uses the host monotonic clock. Boot changes or backwards clock movement
+re-anchor it only within the bounded re-anchor limit. Replay restores waiting
+without a host query, and status reads saved evidence without advancing the
+graph. Pending gates persist their next wake deadline, so host tick can resume
+after restart and rechecks that deadline under the journal lock. Explicit advance
+may observe earlier; each gate still owns its deadline. Poll backoff and evidence
+retention bounds are owned by the
+[graph configuration](../../tools/front-door/crates/fabric-runtime/src/config.rs).
+
+Failed CI checks expose bounded findings for a downstream repair node;
+truncation remains explicit. Passing gates expose no failure findings.
+A failure target must depend on its gate. Only that target follows failure;
+inactive paths are skipped, unreachable joins are refused, and unhandled or
+failed recovery prevents graph delivery. A recovered graph retains gate and
+skipped-path evidence in its delivery body.
+
+Scheduling and collection procedures belong to the
+[host runbook](../runbooks/fabric-hosts.md); gate execution never launches a model.
 
 - Why: deterministic decisions need durable evidence without a provider launch.
 - Test: `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::gate_verdict_fixture_is_attempt_less_and_replays`;
-  `::gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities`;
-  `::gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume`;
-  `::gate_on_fail_routes_only_the_active_path_and_delivers_after_recovery`;
-  `::gate_inactive_path_waits_for_other_parents_before_settling`;
-  `::gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips`;
-  `::gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles`;
-  `::gate_rejects_unreachable_joins_of_mutually_exclusive_paths`;
-  `::gate_only_graph_obeys_structural_limits_before_evaluating`;
-  `::gate_verdict_rejects_spoofed_multiple_and_malformed_lines`;
-  `::gate_budget_overrides_warn_only_for_configured_metrics`;
+  `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities`;
+  `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::gate_budget_fixtures_fail_closed_and_preserve_the_decision_on_resume`;
   `crates/fabric-runtime/src/graph/ci_tests.rs::ci_outcomes_are_recorded_and_fail_closed`;
-  `::ci_pending_checkpoint_replays_then_passes`;
-  `::ci_pending_times_out_using_original_observation_time`;
-  `::ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot`;
-  `::ci_backwards_clock_reanchors_are_bounded`;
-  `::ci_document_checks_reach_host_query`;
-  `::ci_optional_evidence_fields_remain_absent`;
-  `::ci_check_names_are_validated`;
-  `::pending_ci_does_not_consume_attempt_concurrency`;
-  `::ci_failure_activates_recovery_path`;
-  `::ci_validation_rejects_bad_targets_and_timeouts`;
-  `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::agent_json_still_requires_explicit_access`;
-  `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
-  `::gate_skipped_chain_replays_every_save_after_the_gate_decision`;
-  `::gate_reachability_handles_two_gates_and_deep_paths`;
-  `::gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits`;
-  `src/pr/status.rs::tests::branch_requirements_merge_protection_and_paginated_rulesets`;
-  `::branch_requirements_reject_incomplete_data_and_empty_sets`;
-  `::gate_check_buckets_fail_closed`.
+  `src/pr/status.rs::branch_requirements_merge_protection_and_paginated_rulesets`
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`, `src/pr/status.rs`
 
 ### Bounded loops
@@ -853,18 +767,9 @@ remain in use. Existing graph budget and limit extensions still apply.
 - Why: repeated review and repair needs bounded admission, exact replay and a
   human decision when the bound is exhausted.
 - Test: `crates/fabric-runtime/src/graph/loop_tests.rs::loop_fixture_passes_on_round_two_and_status_retains_outputs`;
-  `::loop_fixture_exhausts_and_pauses_without_delivery`;
-  `::loop_fixture_resumes_after_extension_without_repeating_rounds`;
-  `::loop_replay_mid_round_keeps_attempt_actor_and_input`;
-  `::loop_admission_counts_every_round_before_any_launch`;
-  `::loop_decisions_stop_or_accept_exhausted_outputs`;
-  `::loop_writers_keep_one_worktree_when_the_body_does_not_deliver`;
-  `::loop_body_delivers_only_by_integrate`;
-  `::loop_body_integrate_requires_the_graph_integration_branch`;
-  `::loop_rounds_integrate_from_the_head_the_previous_round_delivered`;
-  `::loop_stops_when_the_target_moved_after_the_previous_delivery`;
-  `crates/run/src/delivery_tests/remote_delivery.rs::fast_forward_only_integration_advances_but_never_merges`;
-  `::loop_body_failure_blocks_later_rounds_and_dependants`.
+  `crates/fabric-runtime/src/graph/loop_tests.rs::loop_fixture_exhausts_and_pauses_without_delivery`;
+  `crates/fabric-runtime/src/graph/loop_tests.rs::loop_fixture_resumes_after_extension_without_repeating_rounds`;
+  `crates/run/src/delivery_tests/remote_delivery.rs::fast_forward_only_integration_advances_but_never_merges`
 - Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
 
 ### Node asks and decide nodes
@@ -941,24 +846,10 @@ graph advance compares the deadline with the host wall clock itself.
 - Why: graphs need human decisions at known points, with durable history and a
   safe default when nobody answers.
 - Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`;
-  `::decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again`;
-  `::decide_ids_stay_unique_across_repeated_cancel_and_resume`;
-  `::waiting_decide_nodes_do_not_use_up_concurrency`;
-  `::decide_deadlines_wait_for_a_clock_instead_of_dropping_the_timeout`;
-  `::completion_closes_a_pause_ask_left_by_lowered_limits`;
-  `::decide_timeout_persists_wake_at_and_takes_the_default`;
-  `::several_decide_asks_are_open_at_once_and_resolve_independently`;
-  `::decide_nodes_run_inside_loop_bodies_once_per_round`;
-  `::decide_configuration_is_checked_against_the_inbox_contract`;
-  `::a_budget_pause_raises_one_ask_and_an_extend_answer_resumes`;
-  `::a_pause_answer_can_cancel_and_a_rejected_answer_asks_again`;
-  `::a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it`;
-  `::decide_timeouts_past_a_century_are_kept_until_the_deadline_overflows`;
-  `crates/fabric-runtime/src/graph/loop_tests.rs::loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled`;
+  `crates/fabric-runtime/src/graph/ask_tests.rs::decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again`;
+  `crates/fabric-runtime/src/graph/ask_tests.rs::decide_ids_stay_unique_across_repeated_cancel_and_resume`;
   `src/fabric/graph_tests.rs::graph_ask_inbox_replays_requests_and_acknowledged_answers`;
-  `::graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume`;
-  `::cancel_closes_a_legacy_loop_request_by_its_original_operation`;
-  `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`.
+  `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`
 - Owner: `crates/fabric-runtime/src/graph/asks.rs`, `src/fabric.rs`
 
 ### Land nodes
@@ -1017,24 +908,11 @@ land.
   records and CI output are writable or deterministic, so neither is landing
   authority or review evidence.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::an_auto_tier_lands_the_newest_delivered_head_through_the_host`;
-  `::a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand`;
-  `::an_inbox_answer_of_land_never_approves_a_land`;
-  `::a_hold_answer_fails_the_land_without_merging`;
-  `::ci_output_never_substitutes_for_review`;
-  `::a_configured_policy_overrides_the_default_and_records_its_source`;
-  `::an_ask_tier_without_a_session_fails_with_guidance`;
-  `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
-  `::a_pending_land_persists_a_retry_deadline_that_survives_restart`;
-  `::merged_land_is_reobserved_after_its_checkpoint_save_fails`;
-  `::pending_land_without_a_wall_clock_keeps_the_prior_checkpoint`;
-  `::a_failed_review_routed_to_land_never_calls_the_host`;
-  `::a_review_of_an_earlier_head_never_lands_a_continuation`;
-  `::a_composite_verdict_binds_to_the_head_its_producer_reviewed`;
-  `::a_loop_body_cannot_land`;
+  `crates/fabric-runtime/src/graph/land_tests.rs::a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand`;
+  `crates/fabric-runtime/src/graph/land_tests.rs::an_inbox_answer_of_land_never_approves_a_land`;
   `crates/fabric-runtime/src/config.rs::land_policy_layers_project_then_host_then_default`;
-  `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`;
-  `src/pr.rs::branch_pull_tests::a_numeric_branch_resolves_to_its_unique_same_repository_pull_request`;
-  `src/preset_deliver_tests.rs::repository_layers_never_lower_the_land_tier_or_add_a_land`.
+  `src/pr/land.rs::a_land_report_maps_to_a_graph_observation`;
+  `src/pr.rs::a_numeric_branch_resolves_to_its_unique_same_repository_pull_request`
 - Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/pr/land.rs`,
   `src/fabric.rs`
 
@@ -1049,7 +927,7 @@ routes resolve through `senior`. Gates use their deterministic
 condition and decide nodes their `decide` object. Supported fragment kinds are
 `task`, `plan`, `synthesise`, `gate` and `decide`.
 The kind allow-list is the extension point for future fragment capabilities;
-presets and review shapes are not interpreted here.
+templates and review shapes are not interpreted here.
 
 The runtime must validate the entire prospective graph against effective
 limits and the host ceiling before saving any addition. Invalid, missing or
@@ -1101,16 +979,9 @@ edge and continuation slots, including when every current attempt has settled.
 - Why: bounded slicing and honest handoffs should advance through the same
   scheduler, persistence and delivery path as static graphs and loops.
 - Test: `crates/fabric-runtime/src/graph/graph_plan_and_gates_tests.rs::plan_fixture_expands_and_replays_without_replanning`;
-  `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_effective_limits_and_ceiling_before_saving`;
-  `::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
-  `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
-  `::planner_requires_write_scope_only_for_writers`;
-  `::planner_integrate_delivery_needs_the_documents_integration_branch`;
-  `::honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract`;
-  `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;
-  `::expansion_at_node_budget_reads_journal_once`;
-  `::plan_inside_loop_keeps_round_membership_after_checkpoint_serialisation`;
-  `src/fabric/graph_tests.rs::graph_status_handles_pause_left_after_terminal_checkpoint`.
+  `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_host_limits_before_saving`;
+  `crates/fabric-runtime/src/graph/plan_tests.rs::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
+  `src/fabric/graph_tests.rs::graph_status_handles_pause_left_after_terminal_checkpoint`
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`, `src/fabric.rs`
 
 ### Typed node outputs
@@ -1263,10 +1134,9 @@ A node's `inputs` list selects `result`, `verdict`, `findings`, `branch`,
 `remaining[]` list of the handoff v2 block the node declared, in any status,
 rendered as a JSON array of at most 4096 canonical bytes (leading items kept, with a warning when cut); it is null when no valid
 handoff was declared or it lists no items. It is the only carrier of
-unfinished work across a clipped `result` excerpt. Decision (#2279): the
-earlier closing-window selector is removed rather than kept as a fallback,
-because handoff v2 is bounded, structured and parsed from the complete stream;
-a provider that emits no handoff gets the head excerpt and digest only. Each dependency and output selector
+unfinished work across a clipped `result` excerpt. Handoff v2 is parsed from
+the complete stream; without a handoff, only the head excerpt and digest are
+available. Each dependency and output selector
 may occur only once. The output record retains whether findings were observed
 and parsed completely. Unknown or unavailable findings are labelled as such;
 they render as `null` when no partial composite findings are retained, while a
@@ -1292,15 +1162,11 @@ of transcripts. Paths remain visible in status but are omitted from downstream
 briefs.
 - Why: downstream nodes can use bounded evidence without copying transcripts.
 - Test: `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::outputs_feed_direct_dependants_and_survive_replay`;
-  `::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
-  `::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
-  `::matched_required_contract_cannot_override_ambiguous_verdict_evidence`;
-  `::upstream_data_boundary_cannot_be_closed_by_result_content`;
+  `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::output_parsing_is_lenient_and_rendering_fails_instead_of_omitting`;
+  `crates/fabric-runtime/src/graph/graph_inputs_and_outputs_tests.rs::findings_and_verdict_at_the_end_of_a_large_result_are_parsed`;
+  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::matched_required_contract_cannot_override_ambiguous_verdict_evidence`;
   `crates/records/src/result_capture.rs::hashes_all_bytes_and_keeps_bounded_windows`;
-  `crates/records/src/result_capture.rs::verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries`;
-  `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`;
-  `crates/run/src/tests.rs::streamed_verdict_evidence_validates_complete_large_artifacts`;
-  `src/fabric/peer_graph_routing.rs::graph_owner_fails_node_when_result_integrity_is_lost`
+  `crates/run/src/tests.rs::streamed_result_is_verified_and_redacted_across_chunks`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Checkpoint before launch
@@ -1318,9 +1184,9 @@ missing launch evidence or the submitting actor is refused, and digests
 detect tampering. Cancelling a graph persists the admission fence first.
 - Why: a restart must never launch a node twice.
 - Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
-  `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`;
+  `crates/fabric-runtime/src/graph/graph_retry_and_substitution_tests.rs::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`;
   `crates/fabric-runtime/src/graph/transitions.rs::complete_attempt_transition_needs_no_owner_or_journal`;
-  `::preparation_transitions_enforce_pinned_sources_and_input_capacity_without_io`
+  `crates/fabric-runtime/src/graph/transitions.rs::preparation_transitions_enforce_pinned_sources_and_input_capacity_without_io`
 - Owner: `crates/fabric-runtime/src/graph.rs`, `crates/fabric-runtime/src/graph/transitions.rs`
 
 ### Checkpoint envelope
@@ -1368,14 +1234,8 @@ saved can be read back.
 - Why: a graph that was accepted cannot later stop on a checkpoint too large
   to save or load.
 - Test: `crates/fabric-runtime/src/graph/envelope_tests.rs::worst_case_checkpoint_fits_its_bound`;
-  `::an_oversized_graph_is_refused_before_its_first_save_naming_the_size`;
-  `::a_graph_at_the_default_node_limit_is_admitted`;
-  `::a_loop_extension_past_the_envelope_pauses_instead_of_growing`;
-  `::usage_events_keep_the_newest_and_count_the_rest_without_churn`;
-  `::usage_warnings_keep_the_most_recently_settled_attempts`;
-  `::a_delivery_retry_takes_a_fresh_settlement_order`;
-  `::long_and_many_extensions_are_kept_and_count_toward_the_envelope`;
-  `::a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit`
+  `crates/fabric-runtime/src/graph/envelope_tests.rs::an_oversized_graph_is_refused_before_its_first_save_naming_the_size`;
+  `crates/fabric-runtime/src/graph/envelope_tests.rs::a_graph_at_the_default_node_limit_is_admitted`
 - Owner: `crates/fabric-runtime/src/graph/envelope.rs`
 
 ### Fallback only for unavailability
@@ -1389,7 +1249,7 @@ requirements, launched writers and uncertain launches do not switch routes.
 The graph keeps each attempt's receipt. A quota-stopped writer may continue its
 retained work on another eligible account with a verified unfinished handoff.
 
-The `settlement_retries` allowance (default 2), overridden by preset then node
+The `settlement_retries` allowance (default 2), overridden by template then node
 `retry.retries`, limits settlement successors. The graph seals the effective
 value and origin on first admission; replay does not replenish it. Verified
 pre-launch preparation fallbacks and same-key observation spend no settlement
@@ -1419,7 +1279,6 @@ work; restoring the worktree or cancelling the graph resolves the condition.
 Pending graphs remain protected from checkpoint retention.
 - Why: dependants progress without scanning unrelated terminal graphs.
 - Test: `crates/fabric-runtime/src/graph/journal_tests.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory`;
-  `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
   `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
@@ -1436,7 +1295,7 @@ options. After a lost reply it reconciles the remote OID; without proof, the
 outcome stays unknown and keeps the fence.
 - Why: two landers must never overwrite each other's push.
 - Test: `crates/fabric-runtime/src/landing_tests.rs::lost_push_reply_keeps_successor_fenced_until_remote_reconciliation`;
-  `::local_url_rewrite_is_refused_before_it_can_push_to_another_repository`
+  `crates/fabric-runtime/src/landing_tests.rs::local_url_rewrite_is_refused_before_it_can_push_to_another_repository`
 - Owner: `crates/fabric-runtime/src/coordination.rs`
 
 ### Fence tokens stay secret
@@ -1446,7 +1305,7 @@ argument, and no token reaches an error renderer. `landing wait` never
 acquires the fence.
 - Why: argv is visible to every process on the host.
 - Test: `tests/fabric.rs::landing_fence_reads_secret_from_environment_without_a_token_argument`;
-  `::malformed_fence_tokens_never_reach_either_error_renderer`
+  `tests/fabric.rs::malformed_fence_tokens_never_reach_either_error_renderer`
 - Owner: `src/fabric.rs`
 
 ## Peer hosts
@@ -1480,7 +1339,7 @@ must form a valid actor address with that host. Neither claim is bound to the
 SSH session; this is the existing configured-peer trust model.
 - Why: the peer key is restricted to one command; nothing else may run.
 - Test: `tests/fabric_transport.rs::peer_ingress_refuses_protocol_before_decoding_or_running_mutations`;
-  `::peer_ingress_refuses_a_trace_naming_another_host_than_the_sender`
+  `tests/fabric_transport.rs::peer_ingress_refuses_a_trace_naming_another_host_than_the_sender`
 - Owner: `crates/fabric-runtime/src/hosts.rs`
 
 ### Remote mutations are never resent
@@ -1495,8 +1354,7 @@ child, never the remote run.
 - Why: an SSH timeout after execution looks like a failure.
 - Test: `crates/fabric-runtime/src/hosts.rs::fixed_peer_transport_preserves_mutation_uncertainty_without_retry`;
   `crates/fabric-runtime/src/home.rs::remote_coordination_read_rejects_forged_operation_errors`.
-  Refusing absolute paths outside the home directory and the cancel scope have no direct
-  test (gaps).
+  Absolute paths outside the home and peer-call cancellation scope have no direct test (gaps).
 - Owner: `crates/fabric-runtime/src/hosts.rs`
 
 ### Peer agent and code transport
@@ -1515,11 +1373,9 @@ missing, duplicate and malformed objects; there is no size cap, only a
 - Why: sign-in works over SSH without forwarding credentials, no dirty tree
   crosses hosts, and Git already verifies what it receives.
 - Test: `crates/fabric-runtime/src/peer_agent.rs::forward_falls_back_only_when_no_agent_accepts`;
-  `::requests_beyond_sixteen_held_connections_are_relayed`;
   `crates/fabric-runtime/src/git_transport.rs::dirty_worktree_and_untrusted_remote_inputs_refuse_before_transfer`;
-  `::commits_over_64_mib_transport`;
-  `::fetch_refuses_corrupt_missing_duplicate_and_malformed_objects`;
-  `::fetch_refuses_a_corrupt_pack`
+  `crates/fabric-runtime/src/git_transport.rs::fetch_refuses_corrupt_missing_duplicate_and_malformed_objects`;
+  `crates/fabric-runtime/src/git_transport.rs::fetch_refuses_a_corrupt_pack`
 - Owner: `crates/fabric-runtime/src/peer_agent.rs`, `crates/fabric-runtime/src/git_transport.rs`
 
 ### Credentials never cross hosts
@@ -1546,48 +1402,30 @@ Peer changes need exact-head CI and a chair-run smoke between two real hosts.
 
 ### Project-local scratch
 
-`.provenant/scratch/` is the only project scratch root that Provenant selects or
-creates. A legacy `.agent-run/` is never preferred, created, migrated, moved or
-deleted, and no document is copied from it. Its documents stay readable only by
-explicit path, and writer lanes keep their read grant on it. Operator graph
-documents default to `.provenant/scratch/graphs/`. Bare document names resolve
-there when no explicitly named file exists in the current directory; a missing
-bare name is reported with that path and the explicit-path hint. Explicit
-project-local paths remain supported. A preset graph directory owned by the
-current user that is not mode 0700 is narrowed to 0700 when a graph is
-published; any other loose directory is refused, and the error names its path,
-its octal mode and the `chmod 700` repair. Scratch setup appends its anchored
-directory pattern to Git's common `info/exclude` under a stable lock, preserving
-existing bytes and never editing tracked `.gitignore`. Symlinked scratch roots
-and exclude files are refused. Writer lanes get a read-only grant on the primary
-checkout's scratch root (never a symlink), so briefs there stay readable from a
-linked worktree. The graph path error and CLI help name
-`.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
-authoritative run state; expiry is owned by GC rather than graph execution.
-When terminal checkpoint retention expires, GC also removes matching scratch
-graph documents. Changed and unrelated documents are retained. A preset
-republishes its document if collection races with admission.
+Project-local scratch is disposable operator data, separate from authoritative
+run state. Provenant selects `.provenant/scratch/`; explicit paths may still
+read older documents. Scratch setup preserves tracked configuration and adds
+its exclusion under Git's common metadata lock. Symlinked roots and exclude
+files refuse. A writer can read the primary checkout's scratch without gaining
+a write grant there.
 
-Foreground preset waits prepare scratch and retain the graph document once
-before the first poll. A setup failure before graph admission fails the command
-with the step, path and cause. For an already-admitted graph, transient scratch
-lock and Git probe timeouts are retried on the next poll; permanent path,
-permission and custody refusals fail immediately. Scratch lock acquisition is
-capped by the preset wait budget; Git probes retain their bounded utility
-timeout. If the wait budget expires during a transient failure, the error
-names the admitted graph ID.
+Graph publication accepts only private directories, repairing permissions only
+when the current user owns the directory. Refusal names the path and repair.
+Bare document lookup has one scratch home and never searches alternate legacy
+roots. GC owns expiry; changed or unrelated documents remain retained. The
+[scratch owner](../../tools/front-door/crates/confinement/src/scratch.rs) and
+[graph publisher](../../tools/front-door/src/fabric/graph_document.rs) own paths,
+permissions and publication mechanics.
+
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
   `crates/confinement/src/scratch.rs::scratch_ensure_respects_the_callers_lock_budget`;
   `crates/confinement/src/scratch.rs::scratch_ignores_legacy_root_and_never_touches_it`;
   `src/fabric/graph_document.rs::graph_publication_repairs_owned_loose_directory`;
-  `src/fabric/preset_graph.rs::refusal_names_the_path_mode_and_repair`;
   `src/fabric/peer_graph_submission.rs::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root`;
-  `src/preset_tests.rs::preset_wait_prepares_scratch_once_across_polls`,
-  `::preset_wait_retries_an_injected_scratch_failure_after_graph_admission`;
-  `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::writers_read_the_primary_checkouts_untracked_scratch`.
-- Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider.rs`, `src/fabric.rs`
+  `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::writers_read_the_primary_checkouts_untracked_scratch`
+- Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider/mod.rs`, `src/fabric.rs`
 
 ### Graph delivery
 
@@ -1623,10 +1461,9 @@ launches are auto-resolved.
 - Why: lanes can feed one integration branch while the graph owns the single
   review boundary and reuses run's delivery checks.
 - Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
-  `::legacy_checkpoint_keeps_its_digest_without_delivery_fields`;
   `src/fabric/peer_graph_submission.rs::graph_submission_pins_the_integration_base_across_replay`;
   `crates/run/src/delivery_tests/remote_delivery.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
-  `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
+  `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
 `status GRAPH --wait=DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.

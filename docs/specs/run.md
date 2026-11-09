@@ -21,16 +21,14 @@ the applied effort and effective network access.
 An opted-in writer on a filesystem that clones may seed its private Cargo registry and Git store from
 the host stores independently. It must never replace an existing store or publish
 a partially cloned tree. Unsupported entries or clone failures must fall back without
-blocking the lane. Each attempt must report the seed outcome and reason in
-`cargo-setup.json` and `cargo-git-setup.json` on a best-effort basis.
+blocking the lane. Each attempt reports the seed outcome and reason on a best-effort basis.
 - Why: a seed must preserve lane isolation and leave Cargo usable when cloning
   is unavailable, while making the outcome observable.
-- Test: `crates/run/src/cargo_seed.rs::tests::existing_registry_is_never_replaced`;
-  `::failed_clone_removes_partial_tree`; `::registry_clone_is_private`;
-  `::git_seed_is_independent_and_preserves_existing_stores`; `::git_clone_is_private`;
-  `crates/run/src/writer.rs::cargo_setup_tests::cargo_setup_record_reports_writer_and_read_only_outcomes`;
-  `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`;
-  `::read_only_dispatch_applies_bound_git_and_project_writes`
+- Test: `crates/run/src/cargo_seed.rs::existing_registry_is_never_replaced`;
+  `crates/run/src/cargo_seed.rs::failed_clone_removes_partial_tree`;
+  `crates/run/src/cargo_seed.rs::registry_clone_is_private`;
+  `crates/run/src/writer.rs::cargo_setup_record_reports_writer_and_read_only_outcomes`;
+  `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
 - Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/writer.rs`
 
 ## Cargo target seed
@@ -44,7 +42,12 @@ and clone failures leave the target empty and are reported in
 `cargo-target-setup.json`. Existing targets are retained. A clone is private and
 writable; no lane may write the published generation. Preparation holds the
 store lock until cloning finishes, so GC cannot remove the source mid-clone.
-- Test: `crates/run/src/cargo_seed.rs::tests`; `crates/run/src/target_seed.rs::lane_probe_tests`; `crates/run/src/writer.rs::cargo_setup_tests`; `crates/run/src/cargo_seed.rs::tests::enabled_writer_with_a_verified_pin_is_seeded_on_apfs`; `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`; `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`; `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
+- Test: `crates/run/src/cargo_seed.rs::tests`;
+  `crates/run/src/target_seed.rs::lane_probe_tests`;
+  `crates/run/src/writer.rs::cargo_setup_tests`;
+  `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`;
+  `crates/run/src/target_seed_gc.rs::active_clone_lock_prevents_collection`;
+  `src/compose_tests.rs::writer_dispatch_uses_lane_cache_and_narrow_provider_state`
 - Owner: `crates/run/src/cargo_seed.rs`, `crates/run/src/target_seed.rs`
 
 ## Lane build output
@@ -64,10 +67,13 @@ measured it, is kept. The grace covers only recent writes: a binary that runs lo
 stops there; removal holds the host admission lock, so no lane is admitted
 mid-removal, and probes each candidate again. Collection runs when a lane
 settles, when admission finds the disk below the floor, and in `provenant gc`.
-- Why: a lane's shared target filled the workshop disk with incremental sessions
-  and debug objects that no existing collector owned.
-- Test: `crates/run/src/build_dir_gc.rs::tests::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`; `crates/run/src/build_dir_gc.rs::tests::least_recently_used_goes_first_and_the_cap_stops_collection`; `crates/run/src/build_dir_gc.rs::tests::the_free_space_floor_is_honoured_and_no_more_is_removed`; `crates/run/src/build_dir_gc.rs::tests::collection_waits_for_the_admission_lock_and_blocks_claims`; `crates/run/src/build_dir_gc.rs::tests::a_directory_written_within_the_grace_is_kept_though_its_locks_are_free`; `crates/run/src/build_dir_gc.rs::tests::a_write_after_the_walk_keeps_the_directory`; `crates/run/src/build_dir_gc.rs::tests::a_sweep_with_nothing_to_do_does_not_take_the_admission_lock`; `crates/run/src/build_dir_gc.rs::tests::busy_directories_count_toward_the_cap_and_idle_ones_all_go_when_it_is_exceeded`; `crates/run/src/dispatch_writer_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`; `crates/cli/src/run/provider.rs::cargo_profile_tests`
-- Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider.rs`
+- Why: disposable build output must stay bounded without deleting active builds.
+- Test: `crates/run/src/build_dir_gc.rs::a_held_lock_prevents_deletion_whichever_of_the_three_is_held`;
+  `crates/run/src/build_dir_gc.rs::least_recently_used_goes_first_and_the_cap_stops_collection`;
+  `crates/run/src/build_dir_gc.rs::the_free_space_floor_is_honoured_and_no_more_is_removed`;
+  `crates/run/src/dispatch_writer_tests.rs::admission_below_the_floor_reclaims_build_output_and_then_admits`;
+  `crates/cli/src/run/provider/mod.rs::cargo_profile_tests`
+- Owner: `crates/run/src/build_dir_gc.rs`, `crates/cli/src/run/provider/mod.rs`
 
 ## Operation IDs
 
@@ -186,65 +192,18 @@ and exclude unbound, ambiguous, truncated, skipped or missing coverage until res
 `provenant pr contributions N [--json]` reads retained local links without
 creating or migrating a store; GitHub's repository lookup supplies the
 canonical repository namespace. `--bind` explicitly retries binding using the
-observed branch, head and state, and refuses fork PRs. Version 1 rows remain
-readable with null metadata. Versions 1 and 2 migrate to version 3 at the next
-host write; old `review` roles become `read_only` because no explicit review
-request field established that intent. Existing historical links are retained,
-without reconstructing their original lifecycle. The database is outside
-attempts and worktrees, so `gc --apply`, landing cleanup and worktree removal
-retain links and metadata. Rollback must retain the database; older binaries
-cannot write version 3.
+observed branch, head and state, and refuses fork PRs. The database is outside attempts and worktrees; GC, landing cleanup and
+worktree removal retain contribution links. The source owns forward migrations.
 
 ### PR contributions JSON reference
 
-The normal command-result envelope contains `data` with these fields:
+The [contribution owner](../../tools/front-door/crates/run/src/pr_contribution.rs)
+and [command renderer](../../tools/front-door/src/pr/contributions.rs) own the
+payload. Missing metadata remains null; peer coverage is unknown. Readers must
+not infer contribution from transcripts or centrally backfill old attempts.
 
-| Field | Type and meaning |
-|---|---|
-| `pull_request` | Object with non-null canonical lower-case `repository` (`owner/repo`) and positive integer `number`. |
-| `attempts` | Array, once per local attempt linked to this PR, ordered by `queued_at` then `attempt`. Null queue times sort first. |
-| `coverage` | Object described below; prospective local capture never proves complete historical or peer coverage. |
-
-Each `attempts` row always includes all of these fields. Missing facts are
-JSON null (text output uses `unknown`).
-
-| Field | Type and nullability |
-|---|---|
-| `attempt` | Non-null attempt UUID string. |
-| `pull_request` | Non-null repository/number object, as above. |
-| `run` | Run UUID string, or null for legacy/explicit links without host metadata. |
-| `outcome` | Terminal outcome string, or null before terminal publication or when unavailable. Values: `succeeded`, `review_required`, `failed`, `rejected`, `cancelled`, `timed_out`, `rate_limited`, `quota_limited`, `auth_required`, `model_unavailable`, `permission_denied`, `quarantined`, `lost`, `uncommitted`, `input_required`. |
-| `queued_at` | Canonical RFC3339 UTC string with six fractional digits, or null when unavailable. |
-| `finished_at` | Same timestamp format, or null before terminal publication or when unavailable. |
-| `branch` | Captured local branch string, or null when unavailable. |
-| `head` | Observed full PR Git SHA string, or null when unavailable. |
-| `role` | `worker` for writer dispatch, `read_only` for cwd-linked read-only dispatch/validated children, `repair` for writer continuations; null for legacy/explicit links. No review intent is inferred. |
-| `model`, `account` | Resolved placement strings, or null when unknown; requested or lane-written placement is not substituted. |
-| `weight_millionths` | Integer from 0 to 1,000,000, or null until explicit complete allocation is sealed. |
-| `pr_count` | Non-null integer count of retained PR links for this attempt, across repositories and including closed PRs. A truncated count is a lower bound. |
-| `ambiguous` | Non-null boolean: more than one retained PR link and no sealed allocation. |
-| `truncated` | Non-null boolean: additional links for the attempt have been skipped at the cap. |
-
-Coverage fields are always present and non-null:
-
-| Field | Values |
-|---|---|
-| `local_attempts` | `unbound` when the project is unregistered, the store is absent, or this PR has neither binding nor legacy links; otherwise `truncated` when any associated attempt lost a link, `skipped` when a sealed allocation prevented a link, `ambiguous` when any row is ambiguous, or `captured`. The precedence is unbound, truncated, skipped, ambiguous, captured. An empty captured list is possible for a successfully bound PR with no captured attempts. |
-| `ambiguous` | Boolean indicating any returned row has ambiguous allocation, independently of the coverage precedence. |
-| `truncated` | Boolean indicating omitted links, including attempts absent from the returned rows. |
-| `skipped_sealed` | Non-negative integer count of distinct branch attempts omitted from this PR because their allocation was already sealed, including attempts absent from the returned rows. Legacy schemas return zero. |
-| `peer_attempts` | Always `unknown`. |
-| `known_peer_hosts` | Array of configured peer host labels, sorted and deduplicated; empty when none are configured. |
-
-The reader never opens peer records or forwards peer queries. Older attempts
-without captured membership are not inferred from transcripts or centrally
-backfilled.
-
-- Tests: `src/pr_land_tests.rs::pr_contribution_roundtrip` drives dispatch,
-  continuation, PR creation, landing, worktree removal and GC;
-  `crates/run/src/pr_contribution.rs` covers allocation and retained placement.
-- Owners: `crates/run/src/pr_contribution.rs`, `crates/run/src/service.rs`,
-  `src/pr/contributions.rs`.
+- Test: `src/pr_land_tests.rs::pr_contribution_roundtrip`
+- Owner: `crates/run/src/pr_contribution.rs`, `src/pr/contributions.rs`
 
 ## Work correlation lookup
 
@@ -307,7 +266,8 @@ growth is unbounded and is not counted towards the disk floor.
 
 - Why: caller claims cannot establish membership or hide a known contradiction,
   and a waiting index reader must not block unrelated Fabric writers.
-- Test: `crates/run/src/correlation.rs::tests`; `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`
+- Test: `crates/run/src/correlation.rs::tests`;
+  `crates/cli/src/run/provider/confinement_test.rs::configured_grants_cannot_expose_host_indexes`
 - Owner: `crates/run/src/correlation.rs`, `crates/run/src/launch.rs`
 
 ## Chair associations
@@ -333,7 +293,7 @@ same operation ID: launch repairs its index from the immutable host request,
 including owned-worktree replay. Lane stores cannot repair it.
 Transient index errors leave queued children available for a later scan.
 
-Admission audit (#2088):
+Chair inheritance must obey these boundaries:
 
 - New child associations require the version 1 derived run ID check used by
   WorkIndex, before any index write. An unversioned request with a lane-chosen
@@ -374,165 +334,64 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 
 - Test: `crates/fabric-runtime/src/chairs.rs::nested_chair_binding`;
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
-  `crates/cli/src/run/children.rs::tests::{legacy_child_cannot_claim_a_chair_under_a_lane_chosen_run_id, child_chair_seals_the_validated_request_despite_a_lane_rewrite, continuation_cannot_copy_a_chair_to_a_lane_chosen_replay_run, continuation_cannot_redirect_its_source_to_another_runs_chair}`;
   `crates/cli/src/run/tests.rs::operation_replays_after_its_context_ref_moves_or_is_deleted`;
-  `crates/run/src/dispatch_lifecycle_tests.rs::{nested_continuation_uses_host_derived_ids, nested_continuation_preserves_legacy_replay_even_before_request_publication, nested_continuation_preflight_does_not_reuse_crashed_staging}`
+  `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_uses_host_derived_ids`;
+  `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_preserves_legacy_replay_even_before_request_publication`;
+  `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_preflight_does_not_reuse_crashed_staging`
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
-  `crates/cli/src/run.rs`, `crates/cli/src/run/children.rs`
+  `crates/cli/src/run.rs`, `crates/cli/src/fabric/graph_relay.rs`
 
 ## Atomic admission
 
-Writer admission serialises ownership and custody per worktree. A writer
-checks retained-import fences only in its own custody slot, including when
-its run belongs to another project. Git probes, directory scans, Cargo seeding
-and provider preparation never hold a shared writer registry lock. Repository
-mutation locks still protect worktree creation and removal; they do not
-serialise ownership claims or fast-forwarding an existing writer checkout.
-Lock contention defers launch until its own admission deadline; a retry-count
-limit cannot end a contention wait early. One writer per worktree and the
-retained-import fence remain mandatory regardless of optional admission limits.
+Writer custody is exclusive per verified worktree, including retained-import
+fences across run-state roots. Git probes, scans, seeding and provider preparation
+must not hold a shared writer registry lock. Repository mutation locks protect
+creation/removal; they do not serialise independent writer claims. Contention
+waits until the admission deadline, never an unrelated retry-count limit.
 
-Admission and operation insertion are one transaction, and the immutable
-request is published before acknowledgement. No launch, probe, wait or
-supervisor call happens inside a transaction. Admission has no host or project
-count limit by default. Optional
-`max_lanes` (host) and `max_project_lanes` (project) cap all lane classes;
-explicit values accept up to 64 and 32 respectively.
-Queued lanes are bounded at 256 per host, with
-the disk floor, startup spacing and a deadline. The unconfigured memory floor
-is advisory and emits `MEMORY_FLOOR` with a next action.
+Admission and operation insertion commit together; the immutable request is
+published before acknowledgement. Transactions contain no launches, probes,
+waits or supervisor calls. Optional total and writer-specific host/project caps
+are independent. Build slots gate compiling Cargo commands rather than idle
+writers. Configuration and bounds belong to the generated
+[configuration reference](../reference/config-keys-all.md).
 
-On macOS, Critical kernel memory pressure defers both classes by default.
-`domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
-(Warning or Critical) or `never`. An unavailable or unknown pressure sample is
-logged. Low available memory warns on both classes without holding admission.
-The disk floor holds lanes with write authority, including declared write roots
-and prepared tool or project write grants. Lanes limited to provider bookkeeping
-and private scratch warn once below it with free space, the floor and its source,
-then proceed. Build slots do not gate
-admission: a host-wide build throttle (not a hard cap), by default
-max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
-compiling cargo command a lane runs (`provenant_os::build_slots`, reached
-through the lane's `cargo` shim), so idle writers are admitted beyond the slot
-count. Optional `max_writer_lanes` (host) and `max_project_writer_lanes`
-(per project) cap writers separately; both are off by default. A writer at the
-cap queues to the admission deadline and is then refused with a reason naming
-the cap, its scope and the key to raise. All lanes also count against the
-configured total caps. At expiry, disk floor, known pressure and the applicable
-lane cap have distinct refusal reasons with their setting and source. For writers, disk-floor
-refusal takes precedence when disk and pressure are both insufficient. A failed
-memory sample or a floor-only memory shortage does not by itself refuse admission.
-The ledger associates new leases
-with the boot and guardian identity; a different boot, a definitely absent
-guardian or an admission row proven absent from the same readable owner store
-releases a lease. A busy, missing, replaced or unreadable store retains the
-lease until the guardian is confirmed absent or the boot changes. The ledger
-records the owner file's device and inode to detect replacement. Malformed
-lease evidence is retained unless independent evidence proves release.
-A parsed host configuration with invalid build settings fails immediately with a named configuration error. An unreadable or syntactically incomplete configuration is retried, so an unavailable current disk floor never admits unchecked.
-An unavailable guardian identity is retried until the admission deadline, then
-reported as a typed refusal.
-Both identity fields are required on every lease. Earlier lease schemas were
-never installed; upgrades retain spacing but discard their lease rows.
+Known kernel memory pressure may defer either class. Low available memory alone
+is advisory. The disk floor holds lanes with write authority, including prepared
+tool/project grants; private bookkeeping/scratch alone warns and proceeds.
+Expiry reports the actual limiting condition and configuration source, with disk
+refusal taking precedence over pressure for writers. Invalid parsed settings
+fail immediately; unreadable configuration retries rather than admitting with an
+unknown disk policy.
 
-Each ticket and host ledger lease records a lane class: `writer` for a lane
-with write authority (`worktree-write`, declared write roots, or prepared tool or
-project write grants), `read_only` for lanes limited to provider bookkeeping and
-private scratch. Preparation promotes a ticket when it adds write authority. Startup spacing is per
-class and defaults to zero for both classes. `[domains.fabric.lanes] start_spacing_ms`
-sets the spacing in milliseconds for both classes, measured against the last
-start of the same class. A read-only lane never waits behind a writer.
-Build slots (`provenant_os::build_slots`) remain the gate for heavy runs. Spacing is measured on the host's
-monotonic clock since boot (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on
-Linux, both counting sleep), never the wall clock. Every process on the host
-shares that clock, and the ledger records each class's last start as a reading
-of it with the boot identity it was read under (`kern.bootsessionuuid` on macOS,
-`/proc/sys/kernel/random/boot_id` on Linux). The ledger reads the clock inside
-the transaction that checks and records spacing, never before a probe or the
-lock, so lock order is clock order and an admission delayed behind another
-process's newer start still waits for it. When the stored boot identity is the
-current one, spacing is the clock now minus the start, and no wall-clock step,
-forward or back, moves it. The guarantee is: within one boot, no two lanes of a
-class start less than one spacing apart. A reboot resets spacing: a start from
-another boot, or none, leaves the class free, apart from the one-time upgrade
-below of a version 1 ledger that recorded a start, which holds each class for
-one spacing. If the clock or the boot identity cannot be read the claim is refused with a reason (`startup spacing cannot be
-judged: host clock or boot identity unreadable`), which the guardian publishes
-as the lane's never-spawned reason, rather than judged on the wall clock;
-`status` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
-memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
-can refuse any lane with write authority; lanes limited to provider bookkeeping
-and private scratch warn once below it and proceed.
-The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
-place, in one transaction, carrying any wall-time start across as a start of now under the current boot
-for each class, whatever its age and without reading the wall clock, so the
-one-time upgrade holds each class for one spacing (a version 1 ledger with no
-start holds neither); it refuses the upgrade if the
-clock or boot identity cannot be read. Spacing is enforced at
-admission, the ledger commit, not at provider spawn, so a guardian suspended
-between the two can spawn alongside a later lane. A run's own batch concurrency (1 to 16) defaults to
-8 when any lane writes and to 16 when none does, from `lanes.max_concurrency`
-and `lanes.max_concurrency_read_only`; an explicit value wins. A
-`lanes.max_concurrency` the user set also caps the read-only default unless
-they set the read-only knob too. Every entry point (CLI, Fabric and a peer)
-accepts a value above the task count; it cannot admit more lanes than the run
-has.
+Host leases bind the boot, guardian identity and owner-store identity. A changed
+boot or proven absence releases a lease; busy, replaced, corrupt or unreadable
+state retains it until independent custody evidence permits release.
 
-`status` shows each queued or starting lane's `lane_class` and `waiting_for`,
-and uses the latter as its reason: launch not yet handed to a guardian, run
-concurrency, the class's remaining configured startup spacing, or a measured host
-limit. A reached lane cap names its scope and active and limit counts. When no
-check is failing, the reason says `launch preparation: preparing the lane`. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. Peer status reads and the other peer
-listings show the same two fields: the peer derives them from its own store and
-ledger (peer action `lane_waits`) and an older peer that does not know the
-action simply shows none.
-While a running lane's identity-checked guardian checkpoint reports silence,
-`status` shows `provider silent for <duration>; provider still
-running` as its reason and `waiting_for`, unless a visible disk pause or build
-slot wait supplies a more specific reason. This observation clears when
-progress resumes and never changes the lane state. Wait commands return early
-with `condition_met: false`, `timed_out: false`, and a reason naming the silent
-lane; silence never counts as completion or settlement.
+Startup spacing is independent for writer and read-only classes. Preparation
+promotes a ticket that gains write authority. The host monotonic clock and boot
+identity are read inside the ledger transaction, so lock order is clock order;
+wall-clock adjustments cannot shorten spacing. Reboot clears prior-boot spacing.
+An unreadable clock/boot identity refuses the claim. Spacing constrains admission,
+not eventual provider spawn. A run's own concurrency remains independent of host
+caps and can never launch more tasks than it contains.
+
+Status derives queued waits from the owner store and ledger, including over peer
+reads. Unknown observations remain unavailable. A running guardian's observed
+silence may return a wait early with the condition unmet; it never becomes
+settlement or changes the execution state. Resume of progress clears that
+observation. The [admission owner](../../tools/front-door/crates/run/src/ledger.rs)
+owns lease persistence and defaults.
+
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
-- Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high}`; `crates/run/src/dispatch_core_tests.rs::{pressure_errors_and_low_advisory_memory_do_not_refuse, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
-  `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
-  `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock, the_slot_descriptor_is_close_on_exec, a_process_that_outlives_the_holder_does_not_keep_the_slot, a_wait_reports_progress_then_times_out_naming_the_slots, waiting_for_a_cargo_lock_reports_progress_and_times_out}`;
-  `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_settings_that_cannot_be_trusted, no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory}`;
-  `tests/build_slot.rs::{more_builds_than_slots_compile_serially, a_killed_build_releases_its_slot_and_the_wait_is_reported, a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot, a_wait_gives_up_after_the_configured_time_naming_the_slots, a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor, read_only_slot_files_cannot_be_unlinked_or_created_by_the_build, commands_that_do_not_compile_and_nested_cargo_never_queue, a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate, the_cargo_lock_wait_and_the_slot_wait_share_one_deadline, a_terminated_shim_passes_the_signal_to_its_build}`;
-  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values, writer_caps_and_wait_validate_and_default, automatic_build_slots_follow_cores_jobs_and_memory}`;
-  `crates/run/src/dispatch_tests.rs::{invalid_build_settings_refuse_without_waiting}`; `crates/run/src/dispatch_core_tests.rs::{guardian_identity_unknown_retries_and_names_expiry}`;
-  `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
-  `crates/run/src/dispatch_settlement_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
-  `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
-  `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
-  `::read_only_lanes_are_spaced_2_seconds_apart`;
-  `::memory_floor_warns_for_both_lane_classes`;
-  `::configured_project_cap_allows_up_to_32_active_lanes`;
-  `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
-  `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
-  `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
-  `::a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root`;
-  `crates/cli/src/run/tests_submission.rs::a_nested_lane_reads_the_host_ledger_when_it_opens_read_only`;
-  `crates/cli/src/run/remote.rs::a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones`;
-  `tests/fabric_transport.rs::run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates`;
-  `crates/fabric-runtime/src/coordination/input.rs::concurrency_above_the_task_count_is_accepted_up_to_sixteen`;
-  `::a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it`;
-  `::a_wall_clock_step_back_then_forward_cannot_admit_two_writers_within_a_spacing`;
-  `::a_forward_wall_clock_step_alone_does_not_free_the_class`;
-  `::read_only_spacing_holds_on_the_host_clock_and_never_holds_a_writer`;
-  `::a_new_boot_frees_the_class_and_spacing_runs_on_the_new_boot`;
-  `::an_unreadable_host_clock_or_boot_identity_refuses_the_claim`;
-  `::a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class`;
-  `::lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreadable`;
-  `crates/supervisor/tests/custody.rs::the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal`;
-  `crates/run/src/holder.rs::host_clock_tests::an_unreadable_host_clock_reaches_the_guardian_as_itself`;
-  `crates/os/src/sys/clock.rs::host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable`;
-  `::lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for`;
-  `crates/cli/src/run/tests_lanes.rs::render_lanes_says_what_an_unstarted_lane_waits_for`;
-  `crates/run/src/tests.rs::full_database_retains_admission_and_recovers_original_terminal_intent`
+- Test: `crates/run/src/ledger.rs::live_guardian_fences_busy_replaced_and_corrupt_store`;
+  `crates/run/src/ledger.rs::cross_boot_malformed_and_readable_row_removal_release`;
+  `crates/run/src/dispatch_core_tests.rs::pressure_errors_and_low_advisory_memory_do_not_refuse`;
+  `crates/providers/src/lane.rs::claude_shell_restores_jobs_after_scrub`;
+  `crates/os/src/build_slots.rs::slots_are_bounded_and_reusable`;
+  `tests/build_slot.rs::more_builds_than_slots_compile_serially`
 - Owner: `crates/run/src/admission.rs`, `crates/run/src/ledger.rs`, `crates/os/src/sys/clock.rs`
 
 ## Lane priority
@@ -547,7 +406,7 @@ differs.
 - Why: lanes should yield CPU without requiring new privileges or preventing
   nested work from starting.
 - Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
-  `::priority_failures_degrade_and_preserve_evidence`;
+  `crates/supervisor/src/process_os/provider.rs::priority_failures_degrade_and_preserve_evidence`;
   `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
   `crates/cli/src/run/tests_lanes.rs::render_lanes_removes_peer_terminal_controls`
 - Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
@@ -735,9 +594,9 @@ or an existing settlement owner; the supervisor owns this work after return.
 - Why: each phase records enough evidence to resume without holding a writer
   lock through Git, and cancellation must remain available during import.
 - Test: `crates/run/src/settlement.rs::tests`;
-  `crates/run/src/objects_tests.rs::cancellation_kills_a_blocking_import_within_two_seconds`;
+  `crates/run/src/objects_tests.rs::cancellation_kills_a_blocking_import_promptly`;
   `crates/run/src/tests.rs::publication_crashes_preserve_committed_records_and_allow_retry`;
-  `::prelaunch_refusal_publishes_durable_never_launched_evidence`.
+  `crates/run/src/tests.rs::prelaunch_refusal_publishes_durable_never_launched_evidence`.
   No run-level test asserts that `launch_unknown` is never replayed (gap).
 - Owner: `crates/run/src/settlement.rs`, `crates/run/src/holder.rs`,
   `crates/run/src/launch.rs`, `crates/run/src/store.rs`
@@ -755,7 +614,7 @@ transcript except Codex's post-exit identity projection. A read-only lane (no
 `writer`) whose complete, validated, non-empty answer is present settles
 `succeeded` without a handoff; only a writer must also report one.
 - Why: a crash, truncation or impostor must never read as success.
-- Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
+- Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
   `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
@@ -811,7 +670,7 @@ A lost or unsettled outcome names its reason whatever evidence it
 carries; the process may have run even though custody was not proven. A failed, cancelled or lost
 lane whose final answer declares a stop records `declared_stop` (with any
 provider stop it already reported) and no other partial signal. The settled outcome is
-what the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other
+what the graph reads: `src/fabric.rs` maps any outcome other
 than `succeeded`, including `review_required`, to a failed graph node attempt.
 Delivery is gated on the outcome before the stop, so a lane that succeeded
 before stopping still delivers its partial work once its publication is
@@ -839,10 +698,8 @@ original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
 The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
 an unfinished result; the initial attempt is separate.
-The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
 - Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`;
-  `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests_stream_outcomes.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
 - Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
@@ -882,13 +739,12 @@ a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
 (default 7200) in total.
 - Why: a long writer should stop on what it spends, and a stuck lane must not
   wait or run forever.
-- Test: `crates/supervisor/src/machine.rs::tests::a_token_budget_stop_is_a_typed_stop`;
-  `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_fresh_input`;
-  `crates/providers/src/codex.rs::live_usage_tests::a_completed_turn_reports_its_fresh_input_and_output`;
-  `crates/run/src/token_budget.rs::tests::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
-  `crates/run/src/token_budget.rs::tests::a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns`;
-  `crates/run/src/holder.rs::writer_recovery_tests::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
-  `crates/confinement/src/run_config.rs::tests::a_host_setting_equal_to_the_default_still_reports_host`
+- Test: `crates/supervisor/src/machine.rs::a_token_budget_stop_is_a_typed_stop`;
+  `crates/providers/src/claude.rs::live_usage_counts_each_call_once_with_fresh_input`;
+  `crates/providers/src/codex.rs::a_completed_turn_reports_its_fresh_input_and_output`;
+  `crates/run/src/token_budget.rs::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
+  `crates/run/src/holder.rs::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
+  `crates/confinement/src/run_config.rs::a_host_setting_equal_to_the_default_still_reports_host`
 - Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
 
 ## Host inputs fail before launch
@@ -908,10 +764,10 @@ could not read, truncated captures and `slices_complete: false`.
   reviewer still reads the surrounding code in the checkout.
 - Test: `crates/run/src/dispatch_custody_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
   `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`;
-  `::slices_cover_every_file_and_the_index_names_them`;
-  `::slices_stop_at_their_limit_and_say_so`;
-  `::an_incomplete_prompt_names_the_changed_files_without_a_slice`;
-  `::real_git_stat_and_slices_match_the_whole_patch`
+  `crates/run/src/git_context.rs::slices_cover_every_file_and_the_index_names_them`;
+  `crates/run/src/git_context.rs::slices_stop_at_their_limit_and_say_so`;
+  `crates/run/src/git_context.rs::an_incomplete_prompt_names_the_changed_files_without_a_slice`;
+  `crates/run/src/git_context.rs::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
 ## The pinned source view names its failure
@@ -964,9 +820,8 @@ back to a fresh named launch under the existing resume policy.
   confinement and provenance through execution and recovery.
 - Test: `crates/records/src/adapters.rs::host_native_declares_a_fresh_named_writer_contract`;
   `tests/graph_provider.rs::host_native_preparation_uses_the_provider_contract`;
-  `::host_native_dispatch_uses_the_declared_agent_and_refuses_resume`;
-  `crates/cli/src/run.rs::host_native_attempts_do_not_resume_implicitly_or_explicitly`
-- Owner: `crates/records/src/adapters.rs`, `crates/cli/src/run/provider.rs`
+  `crates/cli/src/run/tests_graph.rs::host_native_attempts_do_not_resume_explicitly`
+- Owner: `crates/records/src/adapters.rs`, `crates/cli/src/run/provider/mod.rs`
 
 ## Launch prompts
 
@@ -976,10 +831,10 @@ larger top-level prompt is sealed as `prompt.md` and replaced by a pointer to it
 nested argv attempts refuse it because the parent lane can write their
 directory. Prompt digests cover the full text in `prompt.txt`.
 - Why: a spill file a lane can rewrite would change its child's task.
-- Test: `tools/front-door/crates/cli/src/run/provider/tests.rs#launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
-  `tools/front-door/crates/cli/src/run/provider/tests.rs#nested_argv_prompt_respects_configured_byte_limit`;
-  `tools/front-door/crates/cli/src/run/provider/tests.rs#launch_prompt_refuses_symlinked_attempt_ancestors`
-- Owner: `tools/front-door/crates/cli/src/run/provider/observation.rs#launch_prompt`
+- Test: `crates/cli/src/run/provider/tests_provider_auth_setup.rs::launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
+  `crates/cli/src/run/provider/tests_provider_auth_setup.rs::nested_argv_prompt_respects_configured_byte_limit`;
+  `crates/cli/src/run/provider/tests_provider_auth_setup.rs::launch_prompt_refuses_symlinked_attempt_ancestors`
+- Owner: `crates/cli/src/run/provider/observation.rs#launch_prompt`
 
 ## Read-only write exceptions
 
@@ -1038,7 +893,7 @@ accidental fixture commits; the sandbox is the boundary, and a lane can only
 affect its own branch. A fixture that
 runs `git init` and commits in a temporary directory, even one under the
 checkout, therefore acts on that directory with its own `-c user.name` and
-cannot read or write the lane's index or branch (#2601). That private object
+cannot read or write the lane's index or branch. That private object
 store reads the shared store through
 `objects/info/alternates`. Stash, rebase, merge and garbage collection operate
 on private Git state without individual metadata grants. Launch pins the base
@@ -1199,11 +1054,9 @@ read-only to the lane, so no host path creates such a link today.
   Git control files make such a link dangerous; refusing whole build trees cost
   launches without protecting anything.
 - Test: `crates/confinement/src/permissions/tests/validation.rs::only_git_control_files_are_checked_for_other_names`;
-  `::a_hard_linked_exact_grant_names_its_path`;
-  `::held_path_failures_name_the_path_and_the_check`;
-  `::a_grant_in_a_directory_that_does_not_exist_needs_no_anchor`;
-  `::profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size`;
-  `::native_sandbox_blocks_path_escape_probes`
+  `crates/confinement/src/permissions/tests/validation.rs::a_hard_linked_exact_grant_names_its_path`;
+  `crates/confinement/src/permissions/tests/validation.rs::held_path_failures_name_the_path_and_the_check`;
+  `crates/confinement/src/permissions/tests/validation.rs::a_grant_in_a_directory_that_does_not_exist_needs_no_anchor`
 - Owner: `crates/confinement/src/permissions.rs`
 
 ## Reconcile and temporary cleanup
@@ -1227,9 +1080,9 @@ unreserved `tmp/`; owner locks such as `writer.lock`,
   deleting under a reservation destroys a writer's work.
 - Test: `crates/run/src/holder.rs::writer_recovery_accepts_only_matching_terminal_absence`;
   `crates/run/src/dispatch_temporary_tests.rs::reconcile_preserves_protected_locks_outside_temporary`;
-  `::reconcile_leaves_temporary_data_behind_a_writer_reservation`;
-  `::reconcile_unreadable_reservation_only_retains_existing_temporary_data`;
-  `::reconcile_temporary_removal_never_follows_symlinks`
+  `crates/run/src/dispatch_temporary_tests.rs::reconcile_leaves_temporary_data_behind_a_writer_reservation`;
+  `crates/run/src/dispatch_temporary_tests.rs::reconcile_unreadable_reservation_only_retains_existing_temporary_data`;
+  `crates/run/src/dispatch_temporary_tests.rs::reconcile_temporary_removal_never_follows_symlinks`
 - Owner: `crates/run/src/controls.rs`
 
 ## Store
@@ -1246,7 +1099,7 @@ instead. Relaxed state survives a process crash but not power loss; it is for
 disposable test and CI state, and any other value or none keeps the full flush.
 - Why: a corrupt or foreign store must never be repaired into evidence.
 - Test: `crates/run/src/tests.rs::opens_refuse_unsafe_database_companions`;
-  `::oversize_is_refused_before_publication_or_read`
+  `crates/run/src/tests.rs::oversize_is_refused_before_publication_or_read`
 - Owner: `crates/run/src/db.rs`
 
 ## Reads and waits
@@ -1318,18 +1171,9 @@ fixed placeholder, even when no credential matched. It is not a count of
 replacements or a guarantee against unknown secret formats.
 - Test: `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/run/src/dispatch_settlement_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
-  `::settlement_scrubs_provider_session_history`;
-  `::unredactable_result_settles_failed_with_a_placeholder`;
-  `::cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails`;
-  `::orphan_result_with_plaintext_settles_once_and_preserves_its_bytes`;
+  `crates/run/src/dispatch_settlement_tests.rs::settlement_scrubs_provider_session_history`;
   `crates/run/src/tests.rs::result_orphan_redaction_flag_describes_the_preserved_bytes`;
-  `crates/confinement/src/redact.rs::tests::settlement_scrub_removes_tokens_from_session_text_and_keeps_binaries`;
-  `::session_scrub_skips_links_and_leaves_clean_transcripts_alone`;
-  `::session_scrub_keeps_going_after_an_overlong_authority`;
-  `::session_scrub_keeps_going_past_a_tree_over_the_depth_bound`;
-  `::session_scrub_refuses_more_candidates_than_its_bound`;
-  `::session_scrub_reaches_tool_result_text_under_projects`;
-  `::token_split_across_the_session_chunk_boundary_is_redacted`;
+  `crates/confinement/src/redact.rs::settlement_scrub_removes_tokens_from_session_text_and_keeps_binaries`;
   `tests/graph_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
 - Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`,
   `crates/confinement/src/redact.rs`
@@ -1337,9 +1181,8 @@ replacements or a guarantee against unknown secret formats.
 `output` scans the whole artifact for known shapes before paging, including
 older artifacts. Its offsets and digest refer to those filtered bytes. Prompt
 reads are lossless and need dispatch-equivalent authority. A terminal attempt with no requested
-output is `NOT_FOUND`. `wait any` returns on the next unseen terminal or
-`input_required` lane, and `wait all` returns when all are terminal or any needs
-input. The set is fixed at entry and excludes the caller and its ancestors.
+output is `NOT_FOUND`. [CLI](cli.md#waits-are-readers) owns wait budgets and
+reader cancellation; a wait selection excludes the caller and its ancestors.
 - Why: attention must never wait behind a running sibling.
 - Test: `crates/run/src/tests.rs::create_publish_and_read_exact_bounded_facts`;
   `crates/fabric-runtime/src/runs.rs::input_required_wakes_all_without_waiting_for_a_sibling`
@@ -1373,9 +1216,7 @@ its launch request. Credential roots, state roots and overlapping worktree
 write roots retain the ordinary launch protections.
 - Why: any agent must be able to launch children and collect their results and
   failure causes without gaining direct access to host journals or credentials.
-- Test: `crates/fabric-runtime/src/graph/relay_tests.rs`;
-  `src/fabric/lane_read_tests.rs`;
-  `src/fabric/interface.rs::tests::explicit_writer_children_use_their_selected_project_custody`
+- Test: `src/fabric/interface.rs::explicit_writer_children_use_their_selected_project_custody`
 - Owner: `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/unified.rs`
 
 ## Not provided
@@ -1386,82 +1227,37 @@ write roots retain the ordinary launch protections.
 
 ## Lane-owned worktrees and Git membership
 
-A `run` submitted from a linked Git worktree with neither `--mode` nor a
-target (`--worktree`, `--branch` or `--worktree-branch`) is refused with code
-`REFUSED`. The repair names both choices: `--worktree <path>` for a writer, or
-`--mode read-only` for a reader. This prevents an intended writer from silently
-starting read-only. An explicit `--mode read-only` or an explicit worktree
-dispatches normally. A submodule's gitfile names `.git/modules/`, not a
-`worktrees/` entry, so a run inside a submodule is not refused.
+Writer access requires an explicit verified worktree; explicit read-only
+access may bind a worktree without writer authority. Git's inventory and
+common-directory/backlink checks admit existing linked checkouts without an
+adoption step. Registry reservations do not establish Git membership, and
+ownership metadata controls lifecycle cleanup rather than admission authority.
+Per-attempt supervisor evidence still controls launched-work recovery.
 
-Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
-[--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
-confinement's existing registered-worktree path. Reuse requires the same branch,
-a clean tree and free writer custody; an explicit base applies at creation.
-Reuse preserves the existing lane owner's creation base and refuses adopted
-owners without changing their records. Operation replay
-returns its original run, including after owned cleanup, and checks changed
-inputs before any worktree creation. A tracked gitlink whose checkout is not
-initialised has no nested Git configuration, so creation and status accept it;
-a gitlink with a `.git` marker still reports unknown and requires review
-because status could follow lane-controlled nested filters.
-The private Git admin directory holds `provenant-owner.json` as a bounded,
-atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
-pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
-owner label. `load_owner` and `save_owner` require a verified linked worktree.
+Worktree creation/reuse belongs to the
+[worktree owner](../../tools/front-door/crates/confinement/src/worktrees/owner.rs).
+An existing tree must be clean with free custody. Continuation retains its
+sealed owner and lineage; a changed owner or a live predecessor refuses reuse.
+An uninitialised gitlink is acceptable, while an initialised nested repository
+requires review because Git could follow lane-controlled configuration.
 
-A continuation may reuse a saved lane-owned worktree only when its recorded
-owner attempt is terminal. Records predating the saved `owner` field retain
-their refusal; use `provenant run --branch B --base SHA` to proceed. Setup
-waits for the shared Git configuration lock with a 240-second retry deadline and
-observes lane cancellation while waiting.
+Owned settlement can remove only its own clean checkout after successful
+execution or delivery, with the exact head proven retained by its creation base
+or delivered ref. Branch deletion also requires landed integration; push and
+open PRs retain branches. Ownership, terminal state, absent live work, custody,
+registration, sequencer state and head are checked under removal locks.
+Only declared regenerable output may be discarded; other ignored files retain
+the checkout. Durable removal intent permits replay when the checkout is gone.
 
-Git's inventory and verified common-directory/backlink membership admit
-existing linked checkouts without an adoption step. Canonical paths locate
-persistent exclusion slots; registry reservation records do not gate admission.
-Ownership metadata only controls lane lifecycle cleanup.
-Per-attempt supervisor evidence still controls recovery of launched work.
+Tracking-ref refresh is best effort, bounded and outside the collection lock.
+Failure cannot change the attempt outcome or an adopted tree's receipt. The
+[lifecycle policy](../worktrees.md) owns operational guidance.
 
-Owned lane settlement may prune its own clean checkout only after success
-without requested delivery, or after successful delivery, and when its exact
-recorded head is reachable from the pinned delivered ref or its creation base.
-Local branch deletion additionally requires proof of landed integration;
-pushes and open PRs retain local branches. Settlement rechecks ownership, terminal state, absent live lanes,
-registration, writer custody, Git sequencer state and head under the existing
-removal locks. Resumed attempts may settle a worktree whose owner is in their
-recorded continuation lineage, using the same bounded ancestry proof as resume.
-For an explicitly selected worktree, launch seals its owner under writer custody.
-A continuation accepts that unchanged owner even when it names an earlier lane;
-a changed owner is refused. Existing snapshots without an owner retain the
-conservative lineage check. Custody still excludes live writers.
-Ignored output uses GC's existing declared-regenerable walker
-and keep paths. Only the project's declared regenerable output may be removed;
-other ignored files retain the tree. Other worktrees keep the existing
-GC/removal policy. A host lifecycle receipt records intent before removal,
-then pruning or the retention reason in `worktree-settlement.json` beside the
-attempt result. An interrupted intent whose checkout is gone replays as pruned.
-At settlement the host best-effort refreshes the exact `origin` tracking ref
-for every writer with a branch, including explicit and adopted worktrees,
-before any prune upstream pin. The bounded fetch runs outside the collection
-lock and does not affect the lane outcome. A missing `origin` or remote branch
-is silently skipped. Other failures may add a fixed, redacted
-`tracking_ref_warning` to a lane-owned settlement receipt; they never create
-or change an adopted worktree's receipt. Concurrent refreshes of the same
-branch may race and produce a warning.
-- Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
-- Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
-  `crates/cli/src/run.rs::tests::run_in_linked_worktree_requires_explicit_target`;
-  `::explicit_target_or_mode_passes_the_linked_worktree_guard`;
-  `::explicit_read_only_from_a_linked_worktree_dispatches`;
-  `::submodule_gitfile_is_not_a_linked_worktree`;
-  `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::create_accepts_uninitialised_gitlinks_and_still_rejects_initialised_ones`;
-  `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
-  `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
-  `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;
-  `src/fabric/peer_writer_delivery.rs::settlement_records_tracking_ref_failure_without_failing_lane`;
-  `src/fabric/peer_graph_submission.rs::explicit_writer_refreshes_tracking_ref_while_collection_is_busy`;
-  `src/fabric/peer_writer_delivery.rs::adopted_writer_refresh_failure_does_not_change_receipt`.
-- Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run.rs`, `src/fabric.rs`
+- Why: cleanup may reclaim only owned work proven retained elsewhere.
+- Test: `crates/cli/src/run/worktree.rs::worktree_access_preserves_writer_and_implicit_reader_rules`;
+  `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
+  `src/fabric/peer_writer_delivery.rs::settlement_records_tracking_ref_failure_without_failing_lane`
+- Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run/worktree.rs`, `src/fabric/settlement.rs`
 
 ## Delivery modes and settled pickup
 
@@ -1526,11 +1322,10 @@ action where the host has an identifiable PR.
 - Why: delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
 - Test: `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_fast_forwards_merges_and_replays`;
-  `::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
-  `::remote_integration_refreshes_the_leased_destination`;
-  `::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
-  `::existing_pr_delivery_only_creates_after_positive_absence`;
-  `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
+  `crates/run/src/delivery_tests/remote_delivery.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
+  `crates/run/src/delivery_tests/remote_delivery.rs::remote_integration_refreshes_the_leased_destination`;
+  `crates/run/src/delivery_tests/settlement.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
+  `crates/run/src/delivery_tests/host_commands.rs::existing_pr_delivery_only_creates_after_positive_absence`
 - Owner: `crates/run/src/delivery.rs`, `crates/records/src/run.rs`, `crates/cli/src/run.rs`
 
 ## Cloud writers
@@ -1612,11 +1407,10 @@ reassigned worktrees require a new owned checkout for fresh fallback;
 - Why: a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
 - Test: `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
-  `::resume_continues_a_terminal_attempt_once_with_its_route`;
-  `crates/run/src/controls.rs::lineage_tests::resume_preserves_explicit_unowned_and_adopted_worktrees`;
-  `::resume_refuses_a_pruned_worktree_reused_by_another_lane`;
-  `crates/cli/src/run/tests_graph.rs::displaced_fallback_reports_unavailable_history`;
-  `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
+  `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
+  `crates/run/src/controls.rs::resume_preserves_explicit_worktrees_and_settled_lane_ownership`;
+  `crates/run/src/controls.rs::resume_refuses_a_pruned_worktree_reused_by_another_lane`;
+  `crates/cli/src/run/tests_graph.rs::displaced_fallback_reports_unavailable_history`
 - Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`
 
 ### Alias quota recovery
