@@ -56,16 +56,22 @@ provenant upgrade
 provenant upgrade --from-source /absolute/path/to/provenant --hosts all
 ```
 
-Before upgrading, finish or stop pending graphs and let active writers settle
-on every host. Install on all hosts before launching new work. Preserve and
-report unreadable records; never drop them. Check `provenant status`, collect
-`provenant output TARGET` and inspect `provenant output TARGET --trace` before
-using `retry` for unfinished work.
+Before upgrading, check each host for running work. A release that breaks state
+readability requires pending graphs to be finished or stopped and active writers
+to settle before upgrading. Routine releases maintain state readability across
+upgrades: pending graphs and live lanes continue across the binary swap without
+requiring a blanket drain. Preserve and report unreadable records; never drop
+them. Check `provenant status`, collect `provenant output TARGET` and inspect
+`provenant output TARGET --trace` before using `retry` for unfinished work.
 
-The staged release checks each host for pending graphs, live lanes and user
-presets before installation. Resolve the reported findings and rerun the upgrade,
-or pass `--yes` to `provenant upgrade` or `install.sh --upgrade` to proceed
-despite them. A failure to inspect the state stops the upgrade.
+The staged release checks each host for pending graphs, live lanes, unreadable
+records and user presets before installation. If a release breaks state
+readability between the installed and target versions, or if unreadable records
+or legacy presets are present, the preflight blocks and reports the findings;
+resolve them and rerun the upgrade, or pass `--yes` to `provenant upgrade` or
+`install.sh --upgrade` to proceed despite them. On routine releases without
+state format breaks, in-flight work is reported as a warning and the upgrade
+proceeds without `--yes`. A failure to inspect the state stops the upgrade.
 
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.

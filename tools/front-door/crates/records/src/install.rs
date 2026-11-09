@@ -98,11 +98,19 @@ pub struct ResolvedHarnessTarget {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hooks_relinquished: bool,
 }
+pub const STATE_FORMAT_VERSION: u64 = 1;
+
+fn default_state_format_version() -> u64 {
+    STATE_FORMAT_VERSION
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
+    #[serde(default = "default_state_format_version")]
+    pub state_format_version: u64,
     pub source_digest: SourceDigest,
     pub manifest_digest: FileDigest,
     pub asset_digest: SourceDigest,

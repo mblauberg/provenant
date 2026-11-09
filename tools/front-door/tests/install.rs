@@ -1720,6 +1720,99 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
 }
 
 #[test]
+fn upgrade_preflight_warns_and_proceeds_on_pending_work_when_no_break() -> Result {
+    let rig = TestRig::new()?;
+    let db_path = rig.state.join("run.sqlite3");
+    let db = rusqlite::Connection::open(&db_path)?;
+    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('proj-warn','run-warn','lane-warn',X'7b7d',0);")?;
+    drop(db);
+    let attempt = rig.state.join("runs/run-warn/attempts/lane-warn");
+    fs::create_dir_all(&attempt)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+    let _lock = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+
+    let result = rig.command(&[
+        "install",
+        "--source",
+        rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight",
+    ])?;
+    assert_eq!(code(&result), 0, "{result:?}");
+    let output = String::from_utf8(result.stdout.bytes)?;
+    assert!(
+        output.contains("Warning: Live lane proj-warn/run-warn/lane-warn"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("Finish or cancel pending graphs"),
+        "{output}"
+    );
+    Ok(())
+}
+
+#[test]
+fn upgrade_preflight_blocks_on_pending_work_when_declared_break_and_yes_overrides() -> Result {
+    let mut rig = TestRig::new()?;
+    let db_path = rig.state.join("run.sqlite3");
+    let db = rusqlite::Connection::open(&db_path)?;
+    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('proj-block','run-block','lane-block',X'7b7d',0);")?;
+    drop(db);
+    let attempt = rig.state.join("runs/run-block/attempts/lane-block");
+    fs::create_dir_all(&attempt)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+    let _lock = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+
+    // Declare a break between installed and target releases.
+    fs::create_dir_all(rig.state.join("fabric"))?;
+    fs::write(rig.state.join("fabric/state-format-version"), "0\n")?;
+
+    let result = rig.command(&[
+        "install",
+        "--source",
+        rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight",
+    ])?;
+    assert_eq!(code(&result), 2, "{result:?}");
+    let output = String::from_utf8(result.stdout.bytes)?;
+    assert!(
+        output.contains("Live lane proj-block/run-block/lane-block"),
+        "{output}"
+    );
+    assert!(output.contains("Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."), "{output}");
+
+    // Rerunning install with --yes overrides preflight stopping.
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    rig.env
+        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
+    let forced = rig.execute_os(
+        Path::new("/bin/sh"),
+        &[
+            script.into_os_string(),
+            "--upgrade".into(),
+            "--yes".into(),
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "--tag".into(),
+            "v9.8.7".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&forced), 0, "{forced:?}");
+    let forced_output = String::from_utf8_lossy(&forced.stderr.bytes);
+    assert!(
+        forced_output.contains("Proceeding despite upgrade preflight findings (--yes)."),
+        "{forced_output}"
+    );
+    Ok(())
+}
+
+#[test]
 fn upgrade_requires_a_receipt_before_download_or_build() -> Result {
     let rig = TestRig::new()?.without_state()?;
     let result = rig.command(&["upgrade", "--json"])?;

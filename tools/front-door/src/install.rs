@@ -891,17 +891,28 @@ struct SyncOptions {
 pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
     if args.upgrade_preflight {
         return match upgrade_preflight(globals) {
-            Ok(findings) if findings.is_empty() => 0,
-            Ok(findings) => {
+            Ok(outcome) if outcome.is_empty() => 0,
+            Ok(outcome) => {
                 let mut output = io::stdout().lock();
-                for finding in findings {
+                for warning in &outcome.warnings {
+                    if writeln!(output, "Warning: {warning}").is_err() {
+                        return 1;
+                    }
+                }
+                if outcome.blocking.is_empty() {
+                    return 0;
+                }
+                for finding in &outcome.blocking {
                     if writeln!(output, "{finding}").is_err() {
                         return 1;
                     }
                 }
-                if writeln!(output,
+                if writeln!(
+                    output,
                     "Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."
-                ).is_err() {
+                )
+                .is_err()
+                {
                     return 1;
                 }
                 2
@@ -1529,8 +1540,37 @@ struct UpgradeRunner {
 fn pending_upgrade_findings(
     state: &provenant_core::StateRoot,
     legacy_only: bool,
-) -> Result<Vec<String>, String> {
-    provenant_fabric_runtime::graph::cutover::pending_findings(state, legacy_only)
+) -> Result<provenant_fabric_runtime::graph::cutover::ClassifiedFindings, String> {
+    provenant_fabric_runtime::graph::cutover::classified_pending_findings(state, legacy_only)
+}
+
+fn installed_state_format_version(targets: &Targets) -> Option<u64> {
+    let state_file = targets
+        .roots
+        .state
+        .as_path()
+        .join("fabric/state-format-version");
+    if let Ok(content) = std::fs::read_to_string(&state_file)
+        && let Ok(version) = content.trim().parse::<u64>()
+    {
+        return Some(version);
+    }
+    match read_install_receipt(targets) {
+        Ok(Some(receipt)) => Some(receipt.state_format_version),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Default)]
+struct PreflightOutcome {
+    blocking: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl PreflightOutcome {
+    fn is_empty(&self) -> bool {
+        self.blocking.is_empty() && self.warnings.is_empty()
+    }
 }
 
 /// Carry the cutover guard's bounded findings into admission diagnostics.
@@ -1549,9 +1589,33 @@ pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result
 }
 
 /// Inspect the old state with the staged release before it replaces the binary.
-fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
+fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String> {
     let (environment, targets) = selected_targets(globals, &[]).map_err(|e| format!("{e:?}"))?;
-    let mut findings = pending_upgrade_findings(&targets.roots.state, false)?;
+    let classified = pending_upgrade_findings(&targets.roots.state, false)?;
+    let mut outcome = PreflightOutcome::default();
+
+    outcome.blocking.extend(classified.unreadable);
+
+    let installed_version =
+        installed_state_format_version(&targets).unwrap_or(provenant_records::STATE_FORMAT_VERSION);
+    let declared_break = installed_version != provenant_records::STATE_FORMAT_VERSION;
+
+    if declared_break {
+        for (project, id) in classified.pending_graphs {
+            outcome.blocking.push(format!(
+                "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
+            ));
+        }
+        outcome.blocking.extend(classified.live_lanes);
+    } else {
+        for (project, id) in classified.pending_graphs {
+            outcome
+                .warnings
+                .push(format!("Pending graph {project}/{id} in flight"));
+        }
+        outcome.warnings.extend(classified.live_lanes);
+    }
+
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| environment.home.join(".config"));
@@ -1586,7 +1650,9 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
                 for entry in entries {
                     let entry = entry.map_err(|e| e.to_string())?;
                     if entry.path().extension().is_some_and(|ext| ext == "toml") {
-                        findings.push(format!("{kind} preset to port: {}", entry.path().display()));
+                        outcome
+                            .blocking
+                            .push(format!("{kind} preset to port: {}", entry.path().display()));
                     }
                 }
             }
@@ -1594,8 +1660,9 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
             Err(error) => return Err(format!("{}: {error}", presets.display())),
         }
     }
-    findings.sort();
-    Ok(findings)
+    outcome.blocking.sort();
+    outcome.warnings.sort();
+    Ok(outcome)
 }
 impl UpgradeRunner {
     fn execute(
@@ -2209,6 +2276,7 @@ mod tests {
         let receipt = InstallReceipt {
             extra: Default::default(),
             schema_version: 1,
+            state_format_version: provenant_records::STATE_FORMAT_VERSION,
             source_digest: SourceDigest::from_bytes([1; 32]),
             manifest_digest: FileDigest::from_bytes([2; 32]),
             asset_digest: SourceDigest::from_bytes([3; 32]),
