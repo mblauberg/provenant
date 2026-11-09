@@ -1,6 +1,6 @@
 # Lens: adversarial
 
-Canonical questions: [review-lenses.md](../review-lenses.md), all sections.
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 Assume the change is wrong and try to prove it. Pick the three most damaging
 ways it could fail in production or be abused, then trace each through the code

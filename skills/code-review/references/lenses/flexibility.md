@@ -1,7 +1,6 @@
 # Lens: flexibility
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Ownership and structure".
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Identify hard-coded names and values that should be configuration.
 - Check coupling to a single provider, platform or account.

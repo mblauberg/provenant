@@ -357,12 +357,9 @@ read-event source for that measurement.
 ## Token-per-merged-PR study
 
 `provenant_telemetry::study` reduces recorded attempts, chair sessions and
-merged-PR attribution into two cohorts split at a stated cut-over. Every token
-lands in one category (chair, worker, review, repair, failed attempt); work
-that joins no cohort PR is shown beside the totals. Fewer than 10 merged PRs in
-a cohort is `pending`; missing chair counters or a coverage gap above 10
-percentage points is `inconclusive`. Method, deferred replay and the results
-template: `docs/telemetry/token-per-pr-study.md`.
+merged-PR attribution into two cohorts. The [study method](../telemetry/token-per-pr-study.md)
+owns attribution and verdict interpretation; `crates/telemetry/src/study.rs`
+owns the thresholds.
 
 - Why: #2315 asks whether the cut-over lowers tokens per merged PR, without new
   counters or synthetic runs.

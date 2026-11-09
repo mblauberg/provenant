@@ -1,7 +1,6 @@
 # Lens: concurrency, data and errors
 
-Canonical questions: [review-lenses.md](../review-lenses.md), section
-"Correctness and failure" (ordering, atomicity, retries, error propagation).
+Shared guidance: [review-lenses.md](../review-lenses.md).
 
 - Persistence and migrations: atomicity, rollback and mixed-version operation.
 - Async, retries and cancellation: idempotency, ordering, duplicate delivery.

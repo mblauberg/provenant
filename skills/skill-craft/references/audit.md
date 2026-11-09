@@ -55,7 +55,7 @@ in [../SKILL.md](../SKILL.md).
 
 ## Research basis
 
-Dated, most recent first. Weigh the 2026 sources above the older ones.
+Dated, most recent first. Weigh sources by currency and relevance to the claim.
 
 - [MCP description quality](https://arxiv.org/abs/2602.18914), February 2026:
   standard-compliant tool descriptions were selected 72% of the time in
