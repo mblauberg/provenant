@@ -1189,6 +1189,9 @@ impl Factory {
             let head =
                 provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
             let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
+            if base == head {
+                return Err(FacadeError::invalid(InvalidInputDetail::Field("review_empty_range: base and subject resolve to the same commit; select a subject with changes".into())));
+            }
             identity["head"] = json!(head);
             identity["review_base"] = json!(base);
             resolved_head = Some(head);
@@ -2312,6 +2315,37 @@ mod tests {
             factory
                 .child_request(&json!({"op":"run", "operation_id":"invalid op"}))
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_ref_binds_tip_until_launch() -> Result {
+        let rig = crate::worktree_tests::repository()?;
+        let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "subject"])?;
+        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", &base])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "target advanced"])?;
+        let tip = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let result = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true}), budget, &cancel)?;
+        assert_eq!(result["document"]["review_base"], tip);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_review_range_is_refused_before_launch() -> Result {
+        let rig = crate::worktree_tests::repository()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let error = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","set":{"subject":"HEAD","review_base":"HEAD"}}), budget, &cancel).unwrap_err();
+        assert!(
+            matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::Field(ref message)) } if message.contains("review_empty_range"))
         );
         Ok(())
     }

@@ -549,6 +549,22 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
 }
 
 #[test]
+fn empty_review_range_stops_before_lens_launch() {
+    let head = "1".repeat(40);
+    let mut review = node("review", route("review"));
+    review.role = Some("lens.correctness-spec".into());
+    review.source = Some(SourceBinding::Commit { commit: head.clone() });
+    let mut owner = FakeOwner {
+        graph_bases: (Some(head.parse().unwrap()), None),
+        ..Default::default()
+    };
+    let run = advance(&graph(vec![review]), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(owner.calls.is_empty());
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("review_empty_range"));
+}
+
+#[test]
 fn equal_review_range_cannot_pass_a_reduced_panel_gate() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "empty-quick-review", "nodes": [

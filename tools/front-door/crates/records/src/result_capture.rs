@@ -178,7 +178,7 @@ impl ResultCapture {
             excerpt,
             tail,
             truncated,
-            source_truncated: false,
+            source_truncated: tail_truncated,
             tail_truncated,
             matched_required: self.matched_required,
             disposition_proof: self.dispositions.finish(),
