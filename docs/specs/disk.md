@@ -20,7 +20,7 @@ existing run store while reading it. If the run store has a non-empty rollback j
 unavailable index, the report falls back to a filesystem-only inventory with an
 error and unknown terminal status. A report over 1 MiB returns
 `RESULT_TOO_LARGE` without publishing an artefact.
-- Why: inspecting disk use must be safe while lanes run.
+- Why (default): inspecting disk use must be safe while lanes run.
 - Test: `src/disk.rs::disk_report_inventories_worktrees_and_unindexed_state_without_writes`;
   `crates/run/src/disk.rs::disk_reader_refuses_rollback_journal_without_modification`
 - Owner: `src/disk.rs`, `crates/run/src/disk.rs`
@@ -31,7 +31,7 @@ The walk never follows symlinks or crosses a held anchor's device boundary. Each
 measured path has a budget of 1,000,000 entries and 10 seconds, and depth is
 capped at 256; reaching a limit records one error and keeps the bytes measured so far.
 Hard-linked files count once across the report; when roots overlap, allocation is attributed to the first observation.
-- Why: a link or a huge tree must not send the report outside its roots or
+- Why (default): a link or a huge tree must not send the report outside its roots or
   hang it.
 - Test: `crates/os/src/disk.rs::measurement_never_follows_links_and_separates_tagged_cache`;
   `::walk_budget_preserves_partial_bytes_and_reports_exhaustion`
@@ -43,7 +43,7 @@ Hard-linked files count once across the report; when roots overlap, allocation i
 elsewhere; any fallback sets `method` to `allocated_fallback`. Neither figure
 promises bytes recoverable by deletion, and the report is a sequence of
 observations, not an atomic snapshot.
-- Why: users decide deletions from these numbers.
+- Why (default): users decide deletions from these numbers.
 - Test: `crates/os/src/disk.rs::unavailable_private_size_selects_allocated_fallback`;
   `crates/os/src/sys/fs.rs::returned_attributes_control_private_size`
 - Owner: `crates/os/src/disk.rs`, `crates/os/src/fs.rs` (`private_size_at`)
@@ -56,7 +56,7 @@ errors classify a cache as `refused`; v1 markers never become idle.
 `reclaim: "gc"` and owner or writer facts are hints only, and GC revalidates
 its own conditions. The run inventory covers the host state root, never the
 invoking lane's `PROVENANT_RUN_STATE_DIR`.
-- Why: a report row must never become deletion authority.
+- Why (default): a report row must never become deletion authority.
 - Test: `crates/confinement/src/disk.rs::lane_inventory_refuses_incomplete_measurements`;
   `::lane_classification_reuses_gc_owner_and_reason`
 - Owner: `crates/confinement/src/disk.rs`
@@ -93,7 +93,7 @@ undeclared ignored paths refuse removal and appear in the error. Explicit
 removal skips the bounded idleness scan but still checks repository boundaries.
 Every nested `.git` entry, file or directory, protects its repository and any
 declared output containing it, including beneath ignored parents.
-- Why: rebuildable output should not require ending a long-lived worktree,
+- Why (default): rebuildable output should not require ending a long-lived worktree,
   while ignored secrets and tracked directories remain protected.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::gc_idle_output_requires_ignored_idle_and_free_writer`;
   `::remove_declared_ignored_output_but_names_undeclared_env`
@@ -148,7 +148,7 @@ advisory lock; the complete process census and final clean recheck still apply.
 Exclusion slots remain after collection or refusal. Reusing a canonical path
 uses the same flock inode and never requires a retired identity record. Legacy
 identity and registry reservation files are ignored by worktree collection.
-- Why: native worktrees need an explicit alternative to terminal-lane evidence.
+- Why (default): native worktrees need an explicit alternative to terminal-lane evidence.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
 
@@ -164,7 +164,7 @@ including those beneath `scratchpads` or a `.provenant-staging.` component.
 Explicit GC on a transient checkout reports its common directory and skips
 collection. Unregistered transient roots cannot be discovered by a scheduled
 registry scan.
-- Why: invocation scratch paths must not accumulate as scheduled projects.
+- Why (default): invocation scratch paths must not accumulate as scheduled projects.
 - Test: `crates/config/src/project_binding.rs::transient_roots_have_identity_without_persistent_registration`;
   `::scheduled_projects_exclude_missing_non_git_and_old_transient_bindings`
 - Owner: `crates/config/src/project_binding.rs`, `src/worktrees.rs`
@@ -184,7 +184,7 @@ capture counts so many closed runs fit within the report limit.
 `output --part stderr` falls back to the retained `stderr.log.tail` when
 the full capture has expired. JSON reports `complete=false`; text marks the
 retained tail as truncated. Offsets and digest describe the retained bytes.
-- Why: bound bulky captures and historical logs without rewriting what sealed digests describe.
+- Why (default): bound bulky captures and historical logs without rewriting what sealed digests describe.
 - Test: `crates/run/src/retention.rs::gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview`;
   `::gc_expires_closed_run_events_after_log_retention`;
   `::gc_logs_refuse_symlinks`; `crates/run/src/disk.rs::disk_usage_rolls_many_attempts_up_per_run`
@@ -199,7 +199,7 @@ reports free space and the threshold and names `provenant disk report` and
 `provenant gc`. Volume sampling does not walk filesystem trees; failures and
 timeouts are silent and do not affect the hook or save. Reclaimable space is
 not estimated. Lane sessions do not receive the warning.
-- Why: chairs need headroom to investigate disk use before admission refuses.
+- Why (default): chairs need headroom to investigate disk use before admission refuses.
 - Test: `session_start_warns_once_only_when_disk_is_below_headroom`,
   `session_save_warns_once_only_when_disk_is_low`, and disk guard unit tests.
 - Owner: `src/disk_guard.rs`, `src/hooks.rs`, `src/lib.rs`, `crates/cli/src/workflow.rs`
@@ -235,7 +235,7 @@ the same reason in `notice`.
 Settlement already prunes provider caches and temporary state; removal prunes
 the removed worktree's cache. Settlement lane-cache and delivery-integration
 event wiring remains with those callers.
-- Why: free reclaimable space before sending the chair a manual remedy.
+- Why (default): free reclaimable space before sending the chair a manual remedy.
 - Test: `crates/cli/src/run/tests/writer_disk.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`;
   `src/tick_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
   `src/disk_guard.rs::lane_pause_rereads_the_floor_each_observation`;

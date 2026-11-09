@@ -24,7 +24,7 @@ Reporting starts no provider operation or background collection, and run does
 not depend on telemetry. Attempt reports read through run's `AttemptReader`;
 native-session ingest owns separate usage records. An absent run store gives
 an empty attempt report and creates nothing; a corrupt one is an error.
-- Why: measurement must never perturb what it measures.
+- Why (default): measurement must never perturb what it measures.
 - Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
   `crates/telemetry/src/tests.rs::empty_reader_has_complete_zero_cost`
 - Owner: `crates/telemetry/src/`
@@ -45,7 +45,7 @@ The latest task outcome is the highest-numbered attempt.
 subscription entry in the price table, even when usage or rates are missing.
 Unknown identities are not classified as subscriptions, and this classification
 does not verify account billing.
-- Why: a partial or zero-filled total reads as a real one.
+- Why (default): a partial or zero-filled total reads as a real one.
 - Test: `crates/telemetry/src/tests.rs::attempt_and_group_limits_are_enforced_before_insertion`;
   `crates/telemetry/src/tests.rs::missing_usage_and_prices_preserve_known_lower_bounds`
 - Owner: `crates/telemetry/src/`
@@ -57,7 +57,7 @@ normalised. Cost accumulates in checked integers, is divided by 10^6 once and
 rounded half-up once, and floating point is never used. Prices are keyed by exact provider and model; an omitted
 rate is unknown. A zero rate must be verified. There is no runtime fetch,
 regex or alias. Cost is an estimate, not a bill.
-- Why: rounding drift or a guessed price corrupts route comparison.
+- Why (default): rounding drift or a guessed price corrupts route comparison.
 - Test: `crates/telemetry/src/tests.rs::rounding_occurs_once_across_categories_attempts_and_groups`;
   `crates/telemetry/src/tests.rs::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
 - Owner: `crates/telemetry/src/`, `../../config/telemetry-prices.toml`
@@ -80,7 +80,7 @@ unknown or incomplete prices remain unknown.
   `crates/telemetry/src/refresh.rs::tests::converts_per_token_to_exact_microdollars_per_million`;
   `tests/telemetry_native.rs::prices_refresh_proposes_a_deterministic_diff_and_never_edits_the_sheet`;
   `crates/telemetry/src/tests.rs::review_older_than_the_configured_age_is_stale`
-- Why: native sub-agent usage should be visible without counting it as a
+- Why (default): native sub-agent usage should be visible without counting it as a
   Provenant attempt or collecting conversation content.
 - Test: `crates/telemetry/src/native.rs::tests::imports_metadata_once_per_message_and_prices_exact_model`;
   `tests/telemetry_native.rs::native_stats_runs_without_a_project_or_store_and_sanitises_output`
@@ -100,7 +100,7 @@ subtracts both; Claude and Cursor report them beside the uncached count. Agy's
 table's single write rate.
 An absent `reasoning` count never makes a cost a lower bound: reasoning is
 priced at the output rate and providers count it inside output.
-- Why: a share that counts providers which never report a split reads as a
+- Why (default): a share that counts providers which never report a split reads as a
   cache miss, and a token total that includes cached input is not input.
 - Test: `crates/telemetry/src/tests.rs::cache_read_share_is_reported_per_model_account_provider_and_source`;
   `crates/providers/src/tests_stream_outcomes.rs::codex_cached_input_is_cache_read_and_leaves_uncached_input`
@@ -123,7 +123,7 @@ line) and never follow links. A session whose transcript cannot be read is
 counted as unread with its reason, not as zero. `telemetry stats` shows the
 host's chair sessions in a `chair` section priced like lanes; `quota usage`
 shows them per account and project beside lane tokens.
-- Why: chair sessions are most of the spend, and an unattributed or zero row
+- Why (default): chair sessions are most of the spend, and an unattributed or zero row
   hides who spent it.
 - Test: `crates/telemetry/src/chair/tests.rs`;
   `tests/chair.rs::chair_start_records_serving_account_without_a_pending_handoff`;
@@ -156,7 +156,7 @@ Reads and stores are bounded and never follow links. Missing message timestamps
 are counted as skipped. Reaching the store cap stops additions visibly instead
 of manufacturing complete coverage. The [CLI reference](../reference/cli-all.md)
 owns invocation; `crates/telemetry/src/ingest.rs` owns limits and record layout.
-- Why: most Claude spend is the interactive chair and its native sub-agents,
+- Why (default): most Claude spend is the interactive chair and its native sub-agents,
   which no supervised attempt record sees.
 - Test: `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
   `crates/telemetry/src/ingest/tests.rs::lines_this_build_cannot_read_survive_a_rewrite`;
@@ -198,7 +198,7 @@ Fitted non-negative weights for `delta used = sum w_b x tokens_b` are reported
 per account, window and model only with `n` and the fit's R-squared, and only
 when the fit explains at least half the variance. All money is integer
 microdollars, rounded once.
-- Why: a subscription's value is what a percentage point costs, not what the
+- Why (default): a subscription's value is what a percentage point costs, not what the
   list price says a token costs.
 - Test: `crates/telemetry/src/mileage.rs::tests::three_readings_give_exact_mileage_and_capacity`;
   `crates/telemetry/src/mileage.rs::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
@@ -215,7 +215,7 @@ microdollars, rounded once.
 one thread per attempt, and flow arrows from a child to its `Trace.parent`
 across hosts. An
 unreadable peer is listed with its error and the rest of the export is still written.
-- Why: one peer outage must not hide the local picture.
+- Why (default): one peer outage must not hide the local picture.
 - Test: `crates/telemetry/src/tests.rs::trace_groups_hosts_and_links_a_child_to_its_parent_across_them`;
   `crates/cli/src/run/remote.rs::peer_export_asks_every_configured_peer_for_its_lanes`
 - Owner: `crates/telemetry/src/`
@@ -290,7 +290,7 @@ through the CLI, use `provenant route override set --model ADAPTER/ID
 values. Pattern and lens suggestions remain advisory with `accept: null`.
 Whole-patch-read measurement has no read-event source and is unmeasured.
 
-- Why: post-merge quality and verified value need evidence coverage, comparable
+- Why (default): post-merge quality and verified value need evidence coverage, comparable
   cohorts and an explicit decision before changing policy.
 - Test: `crates/telemetry/tests/telemetry_pipeline.rs`;
   `tests/telemetry_pipeline_cli.rs`
@@ -316,7 +316,7 @@ creating one. They carry the command or tool name, time, duration and outcome, n
 argument, prompt or result text. Each line is one bounded `O_APPEND` write.
 Only rotation takes a non-blocking lock, and an I/O error discards the event.
 Recording the project is opt-in and stores only the `ProjectId` hash.
-- Why: counting demand must not leak work content or slow a command.
+- Why (default): counting demand must not leak work content or slow a command.
 - Test: `tests/usage.rs::cli_and_mcp_usage_records_exclude_arguments_prompts_and_results`;
   `crates/telemetry/src/usage/tests.rs::recording_on_a_missing_root_creates_nothing`
 - Owner: `crates/telemetry/src/usage.rs`, `src/usage.rs`
@@ -326,7 +326,7 @@ Recording the project is opt-in and stores only the `ProjectId` hash.
 A failed refresh keeps the last snapshot, marked stale. The menu bar
 never shows a stale value as zero usage. An unregistered icon account falls back
 to `most_constrained` with a warning and leaves config unchanged.
-- Why: stale data must not look like free headroom.
+- Why (default): stale data must not look like free headroom.
 - Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_auth_marker`;
   `tests/quota.rs::show_warns_when_display_icon_account_is_not_registered`
 - Owner: `crates/cli/src/quota.rs`

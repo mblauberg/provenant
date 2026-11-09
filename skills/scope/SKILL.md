@@ -43,7 +43,8 @@ how verification catches a wrong implementation; test behaviour, not wording.
 A verification step beyond the stated outcome names the failure it prevents and
 how likely that failure is; otherwise do not write it, because every later
 implementer must honour it.
-Add must-not-change behaviour and the verify command. The readiness test: could a
+Add the verify command and any Boundaries, each citing a recorded hard boundary
+or its reason. The readiness test: could a
 fresh agent build and verify this without asking? If not, it is not ready.
 
 ## Questions

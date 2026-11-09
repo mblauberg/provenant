@@ -38,7 +38,8 @@ Keep only what code cannot say, and link code, schemas and tests.
 - **Owner and anchor.** Each spec and runbook opens with `Owner:` (the
   responsible crate, skill or document) and `Anchor:` (relative links to source
   symbols or tests that let a reader check its claims). Name the symbol, not a
-  line number.
+  line number. A rule's `Why:` cites its event, or reads `Why (default):`, a
+  default open to change.
 - **Prevent drift.** Mechanical owner, anchor, link and generated-diff checks
   may fail CI; whether prose belongs in a spec is review judgement. Before
   cutting apparent restatement, check renames and live callers.
@@ -49,7 +50,9 @@ Keep only what code cannot say, and link code, schemas and tests.
 
 ## ADRs: architecture only
 
-Record the decision, its forces and consequences, for architecture alone.
+Record the decision, its forces and consequences, for architecture alone. Add
+`Overturn when: <fact>` only for a checkable fact that would end the decision;
+never invent one.
 Process goes to its skill or `HARNESS.md`; deferrals and product calls to their
 issues. Amend an accepted ADR in place to the current decision, keeping one
 `Changed: YYYY-MM-DD, #issue` line that each amendment replaces. Merge or delete

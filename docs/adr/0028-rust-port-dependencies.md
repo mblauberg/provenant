@@ -52,3 +52,6 @@ Bundled SQLite adds clean-build cost in exchange for one database version.
 A narrow dependency set limits audit and update work; bespoke protocol and
 subset readers carry focused conformance tests. This is a dependency policy,
 not a migration rollout plan.
+
+Overturn when (decision 4): Fabric must serve MCP over a transport other than
+stdio, or a supported host has no system `curl`.
