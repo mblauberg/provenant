@@ -1603,7 +1603,7 @@ mod tests {
         };
         assert!(matches!(
             transport.exchange_within(&peer, &submit, budget, &CancelToken::new(), Duration::ZERO),
-            Err(PeerError::Unavailable)
+            Err(PeerError::Deadline)
         ));
         assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
         assert!(matches!(
