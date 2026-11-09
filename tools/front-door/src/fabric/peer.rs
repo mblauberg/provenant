@@ -401,6 +401,12 @@ pub fn peer(
                                 "graph_custody_released".into(),
                                 serde_json::json!(released),
                             );
+                            // The sealed settlement handoff, so the chair never
+                            // re-derives it from the result text.
+                            attempt.extra.insert(
+                                "graph_handoff".into(),
+                                serde_json::json!(store.handoff(attempt).map_err(run_error)?),
+                            );
                         }
                         if let provenant_fabric_runtime::runs::RunResult::Status {
                             attempt, ..

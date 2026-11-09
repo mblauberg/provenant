@@ -1415,6 +1415,7 @@ impl RunStore {
                 usage: UsageRecord::default(),
                 session: None,
                 partial_signals: Vec::new(),
+                turns: Vec::new(),
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -1431,6 +1432,7 @@ impl RunStore {
                 usage: UsageRecord::default(),
                 session: None,
                 partial_signals: Vec::new(),
+                turns: Vec::new(),
                 reason: Some(
                     exit.warnings
                         .first()
@@ -1705,6 +1707,7 @@ impl RunStore {
                 });
                 if decoded.result.trim().is_empty() {
                     decoded.result = budget_stop_result(&result, note);
+                    decoded.turns.clear();
                 }
             }
             if let Err(error) = &check
@@ -2071,6 +2074,7 @@ impl RunStore {
                 // A writer's work is its commit. A provider that exited cleanly
                 // with no final message needs review; it has not failed.
                 decoded.result = EMPTY_WRITER_RESULT.into();
+                decoded.turns.clear();
                 if decoded.outcome == Outcome::Succeeded {
                     decoded.outcome = Outcome::ReviewRequired;
                 }
@@ -2128,10 +2132,7 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         ) && task.writer.is_some()
             && !matches!(&task.route, RequestedRoute::Adapter { .. })
-            && provenant_records::handoff::Handoff::from_result(&decoded.result)
-                .ok()
-                .flatten()
-                .is_none()
+            && decoded.handoff().ok().flatten().is_none()
             && !reports_verdict(&decoded.result)
         {
             partial.push(PartialSignal::HandoffMissing);
