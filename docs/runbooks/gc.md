@@ -18,6 +18,17 @@ provenant --project /absolute/path/to/repo gc --dry-run --json
 provenant --project /absolute/path/to/repo gc --json
 ```
 
+After a successful managed install, the installer retains the active release
+and the two most recently installed releases. It also retains any release
+whose executable is still running. If the host process census is incomplete,
+release pruning is skipped so an unobserved process cannot lose its release.
+Older managed release directories are removed from `<state>/releases/`.
+
+Manual `provenant gc` also rebuilds pending graph markers and collects old
+terminal graph checkpoints using `gc.graph_checkpoint_days`, the same policy
+as the daily tick. Checkpoints with pending work, open asks or scheduled wakes
+are retained. `gc --dry-run` leaves graph checkpoints untouched.
+
 Lane build-cache selection uses `--idle-days` and `--free-floor`; see
 [cache collection](install.md#build-a-staged-release).
 Provider-state retention covers indexed terminal attempts in the resolved
