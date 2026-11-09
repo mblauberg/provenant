@@ -4,6 +4,7 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
+const REVIEW_BASE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const WRITE_HEAD: &str = "1111111111111111111111111111111111111111";
 const REPAIR_HEAD: &str = "2222222222222222222222222222222222222222";
 
@@ -81,6 +82,26 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        (Some(REVIEW_BASE.parse().unwrap()), None)
+    }
+    fn resolve_review_merge_base(
+        &mut self,
+        reference: &str,
+        _subject: &str,
+        _worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(reference
+            .parse::<provenant_core::GitOid>()
+            .ok()
+            .map(|oid| oid.to_string()))
+    }
+
     fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         let mut families = Vec::new();
         for family in attempts
