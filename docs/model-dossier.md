@@ -14,9 +14,6 @@ entries and say which ones you reasoned from.
 Read it before choosing a model. Prefer what it says. Depart from it when the
 work calls for something else, and say why in the receipt.
 
-All five adapters are enabled by default. `provenant route list` does not
-probe; readiness is decided at dispatch.
-
 ## Advisory only
 
 This file cannot change what is permitted. Nothing here is enforced by a schema
@@ -30,12 +27,6 @@ dispatch a leg.
   authority, never reaches an unavailable route, and never blocks a dispatch.
 - If a preference here disagrees with a resolved route, the resolved route wins
   and the disagreement is a signal to fix the dossier, not the router.
-
-```mermaid
-flowchart LR
-  D[model dossier] -->|ADVISORY: which mind fits| R
-  G[route eligibility] -->|VETO| R
-```
 
 ## What this file does not own
 
@@ -81,8 +72,7 @@ not read an absent `Watch out for` as an endorsement.
   exploration. The default for critical review, synthesis and adjudication at
   every risk tier, ahead of Fable 5.1. Reserve it for that work; Sonnet 5.5 is
   the cheaper default elsewhere.
-- **Watch out for:** the owner on Opus 5's long-form prose: "opus's writing is
-  quite horrible". Hand human-facing prose to a voice pass (see
+- **Watch out for:** long-form prose reads poorly. Hand human-facing prose to a voice pass (see
   [Human-facing final polish](#human-facing-final-polish)) rather than shipping
   Opus drafts as written.
 - **Cost:** principal-tier; not separately characterised.
@@ -256,41 +246,12 @@ to whoever chairs the run, so the right second family depends on the first. Do
 not write a standing preference here; pick the family that is *not* the author's
 and record it.
 
-## Execution status
-
-All five adapters are enabled for dispatch. A catalogue entry shows that a
-model is configured, not that it is reachable; readiness depends on the local
-sign-in and quota, which dispatch decides; `provenant route list` does not probe.
-
-| Adapter | Models in the bundled pools |
-|---|---|
-| Claude | Haiku 5.5, Sonnet 5.5, Opus 5.5 |
-| Codex | GPT-6 Luna, GPT-6.1 Terra, GPT-6.1 Sol |
-| Agy | Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking |
-| Cursor | Grok 4.7 |
-| OpenCode | DeepSeek V4.1 Flash and GLM 5.3 Flash (free models) |
-
-No other adapters exist.
-
 ## Recording the preference
 
-Cite the entry heading when one of these entries actually decided a route. The
-`orchestrate` skill's routing reference owns that convention and where the
-citation goes; it is not repeated here.
+When one of these entries decided a route, cite its heading in the receipt.
 
 ## Maintenance
 
-Edit this file directly. It needs no migration, no baseline and no regenerated
-fixture, which is the entire point. If a preference here starts being treated as
-binding, that is a bug in the caller, not a reason to formalise the file.
-
-These notes are version-specific and they decay. That is expected and is the
-reason the file is prose rather than a schema: a claim like "loves to
-over-engineer but is very good at being correct" is worth writing down precisely
-because it will stop being true, and rewriting one paragraph must cost nothing.
-
-- A new model release is one new entry, not an audit of every use case.
-- Delete a claim the moment it stops matching what you observe. A stale entry is
-  worse than an absent one.
-- Keep entries in the owner's own terms. Do not balance or soften an assessment,
-  and do not invent one for a model nobody has used.
+Edit this file directly; it needs no migration or regenerated fixture. Notes are
+version-specific and decay: add one entry per new model, delete a claim when it
+stops matching what you observe, and keep entries in the owner's own terms.

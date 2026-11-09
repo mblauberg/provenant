@@ -7,9 +7,9 @@
 
 ## Decision requested
 
-<!-- The exact decision the reviewing user is asked to make, e.g.
-     "Approve merge of <head SHA> to main." Name any user or external
-     gate that stays open after merge. -->
+<!-- Include only when a user or external decision is outstanding: state the
+     exact decision and any gate that stays open after merge. Delete this
+     section otherwise; the repository runbook owns merge authority. -->
 
 <!-- Change map: add a Mermaid diagram whenever it makes the change faster to
      review than prose: changed actors or flows, state transitions, before/after

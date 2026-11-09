@@ -1,21 +1,14 @@
 # Agentic delivery harness: 2026 research synthesis
 
-Acceptance policy note (21 October 2026): historical human-acceptance wording
-below records the research baseline. Current delivery acceptance is met by
-objective checks and tier-required review; explicit user acceptance applies
-only to `terminal` work or approved scope. A project may name its landing gate
-as acceptance. External-action gates remain.
+Historical acceptance wording records the baseline; see [research index](README.md#acceptance-wording).
 
 Status: Research baseline
 Evidence cut-off: 10 July 2026
 Review cadence: quarterly, and whenever a primary model, provider interface or
 material security standard changes
 
-Implementation status (11 July 2026): this document is the pre-implementation
-baseline. Its 30-skill inventory and ten material gaps are historical, not the
-live backlog. The current 32-skill catalogue is generated in the
-[skill catalogue](../../skills/); closed gaps, dated
-evaluation evidence and later consolidations are explained in
+This document is the pre-implementation baseline. Its skill inventory and gaps
+are historical; later work is recorded in
 [Agent skill portfolio: 2026 research and refactor](skill-portfolio-practices-2026.md).
 
 ## Executive finding

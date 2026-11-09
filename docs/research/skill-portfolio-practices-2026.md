@@ -1,10 +1,6 @@
 # Agent skill portfolio: 2026 research and refactor
 
-Acceptance policy note (21 October 2026): historical references below to a
-mandatory final human gate describe the policy at the recorded revision.
-Current delivery acceptance is met by objective checks and tier-required review;
-explicit user acceptance applies only to `terminal` work or approved scope.
-A project may name its landing gate as acceptance. External-action gates remain.
+Historical acceptance wording records the baseline; see [research index](README.md#acceptance-wording).
 
 Status: Dated implementation research and decision record with a current-state
 mapping
@@ -20,9 +16,7 @@ entire pack belongs here. This review therefore adapts individual ideas only
 when they have a distinct trigger, authority boundary, output and verification
 gate.
 
-The portfolio held 32 skills at this decision's evidence cut-off; later
-consolidations brought it to the count generated in the
-[skill catalogue](../../skills/). Since this decision's
+The portfolio held 32 skills at this decision's evidence cut-off. Since this decision's
 evidence cut-off, `frontend-design` and `frontend-review` consolidated into
 `ui-ux-design`, `autonomous-lab` became `autopilot`, and `skill-audit` and
 `skill-authoring` consolidated into `skill-craft`. The obsolete `agy-headless`

@@ -8,23 +8,24 @@ links and verify volatile provider or model claims at the live runtime.
 
 - [Evidence-based provider routing](evidence-based-provider-routing.md)
 - [Native orchestration and discovery surfaces](native-orchestration-and-discovery-surfaces.md)
-
-- [Model benchmark registry](model-benchmarks/README.md)
-  : benchmark priors per catalogue model and effort; priors only, never acceptance evidence.
+- [Model benchmark registry](model-benchmarks/README.md): benchmark priors per
+  catalogue model and effort; priors only, never acceptance evidence.
 
 ## Dated evidence and decisions
 
-- [OpenCode Go model admission, 28 October 2026](opencode-go-models.md)
-  : provisional MiMo Flash pool membership and catalogue-only MiMo Pro and GLM trials
-- [Agentic delivery harness: 2026 research synthesis](agentic-sdlc-harness-2026.md)
-  : pre-implementation baseline, evidence cut-off 10 July 2026
-- [Agent skill portfolio: 2026 research and refactor](skill-portfolio-practices-2026.md)
-  : dated decision record with a current-name and evaluation mapping
-- [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
-  : descriptive provenance snapshot, not implementation authority
+- [OpenCode Go model admission, 28 October 2026](opencode-go-models.md): provisional MiMo Flash pool membership and catalogue-only MiMo Pro and GLM trials
+- [Agentic delivery harness: 2026 research synthesis](agentic-sdlc-harness-2026.md): pre-implementation baseline, evidence cut-off 10 July 2026
+- [Agent skill portfolio: 2026 research and refactor](skill-portfolio-practices-2026.md): dated decision record with a current-name and evaluation mapping
+- [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md): descriptive provenance snapshot, not implementation authority
 
 The frozen lifecycle routing dataset used by the comparative eval procedure lives at
 [`../evals/lifecycle-routing-2026-07/`](../evals/lifecycle-routing-2026-07/README.md).
+
+## Acceptance wording
+
+Historical human-acceptance wording in research and eval baselines records the
+policy at the time. Current acceptance is owned by
+[`HARNESS.md`](../../HARNESS.md).
 
 ## Current owners
 
@@ -32,7 +33,7 @@ The frozen lifecycle routing dataset used by the comparative eval procedure live
 |---|---|
 | Harness policy and topology | [`HARNESS.md`](../../HARNESS.md) |
 | Current architecture | [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
-| Skill names and catalogue | [Skill catalogue](../../skills/) and `skills/*/SKILL.md` |
+| Skill names | `skills/*/SKILL.md` |
 | Fabric | [Fabric Rust design](../specs/fabric.md) |
 | Provider launch and replay coverage | [Provider recordings](../../tools/front-door/tests/fixtures/providers/README.md) |
 | Current skill-portfolio evaluation | [Evaluation appendix](../evals/skill-portfolio-2026/README.md) |

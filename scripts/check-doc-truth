@@ -196,6 +196,22 @@ def inventory(root, document):
     return missing
 
 
+def check_research_index(root):
+    """Every note under docs/research is linked from its README index."""
+    base = root / "docs/research"
+    index = base / "README.md"
+    if not index.exists():
+        return 0
+    text = index.read_text()
+    errors = 0
+    for path in sorted(base.rglob("*.md")):
+        relative = path.relative_to(base).as_posix()
+        if path != index and relative not in text and path.parent.relative_to(base).as_posix() + "/README.md" not in text:
+            print(f"{index.relative_to(root)}: error: {relative} is not linked from the research index")
+            errors += 1
+    return errors
+
+
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
@@ -291,7 +307,7 @@ def main():
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers; reference warnings remain advisory")
     args = parser.parse_args()
     root = args.root.resolve()
-    command_errors = check_deleted_commands(root)
+    command_errors = check_deleted_commands(root) + check_research_index(root)
     commands = None if args.inventory_only else catalogue(args, root)
     adrs = {int(match[1]) for path in (root / "docs/adr").glob("*.md")
             if (match := re.match(r"(\d+)-", path.name))}

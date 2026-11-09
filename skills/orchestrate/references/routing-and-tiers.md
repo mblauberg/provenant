@@ -47,8 +47,8 @@ missing.
 A missing `verifier` route can substitute `senior`; a missing `web` route
 can substitute `junior`. Neither substitution proves the requested family or
 external research capability. Confirm the evidence actually obtained.
-Replace an unavailable required review leg with an independent reviewer
-through a different lens as HARNESS requires; report any remaining gap.
+For an unavailable required review leg, follow the HARNESS review ladder
+(an independent same-family reviewer for the same lens); report any remaining gap.
 
 Keep unsupported effort values out of requests. Prefer per-run controls;
 changing global provider configuration requires authority for that path and

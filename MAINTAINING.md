@@ -219,11 +219,7 @@ materially distinct.
 
 Trigger fixtures remain mandatory. Contract tests follow the
 machine-enforced-invariant test in **Change a skill** step 7. The eval
-triggers under **Change a skill** apply unchanged. When they fire here, use the
-held-out portfolio ([`docs/evals/skill-portfolio-2026`](docs/evals/skill-portfolio-2026/README.md))
-and lifecycle ([`docs/evals/lifecycle-routing-2026-07`](docs/evals/lifecycle-routing-2026-07/README.md))
-datasets with repeated trials, recording raw
-numerator and denominator, model and harness versions.
+triggers under **Change a skill** apply unchanged.
 
 ## Public and third-party hygiene
 

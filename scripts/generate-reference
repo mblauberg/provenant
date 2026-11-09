@@ -53,6 +53,12 @@ def cell(value):
     return "`" + compact(value).replace("|", "&#124;").replace("`", "&#96;") + "`"
 
 
+def default_text(value):
+    if isinstance(value, bool):
+        return str(value).lower()
+    return "empty" if value in ([], {}) else value
+
+
 def fenced(value):
     return "```json\n" + json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n```\n"
 
@@ -131,7 +137,7 @@ def cli_reference(data, all_commands=False):
         text += ("## Error codes\n\n"
                  "Commands the run owner serves put one of these stable codes in the JSON\n"
                  "envelope's `error.code`; `status` and the exit code give its category. Other\n"
-                 "owners' codes are not listed yet. Match on the code, never on `error.message`,\n"
+                 "owners' codes are in [Schemas](schemas.md#edge-error-codes). Match on the code, never on `error.message`,\n"
                  "which may be reworded.\n\n"
                  "| Code | Meaning |\n|---|---|\n")
         for entry in codes:
@@ -160,8 +166,8 @@ def schema_files(data):
         "These JSON Schemas (draft 2020-12) describe retained version 1 wire records.\n"
         "Their lane rows share the same projection. Historical schema filenames and\n"
         "titles are record identifiers, not current command guidance. Use the\n"
-        "[CLI reference](cli.md) for the graph commands. MCP schemas describe planned\n"
-        "structuredContent; version 2 is not emitted yet.\n\n"
+        "[CLI reference](cli.md) for the graph commands. MCP tools emit schema version 2\n"
+        "as `_meta.\"io.provenant/schemaVersion\"`.\n\n"
         "A non-ok status may carry `error: null` and partial `data`, so the schemas\n"
         "check `data` only for `ok`, `pending` and `waiting`. An unobserved stop may\n"
         "carry only `data: {operation_id}` without `receipts`. Validate failures\n"
@@ -238,7 +244,7 @@ def config_reference(data, all_fields=False):
                 contract = {"default": "balanced", "effect": "Select balanced or economy defaults"}
             if contract is None:
                 raise ValueError(f"documented configuration field has no contract: {name}")
-            text += f"| `{name}` | {contract.get('default', 'unset')} | {contract.get('effect', '')} |\n"
+            text += f"| `{name}` | {default_text(contract.get('default', 'unset'))} | {contract.get('effect', '')} |\n"
         if len(documented) >= 40:
             raise ValueError("compact configuration surface must contain fewer than 40 fields")
         return text
@@ -262,7 +268,7 @@ def config_reference(data, all_fields=False):
                     allowed = ", ".join(str(value) for value in setting.get("values", [setting["type"]]))
                 if auto is not None:
                     allowed += f" or {auto} for auto"
-            text += f"| `{name}` | {setting['default']} | {setting['effect']} ({allowed}). |\n"
+            text += f"| `{name}` | {default_text(setting['default'])} | {setting['effect']} ({allowed}). |\n"
         text += "\n"
     history = data.get("quota_history")
     if history:
