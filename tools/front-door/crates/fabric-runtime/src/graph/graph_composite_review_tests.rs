@@ -136,11 +136,14 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     assert_eq!(lens.state, NodeState::Succeeded);
     let outputs = lens.outputs.as_ref().unwrap();
     assert_eq!(outputs.findings.len(), 3);
-    assert_eq!(outputs.findings[0].severity, "note");
-    assert_eq!(outputs.findings[1].severity, "note");
+    assert_eq!(outputs.findings[0].severity, "blocking");
+    assert_eq!(outputs.findings[1].severity, "blocking");
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
-    assert_eq!(outputs.findings[2].severity, "note");
+    assert_eq!(outputs.findings[2].severity, "high");
+    assert!(outputs.findings.iter().all(|finding| {
+        finding.effective_severity() == "note" && finding.trigger().is_none()
+    }));
     assert_eq!(outputs.findings[2].summary, "valid finding");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
     assert!(
@@ -171,6 +174,14 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
             .iter()
             .any(|w| w.contains("field status"))
     );
+    assert_eq!(composite.findings.len(), 3);
+    for (finding, severity) in composite.findings.iter().zip(["blocking", "blocking", "high"]) {
+        assert_eq!(finding.severity, severity);
+        assert_eq!(finding.effective_severity(), "note");
+        assert!(finding.trigger().is_none());
+        assert!(owner.prompts[3].contains(&format!("\"severity\":\"{severity}\"")));
+        assert!(owner.prompts[3].contains(&finding.file));
+    }
     assert!(owner.prompts[3].contains("malformed finding:"));
     assert!(owner.prompts[3].contains("field status"));
 }
