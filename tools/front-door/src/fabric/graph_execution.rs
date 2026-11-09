@@ -1195,14 +1195,13 @@ impl Factory {
             }
         };
         let mut first_error = None;
-        for target in targets {
+        for mut target in targets {
             if target
                 .host
                 .is_none_or(|host| host == self.context.identity.host)
             {
                 let store = owner.store(cancel)?;
                 let call = owner.call(cancel);
-                let mut target = target;
                 let mut record = store.record(target.attempt, &call).map_err(run_error)?;
                 while let Some(next) = record.superseded_by {
                     target.attempt = next;
