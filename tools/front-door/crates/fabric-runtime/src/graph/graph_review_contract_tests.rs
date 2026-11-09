@@ -1,48 +1,56 @@
-    use super::*;
-    use serde_json::{Value, json};
+use super::*;
+use serde_json::{Value, json};
 
-    fn review(name: &str, id: &str) -> GraphNode {
-        template::Compiler::new(&template::TemplateLibrary::bundled())
-            .compile(&json!({"id":id,"use":name,"route":{"alias":"fixture"}}))
-            .unwrap()
-    }
+fn review(name: &str, id: &str) -> GraphNode {
+    template::Compiler::new(&template::TemplateLibrary::bundled())
+        .compile(&json!({"id":id,"use":name,"route":{"alias":"fixture"}}))
+        .unwrap()
+}
 
-    fn finding() -> Value {
-        json!({"id":"F1","severity":"high","file":"a.rs","line":1,
+fn finding() -> Value {
+    json!({"id":"F1","severity":"high","file":"a.rs","line":1,
             "summary":"The failing path is reachable","status":"open",
             "evidence":"Input x reaches the panic","proposed_fix":"Handle x"})
-    }
+}
 
-    fn answer(findings: Value, verdict: &str) -> String {
-        format!(
-            "```findings\n{}\n```\n{verdict}\n",
-            json!({"schema_version":1,"findings":findings})
-        )
-    }
+fn answer(findings: Value, verdict: &str) -> String {
+    format!(
+        "```findings\n{}\n```\n{verdict}\n",
+        json!({"schema_version":1,"findings":findings})
+    )
+}
 
-    fn panel(topology: &str) -> GraphDocument {
-        let library = template::TemplateLibrary::bundled();
-        let resolvers = std::collections::BTreeMap::from([
-            ("review-topology".into(), vec![topology.to_owned()]),
-            (
-                "review-panel".into(),
-                vec!["correctness".into(), "tests".into()],
-            ),
-            (
-                "review-verifiers".into(),
-                vec!["first".into(), "second".into()],
-            ),
-            ("review-advice-correctness".into(), vec![String::new()]),
-            ("review-advice-tests".into(), vec![String::new()]),
-        ]);
-        let panel = template::Compiler {
-            library: &library,
-            resolvers: &resolvers,
-        }
-        .compile(&json!({"id":"panel","use":"review-panel"}))
-        .unwrap();
-        graph(vec![panel])
+fn panel(topology: &str) -> GraphDocument {
+    panel_with_lenses(topology, &["correctness", "tests"])
+}
+
+fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([
+        ("review-topology".into(), vec![topology.to_owned()]),
+        (
+            "review-panel".into(),
+            lenses.iter().map(|lens| (*lens).to_owned()).collect(),
+        ),
+        (
+            "review-verifiers".into(),
+            vec!["first".into(), "second".into()],
+        ),
+        ("review-advice-correctness".into(), vec![String::new()]),
+        ("review-advice-tests".into(), vec![String::new()]),
+    ]);
+    let mut resolvers = resolvers;
+    for lens in lenses {
+        resolvers.insert(format!("review-advice-{lens}"), vec![String::new()]);
     }
+    let panel = template::Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    }
+    .compile(&json!({"id":"panel","use":"review-panel"}))
+    .unwrap();
+    graph(vec![panel])
+}
 
     #[test]
     fn every_review_topology_preserves_partial_panel_coverage() {
@@ -645,12 +653,62 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
                 .count(),
             1
         );
-        assert!(
-            owner
-                .prompts
-                .iter()
-                .any(|prompt| prompt.contains("only automatic verdict correction"))
+        let retried = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| !node.previous_attempts.is_empty())
+            .unwrap();
+        assert_eq!(retried.id, "panel--lenses--correctness");
+        assert_eq!(
+            retried.state,
+            if corrected {
+                NodeState::Succeeded
+            } else {
+                NodeState::Failed
+            }
         );
+        let correction = owner
+            .prompts
+            .iter()
+            .position(|prompt| prompt.contains("only automatic verdict correction"))
+            .unwrap();
+        assert_eq!(correction, 1);
+        assert_eq!(owner.calls[correction].0.node_id, retried.id);
+        assert_eq!(
+            owner
+                .calls
+                .iter()
+                .filter(|(key, _)| key.node_id == retried.id)
+                .count(),
+            2
+        );
+        for id in ["panel", "panel--lenses"] {
+            let composite = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap();
+            assert_eq!(composite.state, NodeState::Succeeded);
+        }
+        if !corrected {
+            let lenses = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "panel--lenses")
+                .unwrap();
+            assert!(
+                lenses
+                    .outputs
+                    .as_ref()
+                    .unwrap()
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.starts_with("unavailable panel--lenses--correctness:"))
+            );
+        }
         let output = run
             .checkpoint
             .nodes
@@ -755,7 +813,8 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
 
 #[test]
 fn below_minimum_review_keeps_returned_findings_on_replay() {
-    let document: GraphDocument = serde_json::from_value(json!({
+    for export_failure in [false, true] {
+        let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"below-review-minimum","nodes":[{
             "id":"panel","kind":"composite","access":"read_only","composite":{"min_successful":1,"nodes":[{
                 "id":"lenses","kind":"composite","access":"read_only",
@@ -765,31 +824,202 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
             }],"exports":[{"node":"lenses","outputs":["findings","result"]}]}
         }]
     })).unwrap();
+        let mut entry = finding();
+        if export_failure {
+            entry["id"] = json!("x".repeat(outputs::OUTPUT_FIELD_BYTES));
+        }
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([entry]), "VERDICT: FAIL"),
+                ),
+                terminal(AttemptOutcome::AdapterUnavailable),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let boundary = &run.checkpoint.nodes[0];
+        assert_eq!(
+            boundary.advance_error_code.as_deref(),
+            Some("coverage_below_minimum")
+        );
+        if export_failure {
+            assert!(boundary.outputs.is_none());
+        } else {
+            let output = boundary.outputs.as_ref().unwrap();
+            assert_eq!(output.findings.len(), 1);
+            assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
+        }
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+#[test]
+fn correction_admission_failure_is_fenced_and_panel_proceeds() {
+    let document = panel("f0-v0-s0");
+    let (plan, _) = validate_plan(&document).unwrap();
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: plan
+            .nodes
+            .iter()
+            .map(|node| node.prompt.len())
+            .max()
+            .unwrap(),
+        ..Default::default()
+    };
     let mut owner = FakeOwner {
         observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
             terminal_with_result(
                 AttemptOutcome::Succeeded,
-                &answer(json!([finding()]), "VERDICT: FAIL"),
+                &answer(json!([]), "VERDICT: PASS"),
             ),
-            terminal(AttemptOutcome::AdapterUnavailable),
         ]
         .into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let boundary = &run.checkpoint.nodes[0];
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let lens = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel--lenses--correctness")
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Failed);
+    assert!(lens.extra.contains_key("review_verdict_correction_refused"));
+    assert!(lens.previous_attempts.is_empty());
     assert_eq!(
-        boundary.advance_error_code.as_deref(),
-        Some("coverage_below_minimum")
+        owner
+            .calls
+            .iter()
+            .filter(|(key, _)| key.node_id == lens.id)
+            .count(),
+        1
     );
-    let output = boundary.outputs.as_ref().unwrap();
-    assert_eq!(output.findings.len(), 1);
-    assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel")
+        .unwrap();
+    assert_eq!(panel.state, NodeState::Succeeded);
+    assert!(review::partial(panel.outputs.as_ref().unwrap()));
     assert_eq!(
-        advance(&document, &mut owner, &mut journal)
-            .unwrap()
-            .checkpoint,
+        advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default()
+        )
+        .unwrap()
+        .checkpoint,
         run.checkpoint
     );
+}
+
+#[test]
+fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
+    let document = panel_with_lenses(
+        "f0-v1-s1",
+        &["correctness", "tests", "security", "design", "operations"],
+    );
+    let entries: Vec<_> = (0..3)
+        .map(|i| {
+            let mut entry = finding();
+            entry["id"] = json!(format!("F{i}"));
+            entry["evidence"] =
+                json!("A checked request reaches an unchecked dispatch state. ".repeat(10));
+            entry["proposed_fix"] =
+                json!("Validate the state and preserve the original error. ".repeat(10));
+            entry
+        })
+        .collect();
+    let mut observations = VecDeque::new();
+    let mut ids = Vec::new();
+    for lens in 0..5 {
+        let entries: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let mut entry = entry.clone();
+                let id = format!("F{lens}-{i}");
+                entry["id"] = json!(id);
+                ids.push(id);
+                entry
+            })
+            .collect();
+        observations.push_back(terminal_with_result(
+            AttemptOutcome::Succeeded,
+            &answer(json!(entries), "VERDICT: FAIL"),
+        ));
+    }
+    let verified: Vec<_> = ids.iter().map(|id| json!({"id":id,"verification":"upheld","reason":"Reproduced from the pinned source"})).collect();
+    for _ in 0..2 {
+        observations.push_back(terminal_with_result(
+            AttemptOutcome::Succeeded,
+            &answer(json!(verified), "VERDICT: FAIL"),
+        ));
+    }
+    let accepted: Vec<_> = ids.iter().map(|id| json!({"id":id,"disposition":"accepted","reason":"The unchecked dispatch remains reachable"})).collect();
+    observations.push_back(terminal_with_result(
+        AttemptOutcome::Succeeded,
+        &answer(json!(accepted), "VERDICT: FAIL"),
+    ));
+    let mut owner = FakeOwner {
+        observations,
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(owner.observations.is_empty());
+    assert!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.advance_error_code.is_none()),
+        "{:?}",
+        run.checkpoint.nodes
+    );
+    let (plan, positions) = validate_plan(&document).unwrap();
+    let limits = crate::config::GraphLimits::default();
+    let mut verifiers = 0;
+    let mut synthesis = 0;
+    for node in &plan.nodes {
+        if template::review_verifier(node)
+            || template::review_behaviour(node) == Some(template::ReviewBehaviour::Synthesis)
+        {
+            let (prompt, overflow) = render_input(
+                node,
+                &plan,
+                &run.checkpoint,
+                &positions,
+                limits.node_prompt_bytes,
+            );
+            assert!(!overflow, "{}: {} bytes", node.id, prompt.len());
+            assert!(prompt.len() < limits.node_prompt_bytes);
+            if template::review_verifier(node) {
+                verifiers += 1;
+            } else {
+                synthesis += 1;
+            }
+        }
+    }
+    assert_eq!(verifiers, 2);
+    assert_eq!(synthesis, 1);
 }

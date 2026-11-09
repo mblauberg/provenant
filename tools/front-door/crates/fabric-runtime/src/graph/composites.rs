@@ -897,7 +897,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     let mut exported = None;
     let mut export_error = None;
     if state == NodeState::Succeeded
-        || (state == NodeState::Failed && review::composite_review(spec, plan, positions))
+        || (shortfall.is_some() && review::composite_review(spec, plan, positions))
     {
         match outputs(spec, plan, checkpoint, positions, false) {
             Ok(mut value) => {
@@ -922,12 +922,12 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         progress.state = state;
         progress.outputs = exported;
         progress.truncation_cause = truncation_cause;
-        if let Some(reason) = export_error {
-            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
-            progress.advance_error = Some(reason);
-        } else if let Some(reason) = shortfall {
+        if let Some(reason) = shortfall {
             progress.advance_error_code = Some("coverage_below_minimum".into());
             progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        } else if let Some(reason) = export_error {
+            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
+            progress.advance_error = Some(reason);
         }
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
@@ -1039,15 +1039,7 @@ pub(super) fn validate_progress(
         .composite
         .as_ref()
         .map(|spec| outputs(spec, plan, checkpoint, positions, false));
-    let failed_review = progress.state == NodeState::Failed
-        && state == NodeState::Failed
-        && node
-            .composite
-            .as_ref()
-            .is_some_and(|spec| review::composite_review(spec, plan, positions));
-    if (failed_for_coverage || failed_review)
-        && let Some(Ok((output, _))) = &mut export
-    {
+    if failed_for_coverage && let Some(Ok((output, _))) = &mut export {
         review::mark_partial(output);
     }
     if progress
@@ -1067,7 +1059,6 @@ pub(super) fn validate_progress(
     let valid = progress.attempts.is_empty()
         && (progress.state == NodeState::Succeeded
             || failed_for_coverage
-            || failed_review
             || progress.truncation_cause.is_none())
         && progress.gate.is_none()
         && progress.ci.is_none()
@@ -1075,7 +1066,7 @@ pub(super) fn validate_progress(
         && progress.source_commit.is_none()
         && match progress.state {
             NodeState::Failed => {
-                ((failed_for_coverage || failed_review)
+                (failed_for_coverage
                     && export
                         .as_ref()
                         .and_then(|value| value.as_ref().ok())

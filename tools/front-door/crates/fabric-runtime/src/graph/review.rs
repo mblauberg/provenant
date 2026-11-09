@@ -1,6 +1,8 @@
 //! Deterministic contract for review template results and coverage.
 use super::*;
 
+const CORRECTION_REFUSED: &str = "review_verdict_correction_refused";
+
 pub(super) const PARTIAL: &str = "review_partial";
 
 pub(super) fn partial(outputs: &NodeOutputs) -> bool {
@@ -172,6 +174,9 @@ pub(super) fn correct_verdict(
     let Some((index, node)) = plan.nodes.iter().enumerate().find(|(index, node)| {
         template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
             && checkpoint.nodes[*index].state == NodeState::Failed
+            && !checkpoint.nodes[*index]
+                .extra
+                .contains_key(CORRECTION_REFUSED)
             && checkpoint.nodes[*index].advance_error_code.as_deref()
                 == Some("review_verdict_invalid")
             && !checkpoint
@@ -190,7 +195,7 @@ pub(super) fn correct_verdict(
         "{}\n\nThe previous reply had an invalid final verdict. Return the findings and end with exactly one final line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. Only the shared closed handoff block may follow. This is the only automatic verdict correction.",
         node.prompt
     );
-    patch::correct_review_verdict(
+    if let Err(error) = patch::correct_review_verdict(
         &mut LiveGraph {
             document,
             checkpoint: &mut next,
@@ -204,7 +209,16 @@ pub(super) fn correct_verdict(
             scan: &patch::scan_for_secrets,
             journal: None,
         },
-    )?;
+    ) {
+        // Admission is atomic: keep the failed attempt and fence further
+        // automatic corrections so coverage can settle on subsequent advances.
+        next = checkpoint.clone();
+        next.nodes[index].extra.insert(
+            CORRECTION_REFUSED.into(),
+            bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES).into(),
+        );
+        return Ok(Some(next));
+    }
     transitions::retain_automatic_retry_accounting(
         &checkpoint.nodes[index],
         &mut next.nodes[index],
