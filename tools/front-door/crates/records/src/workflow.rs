@@ -54,7 +54,7 @@ pub struct RiskFactors {
 #[serde(deny_unknown_fields)]
 pub struct RiskPolicy {
     pub minimum: RiskTier,
-    /// Compiled configured boundary patterns; bundled floors remain binding.
+    /// Matched boundary floors, keyed by repository-relative changed path.
     #[serde(default)]
     pub boundary_floors: std::collections::BTreeMap<String, RiskTier>,
 }

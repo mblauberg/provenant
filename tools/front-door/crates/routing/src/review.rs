@@ -639,6 +639,32 @@ impl<T: Clone> Select<T> {
     }
 }
 impl ReviewConfig {
+    /// Compile matched workflow boundary floors at the composition edge. Bundled
+    /// boundaries stay binding when configured floors are extended or overridden.
+    pub fn workflow_risk_policy(
+        &self,
+        paths: &[String],
+    ) -> provenant_records::workflow::RiskPolicy {
+        use provenant_records::workflow::{RiskPolicy, RiskTier};
+        let bundled = Self::default();
+        let mut policy = RiskPolicy::default();
+        for path in paths {
+            let mut tier = RiskTier::Routine;
+            for review in [&bundled, self] {
+                let floor = review.path_floors(std::slice::from_ref(path));
+                let matched = match floor.tier.as_deref() {
+                    Some("terminal") => RiskTier::Terminal,
+                    Some("crucial") => RiskTier::Crucial,
+                    _ => RiskTier::Routine,
+                };
+                tier = std::cmp::max(tier, matched);
+            }
+            if tier >= RiskTier::Crucial {
+                policy.boundary_floors.insert(path.clone(), tier);
+            }
+        }
+        policy
+    }
     /// The configured minimum coverage for each changed path. Routine applies
     /// only when no other class matches; unmatched paths use unknown.
     pub fn path_floors(&self, paths: &[String]) -> AppliedFloors {
@@ -1391,6 +1417,32 @@ pub fn diff_has_test_markers(diff: &str) -> bool {
 mod tests {
     use super::*;
     use provenant_config::DomainConfig;
+
+    #[test]
+    fn workflow_policy_keeps_bundled_and_configured_boundary_paths() {
+        use provenant_records::workflow::RiskTier;
+        let mut review = ReviewConfig::default();
+        let mut custom = review.floors["security"].clone();
+        custom.paths = vec!["**/special/**".into()];
+        custom.tier = "terminal".into();
+        review.floors.insert("custom".into(), custom);
+        review.floors.remove("security");
+        let paths = vec![
+            "src/credentials/store.rs".into(),
+            "src/special/a.rs".into(),
+            "src/build_graph.rs".into(),
+        ];
+        let policy = review.workflow_risk_policy(&paths);
+        assert_eq!(
+            policy.boundary_floors.get(&paths[0]),
+            Some(&RiskTier::Crucial)
+        );
+        assert_eq!(
+            policy.boundary_floors.get(&paths[1]),
+            Some(&RiskTier::Terminal)
+        );
+        assert!(!policy.boundary_floors.contains_key(&paths[2]));
+    }
 
     #[test]
     fn size_and_kind_choose_shapes_with_risk_floor() {
