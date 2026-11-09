@@ -1695,6 +1695,10 @@ mod tests {
                 "provenant_lane_git",
             ),
             (
+                "tools/front-door/crates/confinement/src/run_config.rs",
+                "provenant_lane_git",
+            ),
+            (
                 "tools/front-door/crates/confinement/src/permissions/grants.rs",
                 "provenant_lane_git",
             ),

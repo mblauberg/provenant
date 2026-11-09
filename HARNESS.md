@@ -81,7 +81,7 @@ evidence back to scope. `deliver` owns the outcome report for non-software work,
 compaction and retention.
 
 The user directs the work at the start and at real one-way doors. User approval
-is required for specs and one-way doors, risk-tier downgrades, unresolved
+is required for specs and one-way doors, unresolved
 acceptance criteria, destructive or irreversible actions, external
 communications and production promotion.
 
@@ -96,7 +96,7 @@ project may name its own landing gate as acceptance.
 `scope` emits the minimum risk tier (`routine`, `substantial`, `crucial` or
 `terminal`) from the factor floors below, together with
 machine-readable authority covering paths, actions, disclosure, secrets,
-deployment, irreversible actions, expiry and the approver. Delegation can only
+deployment, irreversible actions, expiry and the approver. The chair may lower a derived tier outside protected boundaries with a recorded reason; boundary floors and irreversible external effects remain binding. Delegation can only
 narrow that authority. Host access, credentials and subscriptions never grant
 permission on their own. Standing authority for commits, pushes and pull
 requests on implementation branches comes from the global Git rule; a

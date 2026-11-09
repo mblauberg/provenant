@@ -1,10 +1,12 @@
-//! Derive risk from typed factors, with originating user authority for downgrades.
+//! Derive risk from typed factors, with recorded authority for downgrades.
 use provenant_records::workflow::*;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RiskError {
-    #[error("lowering derived risk requires originating user approval")]
+    #[error("lowering derived risk requires recorded chair authority")]
     ApprovalRequired,
+    #[error("a protected boundary cannot be downgraded below crucial")]
+    BoundaryFloor,
     #[error(transparent)]
     Record(#[from] RecordError),
     #[error("stored risk does not match the current factors and policy")]
@@ -13,10 +15,8 @@ pub enum RiskError {
 pub fn minimum(factors: &RiskFactors, policy: &RiskPolicy) -> RiskTier {
     [
         policy.minimum,
-        factors.blast_radius.minimum(),
         factors.reversibility.minimum(),
         factors.data_sensitivity.minimum(),
-        factors.migration.minimum(),
         factors.oracle_quality.minimum(),
         factors.external_effects.minimum(),
         factors.critical_surface.minimum(),
@@ -31,6 +31,12 @@ pub fn assess(
     approval: Option<&UserApproval>,
 ) -> Result<RiskRecord, RiskError> {
     let derived = minimum(&factors, policy);
+    if tier < RiskTier::Crucial
+        && (factors.critical_surface == CriticalSurface::AuthSecurity
+            || factors.external_effects == ExternalEffects::Irreversible)
+    {
+        return Err(RiskError::BoundaryFloor);
+    }
     let downgrade_approval = if tier < derived {
         let approval = approval.ok_or(RiskError::ApprovalRequired)?;
         Some(ApprovalRef {
@@ -71,6 +77,30 @@ mod tests {
         }
     }
     #[test]
+    fn size_and_migration_do_not_raise_risk() {
+        let mut f = factors();
+        f.critical_surface = CriticalSurface::None;
+        f.blast_radius = BlastRadius::Production;
+        f.migration = Migration::Destructive;
+        assert_eq!(minimum(&f, &RiskPolicy::default()), RiskTier::Routine);
+    }
+
+    #[test]
+    fn protected_factors_cannot_be_downgraded() {
+        let mut f = factors();
+        f.critical_surface = CriticalSurface::AuthSecurity;
+        assert_eq!(
+            assess(f.clone(), RiskTier::Routine, &RiskPolicy::default(), None),
+            Err(RiskError::BoundaryFloor)
+        );
+        f.critical_surface = CriticalSurface::None;
+        f.external_effects = ExternalEffects::Irreversible;
+        assert_eq!(
+            assess(f, RiskTier::Routine, &RiskPolicy::default(), None),
+            Err(RiskError::BoundaryFloor)
+        );
+    }
+    #[test]
     fn strongest_factor_and_policy_floor_determine_minimum() {
         assert_eq!(
             minimum(&factors(), &RiskPolicy::default()),
@@ -101,7 +131,7 @@ mod approval_tests {
             reversibility: Reversibility::Easy,
             data_sensitivity: DataSensitivity::Internal,
             migration: Migration::None,
-            oracle_quality: OracleQuality::Strong,
+            oracle_quality: OracleQuality::Weak,
             external_effects: ExternalEffects::None,
             critical_surface: CriticalSurface::None,
         };
@@ -122,7 +152,7 @@ mod approval_tests {
             },
         };
         let record = assess(factors, RiskTier::Substantial, &policy, Some(&approval)).unwrap();
-        assert_eq!(record.derived(), RiskTier::Terminal);
+        assert_eq!(record.derived(), RiskTier::Crucial);
         assert!(validate(&record, &policy, Some(&approval)).is_ok());
         assert_eq!(
             validate(&record, &policy, None),

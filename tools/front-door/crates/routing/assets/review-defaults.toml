@@ -91,6 +91,8 @@ paths = [
   "tools/front-door/crates/confinement/src/worktrees.rs",
   "tools/front-door/crates/confinement/src/worktrees/**",
   "tools/front-door/crates/confinement/src/permissions/**",
+  # Resolves mandatory credential and Git protections for each launch.
+  "tools/front-door/crates/confinement/src/run_config.rs",
   "tools/front-door/crates/confinement/src/push.rs",
   "tools/front-door/crates/confinement/src/transport.rs",
   "tools/front-door/crates/confinement/src/repo.rs",
