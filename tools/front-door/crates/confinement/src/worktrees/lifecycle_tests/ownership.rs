@@ -1004,10 +1004,25 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
 
 #[test]
 fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(), Box<dyn Error>> {
+    transient_holder_is_reobserved_but_persistent_holder_refuses(ProcessEvidenceKind::OtherHeldPath)
+}
+
+#[test]
+fn transient_working_directory_holder_is_reobserved_but_persistent_holder_refuses()
+-> Result<(), Box<dyn Error>> {
+    transient_holder_is_reobserved_but_persistent_holder_refuses(
+        ProcessEvidenceKind::WorkingDirectory,
+    )
+}
+
+fn transient_holder_is_reobserved_but_persistent_holder_refuses(
+    kind: ProcessEvidenceKind,
+) -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Holder {
         calls: AtomicUsize,
         persistent: bool,
+        kind: ProcessEvidenceKind,
     }
     impl WorkerObserver for Holder {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
@@ -1021,7 +1036,7 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
                             process: Some(ObservedProcess::new(
                                 42,
                                 Some("holder".into()),
-                                ProcessEvidenceKind::OtherHeldPath,
+                                self.kind,
                             )),
                         }
                     } else {
@@ -1051,6 +1066,7 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
     let transient = Holder {
         calls: AtomicUsize::new(0),
         persistent: false,
+        kind,
     };
     context.workers = &transient;
     assert!(matches!(
@@ -1064,6 +1080,7 @@ fn transient_held_path_is_reobserved_but_persistent_holder_refuses() -> Result<(
     let persistent = Holder {
         calls: AtomicUsize::new(0),
         persistent: true,
+        kind,
     };
     context.workers = &persistent;
     context.lock_budget = WaitBudget::up_to(

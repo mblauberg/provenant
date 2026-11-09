@@ -450,9 +450,11 @@ fn reobserve_held_path(
     pause: &dyn provenant_core::Pause,
 ) -> Result<Occupancy, WorktreeError> {
     loop {
-        if !matches!(&observed, Occupancy::Observed { process: Some(process) }
-            if process.kind == ProcessEvidenceKind::OtherHeldPath)
-        {
+        // Any positive holder is re-checked within the budget, whatever the
+        // evidence kind: a checkout hook's short-lived process still has its
+        // working directory in a fresh worktree. No process name is exempt;
+        // a holder still present at the deadline refuses.
+        if !matches!(&observed, Occupancy::Observed { .. }) {
             break;
         }
         if cancel.is_cancelled() {
