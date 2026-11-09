@@ -171,8 +171,9 @@ selected lenses also review closure.
 
 An evidenced `design_defect` or a recurring blocking finding escalates early.
 Exhausting the repair limit takes the same read-only principal `design` path,
-returning the root constraint, two or three options, the smallest viable slice
-and acceptance evidence. Its findings block includes `repair_design` with
+returning the root constraint, two or three options, a comparison of the
+structural fix with the small one with a recommendation, and acceptance
+evidence. Its findings block includes `repair_design` with
 boolean `within_scope` and `one_way_door` fields. The host sends an idempotent,
 non-blocking owner notification to the graph decision session (or the graph ID
 when no session was supplied). A host `decide` node permits the continuation

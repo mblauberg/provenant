@@ -41,7 +41,10 @@ risk tier, settling an authority question or changing memory policy.
   included, once their work has landed, been superseded or been abandoned;
   record each removed tip and never remove one a live writer holds or one
   with uncommitted edits. Rewriting, deleting or pushing to a shared branch
-  needs the user's authority.
+  needs the user's authority. A change that only repairs CI or restores a red
+  default branch merges once required checks pass, without waiting for review,
+  because a broken pipeline stalls all other work; weakening a check does not
+  qualify.
 - **Checks.** Locally, run only fast targeted checks: lint, type checks and the
   tests you touched. Full suites and release scans run in CI: push the branch,
   open the pull request, run the lens review its risk requires (`code-review`)
