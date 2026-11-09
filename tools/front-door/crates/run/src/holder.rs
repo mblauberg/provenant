@@ -1975,6 +1975,7 @@ impl RunStore {
             && task.deliver.is_none()
             && task.profile.knobs.get("lanes.receipts") == Some(&serde_json::json!("none"))
         {
+            decoded.complete &= result.len() + UNDELIVERED_NOTICE.len() <= RESULT_LIMIT as usize;
             result = undelivered_writer_result(&result);
         }
         let redaction_failed = result_redaction_failed || session_redaction_failed;
@@ -2294,8 +2295,16 @@ fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
     text
 }
 
+const UNDELIVERED_NOTICE: &str = "No delivery was requested; this work has not been delivered.\n\n";
+
 fn undelivered_writer_result(result: &str) -> String {
-    format!("No delivery was requested; this work has not been delivered.\n\n{result}")
+    let mut end = result
+        .len()
+        .min(RESULT_LIMIT as usize - UNDELIVERED_NOTICE.len());
+    while !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{UNDELIVERED_NOTICE}{}", &result[..end])
 }
 
 pub const EMPTY_WRITER_RESULT: &str = "[the provider sent no final message]";
