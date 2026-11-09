@@ -43,9 +43,14 @@ pub fn new(
     now: UtcMicros,
     risk_policy: &RiskPolicy,
     review_policy: &ReviewPolicy,
-    downgrade: Option<&UserApproval>,
+    downgrade: Option<&ChairDowngrade>,
 ) -> Result<DeliveryReceipt, ReceiptError> {
-    risk::validate(&input.risk, risk_policy, downgrade)?;
+    risk::validate(
+        &input.risk,
+        risk_policy,
+        downgrade,
+        input.risk.changed_paths(),
+    )?;
     review::validate_policy(review_policy)?;
     let receipt = DeliveryReceipt::new(
         input.delivery_id,
@@ -130,7 +135,14 @@ mod tests {
                 extra: Default::default(),
                 actor_id: ActorId::from_bytes([5; 16]),
             }],
-            risk: risk::assess(factors, RiskTier::Routine, &RiskPolicy::default(), None).unwrap(),
+            risk: risk::assess(
+                factors,
+                RiskTier::Routine,
+                &RiskPolicy::default(),
+                None,
+                &[],
+            )
+            .unwrap(),
         }
     }
     fn receipt() -> DeliveryReceipt {
@@ -196,9 +208,9 @@ mod tests {
         });
         assert!(validate(&r).is_ok());
     }
-    fn approval_ref() -> ApprovalRef {
-        ApprovalRef {
-            extra: Default::default(),
+    fn approval_ref() -> ChairDowngrade {
+        ChairDowngrade {
+            reason: "Fixture judgement".into(),
             actor_id: ActorId::from_bytes([8; 16]),
             evidence: EvidenceRef {
                 extra: Default::default(),

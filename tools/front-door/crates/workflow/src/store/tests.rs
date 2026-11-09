@@ -46,7 +46,14 @@ fn setup() -> (tempfile::TempDir, ReceiptStore, DeliveryReceipt) {
             extra: Default::default(),
             actor_id: ActorId::from_bytes([5; 16]),
         }],
-        risk: risk::assess(factors, RiskTier::Routine, &RiskPolicy::default(), None).unwrap(),
+        risk: risk::assess(
+            factors,
+            RiskTier::Routine,
+            &RiskPolicy::default(),
+            None,
+            &[],
+        )
+        .unwrap(),
     };
     let receipt = receipt::new(
         input,
@@ -77,6 +84,7 @@ fn save(
             revision,
             SaveContext {
                 risk_policy: &RiskPolicy::default(),
+                changed_paths: &[],
                 downgrade_approval: None,
                 subject: r.subject(),
                 valid_until: time(1000),
@@ -154,7 +162,8 @@ fn refuses_stale_subject_identity_versions_and_bounds_without_publication() {
                 subject: first.subject(),
                 valid_until: time(1000),
                 risk_policy: &RiskPolicy::default(),
-                downgrade_approval: None
+                changed_paths: &[],
+                downgrade_approval: None,
             },
             WaitBudget::cli(stale_clock.mono_now(), 1).unwrap(),
             &CancelToken::new(),
@@ -234,6 +243,7 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
     let policy = RiskPolicy::default();
     let context = || SaveContext {
         risk_policy: &policy,
+        changed_paths: &[],
         downgrade_approval: None,
         subject: first.subject(),
         valid_until: time(1000),
@@ -380,6 +390,7 @@ fn clock_regression_is_diagnosed_and_expiry_uses_unclamped_time() {
             1,
             SaveContext {
                 risk_policy: &RiskPolicy::default(),
+                changed_paths: &[],
                 downgrade_approval: None,
                 subject: first.subject(),
                 valid_until: time(18),
@@ -404,6 +415,7 @@ fn clock_regression_is_diagnosed_and_expiry_uses_unclamped_time() {
             2,
             SaveContext {
                 risk_policy: &RiskPolicy::default(),
+                changed_paths: &[],
                 downgrade_approval: None,
                 subject: first.subject(),
                 valid_until: time(15)
@@ -473,6 +485,7 @@ fn time_is_read_under_lock_and_cancellation_before_staging_has_no_effect() {
                 1,
                 SaveContext {
                     risk_policy: &RiskPolicy::default(),
+                    changed_paths: &[],
                     downgrade_approval: None,
                     subject: first.subject(),
                     valid_until: time(1000),
@@ -555,6 +568,7 @@ fn changing_subject_resets_decision_and_requires_fresh_review() {
             3,
             SaveContext {
                 risk_policy: &RiskPolicy::default(),
+                changed_paths: &[],
                 downgrade_approval: None,
                 subject: first.subject(),
                 valid_until: time(1000)
@@ -581,13 +595,15 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
         subject: first.subject(),
         valid_until: time(1000),
         risk_policy: &policy,
+        changed_paths: &["docs/change.md".into()],
         downgrade_approval: None,
     };
     assert!(matches!(
         store.save(&first, 1, context, budget, &CancelToken::new(), &clock),
         Err(StoreError::Risk(_))
     ));
-    let approval = UserApproval {
+    let approval = ChairDowngrade {
+        reason: "Fixture judgement".into(),
         actor_id: ActorId::from_bytes([9; 16]),
         evidence: EvidenceRef {
             extra: Default::default(),
@@ -600,12 +616,13 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
         RiskTier::Routine,
         &policy,
         Some(&approval),
+        &["docs/change.md".into()],
     )
     .unwrap();
     let downgraded = changed(&first, |v| {
         v["risk"] = serde_json::to_value(approved_risk).unwrap()
     });
-    let mismatched = UserApproval {
+    let mismatched = ChairDowngrade {
         actor_id: ActorId::from_bytes([8; 16]),
         ..approval.clone()
     };
@@ -614,6 +631,7 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
             subject: first.subject(),
             valid_until: time(1000),
             risk_policy: &policy,
+            changed_paths: &["docs/change.md".into()],
             downgrade_approval: supplied,
         };
         assert!(matches!(
@@ -625,6 +643,7 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
         subject: first.subject(),
         valid_until: time(1000),
         risk_policy: &policy,
+        changed_paths: &["docs/change.md".into()],
         downgrade_approval: Some(&approval),
     };
     assert_eq!(

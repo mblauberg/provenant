@@ -5,8 +5,12 @@ use provenant_records::workflow::*;
 pub enum RiskError {
     #[error("lowering derived risk requires recorded chair authority")]
     ApprovalRequired,
-    #[error("a protected boundary cannot be downgraded below crucial")]
+    #[error("a protected factor floor cannot be downgraded")]
     BoundaryFloor,
+    #[error("boundary path cannot be downgraded: {0}")]
+    BoundaryPath(String),
+    #[error("changed paths must be nonempty and repository-relative for a downgrade")]
+    InvalidPaths,
     #[error(transparent)]
     Record(#[from] RecordError),
     #[error("stored risk does not match the current factors and policy")]
@@ -28,34 +32,62 @@ pub fn assess(
     factors: RiskFactors,
     tier: RiskTier,
     policy: &RiskPolicy,
-    approval: Option<&UserApproval>,
+    approval: Option<&ChairDowngrade>,
+    changed_paths: &[String],
 ) -> Result<RiskRecord, RiskError> {
     let derived = minimum(&factors, policy);
-    if tier < RiskTier::Crucial
-        && (factors.critical_surface == CriticalSurface::AuthSecurity
-            || factors.external_effects == ExternalEffects::Irreversible)
+    if (tier < RiskTier::Crucial && factors.critical_surface == CriticalSurface::AuthSecurity)
+        || (tier < RiskTier::Terminal && factors.external_effects == ExternalEffects::Irreversible)
     {
         return Err(RiskError::BoundaryFloor);
     }
     let downgrade_approval = if tier < derived {
         let approval = approval.ok_or(RiskError::ApprovalRequired)?;
-        Some(ApprovalRef {
-            extra: Default::default(),
-            actor_id: approval.actor_id,
-            evidence: approval.evidence.clone(),
-        })
+        if changed_paths.is_empty()
+            || changed_paths.iter().any(|path| {
+                provenant_core::RelativePath::parse(path).is_err()
+                    || path.contains('\\')
+                    || path
+                        .split('/')
+                        .any(|part| part == "." || part == ".." || part.is_empty())
+            })
+        {
+            return Err(RiskError::InvalidPaths);
+        }
+        let review = provenant_routing::ReviewConfig::default();
+        for path in changed_paths {
+            if matches!(
+                review
+                    .path_floors(std::slice::from_ref(path))
+                    .tier
+                    .as_deref(),
+                Some("crucial" | "terminal")
+            ) {
+                return Err(RiskError::BoundaryPath(path.clone()));
+            }
+        }
+        Some(approval.clone())
     } else {
         None
     };
-    Ok(RiskRecord::new(factors, derived, tier, downgrade_approval)?)
+    Ok(RiskRecord::new(factors, derived, tier, downgrade_approval)?
+        .with_changed_paths(changed_paths.to_vec()))
 }
 /// Recompute under the current settings; decoded claims never supply authority.
 pub fn validate(
     record: &RiskRecord,
     policy: &RiskPolicy,
-    approval: Option<&UserApproval>,
+    approval: Option<&ChairDowngrade>,
+    changed_paths: &[String],
 ) -> Result<(), RiskError> {
-    if assess(record.factors().clone(), record.tier(), policy, approval)? != *record {
+    if assess(
+        record.factors().clone(),
+        record.tier(),
+        policy,
+        approval,
+        changed_paths,
+    )? != *record
+    {
         return Err(RiskError::Mismatch);
     }
     Ok(())
@@ -64,7 +96,7 @@ pub fn validate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn factors() -> RiskFactors {
+    pub(super) fn factors() -> RiskFactors {
         RiskFactors {
             extra: Default::default(),
             blast_radius: BlastRadius::Local,
@@ -90,13 +122,19 @@ mod tests {
         let mut f = factors();
         f.critical_surface = CriticalSurface::AuthSecurity;
         assert_eq!(
-            assess(f.clone(), RiskTier::Routine, &RiskPolicy::default(), None),
+            assess(
+                f.clone(),
+                RiskTier::Routine,
+                &RiskPolicy::default(),
+                None,
+                &[]
+            ),
             Err(RiskError::BoundaryFloor)
         );
         f.critical_surface = CriticalSurface::None;
         f.external_effects = ExternalEffects::Irreversible;
         assert_eq!(
-            assess(f, RiskTier::Routine, &RiskPolicy::default(), None),
+            assess(f, RiskTier::Routine, &RiskPolicy::default(), None, &[]),
             Err(RiskError::BoundaryFloor)
         );
     }
@@ -124,7 +162,7 @@ mod approval_tests {
     use provenant_core::{ActorId, Digest, RelativePath};
     use provenant_records::PathWire;
     #[test]
-    fn lowering_risk_requires_matching_current_user_authority() {
+    fn recorded_chair_downgrade_lowers_nonboundary_risk() {
         let factors = RiskFactors {
             extra: Default::default(),
             blast_radius: BlastRadius::Production,
@@ -137,10 +175,17 @@ mod approval_tests {
         };
         let policy = RiskPolicy::default();
         assert_eq!(
-            assess(factors.clone(), RiskTier::Routine, &policy, None),
+            assess(
+                factors.clone(),
+                RiskTier::Routine,
+                &policy,
+                None,
+                &["src/build_graph.rs".into()]
+            ),
             Err(RiskError::ApprovalRequired)
         );
-        let approval = UserApproval {
+        let approval = ChairDowngrade {
+            reason: "Weak oracle is covered by manual inspection".into(),
             actor_id: ActorId::from_bytes([1; 16]),
             evidence: EvidenceRef {
                 extra: Default::default(),
@@ -151,20 +196,115 @@ mod approval_tests {
                 digest: Digest::from_bytes([2; 32]),
             },
         };
-        let record = assess(factors, RiskTier::Substantial, &policy, Some(&approval)).unwrap();
+        let record = assess(
+            factors,
+            RiskTier::Substantial,
+            &policy,
+            Some(&approval),
+            &["src/build_graph.rs".into()],
+        )
+        .unwrap();
         assert_eq!(record.derived(), RiskTier::Crucial);
-        assert!(validate(&record, &policy, Some(&approval)).is_ok());
+        assert_eq!(record.tier(), RiskTier::Substantial);
+        assert_eq!(record.downgrade_approval(), Some(&approval));
+        assert_eq!(record.changed_paths(), &["src/build_graph.rs"]);
         assert_eq!(
-            validate(&record, &policy, None),
+            validate(&record, &policy, Some(&approval), &["src/other.rs".into()]),
+            Err(RiskError::Mismatch)
+        );
+        assert!(
+            validate(
+                &record,
+                &policy,
+                Some(&approval),
+                &["src/build_graph.rs".into()]
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate(&record, &policy, None, &["src/build_graph.rs".into()]),
             Err(RiskError::ApprovalRequired)
         );
-        let different = UserApproval {
+        let different = ChairDowngrade {
             actor_id: ActorId::from_bytes([3; 16]),
             ..approval
         };
         assert_eq!(
-            validate(&record, &policy, Some(&different)),
+            validate(
+                &record,
+                &policy,
+                Some(&different),
+                &["src/build_graph.rs".into()]
+            ),
             Err(RiskError::Mismatch)
+        );
+    }
+    #[test]
+    fn recorded_chair_downgrade_refuses_boundary_paths() {
+        let mut factors = super::tests::factors();
+        factors.critical_surface = CriticalSurface::None;
+        factors.oracle_quality = OracleQuality::Weak;
+        let approval = ChairDowngrade {
+            actor_id: ActorId::from_bytes([1; 16]),
+            reason: "Manual inspection covers the weak oracle".into(),
+            evidence: EvidenceRef {
+                extra: Default::default(),
+                path: PathWire::from_relative(
+                    &RelativePath::parse("authority/reason.json").unwrap(),
+                )
+                .unwrap(),
+                digest: Digest::from_bytes([2; 32]),
+            },
+        };
+        for path in [
+            "src/credentials/store.rs",
+            "tools/front-door/crates/confinement/src/run_config.rs",
+            "tools/front-door/crates/run/src/objects/view.rs",
+            "tools/front-door/src/pr/landing/publish.rs",
+            ".github/workflows/release.yml",
+        ] {
+            // A mixed diff, including a rename's old boundary path, stays protected.
+            let paths = vec![
+                "docs/readme.md".into(),
+                path.into(),
+                "src/new_name.rs".into(),
+            ];
+            assert_eq!(
+                assess(
+                    factors.clone(),
+                    RiskTier::Routine,
+                    &RiskPolicy::default(),
+                    Some(&approval),
+                    &paths
+                ),
+                Err(RiskError::BoundaryPath(path.into()))
+            );
+        }
+        for paths in [vec![], vec!["../credentials/store.rs".into()]] {
+            assert_eq!(
+                assess(
+                    factors.clone(),
+                    RiskTier::Routine,
+                    &RiskPolicy::default(),
+                    Some(&approval),
+                    &paths
+                ),
+                Err(RiskError::InvalidPaths)
+            );
+        }
+        let blank = ChairDowngrade {
+            reason: " ".into(),
+            ..approval
+        };
+        assert_eq!(
+            assess(
+                factors,
+                RiskTier::Routine,
+                &RiskPolicy::default(),
+                Some(&blank),
+                &["src/plain.rs".into()]
+            ),
+            Err(RiskError::Record(RecordError::RiskApproval))
         );
     }
 }

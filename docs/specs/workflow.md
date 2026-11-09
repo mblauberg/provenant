@@ -114,7 +114,13 @@ chair-supplied `LegBlocker` and `user_approval` references.
 
 A receipt records the chair's decision and is not a merge certificate. A
 changed subject resets the decision and needs fresh review. Each save
-rechecks derived risk, and a downgrade needs an originating user approval.
+rechecks derived risk and the complete changed paths (both sides of renames).
+A downgrade uses a chair record with actor, evidence and a nonblank reason of
+at most 4096 bytes, stored alongside the path snapshot. The edge supplies current
+paths again on save; a changed snapshot invalidates the prior assessment.
+Any path matching a bundled crucial or terminal floor refuses the downgrade and
+names the path. Auth/security and irreversible external-effect floors remain
+binding, including with owner approval. Owner decision approvals remain separate.
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
 - Why: acceptance must track the exact subject reviewed.
 - Test: `crates/workflow/src/store/tests.rs::changing_subject_resets_decision_and_requires_fresh_review`;
@@ -365,8 +371,9 @@ installation, push and destructive action stay gated by current user
 authority.
 - Why: evidence must never be mistaken for permission.
 - Test: none (review gate for external-action authority);
-  `crates/workflow/src/risk.rs::lowering_risk_requires_matching_current_user_authority`
-  covers risk downgrades only.
+  `crates/workflow/src/risk.rs::recorded_chair_downgrade_lowers_nonboundary_risk`
+  and `crates/workflow/src/risk.rs::recorded_chair_downgrade_refuses_boundary_paths`
+  cover risk downgrades only.
 - Owner: the orchestrate and evaluate skills; `crates/workflow/src/`
 
 ## Not provided

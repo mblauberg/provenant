@@ -253,7 +253,10 @@ struct ReviewRequest {
 struct RiskInput {
     factors: RiskFactors,
     tier: RiskTier,
-    downgrade_approval: Option<ApprovalInput>,
+    downgrade_approval: Option<ChairDowngrade>,
+    /// Complete changed paths, including both sides of renames; required for downgrades.
+    #[serde(default)]
+    changed_paths: Vec<String>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -758,9 +761,15 @@ fn save(
 ) -> Result<Value, Error> {
     let now = edge.clock.wall_now()?;
     let policy = provenant_records::workflow::RiskPolicy::default();
-    let downgrade: Option<UserApproval> = req.risk.downgrade_approval.map(Into::into);
-    let risk = risk::assess(req.risk.factors, req.risk.tier, &policy, downgrade.as_ref())
-        .map_err(|e| invalid(e.to_string()))?;
+    let downgrade = req.risk.downgrade_approval;
+    let risk = risk::assess(
+        req.risk.factors,
+        req.risk.tier,
+        &policy,
+        downgrade.as_ref(),
+        &req.risk.changed_paths,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
     let mut candidate = receipt::new(
         ReceiptInput {
             delivery_id: delivery,
@@ -827,6 +836,7 @@ fn save(
             valid_until,
             risk_policy: &policy,
             downgrade_approval: downgrade.as_ref(),
+            changed_paths: &req.risk.changed_paths,
         },
         edge.budget()?,
         &edge.cancel,

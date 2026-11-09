@@ -255,8 +255,9 @@ traps, see [shell pitfalls](shell-pitfalls.md#shell-pitfalls).
 The user review or merge gate applies only when an agent is stuck: split
 verdicts it cannot settle with primary evidence, or a decision outside its
 authority. Standing user gates are credential or connector setup, rewrites of
-or pushes to shared branches outside authorised merges, and risk-tier
-downgrades.
+or pushes to shared branches outside authorised merges. A chair may lower risk
+outside protected boundaries with a recorded reason; boundary floors remain
+binding even with owner approval.
 
 ### Land
 
