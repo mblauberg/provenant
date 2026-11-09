@@ -10,5 +10,9 @@ an epic. Each criterion:
 
 Add must-not-change behaviour, non-goals and the verify command. Do not restate the
 design. If a criterion cannot be checked, rewrite it until it can, or park it as a
-decision. The criteria are the contract: the implementer may not weaken or delete
-one, and a risky item keeps one held-back check outside the writer's context.
+decision. A verification step beyond the stated outcome names the failure it
+prevents and how likely that failure is; otherwise leave it out. The criteria are
+the best current statement of the outcome: the implementer may not silently weaken
+or delete one, and raises a flaw with evidence in handoff `decisions`, including
+an insight that is not a failure. A risky item keeps one held-back check outside
+the writer's context.

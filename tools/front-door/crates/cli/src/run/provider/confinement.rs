@@ -57,6 +57,11 @@ pub(super) struct ConfinementRoots<'a> {
     pub(super) prompt_file: Option<&'a Path>,
 }
 
+/// Name progress when the plan has a private-state grant.
+pub(super) fn handoff_writable(permissions: &PlanPermissions) -> bool {
+    permissions.private_state.is_some()
+}
+
 /// Point the lane's temporary-directory variables at the short alias of
 /// `scratch`, leaving every other path, and every grant, on the real one.
 pub(super) fn alias_temporary_env(

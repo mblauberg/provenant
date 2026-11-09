@@ -27,6 +27,14 @@ success from a clean final answer:
   `AGENTS.md`, `CONTRIBUTING` or runbooks name it; otherwise compare the test
   diff by hand. A suite that only grows is a finding.
 
+For comparisons across experiments, releases or instructions, use the
+[local history audit](references/history-audit.md), including Claude, Codex and
+lane histories. Keep recorded exposure separate from historical proxies.
+Report non-identifiability plainly; file actionable findings through `tracker`
+even when no regression can be attributed. Raw history may go to other
+providers only when the owner authorised that run; exclude credentials and
+secrets. Local read-only analysis needs no receipt.
+
 For a wide review, fan out readers with `provenant run --use explore --route junior --over costs,quality,recovery --file Q.md`, one slice of
 runs per branch.
 

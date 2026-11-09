@@ -96,7 +96,7 @@ impl Snapshot {
                         id: Some(format!("operation:{id}")),
                         wait: None,
                         target: Vec::new(),
-                        until: Condition::Any,
+                        until: Condition::All,
                         follow: false,
                         limit: 100,
                         cursor: None,

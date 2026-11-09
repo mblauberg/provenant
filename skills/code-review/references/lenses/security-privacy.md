@@ -8,5 +8,5 @@ Shared guidance: [review-lenses.md](../review-lenses.md).
   confused-deputy boundaries on every mutation path.
 - Check secret handling, execution and injection boundaries, and dependency
   changes. Review the unchanged enforcement the diff relies on.
-- Report realistic exploits with the smallest fix. Flag guards that block
+- Report realistic exploits. Flag guards that block
   ordinary work without protecting a declared hard boundary.

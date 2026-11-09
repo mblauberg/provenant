@@ -15,6 +15,7 @@ launching providers or reading local harness sessions:
   This fixture records the native serializer contract, not a live invocation.
 
 SessionStart output uses `hookSpecificOutput`, `hookEventName` and
-`additionalContext`, as defined by both hosts. PreCompact returns advisory
-`systemMessage` only, with no blocking decision. Claude discards that field;
-the composition edge can also report `HookContext::diagnostic` to stderr.
+`additionalContext`, as defined by both hosts. Claude takes plain PreCompact
+stdout as instructions for the compaction summary, so the hook writes the
+instruction as text with no blocking decision; the composition edge reports
+`HookContext::diagnostic` to stderr.

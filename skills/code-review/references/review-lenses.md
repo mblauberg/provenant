@@ -9,7 +9,7 @@ Follow evidence, not a fixed checklist quota. Apply the shared guidance below.
 - Find live callers, consumers, re-exports, registrations and configuration.
 - Identify the canonical owner of the changed behaviour or data.
 - Trace persistence, network, queue, cache and generated-artifact boundaries.
-- Check migrations, rollback compatibility and mixed-version operation.
+- When persisted state changes, check that a migration or drain exists.
 - Read tests around the public behaviour, including sibling and integration
   tests that the diff did not touch.
 

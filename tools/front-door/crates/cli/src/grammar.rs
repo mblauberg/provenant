@@ -113,9 +113,9 @@ pub enum Command {
         /// Apply the named landing risk tier
         #[arg(long, value_parser = parse_landing_tier)]
         tier: Option<String>,
-        /// Pin a reviewed head instead of using the current PR head
+        /// Pin a reviewed head (any unambiguous object name) instead of the current PR head
         #[arg(long)]
-        head: Option<GitOid>,
+        head: Option<String>,
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
         wait: Option<u64>,
@@ -1669,8 +1669,8 @@ pub struct Status {
     /// Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)
     #[arg(long, catalog_requires = "wait")]
     pub target: Vec<String>,
-    /// Return on any transition or when all targets are terminal
-    #[arg(long, catalog_requires = "wait", value_enum, default_value = "any")]
+    /// Return when all targets are terminal (use `any` for the first transition)
+    #[arg(long, catalog_requires = "wait", value_enum, default_value = "all")]
     pub until: Condition,
     /// Stream transitions until all targets are terminal or the wait expires
     #[arg(long, catalog_requires = "wait")]

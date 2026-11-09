@@ -276,7 +276,11 @@ off; Claude gets its token on a descriptor closed before spawn, never in the
 environment; Agy's private home links only one keychain, the selected account's own
 (`Library/Keychains/login.keychain-db` in its registered directory, refused when
 missing) or, for the user's own home, the login keychain; Cursor
-executes only its resolved version; OpenCode denies shell and web fetch.
+executes only its resolved version; OpenCode’s read-only lanes deny file edits and web fetch
+but permit shell commands, as Claude, Codex and Agy readers do, so read-only
+lenses can atomically write progress in their own private state. The rendered
+profile, not OpenCode’s permission config, refuses writes to the source and to
+protected checkouts.
 Agy’s selected native keychain mechanism permits its client and IPC in both
 account modes; see [authentication diagnosis](../runbooks/agy-authentication.md).
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.

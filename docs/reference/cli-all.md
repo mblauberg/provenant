@@ -2069,7 +2069,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--by` | `{"defaults": ["template"], "description": "Group efficiency by node, requested tier or template", "name": "by", "values": ["node", "tier", "template"]}` |
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
 | `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
-| `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
+| `--until` | `{"defaults": ["all"], "description": "Return when all targets are terminal (use &#96;any&#96; for the first transition)", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
 | `id` | `{"description": "Show a run, task, attempt or graph ID, or operation:ID for a refusal", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
@@ -2115,7 +2115,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--batch` | `{"defaults": ["false"], "description": "Use batch landing even for one pull request", "name": "batch", "values": ["true", "false"]}` |
 | `--shadow` | `{"defaults": ["false"], "description": "Compute the candidate and decisions without publishing", "name": "shadow", "values": ["true", "false"]}` |
 | `--tier` | `{"description": "Apply the named landing risk tier", "name": "tier"}` |
-| `--head` | `{"description": "Pin a reviewed head instead of using the current PR head", "name": "head"}` |
+| `--head` | `{"description": "Pin a reviewed head (any unambiguous object name) instead of the current PR head", "name": "head"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
 | `--poll` | `{"bounds": [1, 18446744073709551615], "description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
 | `--explain` | `{"defaults": ["false"], "description": "Show the resolved landing policy without landing", "name": "explain", "values": ["true", "false"]}` |

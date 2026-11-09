@@ -279,7 +279,9 @@ fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderErro
                 (id == "claude").then_some(&token),
             ))?;
             assert_eq!(spec.stdin, Stdin::Bytes(prompt.text().as_bytes().to_vec()));
-            assert!(!spec.argv.iter().any(|arg| arg == "--add-dir"));
+            if id != "claude" || access == Access::WorktreeWrite {
+                assert!(!spec.argv.iter().any(|arg| arg == "--add-dir"));
+            }
         }
     }
     Ok(())
@@ -563,9 +565,11 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         if id == "codex" {
             // This fixture grants provider-only networking. Cargo must use
             // cached sources rather than attempting dependency downloads.
-            assert!(spec.env.iter().any(|(key, value)| {
-                key == "CARGO_NET_OFFLINE" && value == "true"
-            }));
+            assert!(
+                spec.env
+                    .iter()
+                    .any(|(key, value)| { key == "CARGO_NET_OFFLINE" && value == "true" })
+            );
         }
         assert!(
             spec.env.iter().any(|(key, value)| {
@@ -589,13 +593,35 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             }
             "claude" => {
                 assert_eq!(
-                    spec.env.iter().find(|(key, _)| key == "CLAUDE_CONFIG_DIR").map(|(_, value)| Path::new(value)),
-                    Some(confined.permissions().private_state.as_ref().unwrap().path.join("claude-config").as_path())
+                    spec.env
+                        .iter()
+                        .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                        .map(|(_, value)| Path::new(value)),
+                    Some(
+                        confined
+                            .permissions()
+                            .private_state
+                            .as_ref()
+                            .unwrap()
+                            .path
+                            .join("claude-config")
+                            .as_path()
+                    )
                 );
                 assert!(argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
-                assert!(!argv.iter().any(|arg| arg == "--add-dir"));
+                assert!(spec.argv.windows(2).any(|args| {
+                    args[0] == "--add-dir"
+                        && args[1]
+                            == confined
+                                .permissions()
+                                .private_state
+                                .as_ref()
+                                .unwrap()
+                                .path
+                                .as_os_str()
+                }));
                 assert!(
                     spec.env
                         .iter()
@@ -1023,7 +1049,13 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
         .filter(|pair| pair[0] == "--add-dir")
         .map(|pair| pair[1].clone())
         .collect();
-    assert_eq!(added, [OsString::from("/fixture/build")]);
+    assert_eq!(
+        added,
+        [
+            OsString::from("/fixture/state"),
+            OsString::from("/fixture/build")
+        ]
+    );
     Ok(())
 }
 
@@ -1070,6 +1102,7 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
     assert_eq!(
         added,
         [
+            OsString::from("/fixture/state"),
             OsString::from("/fixture/repo"),
             OsString::from("/fixture/diffs")
         ]
@@ -1148,7 +1181,13 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                         .contains(&crate::launch::subtree(config_home.join("opencode/skills")))
                 );
             }
-            assert!(spec.profile.spec.authentication[0].roots.contains(&crate::launch::exact("/fixture/home/.local/share/opencode/auth.json")));
+            assert!(
+                spec.profile.spec.authentication[0]
+                    .roots
+                    .contains(&crate::launch::exact(
+                        "/fixture/home/.local/share/opencode/auth.json"
+                    ))
+            );
             let auth = data_home.join("opencode/auth.json");
             assert!(spec.profile.spec.state_writes.iter().all(|grant| {
                 match grant.scope {
@@ -1168,17 +1207,20 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                 assert_eq!(config["permission"], serde_json::json!({"*": "allow"}));
             } else {
                 assert_eq!(config["permission"]["edit"], "deny");
-                assert_eq!(config["permission"]["bash"], "deny");
+                assert_eq!(config["permission"]["bash"], "allow");
                 let scratch = format!("{}/**", plan.permissions().scratch.path.display());
                 if git_context {
                     assert_eq!(
                         config["permission"]["external_directory"],
-                        serde_json::json!({ scratch.clone(): "allow" })
+                        serde_json::json!({ scratch.clone(): "allow", "/fixture/state/**": "allow" })
                     );
                     assert_eq!(config["permission"]["read"][&scratch], "allow");
                 } else {
-                    assert!(config["permission"]["external_directory"].is_null());
-                    assert!(config["permission"]["read"].is_null());
+                    assert_eq!(
+                        config["permission"]["external_directory"],
+                        serde_json::json!({"/fixture/state/**": "allow"})
+                    );
+                    assert_eq!(config["permission"]["read"]["/fixture/state/**"], "allow");
                 }
             }
         }
@@ -1209,6 +1251,99 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Composite readers start in a pinned source view, while progress lives in a
+/// sibling private directory. Exercise the provider's native launch controls,
+/// independently of the outer confinement write grant.
+#[test]
+fn read_only_handoff_native_permissions_match_private_state() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("publish progress atomically".into());
+    let token = fixture_token();
+    for id in ["codex", "claude", "agy", "opencode", "cursor"] {
+        let auth = match id {
+            "codex" | "opencode" | "cursor" => Some("login"),
+            "agy" => Some("keychain"),
+            _ => None,
+        };
+        let plan = read_only_plan("/fixture/composite/member", auth);
+        let cwd = Path::new("/fixture/composite/member/repo");
+        let private = &plan.permissions().private_state.as_ref().unwrap().path;
+        assert!(!private.starts_with(cwd));
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let entry = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .unwrap();
+        let spec = entry.adapter.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            cwd,
+            (id == "claude").then_some(&token),
+        ))?;
+        assert_eq!(spec.cwd, cwd);
+        match id {
+            "cursor" => assert!(
+                spec.argv.windows(2).any(|args| args[0] == "--mode" && args[1] == "ask")
+            ),
+            "codex" => assert!(
+                spec.argv
+                    .iter()
+                    .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+            ),
+            "claude" | "agy" => {
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|args| args[0] == "--add-dir" && args[1] == private.as_os_str())
+                );
+                if id == "agy" {
+                    assert!(
+                        spec.argv
+                            .iter()
+                            .any(|arg| arg == "--dangerously-skip-permissions")
+                    );
+                } else {
+                    assert!(spec.argv.windows(2).any(|args| {
+                        args[0] == "--tools"
+                            && args[1]
+                                .to_string_lossy()
+                                .split(',')
+                                .any(|tool| tool == "Bash")
+                    }));
+                    assert!(spec.argv.windows(2).any(|args| args[0] == "--allowedTools"
+                        && args[1].to_string_lossy().contains("Bash")));
+                }
+            }
+            "opencode" => {
+                let config = spec
+                    .env
+                    .iter()
+                    .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+                    .unwrap();
+                let config: serde_json::Value =
+                    serde_json::from_str(&config.1.to_string_lossy()).unwrap();
+                let pattern = format!("{}/**", private.display());
+                assert_eq!(config["permission"]["bash"], "allow");
+                assert_eq!(config["permission"]["edit"], "deny");
+                assert_eq!(
+                    config["permission"]["external_directory"][&pattern],
+                    "allow"
+                );
+                assert!(
+                    config["permission"]["external_directory"][format!("{}/**", cwd.display())]
+                        .is_null()
+                );
+            }
+            _ => unreachable!(),
+        }
+        let writes = provenant_confinement::write_grants(plan.permissions(), &spec.profile);
+        assert!(writes.iter().any(|grant| grant.path == *private));
+        assert!(writes.iter().all(|grant| !grant.path.starts_with(cwd)));
     }
     Ok(())
 }

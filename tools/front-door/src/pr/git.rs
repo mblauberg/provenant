@@ -44,6 +44,32 @@ impl Git {
             repositories: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
+    /// The full ID of the commit `name` identifies: a full ID as given, or any
+    /// object name Git resolves to exactly one commit. Git names an ambiguous
+    /// abbreviation, which is refused rather than guessed.
+    pub(super) fn resolve_commit(&self, dir: &Path, name: &str) -> Result<provenant_core::GitOid> {
+        if let Ok(oid) = provenant_core::GitOid::parse(name) {
+            return Ok(oid);
+        }
+        let spec = format!("{name}^{{commit}}");
+        let (code, stdout, error) =
+            self.exit(dir, &["rev-parse", "--verify", "--end-of-options", &spec])?;
+        let resolved = stdout.trim();
+        if code != 0 || resolved.is_empty() {
+            let reason = if error.is_empty() {
+                "no such commit in this repository"
+            } else {
+                error.as_str()
+            };
+            return Err(super::wait::failure(
+                "HEAD_UNRESOLVED",
+                format!(
+                    "cannot resolve --head {name} to one commit ({reason}); next: fetch it, or pass a longer prefix or the full ID"
+                ),
+            ));
+        }
+        Ok(provenant_core::GitOid::parse(resolved)?)
+    }
     /// Resolve one ref using this command's bounded repository facts.
     pub(super) fn commit(
         &self,
@@ -259,5 +285,74 @@ impl Git {
             String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
             line.chars().take(200).collect(),
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod resolve_commit_tests {
+    use super::*;
+
+    /// A repository of many commits on one branch, so two of them are certain
+    /// to share a four-character abbreviation.
+    fn crowded_repository(commits: usize) -> (tempfile::TempDir, Vec<String>) {
+        let temp = tempfile::tempdir().unwrap();
+        let git = provenant_os::git::git_executable().unwrap();
+        let git = git.to_str().unwrap();
+        let run = |args: &[&str], input: &[u8]| {
+            let mut argv = vec![git];
+            argv.extend_from_slice(args);
+            let output =
+                super::super::execute_with(temp.path(), &argv, GIT_TIMEOUT, false, Some(input))
+                    .unwrap();
+            assert_eq!(output.termination, Termination::Exit(0), "{args:?}");
+            String::from_utf8(output.stdout.bytes).unwrap()
+        };
+        run(&["init", "-q"], b"");
+        let mut stream = String::new();
+        for index in 0..commits {
+            let message = format!("commit {index}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/main\ncommitter T <t@example.invalid> {index} +0000\ndata {}\n{message}\n",
+                message.len()
+            ));
+        }
+        run(&["fast-import", "--quiet"], stream.as_bytes());
+        let listed = run(&["rev-list", "main"], b"");
+        (temp, listed.lines().map(str::to_owned).collect())
+    }
+
+    #[test]
+    fn head_resolves_an_unambiguous_name_and_refuses_an_ambiguous_one() {
+        let (temp, commits) = crowded_repository(3000);
+        let git = Git::new().unwrap();
+        let tip = commits[0].clone();
+        let resolved = git.resolve_commit(temp.path(), &tip[..20]).unwrap();
+        assert_eq!(resolved.to_string(), tip);
+        assert_eq!(
+            git.resolve_commit(temp.path(), "main").unwrap().to_string(),
+            tip
+        );
+        // A full ID is taken as given, even when this repository lacks it.
+        let absent = "1".repeat(40);
+        assert_eq!(
+            git.resolve_commit(temp.path(), &absent)
+                .unwrap()
+                .to_string(),
+            absent
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        let shared = commits
+            .iter()
+            .find_map(|id| (!seen.insert(id[..4].to_owned())).then(|| id[..4].to_owned()))
+            .expect("3000 commits share a four-character prefix");
+        let error = git
+            .resolve_commit(temp.path(), &shared)
+            .expect_err("an ambiguous prefix must be refused")
+            .to_string();
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(error.contains("full ID"), "{error}");
+        assert!(git.resolve_commit(temp.path(), "feedfacefeed").is_err());
     }
 }

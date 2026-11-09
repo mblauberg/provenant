@@ -2446,6 +2446,71 @@ mod tests {
         assert!(response.diagnostic.contains("\nCause: filesystem "));
         assert!(!response.diagnostic.contains(external.to_str().unwrap()));
     }
+    fn compact_text(response: &HookContext) -> String {
+        let wire: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+        wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    fn run_hook(root: &StateRoot, project: ProjectId, event: &str, mtime: i64) -> HookContext {
+        let input = format!(
+            r#"{{"hook_event_name":"{event}","session_id":"host-1","transcript_path":"/t/session.jsonl"}}"#
+        );
+        let event = match event {
+            "PreCompact" => HookEvent::PreCompact,
+            _ => HookEvent::SessionStart,
+        };
+        hook_context(
+            root,
+            project,
+            event,
+            input.as_bytes(),
+            &clock(mtime),
+            DurationMicros::ZERO,
+        )
+    }
+    #[test]
+    fn intent_leads_the_checkpoint_within_the_bound_and_names_the_transcript() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let long = "x".repeat(20_000);
+        let body = format!(
+            "# Goal\nGoal text.\n\n## Intent\nWants A because B; rejected C.\n\n## Plan\nNext {long}"
+        );
+        save(&selected, body.as_bytes()).unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let response = run_hook(&root, project, "SessionStart", mtime);
+        assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
+        let text = compact_text(&response);
+        let intent = text.find("Wants A because B").unwrap();
+        assert!(intent < text.find("Goal text.").unwrap());
+        assert!(text.contains("/t/session.jsonl"));
+        assert_eq!(text.matches("Wants A because B").count(), 1);
+        assert!(!text.contains("has no intent section"));
+    }
+    #[test]
+    fn checkpoint_without_intent_is_reported_on_its_own_line() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        save(&selected, b"# Goal\nGoal text.").unwrap();
+        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let text = compact_text(&run_hook(&root, project, "SessionStart", mtime));
+        assert!(text.lines().any(|line| {
+            line.starts_with("Intent: the checkpoint has no intent section")
+                && line.contains("/t/session.jsonl")
+        }));
+        assert!(text.contains("Goal text."));
+    }
+    #[test]
+    fn pre_compact_instructs_the_summary_to_write_intent() {
+        let (_temp, root, project) = setup();
+        let response = run_hook(&root, project, "PreCompact", 0);
+        let text = String::from_utf8(response.stdout).unwrap();
+        assert!(text.contains("Write an Intent section"));
+        assert!(text.contains("replaces the earlier reading"));
+        assert!(text.contains("/t/session.jsonl"));
+    }
     const FIXTURES: [(&str, HookEvent); 4] = [
         (
             include_str!(concat!(
@@ -2517,22 +2582,29 @@ mod tests {
             );
             assert_eq!(response.status, CheckpointStatus::Present);
             assert!(!response.needs_saving);
-            let wire: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
             let text = match event {
                 HookEvent::SessionStart => {
+                    let wire: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
                     assert_eq!(wire["hookSpecificOutput"]["hookEventName"], "SessionStart");
                     let text = wire["hookSpecificOutput"]["additionalContext"]
                         .as_str()
-                        .unwrap();
+                        .unwrap()
+                        .to_owned();
                     assert!(text.contains("Specific authorised checkpoint"));
                     text
                 }
                 HookEvent::PreCompact => {
-                    assert!(wire.get("hookSpecificOutput").is_none());
-                    assert!(wire.get("decision").is_none());
-                    let text = wire["systemMessage"].as_str().unwrap();
+                    // Plain stdout: Claude takes it as summary instructions.
+                    let text = String::from_utf8(response.stdout.clone()).unwrap();
+                    assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+                    assert!(text.contains("Write an Intent section"));
                     assert!(!text.contains("Specific authorised checkpoint"));
-                    text
+                    assert!(
+                        response
+                            .diagnostic
+                            .contains("provenant workflow session save")
+                    );
+                    response.diagnostic.clone()
                 }
             };
             assert!(text.contains(&format!(
