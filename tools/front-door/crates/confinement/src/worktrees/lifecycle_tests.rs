@@ -672,5 +672,6 @@ mod gc_preview;
 mod gc_pruning;
 mod gc_safety;
 mod ownership;
+mod ref_ownership;
 mod remote_creation;
 mod worktree_operations;

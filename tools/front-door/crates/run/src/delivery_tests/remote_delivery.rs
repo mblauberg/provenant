@@ -822,6 +822,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
                     .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
                 label: None,
+                reference: None,
             };
             let head = provenant_confinement::run_utility(
                 context.executor,

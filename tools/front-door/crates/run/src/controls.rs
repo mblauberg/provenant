@@ -1043,6 +1043,7 @@ mod lineage_tests {
                                 created_at: original.created_at,
                                 origin,
                                 label: None,
+                                reference: None,
                             },
                         )?;
                     }
@@ -1117,6 +1118,7 @@ mod lineage_tests {
                         created_at: original.created_at,
                         origin: WorktreeOrigin::Adopted,
                         label: None,
+                        reference: None,
                     },
                 )?;
                 assert!(matches!(
@@ -1261,6 +1263,7 @@ mod lineage_tests {
                     created_at: original.created_at,
                     origin: WorktreeOrigin::Lane,
                     label: None,
+                    reference: None,
                 },
             )?;
             assert!(matches!(
@@ -1335,6 +1338,7 @@ mod lineage_tests {
                         created_at: original.created_at,
                         origin: WorktreeOrigin::Lane,
                         label: None,
+                        reference: None,
                     },
                 )?;
                 Ok((context.binding.project_id(), info))
@@ -1504,6 +1508,7 @@ mod lineage_tests {
                     created_at: original.created_at,
                     origin: WorktreeOrigin::Lane,
                     label: None,
+                    reference: None,
                 },
             )?;
             let queued = store.record(first.attempt_id, &call).unwrap();
@@ -1556,6 +1561,7 @@ mod lineage_tests {
                         created_at: next.created_at,
                         origin: WorktreeOrigin::Lane,
                         label: None,
+                        reference: None,
                     },
                 )?;
                 Ok(replacement)

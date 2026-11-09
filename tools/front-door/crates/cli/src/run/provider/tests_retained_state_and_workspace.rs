@@ -359,6 +359,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         base: "1".repeat(40), host: provenant_core::HostId::from_bytes([7; 16]),
         created_at: provenant_core::WallTime::from_micros(1)?,
         origin: WorktreeOrigin::Adopted, label: None,
+        reference: None,
     };
     std::fs::write(registration.join("provenant-owner.json"), serde_json::to_vec(&owner)?)?;
     std::fs::write(registration.join("gitdir"), format!("{}\n", foreign.join(".git").display()))?;

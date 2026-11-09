@@ -1167,6 +1167,9 @@ impl RunStore {
                         },
                     )
                 });
+                if let Ok(receipt) = result.as_ref() {
+                    self.record_delivered_ref(record, delivery, receipt, call);
+                }
                 let disposition = match result {
                     Ok(receipt)
                         if matches!(

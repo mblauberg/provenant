@@ -275,6 +275,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
             extra: Default::default(),
             pull_request: None,
         },
+        integration: None,
     };
     for outcome in [
         Outcome::Failed,

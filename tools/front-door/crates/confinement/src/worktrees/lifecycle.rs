@@ -548,6 +548,20 @@ fn create_with_default(
     // Release the verified checkout descriptors before allowing a sibling
     // launcher to inspect this newly created worktree.
     drop(verified);
+    // Still under the registry lock, so no sibling create can interleave
+    // between the ref mutation and its ownership record. A failed record
+    // leaves the branch unobserved, which only ever retains it.
+    let mut warnings = if create_branch && request.base.is_none() {
+        default.map_or_else(Vec::new, |(_, warnings)| warnings)
+    } else {
+        Vec::new()
+    };
+    if let Err(error) = refs::record_local_branch(context, &branch, base, create_branch, cancel) {
+        warnings.push(format!(
+            "could not record ownership of {}: {error}; it is retained as unobserved",
+            branch.as_str()
+        ));
+    }
     // The mutation and registration checks are complete. The advisory census
     // must not keep other branches from acquiring the repository registry.
     drop(_lock);
@@ -556,11 +570,7 @@ fn create_with_default(
         Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())
     });
     Ok(WorktreeInfo {
-        warnings: if create_branch && request.base.is_none() {
-            default.map_or_else(Vec::new, |(_, warnings)| warnings)
-        } else {
-            Vec::new()
-        },
+        warnings,
         path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
@@ -1273,7 +1283,11 @@ pub(super) fn keep_disposition(
             Policy::Named { .. } => Disposition::Merged,
         };
     }
-    match is_ancestor(context, tip, integration_tip, cancel) {
+    let target = LandingTarget {
+        reference: Some(integration.clone()),
+        tip: integration_tip,
+    };
+    match landed::landed_on(context, tip, &target, cancel) {
         Ok(true) => {}
         Ok(false) => {
             return match policy {
@@ -1555,7 +1569,11 @@ fn remove_with_owner(
                     return Err(WorktreeError::IdentityChanged);
                 }
                 let Some(branch) = &entry.branch else {
-                    if !discard && !is_ancestor(context, tip, integration_tip, cancel)? {
+                    let target = LandingTarget {
+                        reference: Some(integration.clone()),
+                        tip: integration_tip,
+                    };
+                    if !discard && !landed::landed_on(context, tip, &target, cancel)? {
                         return Err(WorktreeError::DetachedUnmerged { head: tip });
                     }
                     let removed = remove_named()?;
@@ -1607,8 +1625,12 @@ fn remove_with_owner(
                         }
                         // Scope ancestry-proven tips to the pinned graph delta.
                         // Squash merges lack exact-head proof here and stay put.
+                        let target = LandingTarget {
+                            reference: Some(integration.clone()),
+                            tip: integration_tip,
+                        };
                         for (branch, tip) in &branch_tips {
-                            if is_ancestor(context, *tip, integration_tip, cancel)?
+                            if landed::landed_on(context, *tip, &target, cancel)?
                                 && !is_ancestor(context, *tip, bound, cancel)?
                             {
                                 branches.insert(branch.clone(), ());

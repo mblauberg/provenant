@@ -727,6 +727,7 @@ impl Factory {
             } else {
                 None
             };
+            let mut ledger_warning = None;
             let integration_base = if existing {
                 journal.integration_base()
             } else if let Some(branch) = &document.integration_branch {
@@ -738,17 +739,39 @@ impl Factory {
                     .ok_or(FacadeError::InvalidInput { detail: None })?;
                 // A missing local integration branch starts where the batch is
                 // measured from, rather than refusing the graph.
+                // The shared ref ledger records whether this graph made the
+                // branch or found it, so cleanup never claims a human's ref.
                 if !branch.starts_with("origin/") {
-                    provenant_run::ensure_local_branch(
-                        &git,
-                        &self.cwd,
-                        branch,
-                        document
-                            .review_base
-                            .as_deref()
-                            .filter(|base| !base.is_empty()),
-                    )
-                    .map_err(run_error)?;
+                    let start = document
+                        .review_base
+                        .as_deref()
+                        .filter(|base| !base.is_empty());
+                    match provenant_confinement::worktrees::RefLedger::open(
+                        self.context.roots.state.as_path(),
+                        self.context.identity.project,
+                    ) {
+                        Ok(ledger) => {
+                            (_, ledger_warning) = provenant_run::ensure_recorded_local_branch(
+                                &git,
+                                &self.cwd,
+                                branch,
+                                start,
+                                &ledger,
+                                &provenant_run::Request {
+                                    clock: &self.clock,
+                                    cancel,
+                                },
+                            )
+                            .map_err(run_error)?;
+                        }
+                        Err(error) => {
+                            provenant_run::ensure_local_branch(&git, &self.cwd, branch, start)
+                                .map_err(run_error)?;
+                            ledger_warning = Some(format!(
+                                "could not record ownership of {branch}: {error}; it is retained as unobserved"
+                            ));
+                        }
+                    }
                 }
                 Some(self.resolve_base(&self.cwd, &reference, &facts, cancel)?)
             } else {
@@ -793,7 +816,7 @@ impl Factory {
             let mut owner = BoundGraphOwner {
                 writer_launch_budget: None,
                 admission_timeout,
-                launch_warnings: Vec::new(),
+                launch_warnings: ledger_warning.into_iter().collect(),
                 repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
                 integration_base: Some(BoundGraphBases {

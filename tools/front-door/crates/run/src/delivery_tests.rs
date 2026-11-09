@@ -653,6 +653,7 @@ pub(super) fn registered_landed_writer_fixture(
                     .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
                 label: None,
+                reference: None,
             };
             let head = provenant_confinement::run_utility(
                 context.executor,
