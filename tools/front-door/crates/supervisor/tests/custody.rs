@@ -159,7 +159,14 @@ impl ProcessObserver for CensusGateObserver {
                 std::thread::yield_now();
             }
         }
-        fixture::RecordedBootObserver.observe(pid)
+        let mut observation = fixture::RecordedBootObserver.observe(pid);
+        if std::env::var_os("PROVENANT_STATE_DIR")
+            .is_some_and(|root| PathBuf::from(root).join("s2-constant-cpu").is_file())
+            && let ProcessObservation::Present(fact) = &mut observation
+        {
+            fact.cpu_micros = Some(0);
+        }
+        observation
     }
 
     fn live_census(
@@ -774,9 +781,13 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
 }
 
 fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
     let state = root.join("PROVENANT_STATE_DIR");
     std::fs::create_dir(&state)?;
     std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+    std::fs::write(state.join("s2-constant-cpu"), b"enabled")?;
     let trace = state.join("s2-idle-census-trace");
     std::fs::write(&trace, b"")?;
     let socket = root.join("idle-census.sock");
@@ -816,7 +827,30 @@ fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     );
     if capture_cpu {
         capture_idle_cpu(&attempt)?;
+    } else {
+        // Let the first CPU observation replace the initial unknown value.
+        // The next observation has identical facts and must retain the bytes,
+        // including the timestamp, rather than flushing a heartbeat.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let before = loop {
+            let bytes = std::fs::read(attempt.join("process.json"))?;
+            let checkpoint: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if checkpoint["provider_cpu_micros"] == 0 && checkpoint["phase"] == "running" {
+                break bytes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "running checkpoint with sampled CPU was not published: {checkpoint}"
+            );
+            std::thread::park_timeout(Duration::from_millis(20));
+        };
+        std::thread::park_timeout(Duration::from_millis(1_200));
+        assert_eq!(std::fs::read(attempt.join("process.json"))?, before);
     }
+    assert!(
+        !home.join("graph-children-read").exists(),
+        "live census must not read host graph checkpoints"
+    );
     // A valid atomic cancel still wakes and stops the sleeping driver.
     stop(&handle, StopReason::ExplicitCancellation)?;
     let exit = exited(&handle)?;
@@ -1639,6 +1673,7 @@ impl provenant_supervisor::Holder for GraphChildrenHolder {
         Ok(())
     }
     fn has_live_children(&self, _: &[u8]) -> std::result::Result<bool, CustodyError> {
+        std::fs::write(self.0.join("graph-children-read"), b"read")?;
         Ok(self.0.join("live-graph-children").try_exists()?)
     }
     fn terminal(

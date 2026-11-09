@@ -60,6 +60,7 @@ pub(crate) struct ReactorEvent {
     pub(crate) cancel_watch_failed: bool,
     pub(crate) process_changed: bool,
     pub(crate) process_overflow: bool,
+    pub(crate) io_ready: bool,
 }
 
 /// Guardian-only signal/event source. Install before spawning a provider.
@@ -69,6 +70,7 @@ pub(crate) struct GuardianReactor {
     queue: std::fs::File,
     _mask: SignalMask,
     processes: BTreeSet<i64>,
+    pollfds: Vec<libc::pollfd>,
     cancellation_directory: Option<std::fs::File>,
     #[cfg(feature = "fixture")]
     injected_watch_failures: usize,
@@ -113,6 +115,7 @@ impl GuardianReactor {
             queue,
             _mask: mask,
             processes: BTreeSet::new(),
+            pollfds: Vec::with_capacity(4),
             cancellation_directory: None,
             #[cfg(feature = "fixture")]
             injected_watch_failures: 0,
@@ -211,7 +214,7 @@ impl GuardianReactor {
     /// turn. EINTR retries consume the same monotonic budget.
     pub(crate) fn wait(
         &mut self,
-        watches: &[Watch<'_>],
+        watches: &[Option<Watch<'_>>],
         timeout: Duration,
     ) -> io::Result<ReactorEvent> {
         if watches.len() > 256 {
@@ -230,14 +233,15 @@ impl GuardianReactor {
             // poll takes whole milliseconds. Truncating a positive tail
             // to zero spins until the guardian's next millisecond deadline.
             let millis = poll_timeout_ms(remaining);
-            let mut pollfds = Vec::with_capacity(watches.len() + 1);
+            let pollfds = &mut self.pollfds;
+            pollfds.clear();
             let signal_raw = self.queue.as_raw_fd();
             pollfds.push(libc::pollfd {
                 fd: signal_raw,
                 events: libc::POLLIN,
                 revents: 0,
             });
-            for watch in watches {
+            for watch in watches.iter().flatten() {
                 let mut events = 0;
                 match watch.interest {
                     PollInterest::Read => events |= libc::POLLIN,
@@ -262,6 +266,9 @@ impl GuardianReactor {
                 }
                 return Err(error);
             }
+            // HUP and errors also require a read/write to observe EOF or
+            // failure. Directory and timer wakes do not touch provider pipes.
+            event.io_ready = pollfds.iter().skip(1).any(|fd| fd.revents != 0);
             if let Some(signal_ready) = pollfds.first().map(|fd| fd.revents != 0)
                 && signal_ready
             {
@@ -838,18 +845,12 @@ impl ProviderGroup {
         self.provider_identity.as_ref()
     }
 
-    pub(crate) fn watches(&self) -> Vec<Watch<'_>> {
-        let mut watches = Vec::with_capacity(3);
-        if let Some(pipe) = self.stdin.as_ref() {
-            watches.push(Watch::write(pipe.as_fd()));
-        }
-        if let Some(pipe) = self.stdout.as_ref() {
-            watches.push(Watch::read(pipe.as_fd()));
-        }
-        if let Some(pipe) = self.stderr.as_ref() {
-            watches.push(Watch::read(pipe.as_fd()));
-        }
-        watches
+    pub(crate) fn watches(&self) -> [Option<Watch<'_>>; 3] {
+        [
+            self.stdin.as_ref().map(|pipe| Watch::write(pipe.as_fd())),
+            self.stdout.as_ref().map(|pipe| Watch::read(pipe.as_fd())),
+            self.stderr.as_ref().map(|pipe| Watch::read(pipe.as_fd())),
+        ]
     }
 
     /// Nonblocking WNOWAIT observation. Errors remain distinct from an absent
@@ -1376,6 +1377,35 @@ mod tests {
         assert!(event.cancel_watch_failed);
         assert!(!event.process_changed);
         assert!(!event.process_overflow);
+        Ok(())
+    }
+
+    #[test]
+    fn reactor_reports_pipe_work_only_for_readiness_including_eof() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let directory =
+            provenant_os::fs::Directory::open_anchor(root.path()).map_err(io::Error::other)?;
+        let mut reactor = GuardianReactor::install()?;
+        reactor.watch_cancellation_directory(&directory)?;
+        let (mut reader, mut writer) = UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        let watches = [Some(Watch::read(reader.as_fd())), None, None];
+        assert!(!reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        std::fs::write(root.path().join("checkpoint"), b"changed")?;
+        let event = reactor.wait(&watches, Duration::ZERO)?;
+        assert!(event.cancel_changed);
+        assert!(!event.io_ready);
+        writer.write_all(b"x")?;
+        assert!(reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        let mut byte = [0];
+        reader.read_exact(&mut byte)?;
+        let watches = [Some(Watch::read(reader.as_fd())), None, None];
+        assert!(!reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        drop(writer);
+        assert!(reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        assert_eq!(reader.read(&mut byte)?, 0);
+        // A later wait with no pipe must not reuse its old readiness.
+        assert!(!reactor.wait(&[], Duration::ZERO)?.io_ready);
         Ok(())
     }
 
