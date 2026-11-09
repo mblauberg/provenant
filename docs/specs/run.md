@@ -1363,15 +1363,14 @@ A template delivery setting resolves to the existing
 explicit writer destination contract. Omission keeps delivery off. Push and
 PR modes use `origin` and the lane branch; `integrate:BRANCH` selects an
 existing local branch, and `integrate:origin/BRANCH` selects an existing
-remote integration branch. The legacy remote, branch and open-PR flags remain
-aliases and conflict with `--deliver`. Read-only lanes may select only none.
+remote integration branch. Read-only lanes may select only none.
 Direct push and integration refuse publication to the default branch recorded
 by any configured remote and the primary checkout branch. If no remote HEAD
 is available, both `main` and `master` are protected. PR delivery publishes a
 feature branch and may target a protected branch as its PR base; its published
 head branch is subject to the same protection.
-Dispatch checks publication targets before admission for concise modes,
-legacy flags and manifests, so a refused target leaves no admitted run.
+Dispatch checks publication targets before admission for concise modes
+and manifests, so a refused target leaves no admitted run.
 Destinations supplied in flags are also checked before creating an owned tree.
 Accepted operations compare and replay their immutable inputs before checking
 current branch protection; later protection changes do not invalidate replay.
