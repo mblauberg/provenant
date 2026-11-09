@@ -735,7 +735,15 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
             .outputs
             .as_ref()
             .unwrap();
-        assert_eq!(output.findings.len(), count);
+        assert!(!output.findings.is_empty());
+        let (plan, positions) = validate_plan(&document).unwrap();
+        let verifiers: Vec<_> = plan.nodes.iter().filter(|node| template::review_verifier(node)).collect();
+        assert!(!verifiers.is_empty());
+        for verifier in verifiers {
+            let progress = &run.checkpoint.nodes[positions[&verifier.id]];
+            assert_eq!(progress.state, NodeState::Succeeded);
+            assert_eq!(progress.outputs.as_ref().unwrap().findings.len(), count);
+        }
         assert_eq!(
             advance(&document, &mut owner, &mut journal)
                 .unwrap()
