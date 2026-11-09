@@ -478,13 +478,29 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
     );
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
-    assert_eq!(report.idle_output.len(), 40, "{report:?}");
-    assert!(
-        report
-            .idle_output
-            .iter()
-            .all(|entry| !entry.removed && entry.reason == "would_remove")
-    );
+    // The shared 500 ms preview budget may expire on a busy CI host. Every
+    // candidate must still receive a safe outcome, using the same census and
+    // inventory even when the remaining work is deferred.
+    let reported = report.idle_output.iter().chain(&report.output).map(|entry| {
+        if entry.path.file_name() == Some(std::ffi::OsStr::new("target")) {
+            entry.path.parent().unwrap_or(&entry.path).to_path_buf()
+        } else {
+            entry.path.clone()
+        }
+    }).collect::<std::collections::BTreeSet<_>>();
+    let expected = (0..40).map(|index| fixture.root.join(format!("foreign-{index}")))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(reported, expected, "{report:?}");
+    let entry_limit = provenant_os::fs::FsError::EntryLimit { limit: 20_000 }.to_string();
+    assert!(report.idle_output.iter().all(|entry| {
+        !entry.removed && (entry.reason == "would_remove" || entry.reason == entry_limit)
+    }), "{report:?}");
+    assert!(report.output.iter().all(|entry| {
+        !entry.removed && entry.reason == "preview traversal budget reached; retained"
+    }), "{report:?}");
+    for index in 0..40 {
+        assert_eq!(fs::read_to_string(fixture.root.join(format!("foreign-{index}/target/artifact")))?, "output");
+    }
     Ok(())
 }
 

@@ -392,15 +392,15 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
     use crate::coordination::facade::FacadeError;
     struct ContendedOwner {
         phase: u8,
-        failed: bool,
         calls: usize,
         now: provenant_core::WallTime,
     }
     impl ContendedOwner {
         fn contend(&mut self, phase: u8) -> Result<(), FacadeError> {
             self.calls += 1;
-            if self.phase == phase && !self.failed {
-                self.failed = true;
+            // Initial admission probes an existing writer before the launch
+            // loop. A held lock stays busy across both probes until release.
+            if self.phase == phase && self.now < at(5) {
                 return Err(FacadeError::WriterLockBusy);
             }
             Ok(())
@@ -453,10 +453,25 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         }
         let mut document = graph(vec![writer]);
         document.schema_version = 2;
-        let mut owner = ContendedOwner { phase, failed: false, calls: 0, now: at(0) };
+        let mut owner = ContendedOwner { phase, calls: 0, now: at(0) };
         let mut journal = MemoryJournal::default();
+        if phase == 2 {
+            // Relay children reach provisioning after their graph checkpoint
+            // exists. Seeding that checkpoint avoids initial admission binding
+            // an existing checkout and bypassing the child-creation path.
+            let (plan, _) = validate_plan(&document).unwrap();
+            let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+                .unwrap().to_string();
+            let mut checkpoint = transitions::initial_checkpoint(
+                &document, &plan, digest, None, None, None, None,
+            );
+            transitions::record_provisioning(
+                &plan.nodes[0], &mut checkpoint, 0, ".worktrees/topic-fix", &"a".repeat(40),
+            );
+            journal.0 = Some(checkpoint);
+        }
         let first = advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running, "phase {phase}");
         assert!(first.checkpoint.nodes[0].attempts.is_empty());
         assert_eq!(retry_of(&first.checkpoint).deadline, Some(at(3600)));
         assert_eq!(first.checkpoint.wake_at, Some(at(5)));
@@ -469,7 +484,7 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         assert_eq!(owner.calls, calls, "binding must honour its persisted wake");
         owner.now = at(5);
         let done = advance(&document, &mut owner, &mut journal).unwrap();
-        assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded, "phase {phase}");
         assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
         assert!(relay::pending_provisioning(&done.checkpoint).is_empty());
     }

@@ -38,13 +38,29 @@ fn settlement_defers_adopted_writer_cleanup()
         cancel: &cancel,
     };
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+    let mut receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("deferred receipt")?;
     assert_eq!(receipt["state"], "retained");
     assert_eq!(receipt["cleanup_deferred"], true);
     assert!(fixture.worktree.exists());
+    let pending = provenant_config::private_directory(
+        &fixture.roots.state.as_path().join("gc/completions"), false,
+    )?;
+    let queued = pending.entries()?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(queued.len(), 1);
+    let retries = provenant_config::private_directory(
+        &fixture.roots.state.as_path().join("gc/completion-retries"), false,
+    )?;
+    let first_retry = retries.read_bounded(&queued[0], 1024)?;
+    let dispatch: serde_json::Value = serde_json::from_slice(&first_retry)?;
+    assert_eq!(dispatch["attempts"], 1);
+    // A test harness refuses detached dispatch. Repeating settlement during
+    // backoff preserves its intent without dispatching again or that warning.
+    receipt.as_object_mut().ok_or("receipt object")?.remove("cleanup_warning");
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
     assert_eq!(fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?, Some(receipt));
+    assert_eq!(retries.read_bounded(&queued[0], 1024)?, first_retry);
+    assert_eq!(pending.entries()?.collect::<Result<Vec<_>, _>>()?, queued);
     gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
     assert!(fixture.worktree.exists());
     let retained = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("retained receipt")?;
