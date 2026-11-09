@@ -1,1 +1,1 @@
-Agy lanes can now reach the native keychain they need to sign in, and a cloud job whose submission outcome is unknown can be abandoned.
+Reviewers now share one definition of a blocking finding, and chairs weigh the structural fix beside the small one and treat docs as evidence of a past decision. Finished lanes clean up after themselves, cloud jobs can write to a named branch, and lane supervision costs less.
