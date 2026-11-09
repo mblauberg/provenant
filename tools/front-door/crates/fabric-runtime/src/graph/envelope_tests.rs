@@ -23,6 +23,12 @@ fn routes(count: usize) -> serde_json::Value {
 }
 
 fn mixed() -> GraphDocument {
+    let lens = json!({
+        "id":"lens", "access":"read_only", "prompt":"review the repair",
+        "review_behaviour":"lens", "review_lens":"correctness",
+        "route":{"alias":"senior"}, "depends_on":["writer"],
+        "source":{"type":"node","node":"writer"}
+    });
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"envelope-mixed", "delivery":"pr", "integration_branch":"integration/envelope",
         "decision_session":"chair", "nodes":[
@@ -39,12 +45,7 @@ fn mixed() -> GraphDocument {
                 {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
                  "prompt":"repair", "routes":routes(2)},
                 {"id":"council", "kind":"composite", "access":"read_only", "depends_on":["writer"],
-                 "source":{"type":"node","node":"writer"}, "composite":{"nodes":[
-                    {"id":"lens", "access":"read_only", "prompt":"review the repair",
-                     "review_behaviour":"lens", "review_lens":"correctness",
-                     "route":{"alias":"senior"}, "depends_on":["writer"],
-                     "source":{"type":"node","node":"writer"}}
-                 ], "exports":[{"node":"lens","outputs":["result","verdict","findings"]}]}},
+                 "source":{"type":"node","node":"writer"}, "composite":{"nodes":[lens], "exports":[{"node":"lens","outputs":["result","verdict","findings"]}]}},
                 {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["council"],
                  "inputs":[{"node":"council","outputs":["verdict"]}],
                  "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
