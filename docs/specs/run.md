@@ -234,8 +234,7 @@ run namespace by choosing its run ID and recomputing the public attempt hash.
 
 Nested continuation requests use version 1, retaining the original
 parent-attempt namespace and including their continuation parent in the
-canonical digest. Replays retain the original scheme, including legacy
-prepared operations whose request was not yet published. A child-store
+canonical digest. Replays retain the original scheme. A child-store
 continuation uses its requesting parent's sealed network bound, or open network
 when that context is unavailable. The host network ceiling still
 narrows the effective access; see [child launch policy](routing.md#the-host-validates-and-launches-children).
@@ -246,7 +245,7 @@ marker preserves explicit `Unindexed` coverage. Chair admission separately
 requires a retained host seal for legacy child launch, as described below.
 An unknown version refuses launch. Removing the marker only loses indexing;
 it never adopts a lane-proposed ID as trusted membership. Replays preserve the
-original version, including repair of legacy prepared operations. Calling the
+original version. Calling the
 ordinary start path on a child store cannot seal membership. Only host child
 launch from a validated versioned request can seal nested membership.
 
@@ -323,8 +322,7 @@ Chair inheritance must obey these boundaries:
   Retained continuation rows, including unversioned ones, replay their sealed
   binding without copying a lane-proposed source. Forged continuation
   operations cannot create a chair row under a lane-chosen ID, including the
-  host's early operation replay after reopening the lane store. The regression
-  also replays a retained legacy continuation through that entrypoint.
+  host's early operation replay after reopening the lane store.
 - Root replay with the same operation ID and a different submitting chair
   retains the original immutable request. Even repair of a missing host row
   seals the original chair and digest; a conflicting row is refused.
@@ -345,7 +343,6 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
   `crates/cli/src/run/tests.rs::operation_replays_after_its_context_ref_moves_or_is_deleted`;
   `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_uses_host_derived_ids`;
-  `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_preserves_legacy_replay_even_before_request_publication`;
   `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_preflight_does_not_reuse_crashed_staging`
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/fabric/graph_relay.rs`

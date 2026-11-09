@@ -456,18 +456,6 @@ impl<'a> Service<'a> {
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?,
         };
-        // Repair an older prepared operation whose request was never published.
-        // Only an exact digest match may retain the legacy, unindexed scheme.
-        if previous.is_none()
-            && let Some(operation) = operation
-            && operation.request_digest != prepared.request.digest()?
-        {
-            let mut legacy = prepared.request.clone();
-            legacy.child_attempt_id_version = None;
-            if legacy.digest()? == operation.request_digest {
-                prepared.request = legacy;
-            }
-        }
         if let Some(id) = crate::correlation::child_run_id(
             self.store.context.project_id,
             &prepared.request,

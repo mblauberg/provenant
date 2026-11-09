@@ -333,58 +333,6 @@ fn nested_continuation_preflight_does_not_reuse_crashed_staging() -> TestResult 
     Ok(())
 }
 #[test]
-fn nested_continuation_preserves_legacy_replay_even_before_request_publication() -> TestResult {
-    for published in [true, false] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let mut child = input();
-        child.request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
-        child.request.lane_depth = Some(2);
-        store.create(&child, &call)?;
-        store.refuse_queued(child.run_id, "completed", &call)?;
-        let prior = child.attempts[0].attempt_id;
-        child.run_id = RunId::from_bytes([30; 16]);
-        child.operation_id = "legacy-continuation".parse()?;
-        child.request.parent = Some(prior);
-        child.request.fresh_continuation = Some("fixture".into());
-        child.attempts[0].attempt_id = AttemptId::from_bytes([31; 16]);
-        store.create(&child, &call)?;
-        if !published {
-            let mut operation = store.operation(&child.operation_id, &call)?.unwrap();
-            operation.state = OperationState::Prepared;
-            store.db.execute(
-                "UPDATE operations SET record=?1 WHERE operation=?2",
-                rusqlite::params![crate::db::bytes(&operation)?, child.operation_id.as_str()],
-            )?;
-            std::fs::remove_file(
-                store
-                    .context
-                    .state_root
-                    .as_path()
-                    .join(format!("runs/{}/request.json", child.run_id)),
-            )?;
-        }
-        let resumed = store.resume_fresh(
-            &Resume {
-                prior,
-                expected_generation: 0,
-                operation_id: child.operation_id.clone(),
-                run_id: RunId::from_bytes([40; 16]),
-                attempt_id: AttemptId::from_bytes([41; 16]),
-                prompt: child.attempts[0].prompt.clone(),
-                created_at: child.created_at,
-            },
-            "fixture",
-            &call,
-        )?;
-        assert_eq!(resumed.run_id, child.run_id);
-        assert_eq!(store.request(resumed.run_id, &call)?, child.request);
-    }
-    Ok(())
-}
-#[test]
 fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
