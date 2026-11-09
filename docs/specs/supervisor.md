@@ -210,8 +210,9 @@ is an unknown launch, never permission to launch again.
 While a provider is live, the guardian walks its scoped process tree only
 when process events or failed observations require it, at most once per 100 ms.
 A full census backs up missed notifications every five seconds and follows an
-overflow or observation failure on the next walk. Zombies remain in custody
-history but receive no fork/exit watch. Darwin census topology reads omit task
+overflow or persistent observation failure on the next walk. A transient
+fork or exit retries the validated scoped walk once before a full scan.
+Zombies remain in custody history but receive no fork/exit watch. Darwin census topology reads omit task
 CPU accounting; the provider's one-second progress sample still requests it.
 
 Pipes, signals and process events wake the guardian. An attempt-directory
@@ -221,6 +222,12 @@ back to 100 ms polling if the directory watch fails. The one-second read also
 covers in-place changes and missed directory notifications. Cleanup and lease
 release always use fresh full censuses owned by that guardian: another
 supervisor's older snapshot cannot establish this attempt's quiescence.
+
+The host graph-child check runs only when a control action needs it, rather
+than on census walks. Live descendant journals batch changes once a second;
+the initial journal and cleanup writes remain immediate. Failed journal writes
+retry after 100 ms. Process observations publish changed facts once a second,
+without rewriting `process.json` solely for its observation timestamp.
 - Test: `crates/supervisor/tests/custody.rs::idle_supervisor_does_no_census_per_wake`;
   `crates/supervisor/src/guardian/tests.rs::census_watches_only_possible_live_identities_without_discarding_custody_history`
 - Owner: `crates/supervisor/src/guardian/`, `crates/supervisor/src/process_os/`
