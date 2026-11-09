@@ -185,7 +185,7 @@ fn collect_store(
                 payload_cap,
                 clock.wall_now()?,
                 dry_run,
-                !temporary_only,
+                !temporary_only && !dry_run,
                 projects,
                 &call,
             )?;
