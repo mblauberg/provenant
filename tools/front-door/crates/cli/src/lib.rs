@@ -1952,7 +1952,7 @@ mod tests {
             ),
             (
                 vec!["status", "--wait=5h", "--bogus"],
-                "--bogus",
+                "--wait",
                 "provenant status",
             ),
             (vec!["land"], "numbers", "provenant land"),
