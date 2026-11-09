@@ -443,19 +443,23 @@ fn run_inner(
                 repo,
                 &candidate,
             )?;
-            let excluded =
-                cleanup_unpublished(publish::revalidate(forge, &candidate), repo, &candidate)?;
+            let excluded = cleanup_unpublished(
+                publish::revalidate_with_reasons(forge, &candidate),
+                repo,
+                &candidate,
+            )?;
             if !excluded.is_empty() {
-                for pr in &excluded {
+                for (pr, reason) in &excluded {
                     report.outcomes.insert(pr.number, Outcome::Excluded);
-                    report.exclusion_reasons.insert(
-                        pr.number,
-                        "head, base, or approval changed during publication".into(),
-                    );
+                    report.exclusion_reasons.insert(pr.number, reason.clone());
                 }
                 let retained: Vec<_> = prs
                     .iter()
-                    .filter(|pr| !excluded.iter().any(|excluded| excluded.number == pr.number))
+                    .filter(|pr| {
+                        !excluded
+                            .iter()
+                            .any(|(excluded, _)| excluded.number == pr.number)
+                    })
                     .cloned()
                     .collect();
                 if !retained.is_empty() {

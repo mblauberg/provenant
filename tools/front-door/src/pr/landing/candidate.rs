@@ -85,15 +85,22 @@ pub fn select_batch_with_reasons(
                     continue;
                 }
             }
-            if info.number != number
-                || info.state != PullRequestState::Open
-                || info.base_branch != target
-                || provenant_core::GitOid::parse(&info.head).is_err()
-            {
-                reasons.insert(
-                    number,
-                    format!("pull request is not open with a valid head targeting {target}"),
-                );
+            let reason = if info.number != number {
+                Some("forge returned a different pull request".to_owned())
+            } else if info.state != PullRequestState::Open {
+                Some("pull request is not open".to_owned())
+            } else if info.base_branch != target {
+                Some(format!(
+                    "pull request targets {}, expected {target}",
+                    info.base_branch
+                ))
+            } else if provenant_core::GitOid::parse(&info.head).is_err() {
+                Some("pull request head is invalid".to_owned())
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                reasons.insert(number, reason);
                 continue;
             }
             let approval = forge
