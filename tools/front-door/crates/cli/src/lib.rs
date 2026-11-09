@@ -525,8 +525,17 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
             });
         if let Some(value) = spaced {
             let target = if lands { "land 2199" } else { "pr status 2199" };
-            let _ = value;
-            return Some(format!("provenant {target} --wait=30m"));
+            let proposed = format!("--wait={value}");
+            let command = format!("provenant {target} {proposed}");
+            let words = command
+                .split_whitespace()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            return Some(if command_model().try_get_matches_from(words).is_ok() {
+                command
+            } else {
+                format!("provenant {target} --wait=30m")
+            });
         }
     }
 
@@ -576,6 +585,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some("provenant route resolve senior".into()),
         "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
+        "provenant steer" => Some("provenant steer ID --text-stdin".into()),
         "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
         _ => {
             if let Some(core) = selected.get::<metadata::CoreCommand>() {
@@ -1890,7 +1900,7 @@ mod tests {
         for (words, example) in [
             (
                 vec!["route", "resolve", "one", "two"],
-                "provenant route resolve --model ADAPTER/ID",
+                "provenant route resolve senior",
             ),
             (
                 vec!["output", "--host"],
