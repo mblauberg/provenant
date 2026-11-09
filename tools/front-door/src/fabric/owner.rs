@@ -3498,9 +3498,6 @@ impl BoundGraphOwner<'_> {
                                     // Output pages prove the redacted stream. Graph evidence
                                     // still identifies the peer's sealed original artifact.
                                     result.digest = artifact.digest.to_string();
-                                    result.source_truncated = artifact.bytes
-                                    > provenant_records::result_capture::ResultCapture::TAIL_BYTES
-                                        as u64;
                                 }
                                 (Some(Box::new(result)), None)
                             }
@@ -4277,8 +4274,6 @@ fn capture_graph_output(
             if result.digest != digest.to_string() {
                 return Err(FacadeError::StateCorrupt);
             }
-            result.source_truncated =
-                offset > provenant_records::result_capture::ResultCapture::TAIL_BYTES as u64;
             result.handoff = result.handoff.and_then(|handoff| {
                 handoff
                     .map(|handoff| {

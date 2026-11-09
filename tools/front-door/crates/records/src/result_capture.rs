@@ -48,7 +48,6 @@ pub struct CapturedResult {
 
 impl ResultCapture {
     pub const HEAD_BYTES: usize = HEAD_BYTES;
-    pub const TAIL_BYTES: usize = TAIL_BYTES;
 
     pub fn new(required_verdict: Option<&str>) -> Self {
         Self {
@@ -179,7 +178,7 @@ impl ResultCapture {
             excerpt,
             tail,
             truncated,
-            source_truncated: false,
+            source_truncated: tail_truncated,
             tail_truncated,
             matched_required: self.matched_required,
             disposition_proof: self.dispositions.finish(),
