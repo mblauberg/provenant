@@ -640,6 +640,7 @@ impl Registry<'_> {
             session: None,
             reason: Some(reason.into()),
             partial_signals: Vec::new(),
+            turns: Vec::new(),
         };
         let Some(adapter) = REGISTRY
             .iter()
@@ -781,6 +782,7 @@ impl Registry<'_> {
             session: outcome.session().map(str::to_owned),
             reason: None,
             partial_signals: Vec::new(),
+            turns: Vec::new(),
         };
         let mut has_usage = false;
         let mut early_stop = false;
@@ -789,6 +791,12 @@ impl Registry<'_> {
             match event {
                 ProviderEvent::ResultFallback => result_fallback = true,
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
+                ProviderEvent::TurnEnd { tool_activity } => {
+                    decoded.turns.push(provenant_records::handoff::TurnEnd {
+                        at: decoded.result.len(),
+                        tool_activity: *tool_activity,
+                    });
+                }
                 ProviderEvent::MessageStart => {
                     if !decoded.result.is_empty() && !decoded.result.ends_with('\n') {
                         decoded.result.push('\n');
@@ -833,6 +841,7 @@ impl Registry<'_> {
             let second = right.trim_start();
             if !first.is_empty() && first == second && first.len() + second.len() < answer.len() {
                 decoded.result = first.to_owned();
+                decoded.turns.clear();
             }
         }
         if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
@@ -844,6 +853,7 @@ impl Registry<'_> {
                 decoded
                     .result
                     .insert_str(0, "[output truncated; retained tail]\n");
+                decoded.turns.clear();
             }
         }
         if result_event_usage && !has_usage {

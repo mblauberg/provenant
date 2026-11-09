@@ -633,8 +633,8 @@ transcript except Codex's post-exit identity projection. A read-only lane (no
 
 An attempt that settles `succeeded`, `review_required` or `uncommitted` carries
 `partial_signals` when there is structured evidence that part of the brief is
-undone: `declared_stop` (its final answer ends with a single, valid `handoff`
-schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
+undone: `declared_stop` (its final handoff, defined below, is a valid `handoff`
+schema v2 block with status `stopped_early` or `blocked`),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`), `uncommitted_work`, and
@@ -643,7 +643,24 @@ model-less adapter such as `command`, settled without a valid final handoff;
 a read-only lane never carries it). A failed
 lane never carries `handoff_missing`; a redaction failure flips the outcomes
 that would into `failed`. Prose is never read, and a quoted, repeated or
-trailing-text block is no flag. A declared stop (`stopped_early` or `blocked`)
+trailing-text block is no flag.
+
+The final handoff is one `handoff` fence with nothing after it in the turn it
+ends. A decoder that sees provider turns records where each completed turn
+ends in the result (Claude: each `result` event) and whether a tool ran in
+that turn; a plain text user message, such as a background task notification,
+is not tool work. `Handoff::from_turns` (`crates/records/src/handoff.rs`) reads
+the turns from the last: a later turn's own valid or malformed fence decides;
+a later turn with neither a fence nor tool work, such as a reply to a late
+notification, leaves the earlier turn's handoff standing; a later turn that ran
+a tool without declaring leaves no handoff. A fence quoted or drafted mid-turn
+never ended its turn and is not final. Without turn boundaries, or with text
+that no turn ended (an appended diagnostic, an interrupted answer), the whole
+answer must end with the fence. Settlement and the `handoff_missing` check share
+this one rule. Review verdict and findings fences keep their final-position
+rule over the whole answer.
+
+A declared stop (`stopped_early` or `blocked`)
 and `handoff_missing` both change an otherwise `succeeded` outcome to
 `review_required` (the latter with the reason "no handoff: the lane ended
 without reporting results"); other outcomes remain unchanged. Every terminal
@@ -694,7 +711,7 @@ and each list to 64 non-empty strings.
 The launch prompt instructs a lane to atomically update `handoff.json` in its
 private provider state when the plan has a private-state grant. The update is
 best effort; a provider may refuse it. This path is outside the worktree and commit set. At
-settlement the host saves the valid final fence as the attempt's immutable
+settlement the host saves the valid final handoff as the attempt's immutable
 `handoff.json`. If the provider dies without a final fence, the host reads
 progress only from the exact private-state grant of the applied candidate.
 A completed malformed answer never falls back to stale progress; an interrupted

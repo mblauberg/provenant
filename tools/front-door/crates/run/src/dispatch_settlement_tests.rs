@@ -646,6 +646,39 @@ fn a_declared_stop_settles_review_required() -> TestResult {
     Ok(())
 }
 #[test]
+fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult {
+    use provenant_records::handoff::TurnEnd;
+    let first = format!("Done: parser.\n\n{STOPPED_EARLY}");
+    let answer = format!("{first}\nThe wait was redundant; nothing changed.");
+    let turn = |at, tool_activity| TurnEnd { at, tool_activity };
+    // The declaration ended the first turn; the reply ran no tool.
+    let record = settle_with_turns(
+        &answer,
+        Some(Outcome::Succeeded),
+        Vec::new(),
+        None,
+        vec![turn(first.len(), true), turn(answer.len(), false)],
+    )?;
+    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            ..
+        }
+    ));
+    // Without boundaries, or after later tool work, the trailing text
+    // displaces it as before.
+    for turns in [
+        Vec::new(),
+        vec![turn(first.len(), true), turn(answer.len(), true)],
+    ] {
+        let record = settle_with_turns(&answer, Some(Outcome::Succeeded), Vec::new(), None, turns)?;
+        assert!(record.partial_signals.is_empty());
+    }
+    Ok(())
+}
+#[test]
 fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
     // `input()` is a read-only task, so its complete answer is its proof.
     for answer in [

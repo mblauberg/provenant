@@ -502,6 +502,49 @@ fn repeated_answer_from_non_agy_adapter_is_unchanged() {
     assert_eq!(decoded.result, "answer\nanswer");
 }
 #[test]
+fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        ..Default::default()
+    };
+    let handoff = "Report.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let result = |text: &str| json!({"type":"result","subtype":"success","is_error":false,"session_id":"s","result":text,"usage":{"input_tokens":1,"output_tokens":1}});
+    let tool_use = json!({"type":"assistant","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}]},"session_id":"s","parent_tool_use_id":null});
+    let notification = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"<task-notification>done</task-notification>"}]},"session_id":"s","parent_tool_use_id":null});
+    let decode = |late: &[&serde_json::Value]| {
+        let mut stream = format!(
+            "{}\n{}\n{}\n",
+            json!({"type":"system","subtype":"init","session_id":"s"}),
+            tool_use,
+            result(handoff)
+        );
+        for event in late {
+            stream.push_str(&format!("{event}\n"));
+        }
+        stream.push_str(&format!("{}\n", result("The wait was redundant.")));
+        Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap()
+    };
+    let decoded = decode(&[&notification]);
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    // Each turn starts on its own line, so the fence stays intact.
+    assert_eq!(
+        decoded.result,
+        format!("{handoff}\nThe wait was redundant.")
+    );
+    assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+    assert_eq!(decoded.handoff().unwrap().unwrap().note, "finished");
+    // A tool run after the declaration leaves the lane without one.
+    let decoded = decode(&[&notification, &tool_use]);
+    assert_eq!(decoded.handoff(), Ok(None));
+}
+#[test]
 fn claude_usage_records_cache_read_and_cache_write() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),

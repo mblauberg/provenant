@@ -848,6 +848,8 @@ enum Event {
     User {
         #[serde(default)]
         parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        message: Option<UserMessage>,
     },
     #[serde(rename = "result")]
     Result {
@@ -872,6 +874,39 @@ enum Event {
     },
     #[serde(other)]
     Other,
+}
+/// Any other shape is kept as an unknown message, never a malformed stream.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UserMessage {
+    Message { content: UserContent },
+    Other(serde::de::IgnoredAny),
+}
+/// Only the block types are read; tool output is never kept.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UserContent {
+    // Only the shape matters: a string here is a plain text message.
+    Text(#[allow(dead_code)] String),
+    Blocks(Vec<UserBlock>),
+    Other(serde::de::IgnoredAny),
+}
+#[derive(Deserialize)]
+struct UserBlock {
+    #[serde(rename = "type")]
+    kind: String,
+}
+/// A user message of text alone: a string, or only `text` blocks.
+fn text_only(message: &UserMessage) -> bool {
+    match message {
+        UserMessage::Message {
+            content: UserContent::Text(_),
+        } => true,
+        UserMessage::Message {
+            content: UserContent::Blocks(blocks),
+        } => !blocks.is_empty() && blocks.iter().all(|block| block.kind == "text"),
+        _ => false,
+    }
 }
 #[derive(Deserialize)]
 struct Message {
@@ -1058,8 +1093,17 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             }
             events
         }
+        // A plain text user message, such as a background task notification,
+        // starts a turn but is not tool work.
         Event::User {
             parent_tool_use_id: None,
+            message,
+        } if message.as_ref().is_some_and(text_only) => {
+            vec![]
+        }
+        Event::User {
+            parent_tool_use_id: None,
+            ..
         } => vec![E::ToolActivity],
         Event::Result {
             session_id,
@@ -1123,9 +1167,15 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     events.push(E::Error);
                 }
             } else {
+                // A later turn, such as a reply to a late notification, starts
+                // on its own line and keeps its own boundary.
                 if let Some(result) = result {
+                    events.push(E::MessageStart);
                     events.push(E::Text(result));
                 }
+                events.push(E::TurnEnd {
+                    tool_activity: false,
+                });
                 // A success that stopped for another reason than finishing its
                 // turn is still a partial piece of work.
                 let early = stop_reason
@@ -1199,6 +1249,50 @@ mod overload_tests {
         assert!(events.contains(&E::Text("committed the work".into())));
         assert!(events.contains(&E::ResultFallback));
         assert!(!events.iter().any(|e| matches!(e, E::AssistantText(_))));
+    }
+
+    #[test]
+    fn each_result_ends_a_turn_and_a_notification_is_not_tool_work() {
+        let tool_use = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Bash\",\"input\":{}}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let tool_result = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"ok\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let notification = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<task-notification>done</task-notification>\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"continue\"},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let odd = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":7},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n";
+        let result = |text: &str| {
+            format!(
+                "{{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"{text}\"}}\n"
+            )
+        };
+        let events = finish_text(&format!(
+            "{tool_use}{tool_result}{}{notification}{prompt}{}{odd}{}",
+            result("first"),
+            result("second"),
+            result("third")
+        ));
+        let turns: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                E::TurnEnd { tool_activity } => Some(*tool_activity),
+                _ => None,
+            })
+            .collect();
+        // An unknown user message shape still counts as work, never as malformed.
+        assert_eq!(turns, [true, false, true]);
+        let order: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, E::MessageStart | E::Text(_) | E::TurnEnd { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            order[..3],
+            [
+                E::MessageStart,
+                E::Text("first".into()),
+                E::TurnEnd {
+                    tool_activity: true
+                }
+            ]
+        );
     }
 
     #[test]

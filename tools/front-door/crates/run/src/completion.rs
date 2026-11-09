@@ -43,7 +43,7 @@ impl RunStore {
                     | Outcome::TimedOut
                     | Outcome::Lost
             );
-        let handoff = match Handoff::from_result(&decoded.result) {
+        let handoff = match decoded.handoff() {
             Ok(Some(handoff)) => Some(handoff),
             // The provider may die partway through its final fence. A complete
             // malformed answer remains ambiguous; an interrupted one can use
@@ -227,6 +227,7 @@ mod tests {
             session: None,
             reason: None,
             partial_signals: vec![],
+            turns: Vec::new(),
         }
     }
     fn grant(record: &mut AttemptRecord, candidate: &Path) -> TestResult {
