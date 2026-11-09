@@ -2943,21 +2943,28 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     Ok(())
 }
 
-fn agy_denial_result_stays_out_of_terminal_diagnostics() -> Result {
+fn agy_denial_keeps_raw_step_out_of_terminal_diagnostics() -> Result {
+    let step = b"{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"fixture-session\",\"step_type\":\"tool_call\",\"text_delta\":\"cat /fixture/private.txt\"}}\n";
+    let stdout = [
+        step.as_slice(),
+        include_bytes!("fixtures/providers/agy/denied-result.jsonl").as_slice(),
+    ]
+    .concat();
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
         ("work", "google-fixture"),
-        include_bytes!("fixtures/providers/agy/denied-result.jsonl"),
+        &stdout,
         b"",
         0,
     )?;
     assert!(matches!(
-        terminal.state,
+        &terminal.state,
         provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::Failed,
+            outcome: provenant_run::Outcome::PermissionDenied,
+            reason: Some(reason),
             ..
-        }
+        } if reason.contains("RunCommand") && !reason.contains("cat /fixture/private.txt") && !reason.contains("/fixture/private.txt")
     ));
     let lanes = rig.command(&[
         "status",
@@ -2968,12 +2975,13 @@ fn agy_denial_result_stays_out_of_terminal_diagnostics() -> Result {
     assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["rows"][0];
-    assert_eq!(lane["state"], "failed");
+    assert_eq!(lane["state"], "permission_denied");
     assert_eq!(lane["cause"], "failed");
     for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
         let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
         assert!(!diagnostic.is_empty());
-        assert!(!diagnostic.contains("RunCommand"));
+        assert!(!diagnostic.contains("cat /fixture/private.txt"));
+        assert!(!diagnostic.contains("/fixture/private.txt"));
     }
     let captured = rig
         .state
@@ -2982,7 +2990,9 @@ fn agy_denial_result_stays_out_of_terminal_diagnostics() -> Result {
         .join("attempts")
         .join(terminal.attempt_id.to_string())
         .join("stdout.log");
-    assert!(fs::read_to_string(captured)?.contains("RunCommand"));
+    let captured = fs::read_to_string(captured)?;
+    assert!(captured.contains("RunCommand"));
+    assert!(captured.contains("cat /fixture/private.txt"));
     Ok(())
 }
 
@@ -4389,8 +4399,8 @@ fn main() -> ExitCode {
                 agy_denied_command_reaches_result_without_entering_terminal_diagnostics,
             ),
             (
-                "agy_denial_result_stays_out_of_terminal_diagnostics",
-                agy_denial_result_stays_out_of_terminal_diagnostics,
+                "agy_denial_keeps_raw_step_out_of_terminal_diagnostics",
+                agy_denial_keeps_raw_step_out_of_terminal_diagnostics,
             ),
             (
                 "codex_capacity_settles_without_quota_refusal",
