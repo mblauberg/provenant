@@ -362,7 +362,13 @@ pub(crate) fn settle_owned_worktree(
             }),
         )?,
         Ok(None) => {} // The current worker owns the receipt.
-        Err(error) => eprintln!("could not queue completion GC: {error}"),
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "could not queue completion GC: {error}"
+            );
+        }
     }
     Ok(())
 }

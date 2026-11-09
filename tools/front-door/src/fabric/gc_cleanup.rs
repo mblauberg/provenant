@@ -285,7 +285,9 @@ fn retry_pending_with(
         match result {
             Ok(_) => {}
             Err(error) => {
-                eprintln!(
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
                     "completion GC request {} failed: {error}",
                     name.to_string_lossy()
                 );
