@@ -252,11 +252,11 @@ fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static
                 .map_or((option, false), |(name, _)| (name, true));
             if !joined
                 && model.get_arguments().any(|arg| {
-                    arg.is_global_set()
-                        && arg.get_long() == Some(name)
-                        && arg
-                            .get_num_args()
-                            .is_some_and(|range| range.min_values() > 0)
+                    arg.get_long() == Some(name)
+                        && arg.get_num_args().map_or_else(
+                            || arg.get_action().takes_values(),
+                            |range| range.min_values() > 0,
+                        )
                 })
             {
                 args.next();
@@ -478,9 +478,10 @@ fn walk_subcommands<'a>(
             if !joined
                 && selected.get_arguments().any(|arg| {
                     arg.get_long() == Some(name)
-                        && arg
-                            .get_num_args()
-                            .is_some_and(|range| range.min_values() > 0)
+                        && arg.get_num_args().map_or_else(
+                            || arg.get_action().takes_values(),
+                            |range| range.min_values() > 0,
+                        )
                 })
             {
                 words.next();
