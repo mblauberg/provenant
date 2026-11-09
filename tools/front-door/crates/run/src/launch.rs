@@ -97,6 +97,16 @@ pub fn capture_plan(
         } else {
             0
         },
+        // Writers only: a fresh attempt continues a writer's retained
+        // worktree from its handoff. 0 or unset is off; a provider that
+        // reports no per-call context figure is never stopped for it.
+        context_handoff: if task.writer.is_some() {
+            task.profile
+                .knob_u64("lanes.context_handoff_tokens")
+                .unwrap_or(0)
+        } else {
+            0
+        },
         slot_wait_ms: task
             .profile
             .knob_u64("lanes.slot_wait_seconds")

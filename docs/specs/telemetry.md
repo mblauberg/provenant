@@ -184,9 +184,13 @@ owns invocation; `crates/telemetry/src/ingest.rs` owns limits and record layout.
 
 ## Behaviour context and comparability
 
-`telemetry stats` exposes `attempt_context`, `task_context`, `reply_context`
-and `cli_ergonomics`. Attempt figures cover selected finished project attempts;
+`telemetry stats` exposes `attempt_context`, `task_context`, `reply_context`,
+`context_bands` and `cli_ergonomics`. Attempt figures cover selected finished project attempts;
 native reply and demand-log figures cover the host's selected time window.
+`context_bands` prices each native reply and groups it by source and by the
+context it sent (fresh input, cached reads and cache writes), in bands starting
+at 0, 50k, 100k, 200k and 400k tokens, so spend at large contexts can be
+compared across windows.
 These breakdowns do not add usage to the totals again. A run selection omits
 the host-wide reply breakdown because it cannot be attributed to that run.
 

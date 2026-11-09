@@ -1587,14 +1587,38 @@ fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
 fn live_usage_counts_a_call_once_and_a_revised_figure_replaces_it() {
     use provenant_os::capture::{DecodedEventSink, FrameEvent};
     let events = Events::default();
-    let report = |key, tokens| events.try_send(FrameEvent::Usage { key, tokens }).unwrap();
-    report(1, 600);
-    report(1, 600);
+    let report = |key, tokens, context| {
+        events
+            .try_send(FrameEvent::Usage {
+                key,
+                tokens,
+                context,
+            })
+            .unwrap()
+    };
+    report(1, 600, None);
+    report(1, 600, None);
     assert_eq!(events.tokens(), 600);
-    report(2, 300);
+    assert_eq!(events.context(), None);
+    report(2, 300, Some(200_000));
     assert_eq!(events.tokens(), 900);
-    report(1, 700);
+    assert_eq!(events.context(), Some(200_000));
+    report(1, 700, None);
     assert_eq!(events.tokens(), 1000);
+    // A call without a context figure keeps the latest reported one; a later
+    // call after compaction replaces it with its smaller context.
+    assert_eq!(events.context(), Some(200_000));
+    report(3, 10, Some(40_000));
+    assert_eq!(events.context(), Some(40_000));
+}
+
+#[test]
+fn context_handoff_is_due_only_at_a_reported_context_past_a_set_threshold() {
+    // Off at 0 whatever the context; a provider with no figure never stops.
+    assert!(!context_handoff_due(0, Some(900_000)));
+    assert!(!context_handoff_due(200_000, None));
+    assert!(!context_handoff_due(200_000, Some(199_999)));
+    assert!(context_handoff_due(200_000, Some(200_000)));
 }
 
 #[test]

@@ -22,7 +22,9 @@ pub struct Claude;
 /// usage of its API call, repeated on every content block of that message, so
 /// a call is keyed by its message id and counted once. Output counts are
 /// streaming placeholders until the result, so a live total may undercount
-/// output; it counts input, cached reads and cache writes in full.
+/// output; it counts fresh input and cache writes in full. Each call also
+/// reports the context it sent (input, cached reads and cache writes) for the
+/// context handoff threshold.
 pub struct LiveUsage;
 impl provenant_os::capture::FrameDecoder for LiveUsage {
     fn decode(
@@ -31,19 +33,24 @@ impl provenant_os::capture::FrameDecoder for LiveUsage {
     ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
         use provenant_os::capture::FrameEvent;
         Ok(
-            live_usage(frame).map_or(FrameEvent::Progress, |(key, tokens)| FrameEvent::Usage {
-                key,
-                tokens,
-            }),
+            live_usage(frame).map_or(
+                FrameEvent::Progress,
+                |(key, tokens, context)| FrameEvent::Usage {
+                    key,
+                    tokens,
+                    context: Some(context),
+                },
+            ),
         )
     }
     fn reports_usage(&self) -> bool {
         true
     }
 }
-/// The key and token total of an assistant frame, or `None` for any other
-/// frame or one that does not parse. A bad frame never ends an attempt.
-fn live_usage(frame: &[u8]) -> Option<(u64, u64)> {
+/// The key, fresh token total and context size of an assistant frame, or
+/// `None` for any other frame or one that does not parse. A bad frame never
+/// ends an attempt.
+fn live_usage(frame: &[u8]) -> Option<(u64, u64, u64)> {
     use std::hash::{Hash, Hasher};
     if !frame.windows(7).any(|window| window == b"\"usage\"") {
         return None;
@@ -63,9 +70,17 @@ fn live_usage(frame: &[u8]) -> Option<(u64, u64)> {
     .into_iter()
     .filter_map(count)
     .fold(0_u64, u64::saturating_add);
+    let context = [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ]
+    .into_iter()
+    .filter_map(count)
+    .fold(0_u64, u64::saturating_add);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     message.get("id")?.as_str()?.hash(&mut hasher);
-    Some((hasher.finish(), tokens))
+    Some((hasher.finish(), tokens, context))
 }
 
 pub const REGISTRATION: crate::Registration = crate::Registration {
@@ -1493,11 +1508,16 @@ mod overload_tests {
         let one = LiveUsage.decode(frame("a").as_bytes()).unwrap();
         // Every content block of a message repeats its usage under one key.
         assert_eq!(one, LiveUsage.decode(frame("a").as_bytes()).unwrap());
-        let FrameEvent::Usage { tokens, .. } = one else {
+        let FrameEvent::Usage {
+            tokens, context, ..
+        } = one
+        else {
             panic!("an assistant frame with usage reports it");
         };
         // 10 (input) + 5 (output) + 100 (cache creation) = 115. Cache reads (1000) do not count.
         assert_eq!(tokens, 115);
+        // The context sent is 10 + 1000 + 100: cached reads count here.
+        assert_eq!(context, Some(1110));
         assert_ne!(one, LiveUsage.decode(frame("b").as_bytes()).unwrap());
         for other in [
             &br#"{"type":"system","subtype":"init","session_id":"s"}"#[..],

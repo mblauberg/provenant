@@ -29,6 +29,9 @@ pub enum StopReason {
     PostTerminalCleanup,
     /// A writer passed its token budget, from usage the provider reported.
     TokenBudget,
+    /// A writer's context reached the context handoff threshold, from the
+    /// context size its provider reported for one call.
+    ContextHandoff,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -233,6 +236,8 @@ pub enum Event {
     SupervisorSignal,
     /// Live usage passed the token budget.
     TokenBudget,
+    /// One call's context reached the context handoff threshold.
+    ContextHandoff,
     RetryStop(StopReason),
     Silence,
     CaptureFailure,
@@ -354,6 +359,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             | Event::Terminal
             | Event::ProtocolRejected
             | Event::TokenBudget
+            | Event::ContextHandoff
             | Event::RetryStop(_)
             | Event::Silence
             | Event::CaptureFailure
@@ -379,6 +385,9 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                 request_stop(&mut state, StopReason::SupervisorSignal, &mut effects)
             }
             Event::TokenBudget => request_stop(&mut state, StopReason::TokenBudget, &mut effects),
+            Event::ContextHandoff => {
+                request_stop(&mut state, StopReason::ContextHandoff, &mut effects)
+            }
             Event::Silence
             | Event::CaptureFailure
             | Event::ObservationFailure
@@ -408,6 +417,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                     Event::Progress
                     | Event::Terminal
                     | Event::TokenBudget
+                    | Event::ContextHandoff
                     | Event::Silence
                     | Event::CaptureFailure
                     | Event::ObservationFailure

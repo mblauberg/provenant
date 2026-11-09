@@ -1494,7 +1494,7 @@ impl RunStore {
         // Scrub before publication so a retry never starts from new plaintext.
         let session_redaction_failed =
             provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
-        let handoff = self.capture_handoff(attempt, &record, &decoded)?;
+        let mut handoff = self.capture_handoff(attempt, &record, &decoded)?;
         // Failed headless tools can leave only stderr. Keep the recognised
         // provider diagnostic alongside any partial answer before sealing it.
         if decoded.outcome == Outcome::Failed
@@ -1536,9 +1536,11 @@ impl RunStore {
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
-                Some(StopReason::WallDeadline | StopReason::TokenBudget) => {
-                    decoded.outcome = Outcome::TimedOut
-                }
+                Some(
+                    StopReason::WallDeadline
+                    | StopReason::TokenBudget
+                    | StopReason::ContextHandoff,
+                ) => decoded.outcome = Outcome::TimedOut,
                 Some(StopReason::ExplicitCancellation) if cancelled => {
                     decoded.outcome = Outcome::Cancelled
                 }
@@ -2003,6 +2005,29 @@ impl RunStore {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
         }
+        // A writer the host stopped at its context handoff threshold settles as
+        // a declared stop carrying its latest progress handoff, so the graph's
+        // one restart (`no_work`) continues it fresh on the same worktree. Its
+        // commits and uncommitted edits stay where they are.
+        if decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::ContextHandoff)
+            && task.writer.is_some()
+            && !cancelled
+        {
+            // The result's handoff fence is what the graph continues from;
+            // the sealed snapshot, if any, stays as the lane wrote it.
+            let stopped = context_handoff(handoff.take());
+            decoded.result = format!(
+                "Stopped at the context handoff threshold (lanes.context_handoff_tokens); a fresh attempt continues from this handoff on the same worktree.\n\n{}",
+                stopped.fenced()
+            );
+            decoded.turns.clear();
+            decoded.complete = true;
+            decoded.outcome = Outcome::ReviewRequired;
+            decoded.terminal_cause = Some(TerminalCause::ContextHandoff);
+            decoded.reason = Some(TerminalCause::ContextHandoff.detail().into());
+            handoff = Some(stopped);
+        }
         let answer_limit = RESULT_LIMIT as usize;
         if decoded.result.len() > answer_limit {
             let mut end = answer_limit;
@@ -2402,6 +2427,33 @@ pub(crate) fn seal_manifest(
 /// Placeholder result for a writer whose provider sent no final message.
 /// The result of a writer stopped on its token budget that sent no final
 /// message: what the host committed, and that the remainder is unknown.
+/// The handoff a context handoff stop continues from: the lane's latest
+/// unfinished progress handoff, or a stopped-early one naming the gap. A
+/// progress handoff that claims `done` keeps its content but not that status,
+/// because the host stopped the lane before its final answer.
+fn context_handoff(
+    progress: Option<provenant_records::handoff::Handoff>,
+) -> provenant_records::handoff::Handoff {
+    use provenant_records::handoff::{Handoff, HandoffStatus};
+    match progress {
+        Some(handoff) if handoff.unfinished() => handoff,
+        progress => {
+            let mut handoff = progress.unwrap_or_else(|| Handoff {
+                schema_version: 2,
+                status: HandoffStatus::StoppedEarly,
+                note: "Stopped at the context handoff threshold before the lane recorded a progress handoff; inspect the branch and worktree.".into(),
+                remaining: vec!["unknown: inspect the branch and worktree".into()],
+                decisions: Vec::new(),
+                verify: Vec::new(),
+                spec_concerns: Vec::new(),
+                extra: Default::default(),
+            });
+            handoff.status = HandoffStatus::StoppedEarly;
+            handoff
+        }
+    }
+}
+
 fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
     let mut text = String::from("Stopped on budget.\n");
     if let Some(commit) = record["commit"].as_str() {
@@ -3685,6 +3737,149 @@ mod writer_recovery_tests {
     fn writer_token_budget_commit_leaves_an_apply_rebase_uncommitted()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         budget_stop_case(BudgetStopCase::InProgress("rebase-apply"))
+    }
+
+    /// A writer the host stopped at its context handoff threshold, with an
+    /// edit left uncommitted and a progress handoff recorded, settles as a
+    /// declared stop whose result carries that handoff. The graph restarts
+    /// such a stop fresh on the same worktree with the handoff in its brief
+    /// (`no_work`); the host commits nothing and the edit stays in place.
+    #[test]
+    fn writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = input();
+        run.request.tasks[0].writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = format!("refs/provenant/import/{}", launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory.try_clone()?,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        std::fs::write(
+            launch.worktree.repo().root_path().join("context-work.txt"),
+            "uncommitted work before the context handoff\n",
+        )?;
+        // The lane's latest progress handoff, as settlement snapshots it.
+        let progress = serde_json::json!({
+            "schema_version": 2,
+            "status": "stopped_early",
+            "note": "Parser done; renderer next",
+            "remaining": ["Finish renderer"],
+            "decisions": ["Keep parser API"],
+            "verify": [],
+        });
+        crate::artifacts::seal(
+            &attempt,
+            provenant_records::AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&progress)?,
+            provenant_records::handoff::HANDOFF_BYTES as u64,
+        )?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        observed.stop_reason = Some(StopReason::ContextHandoff);
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        // A stopped provider leaves no final answer.
+        let fake = crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Failed));
+        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        let AttemptState::Terminal {
+            extra,
+            outcome,
+            reason,
+            ..
+        } = &finished.state
+        else {
+            panic!("attempt must be terminal");
+        };
+        assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
+        assert_eq!(
+            extra.get("terminal_cause"),
+            Some(&serde_json::json!(TerminalCause::ContextHandoff))
+        );
+        // Only a declared stop: the owner maps this to the graph's restart.
+        assert_eq!(finished.partial_signals, vec![provenant_records::run::PartialSignal::DeclaredStop]);
+        let result = String::from_utf8(
+            read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?,
+        )?;
+        let handoff = provenant_records::handoff::Handoff::from_result(&result)?
+            .ok_or("result handoff")?;
+        assert_eq!(handoff.note, "Parser done; renderer next");
+        assert_eq!(handoff.remaining, vec!["Finish renderer".to_owned()]);
+        assert!(handoff.unfinished());
+        // Nothing was committed for the lane; its edit stays for the restart.
+        assert!(read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?.is_none());
+        assert_eq!(
+            std::fs::read_to_string(fixture.writer.worktree.join("context-work.txt"))?,
+            "uncommitted work before the context handoff\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_context_handoff_keeps_an_unfinished_handoff_and_never_reports_done() {
+        use provenant_records::handoff::{Handoff, HandoffStatus};
+        let missing = context_handoff(None);
+        assert_eq!(missing.status, HandoffStatus::StoppedEarly);
+        assert!(missing.note.contains("context handoff threshold"));
+        let done = Handoff {
+            status: HandoffStatus::Done,
+            note: "claimed done".into(),
+            ..missing.clone()
+        };
+        let kept = context_handoff(Some(done));
+        assert_eq!(kept.status, HandoffStatus::StoppedEarly);
+        assert_eq!(kept.note, "claimed done");
     }
 
     #[derive(Clone, Copy)]

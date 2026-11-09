@@ -8,4 +8,5 @@ context coverage: inspect attempt_context and task_context with --json; missing 
 comparability: release, harness experiments, task difficulty and user activity cannot be separated when observations are missing or change together
 accepted outcomes: 0 (distinct delivery IDs with recorded accepted workflow receipts among selected attempts; cost includes linked attempts only)
 thinking per trigger (host native replies): provider-reported reasoning tokens; 0 replies without reasoning counts; output_tokens_proxy is separate
+spend by context band (host native replies; context = input + cached reads + cache writes):
 outcomes codex/gpt-6-luna access=read-only effort=low n=1 successes=0 success_rate=0.000 cost/success_microdollars=unknown time/success_ms=unknown comparison=observational_not_hash_assigned pool=none cost_basis=api_equivalent_estimate

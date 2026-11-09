@@ -950,6 +950,11 @@ pub struct CapturePlan {
     /// it runs. 0 is no budget.
     #[serde(default)]
     pub token_budget: u64,
+    /// Context size, in tokens one provider call sent, at which a writer is
+    /// stopped so a fresh attempt continues from its handoff. 0 is off; a
+    /// provider that reports no context figure is never stopped for it.
+    #[serde(default)]
+    pub context_handoff: u64,
     /// The most time spent queued for a build slot that is kept off the wall
     /// deadline, in total.
     #[serde(default = "default_slot_wait_ms")]
@@ -977,6 +982,7 @@ impl Default for CapturePlan {
             root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             silence_ms: default_silence_ms(),
             token_budget: 0,
+            context_handoff: 0,
             slot_wait_ms: default_slot_wait_ms(),
         }
     }

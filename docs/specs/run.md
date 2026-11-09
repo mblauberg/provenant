@@ -795,6 +795,35 @@ a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
   `crates/confinement/src/run_config.rs::a_host_setting_equal_to_the_default_still_reports_host`
 - Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
 
+## A writer hands off at a context threshold
+
+A writer can be restarted fresh before its context grows costly, because cost
+is context length multiplied by turns. `lanes.context_handoff_tokens` (default
+0, off; suggested 200000) sets the context, in tokens one provider call sent
+(fresh input, cached reads and cache writes), at which the guardian stops a
+writer with the typed stop `context_handoff`. Only a provider that reports each
+call's context is stopped: Claude reports it on every assistant message; a Codex
+turn sums several calls, so it reports none, and providers without live usage
+report none. A lane with no context figure keeps today's behaviour. The attempt
+settles `review_required` with `terminal_cause: context_handoff` and a declared
+stop. Its result carries the lane's latest progress handoff, marked
+`stopped_early`. A done claim in that handoff loses its status, and a missing
+one becomes a stopped-early handoff naming the gap. The host commits nothing;
+commits and uncommitted edits stay on the worktree. The graph then takes the
+stopped-writer path: the one automatic continuation starts a fresh attempt on
+the same worktree with that handoff in its brief, on another eligible route as
+for any stopped writer. A second stop returns to the chair. A token budget stop
+takes precedence when both are due.
+- Why (default off): whether a fresh restart keeps enough working state is
+  untested, so restart stays off until a trial shows it does not lower
+  completion.
+- Test: `crates/supervisor/src/guardian/tests.rs::context_handoff_is_due_only_at_a_reported_context_past_a_set_threshold`;
+  `crates/providers/src/claude.rs::live_usage_counts_each_call_once_with_fresh_input`;
+  `crates/run/src/holder.rs::writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff`;
+  `crates/fabric-runtime/src/graph/retry_tests.rs::stopped_writer_restarts_fresh_on_another_route_with_its_handoff`
+- Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/holder.rs`,
+  `crates/fabric-runtime/src/graph/no_work.rs`
+
 ## Host inputs fail before launch
 
 A host failure to read the stored prompt, or to stage or read back a context

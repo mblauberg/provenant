@@ -307,6 +307,14 @@ fn telemetry_stats_reports_context_coverage_reasoning_and_acceptance_denominator
     assert_eq!(unknown["reasoning_unknown"], 1);
     assert_eq!(unknown["reasoning_tokens"], 0);
     assert_eq!(unknown["output_tokens_proxy"], 13);
+    // Spend by context band: the one reply sent 5 + 7 + 11 = 23 tokens.
+    let bands = &data["context_bands"]["bands"];
+    assert_eq!(bands.as_array().map(Vec::len), Some(1), "{bands}");
+    assert_eq!(bands[0]["source"], "lane");
+    assert_eq!(bands[0]["min_tokens"], 0);
+    assert_eq!(bands[0]["below_tokens"], 50_000);
+    assert_eq!(bands[0]["totals"]["attempts"], 1);
+    assert_eq!(bands[0]["totals"]["usage"]["cache_read"]["known"], 7);
     let accepted = &data["task_context"]["accepted_outcomes"];
     assert_eq!(accepted["denominator"], 0);
     assert!(

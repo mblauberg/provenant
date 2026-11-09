@@ -44,6 +44,11 @@ cancelled when their parent settles, including a successful exit. Use `--wait`
 to collect their completion before exiting, or explicitly detach a child that
 should outlive its parent. Any agent may return a patch; started attempts stay immutable.
 
+To keep a long writer from paying for a very large context, pass
+`--knob lanes.context_handoff_tokens=200000`: the host stops it at that context
+and the graph restarts it fresh from its handoff on the same worktree. The
+setting is off by default until a trial settles it.
+
 Verify commits, paths, checks and routes against output. A synthesis cannot waive
 a gate. Bound repair and independently review its delta.
 HARNESS owns review floors and authority; the chair keeps user communication

@@ -668,6 +668,7 @@ impl Registry<'_> {
             Some(
                 provenant_supervisor::machine::StopReason::WallDeadline
                     | provenant_supervisor::machine::StopReason::TokenBudget
+                    | provenant_supervisor::machine::StopReason::ContextHandoff
             )
         );
         let Ok(outcome) = adapter.finish(
