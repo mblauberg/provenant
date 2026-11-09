@@ -1348,3 +1348,74 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
     assert!(!reader.contains("/fixture/primary/.agent-run/locks"));
     Ok(())
 }
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn declared_history_read_opens_only_the_history_directory() -> Result<(), Box<dyn std::error::Error>>
+{
+    let home = Path::new("/Users/alice");
+    let state = Path::new("/fixture/host-state");
+    let render_with = |reads: &[&str], deny_credentials: bool| {
+        let (mut plan, mut profile) = write_grants_fixture();
+        let mandatory = MandatoryRoots::new(home, state, Path::new("/fixture/repo"))?;
+        plan.policy =
+            Some(crate::run_config::RunConfig::default().policy_for_launch(state, mandatory));
+        for read in reads {
+            plan.read_roots.push(PathGrant {
+                path: (*read).into(),
+                scope: PathScope::Subtree,
+            });
+        }
+        profile.spec.deny_credential_access = deny_credentials;
+        let grants = GrantSet::build(&plan, &profile, home, None)?;
+        render(&grants)
+    };
+    let claude_read = "(deny file-read* (require-all (subpath \"/Users/alice/.claude\") (require-not (subpath \"/Users/alice/.claude/projects\"))))";
+    let codex_read = "(deny file-read* (require-all (subpath \"/Users/alice/.codex\") (require-not (subpath \"/Users/alice/.codex/sessions\"))))";
+    // Without the declaration, history is denied like the rest of the store.
+    let denied = render_with(&[], false)?;
+    assert!(denied.contains("(deny file-read* (subpath \"/Users/alice/.claude\"))"));
+    assert!(!denied.contains(claude_read) && !denied.contains(codex_read));
+    // With it, only the declared directory is excepted, and only for reads.
+    let granted = render_with(
+        &[
+            "/Users/alice/.claude/projects",
+            "/Users/alice/.codex/sessions",
+        ],
+        false,
+    )?;
+    assert!(granted.contains(claude_read), "{granted}");
+    assert!(granted.contains(codex_read), "{granted}");
+    for credential_store in ["/Users/alice/.claude", "/Users/alice/.codex"] {
+        let store = format!("(subpath \"{credential_store}\")");
+        for operation in ["file-write*", "process-exec", "file-map-executable"] {
+            assert!(
+                granted.contains(&format!("(deny {operation} {store})")),
+                "{operation} stays denied for {credential_store}"
+            );
+        }
+        assert!(
+            !granted.contains(&format!("(require-not {store})")),
+            "the store itself is never excepted: {credential_store}"
+        );
+    }
+    // The exact Claude account file stays hidden even from a history reader.
+    assert!(granted.contains("(deny file-read* (literal \"/Users/alice/.claude.json\"))"));
+    // A profile that denies credential access admits no exception.
+    let none = render_with(&["/Users/alice/.claude/projects"], true)?;
+    assert!(!none.contains(claude_read));
+    // A credential file beside history is not a history root.
+    for beside in [
+        "/Users/alice/.claude",
+        "/Users/alice/.claude/.credentials.json",
+        "/Users/alice/.codex/auth.json",
+        "/Users/alice/.codex",
+        "/Users/alice/.claude/projects/.ssh",
+    ] {
+        assert!(
+            render_with(&[beside], false).is_err(),
+            "{beside} must stay refused"
+        );
+    }
+    Ok(())
+}

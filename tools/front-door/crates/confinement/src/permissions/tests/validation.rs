@@ -196,7 +196,6 @@ fn codex_standalone_package_is_read_exec_only() {
         "/Users/alice/.codex",
         "/Users/alice/.codex/auth.json",
         "/Users/alice/.codex/config.toml",
-        "/Users/alice/.codex/sessions",
         "/Users/alice/.codex/packages",
         "/Users/alice/.codex/packages/standalone",
         "/Users/alice/.codex/packages/standalone/releases",
@@ -816,4 +815,53 @@ fn invalid_native_control_labels_are_omitted() {
     );
     spec.native_controls = filtered_native_controls(&spec.native_controls);
     assert_eq!(spec.native_controls, ["valid.control"]);
+}
+
+#[test]
+fn agent_history_is_a_read_only_root_beside_credentials() {
+    let grant = |path: &str| PathGrant {
+        path: PathBuf::from(path),
+        scope: PathScope::Subtree,
+    };
+    for path in [
+        "/Users/alice/.claude/projects",
+        "/Users/alice/.claude/projects/-Users-alice-repo",
+        "/Users/alice/.codex/sessions",
+        "/Users/alice/.codex/archived_sessions",
+        "/home/alice/.codex/sessions/2026/11",
+    ] {
+        assert!(is_agent_history_root(Path::new(path)), "{path}");
+        assert!(
+            validate_read_exec_grant(&grant(path)).is_ok(),
+            "read {path}"
+        );
+        assert!(
+            matches!(
+                validate_noncredential_grant(&grant(path)),
+                Err(PermissionError::CredentialRoot)
+            ),
+            "writes stay strict: {path}"
+        );
+        assert!(!refuses_lane_root(Path::new(path), true, None), "{path}");
+        assert!(refuses_lane_root(Path::new(path), false, None), "{path}");
+    }
+    for path in [
+        "/Users/alice/.claude",
+        "/Users/alice/.claude/.credentials.json",
+        "/Users/alice/.claude/settings.json",
+        "/Users/alice/.claude/projects/x/.ssh",
+        "/Users/alice/.codex",
+        "/Users/alice/.codex/auth.json",
+        "/Users/alice/.codex/history.jsonl",
+        "/Users/alice/.gemini/projects",
+        "/Users/alice/.cursor/sessions",
+        "/tmp/x/.claude/projects",
+        "/Users/alice/.codex/sessions-extra",
+    ] {
+        assert!(!is_agent_history_root(Path::new(path)), "{path}");
+        assert!(
+            validate_read_exec_grant(&grant(path)).is_err(),
+            "{path} stays refused"
+        );
+    }
 }
