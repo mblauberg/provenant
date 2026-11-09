@@ -80,7 +80,7 @@ pub(super) fn blocking(finding: &Finding) -> bool {
         triage.blocking_class.as_str(),
         "acceptance" | "default_path_defect"
     ) || matches!(
-        finding.severity.as_str(),
+        finding.severity.to_ascii_lowercase().as_str(),
         "medium" | "moderate" | "should-fix"
     )
 }
@@ -678,8 +678,14 @@ mod tests {
     #[test]
     fn repair_eligibility_uses_checked_reach_and_preserves_boundaries() {
         let mut item = finding("F1", "correctness");
+        item.extra.get_mut("triage").unwrap()["blocking_class"] = "none".into();
         item.severity = "should-fix".into();
         assert!(blocking(&item));
+        item.severity = "MEDIUM".into();
+        assert!(blocking(&item));
+        item.severity = "p2".into();
+        assert!(!blocking(&item));
+        item.severity = "should-fix".into();
         item.extra.get_mut("trigger").unwrap()["reach"] = "operator_mistake".into();
         assert!(!blocking(&item));
         for class in ["boundary", "data_loss"] {
