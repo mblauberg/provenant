@@ -1264,7 +1264,7 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
     let token = fixture_token();
     for id in ["codex", "claude", "agy", "opencode", "cursor"] {
         let auth = match id {
-            "codex" | "opencode" => Some("login"),
+            "codex" | "opencode" | "cursor" => Some("login"),
             "agy" => Some("keychain"),
             _ => None,
         };

@@ -1557,6 +1557,7 @@ mod tests {
         // The same launch must support the brief's temporary-file + rename
         // protocol while refusing writes to the pinned source or another member.
         let private = &plan.permissions().private_state.as_ref().unwrap().path;
+        std::fs::create_dir_all(private)?;
         let source = root.join("repo");
         let sibling = root.join("other-member");
         std::fs::create_dir_all(&source)?;

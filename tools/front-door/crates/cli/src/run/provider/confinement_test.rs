@@ -156,7 +156,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
             let mut absent = permissions.clone();
             absent.private_state = None;
             assert!(!handoff_writable(&absent));
-            assert!(!run::lane_preamble("policy", false, None).contains("Progress handoff JSON"));
+            assert!(!run::lane_preamble("policy", false, handoff_writable(&absent).then_some(handoff.as_path())).contains("Progress handoff JSON"));
 
             if kind == "commit" {
                 let state_read = rendered
