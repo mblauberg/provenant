@@ -3003,8 +3003,8 @@ impl BoundGraphOwner<'_> {
                         .flatten(),
                     prompt: submission_prompt,
                     title: Some(node.title.to_owned()),
-                    route: accepted_route.unwrap_or(match &route.model {
-                        None if route.name.is_some() => {
+                    route: accepted_route.unwrap_or(match route.selector() {
+                        provenant_fabric_runtime::graph::GraphRouteSelector::Adapter(name) => {
                             provenant_records::run::RequestedRoute::Adapter {
                                 extra: route
                                     .extra
@@ -3018,15 +3018,10 @@ impl BoundGraphOwner<'_> {
                                         missing: true,
                                     })
                                 })?,
-                                name: route.name.clone().ok_or_else(|| {
-                                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
-                                        field: "route.name".into(),
-                                        missing: true,
-                                    })
-                                })?,
+                                name: name.to_owned(),
                             }
                         }
-                        Some(model) => {
+                        provenant_fabric_runtime::graph::GraphRouteSelector::Model(model) => {
                             let adapter = route.adapter.as_ref().ok_or_else(|| {
                                 FacadeError::invalid(InvalidInputDetail::FieldDecode {
                                     field: "route.adapter".into(),
@@ -3045,7 +3040,9 @@ impl BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                             }
                         }
-                        None if !avoided_families.is_empty() => {
+                        provenant_fabric_runtime::graph::GraphRouteSelector::Alias(_)
+                            if !avoided_families.is_empty() =>
+                        {
                             provenant_records::run::RequestedRoute::Review {
                                 extra: route
                                     .extra
@@ -3066,21 +3063,23 @@ impl BoundGraphOwner<'_> {
                                 require_distinct: enforced,
                             }
                         }
-                        None => provenant_records::run::RequestedRoute::Named {
-                            extra: route
-                                .extra
-                                .iter()
-                                .filter(|(key, _)| key.as_str() == "required_family")
-                                .map(|(key, value)| (key.clone(), value.clone()))
-                                .collect(),
-                            name: route.alias.clone().ok_or_else(|| {
-                                FacadeError::invalid(InvalidInputDetail::FieldDecode {
-                                    field: "route.alias".into(),
-                                    missing: true,
-                                })
-                            })?,
-                            effort: route.effort.clone(),
-                        },
+                        provenant_fabric_runtime::graph::GraphRouteSelector::Alias(_) => {
+                            provenant_records::run::RequestedRoute::Named {
+                                extra: route
+                                    .extra
+                                    .iter()
+                                    .filter(|(key, _)| key.as_str() == "required_family")
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect(),
+                                name: route.alias.clone().ok_or_else(|| {
+                                    FacadeError::invalid(InvalidInputDetail::FieldDecode {
+                                        field: "route.alias".into(),
+                                        missing: true,
+                                    })
+                                })?,
+                                effort: route.effort.clone(),
+                            }
+                        }
                     }),
                     timeout_seconds: lane_timeout(
                         node.deadline_seconds,

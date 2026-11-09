@@ -179,7 +179,8 @@ pub(super) fn read(
                 }
                 _ => None,
             };
-            let usage = serde_json::to_value(&attempt.usage).map_err(|_| Error::Encode)?;
+            let usage =
+                serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
             let mut known = Vec::new();
             let mut missing = Vec::new();
             for key in [

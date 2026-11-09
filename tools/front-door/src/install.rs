@@ -891,17 +891,28 @@ struct SyncOptions {
 pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
     if args.upgrade_preflight {
         return match upgrade_preflight(globals) {
-            Ok(findings) if findings.is_empty() => 0,
-            Ok(findings) => {
+            Ok(outcome) if outcome.is_empty() => 0,
+            Ok(outcome) => {
                 let mut output = io::stdout().lock();
-                for finding in findings {
+                for warning in &outcome.warnings {
+                    if writeln!(output, "Warning: {warning}").is_err() {
+                        return 1;
+                    }
+                }
+                if outcome.blocking.is_empty() {
+                    return 0;
+                }
+                for finding in &outcome.blocking {
                     if writeln!(output, "{finding}").is_err() {
                         return 1;
                     }
                 }
-                if writeln!(output,
+                if writeln!(
+                    output,
                     "Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."
-                ).is_err() {
+                )
+                .is_err()
+                {
                     return 1;
                 }
                 2
@@ -1529,8 +1540,27 @@ struct UpgradeRunner {
 fn pending_upgrade_findings(
     state: &provenant_core::StateRoot,
     legacy_only: bool,
-) -> Result<Vec<String>, String> {
-    provenant_fabric_runtime::graph::cutover::pending_findings(state, legacy_only)
+) -> Result<provenant_fabric_runtime::graph::cutover::ClassifiedFindings, String> {
+    provenant_fabric_runtime::graph::cutover::classified_pending_findings(state, legacy_only)
+}
+
+fn installed_state_format_version(targets: &Targets) -> Option<u64> {
+    match read_install_receipt(targets) {
+        Ok(Some(receipt)) => Some(receipt.state_format_version),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Default)]
+struct PreflightOutcome {
+    blocking: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl PreflightOutcome {
+    fn is_empty(&self) -> bool {
+        self.blocking.is_empty() && self.warnings.is_empty()
+    }
 }
 
 /// Carry the cutover guard's bounded findings into admission diagnostics.
@@ -1549,9 +1579,40 @@ pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result
 }
 
 /// Inspect the old state with the staged release before it replaces the binary.
-fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
+fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String> {
     let (environment, targets) = selected_targets(globals, &[]).map_err(|e| format!("{e:?}"))?;
-    let mut findings = pending_upgrade_findings(&targets.roots.state, false)?;
+    let classified = pending_upgrade_findings(&targets.roots.state, false)?;
+    let mut outcome = PreflightOutcome::default();
+
+    outcome.blocking.extend(classified.unreadable);
+
+    // A host without a receipt predates format declarations and gets baseline 1.
+    let installed_version = installed_state_format_version(&targets)
+        .unwrap_or(provenant_records::BASELINE_STATE_FORMAT_VERSION);
+    let legacy = pending_upgrade_findings(&targets.roots.state, true)?;
+    let legacy_graphs: std::collections::BTreeSet<_> = legacy.pending_graphs.into_iter().collect();
+    let legacy_lanes: std::collections::BTreeSet<_> = legacy.live_lanes.into_iter().collect();
+    let declared_break = installed_version != provenant_records::STATE_FORMAT_VERSION;
+
+    for (project, id) in classified.pending_graphs {
+        if declared_break || legacy_graphs.contains(&(project.clone(), id.clone())) {
+            outcome.blocking.push(format!(
+                "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
+            ));
+        } else {
+            outcome
+                .warnings
+                .push(format!("Pending graph {project}/{id} in flight"));
+        }
+    }
+    for lane in classified.live_lanes {
+        if declared_break || legacy_lanes.contains(&lane) {
+            outcome.blocking.push(lane);
+        } else {
+            outcome.warnings.push(lane);
+        }
+    }
+
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| environment.home.join(".config"));
@@ -1586,7 +1647,9 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
                 for entry in entries {
                     let entry = entry.map_err(|e| e.to_string())?;
                     if entry.path().extension().is_some_and(|ext| ext == "toml") {
-                        findings.push(format!("{kind} preset to port: {}", entry.path().display()));
+                        outcome
+                            .blocking
+                            .push(format!("{kind} preset to port: {}", entry.path().display()));
                     }
                 }
             }
@@ -1594,8 +1657,9 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
             Err(error) => return Err(format!("{}: {error}", presets.display())),
         }
     }
-    findings.sort();
-    Ok(findings)
+    outcome.blocking.sort();
+    outcome.warnings.sort();
+    Ok(outcome)
 }
 impl UpgradeRunner {
     fn execute(
@@ -2209,6 +2273,7 @@ mod tests {
         let receipt = InstallReceipt {
             extra: Default::default(),
             schema_version: 1,
+            state_format_version: provenant_records::STATE_FORMAT_VERSION,
             source_digest: SourceDigest::from_bytes([1; 32]),
             manifest_digest: FileDigest::from_bytes([2; 32]),
             asset_digest: SourceDigest::from_bytes([3; 32]),

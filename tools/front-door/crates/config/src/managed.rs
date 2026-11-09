@@ -1172,6 +1172,7 @@ pub fn plan_install(
     let receipt = InstallReceipt {
         extra: Default::default(),
         schema_version: 1,
+        state_format_version: provenant_records::STATE_FORMAT_VERSION,
         source_digest: release.manifest.source_digest,
         manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
         asset_digest: release.manifest.asset_digest,

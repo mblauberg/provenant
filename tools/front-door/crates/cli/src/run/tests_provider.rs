@@ -648,6 +648,30 @@ fn codex_usage_records_cache_read_apart_from_uncached_input() {
     assert_eq!(decoded.usage.cache_write, None);
     assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
 }
+
+#[test]
+fn codex_last_turn_completed_is_the_session_total() {
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":150,\"cached_input_tokens\":100,\"output_tokens\":12}}\n",
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    assert_eq!(decoded.usage.uncached_input, Some(50));
+    assert_eq!(decoded.usage.cache_read, Some(100));
+    assert_eq!(decoded.usage.output_excluding_reasoning, Some(12));
+}
 #[test]
 fn command_exit_keeps_requested_route() {
     let route = run::RouteRecord {
