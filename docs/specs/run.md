@@ -1251,7 +1251,9 @@ sealed owner and lineage; a changed owner or a live predecessor refuses reuse.
 An uninitialised gitlink is acceptable, while an initialised nested repository
 requires review because Git could follow lane-controlled configuration.
 
-Owned settlement records `cleanup_deferred: true` and atomically queues intent.
+Owned settlement atomically queues intent under a non-blocking per-request lock.
+The lock holder owns the receipt; a successful holder records `cleanup_deferred: true`.
+A queue failure records a retryable retained receipt with a warning.
 It performs no network operations, recursive output survey or worktree removal.
 Deferred-intent receipts are never final. A detached worker can remove only its
 own clean checkout after successful
@@ -1336,7 +1338,7 @@ and unlanded work without requested delivery are final retentions. Transient
 failures retry at most five times with durable exponential backoff starting
 at ten minutes, with at most four dispatches per host tick. Exhausted requests
 move from `gc/completions` to `gc/completion-exhausted` for diagnosis.
-Settlement atomically publishes only its own request and never waits on a lock.
+Settlement atomically publishes only its own request, using a non-blocking per-request lock.
 Only the host tick enumerates and dispatches the queue. Each request contains
 its identity payload, attempt count, next-retry time and last cause; the filename
 hash covers only identity. A worker claims the entire record by rename to the

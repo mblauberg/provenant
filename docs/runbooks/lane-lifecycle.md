@@ -360,6 +360,7 @@ Use one blocking status call when a chair has several kinds of work outstanding:
 
 ```sh
 provenant status --wait --target lane:ATTEMPT_ID --target graph:GRAPH_ID --target pr:2721
+provenant status --wait=30m --until any --target lane:RUN_ID --target land:2721
 provenant status --wait=30m --until all --target lane:RUN_ID --target land:2721
 provenant status --wait=1h --follow --target graph:GRAPH_ID --target pr:2721 --json
 ```
@@ -377,11 +378,11 @@ Unsupported adapter capabilities and secret input refused by the run service
 have such a record, including nested requests whose canonical child identity can
 be constructed. Other pre-admission refusals may not yet have one.
 
-The default `--until any` returns on the first observed semantic transition,
-or immediately for a terminal target.
+The default `--until all` waits for every target to become terminal. Use
+`--until any` to return on the first observed semantic transition, or
+immediately for a terminal target.
 An initially running lane selection does not count its older settled attempts.
-`--until all` waits for every target to become terminal. A lane selection is
-terminal when all its attempts have settled;
+A lane selection is terminal when all its attempts have settled;
 a graph when complete or cancelled; a PR when merged or closed. A ready or
 failing open PR is notable but remains nonterminal. `--follow` streams initial
 snapshots and each observed transition, and always waits for all targets to

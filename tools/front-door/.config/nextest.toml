@@ -111,6 +111,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_writer_launches_create_attempts)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# One real writer launch from a fetched remote branch takes about 20 seconds on
+# an idle macOS runner and passes 30 seconds under shared-runner load.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # These graph fixtures perform durable settlement and, for paging, repeatedly
 # read a large checkpoint. The eight-lane fixture also serialises and checks a
 # large graph and its stored prompts. Allow for shared-runner contention.

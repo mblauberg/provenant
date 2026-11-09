@@ -173,8 +173,8 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                  "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["result","findings"]}]}
             ]
         })).unwrap();
-        let count = if long { 8 } else { 20 };
-        let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(800)} else {"s".into()},"status":"open"})).collect();
+        let count = 20;
+        let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(200)} else {"s".into()},"status":"open"})).collect();
         let text = format!(
             "```findings\n{}\n```",
             serde_json::json!({"schema_version":1,"findings":entries})
@@ -231,9 +231,12 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
         ));
         let outputs = composite.outputs.as_ref().unwrap();
         assert_eq!(outputs.findings_available, Some(false));
+        let notices = outputs.warnings.join(" ");
+        assert!(notices.contains(&format!("limits: {MAX_FINDINGS} entries")));
+        assert!(notices.contains("DISPOSITION lines for every finding"));
         assert!(outputs.findings.len() < 2 * count);
         assert!(outputs.findings.len() <= MAX_FINDINGS);
-        assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+        assert!(canonical_len(&outputs.findings) <= DISPOSITION_FINDINGS_BYTES);
         assert!(
             outputs.warnings[0]
                 .contains(&format!("{} dropped", 2 * count - outputs.findings.len()))
@@ -700,5 +703,87 @@ fn equal_review_range_warns_on_review_nodes() {
             .warnings
             .iter()
             .any(|warning| warning.contains("equal_base_and_head"))
+    );
+}
+
+#[test]
+fn composite_byte_budget_overflow_below_entry_cap_requires_verifier_proof() {
+    let count = 20;
+    assert!(count < MAX_FINDINGS);
+    let nodes: Vec<_> = (0..count).map(|i| serde_json::json!({
+        "id":format!("lens{i}"),"access":"read_only","prompt":"review","route":{"alias":"fixture"}
+    })).collect();
+    let exports: Vec<_> = (0..count)
+        .map(|i| serde_json::json!({"node":format!("lens{i}"),"outputs":["findings","result"]}))
+        .collect();
+    let mut verifier = template::Compiler::new(&template::TemplateLibrary::bundled())
+        .compile(
+            &serde_json::json!({"id":"verify","use":"review.verify","route":{"alias":"fixture"}}),
+        )
+        .unwrap();
+    verifier.depends_on = vec!["reviews".into()];
+    verifier.inputs = vec![
+        serde_json::from_value(
+            serde_json::json!({"node":"reviews","outputs":["findings","result"]}),
+        )
+        .unwrap(),
+    ];
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"byte-overflow","nodes":[{
+            "id":"reviews","kind":"composite","access":"read_only",
+            "composite":{"nodes":nodes,"exports":exports}
+        },verifier]
+    }))
+    .unwrap();
+    let entry = serde_json::json!({"id":"F1","severity":"high","file":"a.rs","summary":"Unchecked dispatch","status":"open",
+        "evidence":"A reachable dispatch path fails. ".repeat(210),"proposed_fix":"Validate before dispatch"});
+    let text = format!(
+        "```findings\n{}\n```\nVERDICT: FAIL\n",
+        serde_json::json!({"schema_version":1,"findings":[entry]})
+    );
+    let mut observations = VecDeque::new();
+    for _ in 0..count {
+        observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, &text));
+    }
+    observations.push_back(terminal_with_result(
+        AttemptOutcome::Succeeded,
+        "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: INCONCLUSIVE\n",
+    ));
+    let mut owner = FakeOwner {
+        observations,
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let (plan, positions) = validate_plan(&document).unwrap();
+    let full: Vec<_> = (0..count)
+        .flat_map(|i| {
+            materialised_findings(
+                positions[&format!("reviews--lens{i}")],
+                &plan,
+                &run.checkpoint,
+                &positions,
+            )
+        })
+        .collect();
+    assert_eq!(full.len(), count);
+    assert!(canonical_len(&full) > DISPOSITION_FINDINGS_BYTES);
+    let composite = &run.checkpoint.nodes[positions["reviews"]];
+    assert!(matches!(
+        composite.truncation_cause,
+        Some(NodeDecisionCause::CompositeFindingsTruncated { .. })
+    ));
+    assert!(composite.outputs.as_ref().unwrap().findings.len() < count);
+    let verifier = &run.checkpoint.nodes[positions["verify"]];
+    assert_eq!(
+        verifier.advance_error_code.as_deref(),
+        Some("disposition_overflow_incomplete")
+    );
+    assert!(owner.prompts.last().unwrap().contains("DISPOSITION"));
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
     );
 }

@@ -60,18 +60,18 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
         if command == "pre-tool-use" {
             assert!(output.stdout.bytes.is_empty());
         } else {
-            let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-            let context = if command == "compact" {
-                value["hookSpecificOutput"]["additionalContext"]
-                    .as_str()
-                    .ok_or("context")?
-            } else {
-                value["systemMessage"].as_str().ok_or("advisory")?
-            };
-            assert!(context.contains("recorded-session"));
-            assert!(context.contains("Checkpoint present"));
             if command == "compact" {
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+                let context = value["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .ok_or("context")?;
+                assert!(context.contains("recorded-session"));
+                assert!(context.contains("Checkpoint present"));
                 assert!(context.contains("checkpoint fixture: retain originating authority"));
+            } else {
+                // Claude takes plain PreCompact stdout as summary instructions.
+                let text = std::str::from_utf8(&output.stdout.bytes)?;
+                assert!(text.contains("Write an Intent section"));
             }
         }
         assert!(output.stdout.bytes.len() <= 8192);

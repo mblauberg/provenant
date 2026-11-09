@@ -50,3 +50,19 @@ fn bare_name_no_provider_offers_is_unknown() -> Result<(), Box<dyn std::error::E
     );
     Ok(())
 }
+
+#[test]
+fn bundled_senior_pool_keeps_terra_below_high_effort() -> Result<(), Box<dyn std::error::Error>> {
+    // Terra at high effort or above stopped writers early too often, so the
+    // pool that assigns writer work offers it only at low or medium effort.
+    let catalogue = Catalogue::bundled()?;
+    let senior = &catalogue.pools["senior"];
+    for member in senior
+        .iter()
+        .filter(|member| member.model.as_str() == "codex/gpt-6.1-terra")
+    {
+        assert_eq!(member.efforts, ["low", "medium"]);
+        assert_eq!(member.effort.as_deref(), Some("medium"));
+    }
+    Ok(())
+}

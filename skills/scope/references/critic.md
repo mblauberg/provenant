@@ -5,7 +5,7 @@ Use when a draft scope, spec or design needs an adversarial read before approval
 Read the draft cold. Find, in order of severity:
 - requirements that cannot be tested or contradict each other;
 - missing authority bounds, hidden external effects or one-way doors;
-- simpler designs the draft ignored;
+- simpler designs, or the structural option, that the draft ignored;
 - assumptions stated as facts, and facts with no source;
 - scope larger than the goal needs, including more criteria than the class warrants.
 

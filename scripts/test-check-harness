@@ -119,6 +119,58 @@ class HarnessChecks(unittest.TestCase):
         readme.write_text("See `skills/example/references/depth.md`.\n")
         self.assertIn("README.md: line 1: names", self.check(1))
 
+    def test_ambient_files_name_no_repository_paths(self):
+        ambient = self.root / "HARNESS.md"
+        ambient.write_text("Use `orchestrate` and `~/.codex/config.toml`.\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        ambient.write_text("See `docs/runbooks/x.md`.\n")
+        self.assertIn("HARNESS.md: line 1: ambient file names repository path docs/runbooks/x.md", self.check(1))
+        ambient.write_text("Governed by `MAINTAINING.md`.\n")
+        self.assertIn("ambient file names repository path MAINTAINING.md", self.check(1))
+        ambient.write_text("See `../docs/x.md`.\n")
+        self.assertIn("ambient file names repository path ../docs/x.md", self.check(1))
+        ambient.unlink()
+        rules = self.root / "GLOBAL-AGENTS.md"
+        rules.write_text("See `scripts/verify`.\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        self.assertIn("GLOBAL-AGENTS.md: line 1: ambient file names repository path scripts/verify", self.check(1))
+
+    def test_skill_links_must_survive_installation(self):
+        for collection in ("skills", "library"):
+            owner = self.root / collection / "portable"
+            owner.mkdir(parents=True)
+            (owner / "SKILL.md").write_text("---\nname: portable\ndescription: A portable skill.\n---\n")
+            source = owner / "references/depth.md"
+            source.parent.mkdir()
+            source.write_text("# Depth\n")
+            for directory in ("docs", "config", "scripts", "tools"):
+                target = self.root / directory / "target.md"
+                target.parent.mkdir(exist_ok=True)
+                target.write_text("# Target\n")
+                local = owner / directory / "target.md"
+                local.parent.mkdir()
+                local.write_text("# Target\n")
+                subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+                for link in (
+                    f"[target](../../../{directory}/target.md#target)",
+                    f"[target](../../../{directory}/target.md#topic:details)",
+                    f"[target](../../../{directory}/%74arget.md)",
+                    f"[target][dest]\n[dest]: ../../../{directory}/target.md",
+                    f"[target](/{directory}/target.md)",
+                ):
+                    with self.subTest(collection=collection, directory=directory, link=link):
+                        source.write_text(link + "\n")
+                        self.assertIn("link leaves the installed skill", self.check(1))
+                source.write_text(f"[local](../{directory}/target.md#target)\n")
+                self.check()
+            entry = owner / "SKILL.md"
+            entry.write_text(entry.read_text() + "[outside](../../docs/target.md)\n")
+            self.assertIn("link leaves the installed skill", self.check(1))
+            entry.write_text(entry.read_text().replace("[outside](../../docs/target.md)\n", ""))
+            source.write_text("[external](https://example.org/docs/)\n[entry](../SKILL.md)\n`[literal](../../../docs/target.md)`\n```md\n[example](../../../docs/target.md)\n```\n")
+            self.check()
+
 
 if __name__ == "__main__":
     unittest.main()

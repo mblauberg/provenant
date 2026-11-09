@@ -114,6 +114,7 @@ def main():
             fail(path, f"line {number}: names {named}; link the owning skill's SKILL.md instead")
 
     def markdown(path, text):
+        owner = next((p for p in path.parents if p / "SKILL.md" in paths), None)
         fenced = None
         for number, line in enumerate(text.splitlines(), 1):
             for named in re.findall(r"(?<![\w/.-])((?:skills|library)/[\w-]+/references/[\w./-]*)", line):
@@ -129,12 +130,20 @@ def main():
             if fenced:
                 continue
             line = re.sub(r"(`+).*?\1", "", line)
-            for match in re.finditer(r"\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)", line):
-                target = match.group(1).strip("<>")
-                if ":" in target or target.startswith("/"):
+            targets = re.findall(r"\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)", line)
+            definition = re.match(r"^ {0,3}\[[^\]]+\]:\s*(<[^>]+>|\S+)", line)
+            if definition:
+                targets.append(definition.group(1))
+            for target in targets:
+                target = target.strip("<>")
+                if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target) or target.startswith("//"):
                     continue
                 relative, _, anchor = target.partition("#")
                 destination = (root / path.parent / urllib.parse.unquote(relative)).resolve() if relative else root / path
+                if owner and not destination.is_relative_to(root / owner):
+                    fail(path, f"line {number}: link leaves the installed skill: {target}; use a skill-local reference, a provenant command or the repository's runbook")
+                if target.startswith("/"):
+                    continue
                 if not destination.is_relative_to(root):
                     warnings.append(f"{path}:{number}: link escapes the repository: {target}")
                     continue
@@ -261,6 +270,13 @@ def main():
                         raise ValueError("invalid regression note or route")
             except (OSError, ValueError, KeyError, TypeError) as error:
                 fail(path, f"invalid route fixture: {error}")
+
+    ambient_path = re.compile(r"(?<![\w./~-])(?:\.\.?/)*(?:docs|config|scripts)/[\w./-]*|(?<![\w-])MAINTAINING\.md\b")
+    for path in (Path("GLOBAL-AGENTS.md"), Path("HARNESS.md")):
+        if path in paths:
+            for number, line in enumerate((root / path).read_text().splitlines(), 1):
+                for match in ambient_path.finditer(line):
+                    fail(path, f"line {number}: ambient file names repository path {match.group(0)}")
 
     if failures:
         print("\n".join(failures), file=sys.stderr)

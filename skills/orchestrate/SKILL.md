@@ -19,9 +19,11 @@ provenant run --use batch --file brief.md --set 'worktree="/absolute/project/.wo
 ```
 
 Use `explore` over areas, `research` for primary sources and `review` for
-a pinned head. Nodes use `over`, `after` and `inputs` for copies, dependencies
+a pinned head. Send broad code reading to a read-only lane and take back its
+findings with paths and line ranges; the chair's context is paid for again on
+every later turn, so it reads only what its own judgement needs. Nodes use `over`, `after` and `inputs` for copies, dependencies
 and evidence. Layers are bundled, user, repository and inline; project templates go under
-`.provenant/templates/`. See the [template runbook](../../docs/runbooks/presets.md).
+`.provenant/templates/`. Inspect them with `provenant templates NAME --json`.
 
 Register writer worktrees first with `provenant worktree create NAME --base BASE`.
 The bundled `batch` composite gives every slice the same `worktree` and `write_scope` bindings, so its writers sharing that worktree run in sequence. For parallel writers, define a graph with a separate registered worktree and write scope for each node; review the integrated head. The [planner brief](references/planner.md)
@@ -47,4 +49,4 @@ a gate. Bound repair and independently review its delta.
 HARNESS owns review floors and authority; the chair keeps user communication
 and acceptance. Load [routing](references/routing-and-tiers.md) for tier and
 independence decisions and [writer boundaries](references/lane-safety.md) for
-confinement. See [Herdr](../../docs/runbooks/herdr.md) for observation.
+confinement. See [Herdr](references/herdr.md) for observation.

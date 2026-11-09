@@ -9,6 +9,11 @@ Outcome, done-criteria and the tracker or project document that owns them.
 ## Direction
 User rulings, authority pointers, one-way doors and unresolved gates.
 
+## Intent
+Per live ruling: what the user wants, why as you understand it, alternatives
+rejected and why, open disagreement, uncertain readings. A correction replaces
+the earlier reading. Quote only authority grants or corrections of misreadings.
+
 ## Process
 Governing skills, retained evidence locations and verification responsibility.
 

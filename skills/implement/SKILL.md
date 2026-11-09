@@ -14,6 +14,11 @@ verified, non-goals, risk tier and write authority (the tracker issue or the
 scope digest). Missing inputs go back to `scope`. Do not invent owner decisions;
 record an engineering call as `Decided (<source>): <reason>` and proceed.
 
+A plan, or a reply to a proposal, names the structural option alongside the
+small one, recommends one and says when an idea is weak or a better one exists,
+because agent-written code is cheap to change and the small option is not the
+default.
+
 Show `provenant tracker lint N` advice before starting an issue unless already
 supplied; unavailable checks do not block work.
 
@@ -40,7 +45,8 @@ Check authority, write scopes and gates in the explanation,
 then submit without `--explain`. `deliver` is the default composite; use
 `implement` for one slice, `implement.fix` for a known defect, and `batch` for
 parallel slices into one integration branch. Use `plan` when the shape is open.
-See [templates](../../docs/runbooks/presets.md).
+Inspect available templates with `provenant templates` and their definitions
+with `provenant templates NAME --json`.
 
 Follow `provenant status`, collect `provenant output TARGET`, and use `retry`
 for unfinished work. `edit` changes unstarted nodes. Landing uses
@@ -67,17 +73,36 @@ literal write authority. A failed replanned panel feeds its qualified findings
 into the remaining repair cycles. If no separate route is available, continue in a fresh
 attempt on the available route with a recorded separation warning.
 
+## Chair-run review loops
+
+When you run review and repair by hand, judge every finding against the code
+before any writer starts, because a lens can be wrong and a writer patches what
+it is given. Mark each one confirmed or rejected with a reason, and worth fixing
+or not. Rejected findings stay in the record and out of the writer's brief.
+Group confirmed findings by shared cause into fix items, so one flaw is fixed
+once. State the invariant under repair in the repair brief and the delta review,
+not only the files, so a twin copy elsewhere is caught.
+
+After a shared flaw or a third round, ask whether the design is wrong, comparing
+the structural fix with the small one and recommending one. Round count prompts
+that judgement and does not end the work: if the design holds, keep repairing.
+
 ## Writer rules
 
 - The implementer may not edit a failing acceptance test or weaken an
   assertion to pass. A changed test is reported with the reason.
 - Update the owned docs in the same PR: behaviour, architecture, operations. A
   settled decision moves to its durable home (see `engineering-docs`).
-- Keep compatibility only for published or persisted contracts. Otherwise
-  change the callers and delete the old path.
+- Keep compatibility only for published contracts. Otherwise change the
+  callers and delete the old path; when persisted state changes, ship a
+  migration or drain.
 - Report checks that did not run as unverified, never as passing.
 - A repair that leaves failures unchanged or larger twice in a row stops the
-  run. Return the evidence to `scope` when the spec turns out wrong.
+  run.
+- When the spec is wrong, at any point and not only after failed repairs, cite
+  the evidence in handoff `decisions` and take the smallest option inside write
+  scope that serves the stated outcome, so the flaw is raised when found. If no
+  such option exists, return the evidence to `scope`.
 
 ## Done
 
