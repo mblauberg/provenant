@@ -1,6 +1,6 @@
 [package]
 name = "provenant-quota"
-version = "1.6.24"
+version = "1.7.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
