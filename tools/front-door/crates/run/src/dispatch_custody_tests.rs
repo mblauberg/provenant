@@ -13,9 +13,8 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     let base = std::fs::canonicalize(temp.path())?;
     let host = base.join("host");
     let mut stores = Vec::new();
-    std::fs::create_dir_all(&host)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o700))?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(&host)?;
     std::fs::write(
         host.join("config.toml"),
         "schema_version=1\n[domains.fabric.lanes]\nmax_lanes = 32\nmax_project_lanes = 32\n",
@@ -158,7 +157,7 @@ fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestRes
     })
 }
 #[test]
-fn holder_release_reclaims_temporary_after_verified_settlement() -> TestResult {
+fn holder_release_defers_temporary_reclamation_after_verified_settlement() -> TestResult {
     holder_release_temporary_fixture(true)
 }
 #[test]

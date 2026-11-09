@@ -65,6 +65,7 @@ pub fn run(globals: &Globals) -> u8 {
 fn human_report(mut value: serde_json::Value) -> String {
     let volume = value.as_object_mut().and_then(|map| map.remove("volume"));
     let totals = value.as_object_mut().and_then(|map| map.remove("totals"));
+    let payload = value.as_object_mut().and_then(|map| map.remove("payload"));
     let mut text = provenant_cli::terse(&value);
     if let Some(volume) = volume {
         text.push_str(&format!("volume {}", provenant_cli::terse(&volume)));
@@ -73,6 +74,9 @@ fn human_report(mut value: serde_json::Value) -> String {
         for (class, total) in totals {
             text.push_str(&format!("total {class} {}", provenant_cli::terse(&total)));
         }
+    }
+    if let Some(payload) = payload {
+        text.push_str(&format!("payload {}", provenant_cli::terse(&payload)));
     }
     text
 }
@@ -160,7 +164,12 @@ fn collect_resolved(
         .find(|path| path.is_dir())
         .ok_or("missing volume")?;
     let volume = Directory::open_anchor(volume_path)?;
-    let mut report = DiskReport::new(volume_path.into(), volume.available_bytes()?);
+    let mut report = DiskReport::with_walk_budget(
+        volume_path.into(),
+        volume.available_bytes()?,
+        50_000,
+        Duration::from_secs(2),
+    );
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let mut policy = CacheGcPolicy {
@@ -169,6 +178,7 @@ fn collect_resolved(
         ),
         dry_run: true,
         free_floor_bytes: None,
+        max_total_bytes: None,
         protected_owners: Default::default(),
         project_owners: Default::default(),
         selected_only: false,

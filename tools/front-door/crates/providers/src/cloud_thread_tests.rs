@@ -21,7 +21,7 @@ impl CloudCli for FixtureCli {
     }
 }
 
-fn adapter(response: String) -> CodexCloud<FixtureCli> {
+fn fixture_adapter(response: String) -> CodexCloud<FixtureCli> {
     CodexCloud::new(
         FixtureCli {
             response,
@@ -100,7 +100,7 @@ fn finished(adapter: &mut CodexCloud<FixtureCli>, job: &RemoteJob) -> CloudResul
 #[test]
 fn cloud_thread_submit_uses_stdin_environment_without_read_only_and_json_identity() {
     let job = job();
-    let mut adapter = adapter(format!(
+    let mut adapter = fixture_adapter(format!(
         "Created cloud thread fallback-id\nSubmitting message message-1 ...\n{}\n",
         json!({
             "threadId": "thread-1",
@@ -170,7 +170,7 @@ fn cloud_thread_submit_custom_command_and_created_line_fallback() {
 fn cloud_thread_turn_status_is_structured_and_current() {
     for state in ["TURN_STATUS_IN_PROGRESS", "TURN_STATUS_QUEUED", "queued"] {
         let mut adapter =
-            adapter(status(state, vec![agent("completed failed".into())]).to_string());
+            fixture_adapter(status(state, vec![agent("completed failed".into())]).to_string());
         assert_eq!(adapter.observe(&job()).unwrap(), RemoteState::Running);
         assert_eq!(adapter.cli.calls[0].0, "codex-cloud-task");
         assert_eq!(adapter.cli.calls[0].1, ["status", "thread-1"]);
@@ -184,7 +184,7 @@ fn cloud_thread_turn_status_is_structured_and_current() {
             0,
             json!({"id":"old-turn","status":"TURN_STATUS_IN_PROGRESS"}),
         );
-    let mut adapter = adapter(value.to_string());
+    let mut adapter = fixture_adapter(value.to_string());
     assert_eq!(finished(&mut adapter, &job()).exit_status, 0);
 }
 
@@ -201,7 +201,7 @@ fn cloud_thread_completed_uses_last_agent_message_and_observed_thread_model() {
             json!({"item":{"userMessage":{"text":"later user message"}}}),
         ],
     );
-    let mut adapter = adapter(value.to_string());
+    let mut adapter = fixture_adapter(value.to_string());
     let result = finished(&mut adapter, &job());
     assert_eq!(result.observed_model.as_deref(), Some("observed-model"));
     assert!(
@@ -243,8 +243,9 @@ fn cloud_thread_result_checks_identity_and_preserves_reported_failures() {
     ] {
         let mut result = report();
         result[key] = wrong;
-        let mut adapter =
-            adapter(status("TURN_STATUS_COMPLETED", vec![agent(result.to_string())]).to_string());
+        let mut adapter = fixture_adapter(
+            status("TURN_STATUS_COMPLETED", vec![agent(result.to_string())]).to_string(),
+        );
         assert!(
             adapter.observe(&job()).is_err(),
             "accepted mismatched {key}"
@@ -256,8 +257,9 @@ fn cloud_thread_result_checks_identity_and_preserves_reported_failures() {
     ] {
         let mut result = report();
         result[key] = wrong;
-        let mut adapter =
-            adapter(status("TURN_STATUS_COMPLETED", vec![agent(result.to_string())]).to_string());
+        let mut adapter = fixture_adapter(
+            status("TURN_STATUS_COMPLETED", vec![agent(result.to_string())]).to_string(),
+        );
         let checked = finished(&mut adapter, &job())
             .check("job-1", "nonce-1", &job().commit, "requested-model")
             .unwrap();
@@ -274,7 +276,7 @@ fn cloud_thread_failed_and_cancelled_turns_are_terminal_with_detail() {
     ] {
         let mut value = status(state, vec![agent("running earlier".into())]);
         value["turns"]["data"]["values"][0]["error"] = json!({"detail":"fixture failure detail"});
-        let mut adapter = adapter(value.to_string());
+        let mut adapter = fixture_adapter(value.to_string());
         let observed = adapter.observe(&job()).unwrap();
         assert!(observed.is_terminal());
         let RemoteState::Failed { detail } = observed else {
@@ -300,7 +302,7 @@ fn cloud_thread_unknown_shapes_fail_with_bounded_observation() {
         ),
         json!({"unknownShape": "界".repeat(10000)}),
     ] {
-        let mut adapter = adapter(value.to_string());
+        let mut adapter = fixture_adapter(value.to_string());
         let error = adapter.observe(&job()).unwrap_err();
         assert!(!error.is_empty());
         assert!(error.contains("codex thread"));
@@ -315,7 +317,7 @@ fn cloud_thread_unknown_shapes_fail_with_bounded_observation() {
 
 #[test]
 fn cloud_thread_environment_list_cannot_recover_a_lost_submission() {
-    let mut adapter = adapter(
+    let mut adapter = fixture_adapter(
         json!([{
             "id":"environment-uuid~asenvcfg_1234", "name":"nonce-1", "status":"ready"
         }])
@@ -344,27 +346,28 @@ fn cloud_thread_in_progress_turn_settles_on_its_final_answer() {
         "text": report().to_string(),
         "phase": {"string": "MESSAGE_PHASE_STRING_COMMENTARY"}
     }}});
-    let mut cloud = adapter(status("TURN_STATUS_IN_PROGRESS", vec![commentary]).to_string());
-    assert_eq!(cloud.observe(&job()).unwrap(), RemoteState::Running);
-    let mut cloud = adapter(
+    let mut adapter =
+        fixture_adapter(status("TURN_STATUS_IN_PROGRESS", vec![commentary]).to_string());
+    assert_eq!(adapter.observe(&job()).unwrap(), RemoteState::Running);
+    let mut adapter = fixture_adapter(
         status(
             "TURN_STATUS_IN_PROGRESS",
             vec![final_answer(format!("Done.\n```json\n{}\n```", report()))],
         )
         .to_string(),
     );
-    let result = finished(&mut cloud, &job());
+    let result = finished(&mut adapter, &job());
     assert_eq!(result.observed_model.as_deref(), Some("observed-model"));
     let mut stale = report();
     stale["nonce"] = json!("old-nonce");
-    let mut cloud = adapter(
+    let mut adapter = fixture_adapter(
         status(
             "TURN_STATUS_IN_PROGRESS",
             vec![final_answer(stale.to_string())],
         )
         .to_string(),
     );
-    assert_eq!(cloud.observe(&job()).unwrap(), RemoteState::Running);
+    assert_eq!(adapter.observe(&job()).unwrap(), RemoteState::Running);
 }
 
 #[test]
@@ -377,21 +380,24 @@ fn cloud_thread_writer_settles_only_on_a_verified_push() {
     pushed["head"] = json!(head);
     // The fixture answers every command with the status, so ls-remote output
     // is unreadable: that is an observation error, never a settlement.
-    let mut cloud =
-        adapter(status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string());
-    assert!(cloud.observe(&writer).is_err());
+    let mut adapter = fixture_adapter(
+        status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string(),
+    );
+    assert!(adapter.observe(&writer).is_err());
     pushed["branch"] = json!("main");
-    let mut cloud =
-        adapter(status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string());
-    let RemoteState::Failed { detail } = cloud.observe(&writer).unwrap() else {
+    let mut adapter = fixture_adapter(
+        status("TURN_STATUS_COMPLETED", vec![agent(pushed.to_string())]).to_string(),
+    );
+    let RemoteState::Failed { detail } = adapter.observe(&writer).unwrap() else {
         panic!("a push to another branch must not settle as finished")
     };
     assert!(detail.contains("push not verified"), "{detail}");
     let mut missing = report();
     missing["branch"] = json!("lane/cloud");
-    let mut cloud =
-        adapter(status("TURN_STATUS_COMPLETED", vec![agent(missing.to_string())]).to_string());
-    let RemoteState::Finished { result } = cloud.observe(&job()).unwrap() else {
+    let mut adapter = fixture_adapter(
+        status("TURN_STATUS_COMPLETED", vec![agent(missing.to_string())]).to_string(),
+    );
+    let RemoteState::Finished { result } = adapter.observe(&job()).unwrap() else {
         panic!("a verification job needs no push")
     };
     assert!(!writer.check(&result).unwrap().passed);

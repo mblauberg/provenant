@@ -58,6 +58,8 @@ pub(crate) enum Error {
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
     Budget,
+    #[error("graph checkpoint collection failed: {0}")]
+    GraphGc(String),
     #[error("{0}")]
     GcObservation(&'static str),
     #[error("cannot read disk space: {0}")]
@@ -385,6 +387,7 @@ struct GcData {
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
+    graph_checkpoints_removed: usize,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
@@ -478,6 +481,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 chair_logs: Default::default(),
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
+                graph_checkpoints_removed: 0,
                 worktree_cleanup,
                 alerts,
                 notice: None,
@@ -570,6 +574,23 @@ fn gc_data_summary(data: &GcData) -> String {
             temporary.bytes,
         ));
     }
+    let payload = &data.provider_state.payload;
+    if payload.cap_bytes > 0 {
+        human.push_str(&format!(
+            "payload {} bytes accounted of {} cap, {} pinned, {} {} ({} attempt(s)), {} reclaimed in total\n",
+            payload.accounted_bytes,
+            payload.cap_bytes,
+            payload.pinned_bytes,
+            payload.reclaimed_bytes,
+            if data.report.dry_run {
+                "reclaimable"
+            } else {
+                "reclaimed"
+            },
+            payload.evicted.len(),
+            payload.total_reclaimed_bytes,
+        ));
+    }
     if data.provider_state.expired_events > 0 {
         human.push_str(&format!(
             "{} {} event rows\n",
@@ -619,6 +640,27 @@ fn gc_data_summary(data: &GcData) -> String {
                     kept.branch, kept.reason
                 ));
             }
+        }
+        for outcome in &project.refs {
+            use provenant_confinement::worktrees::ArtefactState;
+            let verb = match outcome.outcome {
+                ArtefactState::Removed => "removed",
+                ArtefactState::WouldRemove => "would remove",
+                ArtefactState::Failed => "could not remove",
+                _ => continue,
+            };
+            let kind = serde_json::to_value(outcome.artefact)
+                .ok()
+                .and_then(|value| value.as_str().map(|kind| kind.replace('_', " ")))
+                .unwrap_or_default();
+            human.push_str(&format!("{verb} {kind} {}", outcome.name));
+            if let Some(remote) = &outcome.remote {
+                human.push_str(&format!(" on {remote}"));
+            }
+            if let Some(reason) = &outcome.reason {
+                human.push_str(&format!(" ({reason})"));
+            }
+            human.push('\n');
         }
         for output in project
             .output
@@ -680,6 +722,7 @@ enum GcOutput<'a> {
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
         build_dir_bytes: u64,
+        graph_checkpoints_removed: usize,
         errors: &'a [provenant_run::ProviderStateIssue],
         unobserved_projects: &'a [PathBuf],
         alerts: &'a [String],
@@ -699,6 +742,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
         build_dir_bytes: data.build_dirs.cache_bytes,
+        graph_checkpoints_removed: data.graph_checkpoints_removed,
         errors: &data.provider_state.errors,
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
@@ -725,7 +769,11 @@ fn gc_project(
         roots,
         home,
         project,
-        MUTATION_TIMEOUT,
+        if read_only {
+            Duration::from_secs(2)
+        } else {
+            MUTATION_TIMEOUT
+        },
         workers,
         facts,
         read_only,
@@ -998,7 +1046,7 @@ pub(crate) fn event_collection_lock(
     collection_lock_for(roots, Some(EVENT_LOCK_WAIT_SECS))
 }
 
-fn collection_lock_for(
+pub(crate) fn collection_lock_for(
     roots: &provenant_core::Roots,
     wait_secs: Option<u64>,
 ) -> Result<provenant_os::fs::LockGuard, Error> {
@@ -1110,6 +1158,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
+    let graph_checkpoints_removed = if !command.scheduled && !command.pressure {
+        crate::tick::collect_graph_checkpoints(
+            &roots.state,
+            project_ids.iter().copied(),
+            config.gc.graph_checkpoint_days,
+            command.dry_run,
+            &SystemClock,
+        )
+        .map_err(Error::GraphGc)?
+    } else {
+        0
+    };
     let free_floor = command
         .free_floor
         .map(Ok)
@@ -1133,14 +1193,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &roots,
             &home,
             &project.path,
-            MUTATION_TIMEOUT,
+            if command.dry_run {
+                Duration::from_secs(2)
+            } else {
+                MUTATION_TIMEOUT
+            },
             workers,
             &facts,
             command.dry_run,
             |context, cancel| {
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
-                let (upstream, upstream_error) = if command.pressure {
+                let (upstream, upstream_error) = if command.pressure || command.dry_run {
                     (None, None)
                 } else {
                     match crate::gc_support::fetch_default(context, cancel) {
@@ -1201,7 +1265,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     context,
                     &project.lanes,
                     &worktrees::WorktreeGcPolicy {
-                        upstream: upstream.map(|(_, oid)| oid),
+                        upstream: upstream.as_ref().map(|(_, oid)| *oid),
                         terminal: &terminal,
                         no_live_lanes: &no_live_lanes,
                         regenerable: &settings.regenerable,
@@ -1216,6 +1280,18 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     cancel,
                 )?;
                 report.upstream_error = upstream_error;
+                // Only proven landed refs with unchanged ledger tips may go.
+                if !command.pressure {
+                    let sweep = crate::lane_cleanup::Sweep::new(command.dry_run || !command.apply);
+                    report.refs = crate::lane_cleanup::collect(
+                        context,
+                        upstream
+                            .as_ref()
+                            .and_then(crate::lane_cleanup::fetched_target),
+                        &sweep,
+                        cancel,
+                    );
+                }
                 Ok(report)
             },
         );
@@ -1237,6 +1313,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(command.idle_days) * 86_400 * 1_000_000_000),
         free_floor_bytes: Some(free_floor),
+        max_total_bytes: Some(
+            config
+                .gc
+                .lane_cargo_cache_max_bytes()
+                .map_err(Error::DiskSpace)?,
+        ),
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
@@ -1269,6 +1351,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &assets,
             config.retention.provider_state_days,
             config.retention.logs_days,
+            config.retention.payload_cap_bytes,
             command.dry_run,
         )
     } else {
@@ -1278,6 +1361,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &assets,
             config.retention.provider_state_days,
             config.retention.logs_days,
+            config.retention.payload_cap_bytes,
             command.dry_run,
         )
     };
@@ -1291,25 +1375,33 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .unwrap_or(0)
         .max(free_floor);
     let seed_policy = &config.domains.fabric.lanes.cargo_seed;
-    let seed_collection = provenant_run::target_seed_gc::collect(
-        roots.state.as_path(),
-        seed_policy.max_generations,
-        seed_policy.max_bytes,
-        command.dry_run,
-    );
+    let seed_collection = if command.dry_run {
+        Ok(Default::default())
+    } else {
+        provenant_run::target_seed_gc::collect(
+            roots.state.as_path(),
+            seed_policy.max_generations,
+            seed_policy.max_bytes,
+            false,
+        )
+    };
     // Lane build output goes last among collections: it is the largest, and
     // the sweep holds host admission while it removes.
     let build_settings = config.domains.fabric.lanes.build_settings();
-    let build_collection = provenant_run::build_dir_gc::collect(
-        roots.state.as_path(),
-        &home,
-        provenant_run::build_dir_gc::Limits {
-            max_bytes: build_settings.build_dir_cap(),
-            free_floor,
-            grace_seconds: build_settings.build_dir_grace_seconds(),
-        },
-        command.dry_run,
-    );
+    let build_collection = if command.dry_run {
+        Ok(Default::default())
+    } else {
+        provenant_run::build_dir_gc::collect(
+            roots.state.as_path(),
+            &home,
+            provenant_run::build_dir_gc::Limits {
+                max_bytes: build_settings.build_dir_cap(),
+                free_floor,
+                grace_seconds: build_settings.build_dir_grace_seconds(),
+            },
+            false,
+        )
+    };
     // Observe after every collection class, including a partially failed sweep.
     let mut alerts =
         crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
@@ -1341,18 +1433,22 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             ));
         }
     };
-    let notice = (command.pressure
-        && report.removed.is_empty()
-        && build_dirs.removed.is_empty()
-        && provider_state.removed.is_empty()
-        && provider_state.attempt_tmp.is_empty()
-        && provider_state.attempt_logs.is_empty()
-        && provider_state.expired_events == 0
-        && provider_state.errors.is_empty()
-        && worktree_cleanup
-            .iter()
-            .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
-    .then(|| "pressure collection: no eligible data in scope".into());
+    let notice = if command.dry_run {
+        Some("bounded preview: upstream refresh, worktree removal, target seed and build-profile surveys deferred to applied GC".into())
+    } else {
+        (command.pressure
+            && report.removed.is_empty()
+            && build_dirs.removed.is_empty()
+            && provider_state.removed.is_empty()
+            && provider_state.attempt_tmp.is_empty()
+            && provider_state.attempt_logs.is_empty()
+            && provider_state.expired_events == 0
+            && provider_state.errors.is_empty()
+            && worktree_cleanup
+                .iter()
+                .all(|project| project.output.is_empty() && project.idle_output.is_empty()))
+        .then(|| "pressure collection: no eligible data in scope".into())
+    };
     // Full GC visits all session logs, including those belonging to projects
     // that are no longer registered. Pressure GC stays within its short budget.
     let chair_logs = if command.pressure {
@@ -1377,6 +1473,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         chair_logs,
         target_seeds,
         build_dirs,
+        graph_checkpoints_removed,
         unobserved_projects,
         skipped_transient,
         worktree_cleanup,

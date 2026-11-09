@@ -86,10 +86,9 @@ pub(crate) fn advance_graphs_after_settlement(
     )?;
     // A lane's settlement must not stop unrelated graphs from advancing.
     // Settlement records its own retention reason on the attempt.
-    let pressure_error = crate::disk_guard::settlement_gc(settled).err();
     let settlement_error = settle_owned_worktree(settled, &roots, workers, None).err();
     let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
-    let mut first_error = settlement_error.or_else(|| pressure_error.map(Into::into));
+    let mut first_error = settlement_error;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -279,10 +278,9 @@ pub(crate) fn matching_graph_hint(
 pub(crate) fn settle_owned_worktree(
     settled: &provenant_run::HolderContext,
     roots: &provenant_core::Roots,
-    workers: &dyn WorkerObserver,
+    _workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -331,73 +329,9 @@ pub(crate) fn settle_owned_worktree(
             return Ok(());
         }
     }
-    let facts = store.repo_facts();
-    // Refresh before taking the collection lock and before the prune budget starts.
-    // Explicit worktrees have no owner record, so use their verified HEAD.
-    let mut tracking_ref_warning = None;
-    let mut lane_owned = false;
-    let _ = crate::worktrees::with_context_using_facts(
-        roots,
-        &settled.roots.home,
-        &writer.project,
-        std::time::Duration::from_secs(15),
-        workers,
-        facts,
-        |context, _| {
-            use std::io::Read;
-            let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
-                .map_err(worktrees::WorktreeError::from)?;
-            let owner = worktrees::load_owner(&tree)?;
-            lane_owned = owner
-                .as_ref()
-                .is_some_and(|owner| owner.origin == WorktreeOrigin::Lane);
-            let branch = if let Some(owner) = owner {
-                Some(owner.branch)
-            } else {
-                let mut head = Vec::new();
-                tree.repo()
-                    .private_dir()
-                    .open_read(std::ffi::OsStr::new("HEAD"))?
-                    .take(4097)
-                    .read_to_end(&mut head)
-                    .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
-                if head.len() > 4096 {
-                    None
-                } else {
-                    std::str::from_utf8(&head)
-                        .ok()
-                        .and_then(|head| head.trim().strip_prefix("ref: refs/heads/"))
-                        .map(str::to_owned)
-                }
-            };
-            if let Some(branch) = branch
-                && let Err(error) = crate::gc_support::refresh_writer_tracking_ref(context, &branch)
-            {
-                tracking_ref_warning = Some(error.to_string());
-            }
-            Ok(())
-        },
-    );
-    if !lane_owned {
-        tracking_ref_warning = None;
-    }
-    let _collection = match crate::worktrees::event_collection_lock(roots) {
-        Ok(lock) => lock,
-        // A long-running collector still owns the pass. Leave a visible
-        // receipt rather than skipping silently; replay ignores retained ones.
-        Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
-            let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY});
-            // Never replace a receipt that already settled or began pruning.
-            if store
-                .worktree_settlement(record.attempt_id, &call)?
-                .is_none()
-            {
-                record_worktree_settlement(&store, record.attempt_id, &receipt)?;
-            }
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
+    // Settlement publishes intent only. Fetching refs, inspecting output trees
+    // and removing worktrees/caches belong to the detached completion GC worker.
+    // Replay completed/pruning receipts without walking a worktree.
     if let Some(receipt) = replay_worktree_settlement(
         store
             .worktree_settlement(record.attempt_id, &call)?
@@ -408,217 +342,29 @@ pub(crate) fn settle_owned_worktree(
         return Ok(());
     }
     let pickup = store.delivered(record.attempt_id, &call)?;
-    let delivery_request = pickup
-        .as_ref()
-        .map(|(request, _)| request)
-        .or(task.deliver.as_ref());
     let delivery = delivery_override
         .or(pickup.as_ref().map(|(_, receipt)| receipt))
         .or(record.delivery.as_ref());
-    let retention_reason =
-        settlement_retention_reason(&record.state, task.deliver.is_some(), delivery);
-    let mut pruning_intent = None;
-    let collection_error = std::cell::RefCell::new(None::<String>);
-    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
-        let settings = config
-            .gc
-            .projects
-            .get(&settled.project_id.to_string())
-            .cloned()
-            .unwrap_or_default();
-        Ok(crate::worktrees::with_context_using_facts(
-            roots,
-            &settled.roots.home,
-            &writer.project,
-            std::time::Duration::from_secs(120),
-            workers,
-            facts,
-            |context, cancel| {
-                let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
-                    .map_err(worktrees::WorktreeError::from)?;
-                let Some(owner) = worktrees::load_owner(&tree)? else {
-                    return Ok(None);
-                };
-                // Resumed attempts share the original owner's lane. Apply the
-                // continuation proof before pruning against that owner's ID.
-                if owner.origin == WorktreeOrigin::Lane
-                    && store
-                        .check_continuation_writer(record.attempt_id, &call)
-                        .map_err(|_| worktrees::WorktreeError::UnknownWriter)?
-                        != Some(owner.clone())
-                {
-                    return Err(worktrees::WorktreeError::UnknownWriter.into());
-                }
-                if owner.origin != WorktreeOrigin::Lane {
-                    return Ok(None);
-                }
-                let owner_attempt = owner
-                    .attempt_id
-                    .ok_or(worktrees::WorktreeError::UnknownWriter)?;
-                let states = || {
-                    crate::gc_support::lane_states(
-                        roots,
-                        &settled.roots.home,
-                        &settled.roots.checkout,
-                        settled.project_id,
-                    )
-                    .ok()
-                };
-                let terminal = |path: &Path| {
-                    states().as_ref().and_then(|snapshot| snapshot.get(path)) == Some(&true)
-                };
-                let no_live =
-                    |path: &Path| states().is_some_and(|snapshot| snapshot.no_live_lanes(path));
-                let output_policy = WorktreeGcPolicy {
-                    upstream: None,
-                    terminal: &terminal,
-                    no_live_lanes: &no_live,
-                    regenerable: &settings.regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: i128::MAX,
-                    foreign_merged_clean: false,
-                    dry_run: false,
-                };
-                // A failed pre-prune step must not replace a retained lane's
-                // real reason, so record it and carry on.
-                let pre_prune = || -> Result<(), Box<dyn std::error::Error>> {
-                    let lane = worktrees::list_for_gc_matching(context, cancel, |path, _| {
-                        path == writer.worktree
-                    })?
-                    .into_iter()
-                    .find(|lane| lane.path == writer.worktree)
-                    .ok_or(worktrees::WorktreeError::NotFound)?;
-                    worktrees::collect_lazy(
-                        context,
-                        std::slice::from_ref(&lane),
-                        &output_policy,
-                        cancel,
-                    )?;
-                    // Retained lanes can resume with fresh caches. Restrict this
-                    // pass to their owner, including detached remnants, and prove
-                    // terminal state again while acquiring writer exclusion.
-                    if lane.occupancy.is_available() {
-                        provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
-                            &settled.roots.home,
-                            &provenant_confinement::cache::CacheGcPolicy {
-                                idle_before_ns: Some(i128::MAX),
-                                project_owners: [writer.worktree.clone()].into(),
-                                selected_only: true,
-                                ..Default::default()
-                            },
-                            |path| {
-                                let guard =
-                                    worktrees::cache_writer_guard(context.project_state, path)?;
-                                if !terminal(path) || !no_live(path) {
-                                    return Err(worktrees::Occupancy::custody_unknown(
-                                        path.to_path_buf(),
-                                        "lane settlement could not be verified",
-                                    ));
-                                }
-                                Ok(Some(guard))
-                            },
-                        )
-                        .map_err(|error| crate::worktrees::Error::Permissions(*error.source))?;
-                    }
-                    Ok(())
-                };
-                if let Err(error) = pre_prune() {
-                    *collection_error.borrow_mut() = Some(error.to_string());
-                }
-                if retention_reason.is_some() {
-                    return Ok(None);
-                }
-                let upstream = delivery
-                    .filter(|receipt| {
-                        matches!(
-                            receipt.state,
-                            provenant_run::WriterDeliveryState::Delivered { .. }
-                        )
-                    })
-                    .map(|receipt| {
-                        if receipt.remote.is_empty() {
-                            format!("refs/heads/{}", receipt.branch)
-                        } else {
-                            format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
-                        }
-                    });
-                let upstream = upstream.as_deref().unwrap_or(&owner.base);
-                let pinned = worktrees::resolve_base(context, upstream, cancel)?;
-                let Some(head) = record.head.or_else(|| {
-                    (record.provider_launched == Some(false))
-                        .then(|| owner.base.parse().ok())
-                        .flatten()
-                }) else {
-                    return Err(worktrees::WorktreeError::InvalidOutput.into());
-                };
-                let policy = WorktreeGcPolicy {
-                    // A push or open PR has not landed the branch. Only an
-                    // integration receipt grants local branch cleanup.
-                    upstream: delivery_request
-                        .filter(|request| {
-                            matches!(
-                                request.mode,
-                                provenant_records::run::DeliveryMode::Integrate(_)
-                            )
-                        })
-                        .map(|_| pinned),
-                    ..output_policy
-                };
-                let mut intent = serde_json::json!({
-                    "schema_version":1, "state":"pruning", "worktree":writer.worktree,
-                    "branch":format!("refs/heads/{}", owner.branch)
-                });
-                if let Some(warning) = tracking_ref_warning.as_ref() {
-                    intent["tracking_ref_warning"] = serde_json::json!(warning);
-                }
-                record_worktree_settlement(&store, record.attempt_id, &intent)
-                    .map_err(|_| worktrees::WorktreeError::RegistrationUnconfirmed)?;
-                pruning_intent = Some(intent);
-                Ok(Some(worktrees::prune_owned(
-                    context,
-                    &writer.worktree,
-                    owner_attempt,
-                    head,
-                    pinned,
-                    &policy,
-                    cancel,
-                )?))
-            },
-        )?)
-    })();
-    let mut receipt = match result {
-        Ok(None) => {
-            let reason = match retention_reason {
-                Some(reason) => reason,
-                None => return Ok(()),
-            };
-            let reason = match collection_error.take() {
-                Some(error) => format!("{reason}; collection failed: {error}"),
-                None => reason.to_owned(),
-            };
-            serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":reason})
-        }
-        Ok(Some(result)) => {
-            serde_json::json!({"schema_version":1, "state":"pruned", "worktree": writer.worktree, "result":result})
-        }
-        Err(error) => {
-            if let Some(mut pruned) =
-                replay_worktree_settlement(pruning_intent.as_ref(), &writer.worktree)?
-            {
-                pruned["cleanup_warning"] = serde_json::json!(error.to_string());
-                pruned
-            } else {
-                serde_json::json!({"schema_version":1, "state":"retained", "worktree": writer.worktree, "reason":error.to_string()})
-            }
-        }
-    };
-    if let Some(warning) = tracking_ref_warning {
-        receipt["tracking_ref_warning"] = serde_json::json!(warning);
+    let reason = settlement_retention_reason(&record.state, task.deliver.is_some(), delivery)
+        .unwrap_or("worktree cleanup queued for completion GC");
+    record_worktree_settlement(
+        &store,
+        record.attempt_id,
+        &serde_json::json!({
+            "schema_version":1,
+            "state":"retained",
+            "worktree":writer.worktree,
+            "reason":reason,
+            "cleanup_deferred":true,
+        }),
+    )?;
+    if let Err(error) = super::gc_cleanup::queue(settled, roots, delivery_override) {
+        let mut receipt = store
+            .worktree_settlement(record.attempt_id, &call)?
+            .ok_or("cleanup intent missing")?;
+        receipt["cleanup_warning"] = serde_json::json!(error.to_string());
+        record_worktree_settlement(&store, record.attempt_id, &receipt)?;
     }
-    // The Git mutation has its own 120-second bound. Start a fresh storage
-    // budget after it so a completed prune can always publish its receipt.
-    record_worktree_settlement(&store, record.attempt_id, &receipt)?;
     Ok(())
 }
 

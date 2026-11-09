@@ -211,6 +211,7 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
@@ -310,6 +311,7 @@ fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn E
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_owner(&tree, &owner)?;
     let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
@@ -389,6 +391,7 @@ fn competing_initial_lane_claims_publish_only_one_owner() -> Result<(), Box<dyn 
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     let second = WorktreeOwner {
         operation_id: Some("competing-second".parse()?),
@@ -447,6 +450,7 @@ fn stale_owner_update_cannot_overwrite_a_successor_claim() -> Result<(), Box<dyn
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_lane_owner_when_free(&context, &tree, &first, info.head, None, false, &cancel())?;
     let successor = WorktreeOwner {
@@ -516,6 +520,7 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
     let competing = WorktreeOwner {
@@ -694,6 +699,7 @@ fn ignored_paths_are_accepted_and_dirty_paths_are_named_in_error() -> Result<(),
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
 
     // 1. Acceptance 1: A worktree containing only ignored paths (such as target/
@@ -803,6 +809,7 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
                 created_at: context.clock.wall_now()?,
                 origin: WorktreeOrigin::Lane,
                 label: None,
+                reference: None,
             },
         )?;
         let output = info.path.join("saved/new");
@@ -884,6 +891,7 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_owner(&tree, &owner)?;
     let policy = WorktreeGcPolicy {
@@ -1092,6 +1100,7 @@ fn dozen_writer_worktrees_claim_concurrently_without_registry_exclusion()
             WorktreeOwner {
                 attempt_id: None,
                 operation_id: Some(format!("parallel-writer-{index}").parse()?),
+                reference: None,
                 branch,
                 base: info.head.to_string(),
                 host: provenant_core::HostId::from_bytes([3; 16]),
@@ -1195,6 +1204,7 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
     let owner = WorktreeOwner {
         attempt_id: None,
         operation_id: Some("writer-git-lock".parse()?),
+        reference: None,
         branch: "writer-git-lock".into(),
         base: info.head.to_string(),
         host: provenant_core::HostId::from_bytes([3; 16]),

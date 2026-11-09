@@ -212,6 +212,7 @@ HOST_SECTIONS = (
     ("host_land_settings", "Host land settings", "Omit a key for its default."),
     ("host_graph_settings", "Host graph settings", "Omit a key for its default."),
     ("host_gc_settings", "Host GC settings", "Omit a key for its default."),
+    ("host_cleanup_settings", "Host cleanup settings", "Omit a key for its default."),
     ("host_retention_settings", "Host retention settings", "Omit a key for its default."),
     ("host_quota_settings", "Host quota settings", "Omit a key for its default."),
     ("host_opencode_go_settings", "Host OpenCode Go settings", "Omit a key for its default."),

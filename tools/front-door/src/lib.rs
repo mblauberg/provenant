@@ -28,6 +28,7 @@ mod hook_worktree;
 mod hooks;
 mod hosts;
 mod install;
+mod lane_cleanup;
 pub mod local_answers;
 mod overflow;
 mod pr;
@@ -827,6 +828,18 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             match result {
                 Ok(()) => 0,
                 Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
+            }
+        }
+        Command::Internal(provenant_cli::Internal::LaneCleanup { request }) => {
+            match fabric::gc_cleanup::run(&request, process.workers()) {
+                Ok(()) => 0,
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "LANE_CLEANUP",
+                    &error.to_string(),
+                    globals,
+                ),
             }
         }
         Command::Internal(provenant_cli::Internal::TickGc) => {

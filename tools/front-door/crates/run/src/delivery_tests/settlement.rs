@@ -56,6 +56,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
                     .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
                 label: None,
+                reference: None,
             };
             let head = provenant_confinement::run_utility(
                 context.executor,
@@ -142,10 +143,36 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let acceptance = receipt.review_acceptance.as_ref().ok_or("acceptance")?;
     assert!(acceptance.protected_paths.is_empty());
     assert_eq!(acceptance.actor, execution.actor_id);
+    // The push created the remote branch, so the shared ledger records it as
+    // created at the bound endpoint, for this attempt.
+    let integration = receipt.integration.as_ref().ok_or("integration")?;
+    assert_eq!(integration.previous, None);
+    assert_eq!(integration.integrated, head);
+    let endpoint = provenant_confinement::worktrees::RefEndpoint::Remote {
+        remote: integration.remote.clone(),
+        push_url: integration.push_url.clone().ok_or("push URL")?,
+    };
+    let reference = provenant_confinement::repo::GitRefName::new(&integration.target)?;
+    let ledger = provenant_confinement::worktrees::RefLedger::open(
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let owned = ledger
+        .load(&endpoint, &reference)?
+        .ok_or("pushed ref not recorded")?;
+    assert_eq!(
+        owned.origin,
+        provenant_confinement::worktrees::RefOrigin::Created
+    );
+    assert_eq!(owned.attempt_id, Some(id));
+    assert_eq!(owned.tip, head);
     assert_eq!(
         store.delivered(id, &call)?.map(|(_, receipt)| receipt),
         Some(receipt)
     );
+    // Replaying the sealed receipt is not a recreation.
+    deliver(true)?;
+    assert_eq!(ledger.load(&endpoint, &reference)?, Some(owned));
     Ok(())
 }
 
@@ -205,6 +232,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
                     .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
                 label: None,
+                reference: None,
             };
             let head = provenant_confinement::run_utility(
                 context.executor,
@@ -301,6 +329,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
                 extra: Default::default(),
                 stage: WriterDeliveryStage::Interrupted,
             },
+            integration: None,
         })?,
         RECORD_LIMIT,
     )?;

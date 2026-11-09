@@ -36,9 +36,9 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
 | `cargo_incremental` | false | CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence. (true or false). |
 | `cargo_debug` | line-tables-only | CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence. (none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false). |
-| `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, after a lane settles, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over. (bytes, 0 or more). |
+| `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, during manual or scheduled GC, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over. (bytes, 0 or more). |
 | `build_dir_grace_seconds` | 900 (15 minutes) | A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held. (seconds, 0 or more). |
-| `build_dir_survey_interval_seconds` | 300 (5 minutes) | Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement. (seconds, 0 or more). |
+| `build_dir_survey_interval_seconds` | 300 (5 minutes) | Legacy survey interval, retained for readable existing configurations. Settlement no longer surveys lane caches; manual and scheduled GC own those surveys. (seconds, 0 or more). |
 
 ## Host run settings
 
@@ -196,9 +196,10 @@ Set these in `[gc]` in the host configuration. Omit a key for its default.
 | Key | Default | Effect |
 |---|---|---|
 | `graph_checkpoint_days` | 90 | Retain terminal graph checkpoints for at least this many days after their last save (1 to 3650 days). |
-| `schedule` | true | Run the daily scheduled sweep. false also skips admission collection; settlement pressure collection and landing cleanup still run (true or false). |
+| `schedule` | true | Run the daily scheduled sweep. false also skips admission collection; completion cleanup and landing cleanup still run (true or false). |
 | `idle_days` | 7 | Minimum idle age before a lane cache or declared output is collected (1 to 3650 days). |
 | `free_floor` | 10% of the state volume, at least 50 GiB | Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first (whole B, K, M, G, T or KiB to TiB; a plain number means GiB). |
+| `lane_cargo_cache_max` | 32G | Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody (same syntax as free_floor). |
 | `alert_below` | free_floor | Free space below which an applied collection emits one gc.low_disk note per dip (same syntax as free_floor). |
 | `projects.{project}.regenerable` | ["target"] with a root Cargo.toml, otherwise [] | Git-ignored directory names collected at any depth in the project's linked worktrees (directory names; not .git, .worktrees, absolute or parent paths). |
 | `projects.{project}.keep` | [] | Paths, their descendants and any matching directory containing them that collection preserves (worktree-relative paths). |

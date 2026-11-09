@@ -38,7 +38,13 @@ fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
     data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
         node["advance_error"].is_string()
             && node["attempts"].as_array().is_some_and(Vec::is_empty)
-            && (matches!(outcome, Outcome::Failed | Outcome::Refused) || node["state"] == "failed")
+            && (matches!(outcome, Outcome::Failed | Outcome::Refused)
+                || node["state"] == "failed"
+                || (node["state"] == "blocked"
+                    && matches!(
+                        node["advance_error_code"].as_str(),
+                        Some("launch_refused" | "launch_retry_exhausted")
+                    )))
     })
 }
 
@@ -694,6 +700,28 @@ mod tests {
             launch_error_node(&timed_out, Outcome::Waiting).map(|node| &node["id"]),
             Some(&json!("writer"))
         );
+    }
+
+    #[test]
+    fn pending_graph_projects_definitive_blocked_launch_errors() {
+        for code in ["launch_refused", "launch_retry_exhausted"] {
+            let data = json!({"status":"pending", "timed_out":true, "checkpoint":{"nodes":[
+                {"id":"slow", "state":"running", "attempts":[{}]},
+                {"id":"writer", "state":"blocked", "attempts":[],
+                 "advance_error":"bounded launch refused", "advance_error_code":code,
+                 "advance_owner_code":"writer_lock_busy"}
+            ]}});
+            assert_eq!(response_outcome("run", &data), Outcome::Waiting);
+            let node = launch_error_node(&data, Outcome::Waiting).unwrap();
+            assert_eq!(node["id"], "writer");
+            assert_eq!(node["advance_owner_code"], "writer_lock_busy");
+            let mut retrying = data.clone();
+            retrying["checkpoint"]["nodes"][1]["advance_error_code"] = json!("retrying");
+            assert!(launch_error_node(&retrying, Outcome::Waiting).is_none());
+            let mut launched = data.clone();
+            launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
+            assert!(launch_error_node(&launched, Outcome::Waiting).is_none());
+        }
     }
 
     #[test]

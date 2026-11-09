@@ -18,6 +18,17 @@ provenant --project /absolute/path/to/repo gc --dry-run --json
 provenant --project /absolute/path/to/repo gc --json
 ```
 
+After a successful managed install, the installer retains the active release
+and the two most recently installed releases. It also retains any release
+whose executable is still running. If the host process census is incomplete,
+release pruning is skipped so an unobserved process cannot lose its release.
+Older managed release directories are removed from `<state>/releases/`.
+
+Manual `provenant gc` also rebuilds pending graph markers and collects old
+terminal graph checkpoints using `gc.graph_checkpoint_days`, the same policy
+as the daily tick. Checkpoints with pending work, open asks or scheduled wakes
+are retained. `gc --dry-run` leaves graph checkpoints untouched.
+
 Lane build-cache selection uses `--idle-days` and `--free-floor`; see
 [cache collection](install.md#build-a-staged-release).
 Provider-state retention covers indexed terminal attempts in the resolved
@@ -79,6 +90,35 @@ An unreadable reservation prevents deletion. Resolve custody through normal
 reconciliation or chair recovery, then rerun GC. Filesystem errors produce a
 failed result with their paths; completed removals remain reported.
 
+## Bound run payload bytes
+
+`retention.payload_cap_bytes` (default 16 GiB; see
+[configuration](configuration.md)) caps the bulk payload under `runs/`:
+`provider-state/`, `provider-history/`, `scratch/` and capture bytes beyond the
+64 KiB tails. When the accounted total exceeds the cap, GC evicts the oldest
+eligible attempts first, whole attempts at a time, until the total is at or
+below 75% of the cap.
+
+- A payload whose attempt finished under 24 hours ago is never evicted.
+- Provider state and logs older than `retention.provider_state_days` (seven by
+  default) and `retention.logs_days` expire regardless of the cap, as above.
+- An attempt that holds unique private Git objects (including after a refused
+  import), is abandoned, reserved, unproven lost or the source of a pending
+  continuation is pinned: neither age nor pressure evicts it. Eviction takes the
+  attempt's publication and writer locks and rechecks custody under them.
+- Records, results, exit evidence, receipts and capture tails stay. The attempt
+  gains `payload-evicted.json` and `provider-state-expired.json`; `output` and
+  `status` still work and report `payload: "evicted"`, and resume returns
+  `PROVIDER_STATE_EXPIRED`.
+
+Sizes come from `<state>/payload-ledger.json`, rewritten by full `gc` (the daily
+tick). Settlement-time pressure collection only reads the ledger, so the
+settlement path never walks payload trees. Inspect `data.provider_state.payload`
+in the GC JSON: `accounted_bytes`, `pinned_bytes` (cannot be evicted),
+`reclaimed_bytes` (this pass; planned in a dry run), `total_reclaimed_bytes`
+(lifetime), `evicted` and `kept`. `provenant disk report` shows `payload`
+with the same pinned and lifetime-reclaimed bytes.
+
 Directory removal first renames to an identity-bearing tombstone. A later
 sweep retries an interrupted deletion only for the authorised path and
 matching device and inode. Do not manually rename a refused tree into a
@@ -86,26 +126,91 @@ tombstone.
 
 On macOS, the installed default-state host tick runs every 60 seconds and
 collects when its persisted daily deadline is due.
-`[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
-cache pruning remain available. See
+`[gc] schedule = false` disables scheduled sweeps; manual GC remains available. See
 [configuration](configuration.md#lane-cache-collection) for tick installation
 and logs. Other installations can schedule `provenant tick` explicitly.
 
-Writer admission and lane settlement use pressure collection without network
-fetches or worktree removal. Each caps its single attempt at five seconds
-and rechecks every output volume once. Applied full and pressure sweeps share
+Writer admission uses pressure collection without network fetches or worktree
+removal, capped at five seconds. Applied full and pressure sweeps share
 `<state>/gc/collection.lock`; a busy collector is skipped, not queued.
-Manual `gc --pressure` prints a notice when the project
-is transient or no eligible data is in scope. JSON exposes the reason as `notice`.
-Lane settlement collects that lane's declared ignored output and Cargo cache,
-including when its worktree is retained for delivery pickup. Successful
-settlement, delivery integration and `land` also prune eligible worktrees
-and their caches through the existing custody checks. These event passes share
-the collection lock, apply no idle delay and leave foreign worktrees alone.
-Kept files, live writers and reservations still prevent removal. A busy
-collector skips settlement collection; the daily backstop retries eligible
-data. Provider-cache and temporary cleanup at settlement remain scoped to
-their owner. `gc.schedule = false` leaves settlement and landing cleanup enabled.
+Manual `gc --pressure` prints a notice when the project is transient or no
+eligible data is in scope; JSON exposes the reason as `notice`.
+
+Fabric settlement records `cleanup_deferred = true` and atomically publishes a
+completion request without waiting on any dispatch or collection lock. The host
+tick dispatches a detached worker to collect its worktree, declared output and
+Cargo caches. Settlement fetches no refs and walks no payload trees. The worker retains
+all ownership, continuation, terminal-state, live-writer, landing-proof and
+expected-tip lease checks. Durable requests under `<state>/gc/completions/`
+contain both intent and retry state. A worker claims the whole record by rename
+to a `.claim` filename and holds an OS lock while processing it. A dead worker's
+claim remains retryable; a requeue publishes fresh pending intent even when the
+earlier claim has exhausted its budget. Exhaustion moves the whole record to
+`gc/completion-exhausted` in one rename. Each host tick retries independently of the daily
+GC deadline and `gc.schedule`. A busy worker waits up to 120 seconds for collection
+custody before leaving its request for retry. `land` retains its explicit cleanup.
+Kept files, live writers and reservations still prevent removal.
+
+`gc --dry-run` uses the existing run-size ledger and shared bounded filesystem
+samples. It does not refresh upstream refs or survey build profiles and target
+seeds; `notice` identifies these deferred surveys. Incomplete cache sizes set
+`data.bytes_estimated = true`, and an incomplete newest-write observation
+cannot mark a cache idle. Applied GC obtains the full proof before deletion.
+
+`gc.lane_cargo_cache_max` bounds the total lane Cargo cache at 32 GiB by default.
+After orphan and idle collection, GC evicts remaining eligible caches oldest
+first. It counts live and foreign caches towards the total while retaining them;
+`data.total_bytes_after` may therefore exceed the cap. Existing worktrees need
+writer exclusion before detachment; unknown custody retains the cache.
+
+## Remove finished lanes' refs
+
+Provenant removes what a finished lane leaves behind once its work has
+landed: the worktree, the local branch, the remote branch and its
+remote-tracking ref. It needs no action from you.
+
+- Only refs the ref ledger records as created by Provenant are removed. A
+  branch it found already there (adopted), or one it never observed, stays.
+  The ledger lives at `<state>/worktrees/<project>/refs/`.
+- A ref has landed when the shared landed check proves it: its tip is an
+  ancestor of the freshly fetched target, or an integration receipt chain
+  carries it there. Tree or patch-id equality is never proof, so a squash
+  merge without a receipt is not landed.
+- Unlanded refs are reported and retained regardless of age. An unknown
+  landing state also retains the ref. A tip that differs from the ledger's
+  recorded tip is retained, including commits added by a human.
+- Every deletion is leased on the tip just checked: a local ref is deleted
+  with `update-ref -d NAME TIP` and a remote branch with
+  `git push --force-with-lease=REF:TIP URL :REF`. A ref that moved is kept.
+- A branch any worktree has checked out, the integration branch itself,
+  dirty worktrees, worktrees with a live writer and declared `keep` paths
+  are retained.
+- Remote names and push URLs come from the delivery endpoint recorded with
+  each ref, never from a default remote name.
+
+In completion GC, `prune_owned` removes the lane's worktree and, for an
+integrated lane, its created local branch; an integrated lane's own created
+remote branch goes when the integration receipt proves it landed. A pushed
+lane is not landed at settlement; its refs go on the first full `gc` pass
+after the target contains them. `gc` lists every created ref in the ledger,
+fetches each bound remote's default branch once, and removes only proven
+landed refs whose tips still match the ledger. `gc --pressure` skips this network step.
+
+Each artefact reports one outcome under `artefacts` in the settlement receipt
+and `worktree_cleanup[].refs` in `gc --json`:
+
+```json
+{"artefact":"remote_branch","name":"refs/heads/lane/x","remote":"origin",
+ "outcome":"removed","reason":"landed","head":"0123..."}
+```
+
+`artefact` is `worktree`, `local_branch`, `remote_branch` or `tracking_ref`.
+`outcome` is `removed`, `would_remove` (preview), `absent`, `retained` or
+`failed`; `reason` says why, for example `landed`, `not_landed`, `not_created`, `checked_out`, `changed` or
+`target_unavailable`. A failed removal prints a warning and never fails the
+settlement or the pass; the ref is retained and the next pass retries. To
+restore a removed ref, recreate it at `head`, for example
+`git branch lane/x HEAD_OID` or `git push URL HEAD_OID:refs/heads/lane/x`.
 
 Declared ignored output in an idle linked worktree no longer needs a terminal
 lane. It still needs free writer custody and no live lane. Undeclared ignored
@@ -129,6 +234,5 @@ or missing custody hierarchy returns an observation error without initialising
 it. Scheduled previews list such roots in `unobserved_projects`.
 
 Default GC output shows aggregate counts and exceptions. Use `--json` for the
-full removal and retention records. Settlement runs one bounded pressure pass
-when any output volume is below `gc.free_floor`; the daily sweep retries
+full removal and retention records. Completion GC runs promptly after settlement; the daily sweep also retries
 eligible data left by a busy or interrupted pass.

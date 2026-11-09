@@ -418,6 +418,7 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_owner(&tree, &prior)?;
     let record = slot
@@ -441,6 +442,7 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     save_lane_owner_when_free(
         &context,
@@ -528,6 +530,7 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         created_at: context.clock.wall_now()?,
         origin: WorktreeOrigin::Lane,
         label: None,
+        reference: None,
     };
     assert!(matches!(
         save_lane_owner_when_free(

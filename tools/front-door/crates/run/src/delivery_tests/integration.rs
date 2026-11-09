@@ -807,3 +807,51 @@ fn fetch_destinations_that_are_symrefs_are_refused()
     }
     Ok(())
 }
+
+#[test]
+fn delivery_receipts_record_the_destination_tips_from_the_bound_endpoint()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    // A push that creates the remote branch has no previous tip.
+    fixture.commit(&fixture.writer.worktree, "first lane change")?;
+    let host = fixture.prepare()?;
+    let first = host.head(&fixture.writer)?;
+    let created = host
+        .push(&fixture.writer, &fixture.request, first, "fixture")?
+        .integration
+        .ok_or("push recorded no integration")?;
+    assert_eq!(created.remote, "origin");
+    assert_eq!(
+        created.push_url.as_deref(),
+        fixture.root.join("remote.git").to_str()
+    );
+    assert_eq!(created.target, "refs/heads/published/lane");
+    assert_eq!(created.previous, None);
+    assert_eq!(created.integrated, first);
+    // A later push to the same branch records the tip it found.
+    fixture.commit(&fixture.writer.worktree, "second lane change")?;
+    let second = host.head(&fixture.writer)?;
+    let updated = host
+        .push(&fixture.writer, &fixture.request, second, "fixture")?
+        .integration
+        .ok_or("push recorded no integration")?;
+    assert_eq!(updated.previous, Some(first));
+    assert_eq!(updated.integrated, second);
+    // Local integration leases the target's tip and reads the result back.
+    fixture.git(&["branch", "integration", &first.to_string()])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    let host = fixture.prepare()?;
+    let integrated = host.integrate(&fixture.writer, &fixture.request, second)?;
+    assert_eq!(integrated.remote, "");
+    assert_eq!(integrated.push_url, None);
+    assert_eq!(integrated.target, "refs/heads/integration");
+    assert_eq!(integrated.previous, Some(first));
+    assert_eq!(integrated.integrated, second);
+    // Integrating again finds the head already landed and changes nothing.
+    let replay = host.integrate(&fixture.writer, &fixture.request, second)?;
+    assert_eq!(replay.previous, Some(second));
+    assert_eq!(replay.integrated, second);
+    Ok(())
+}

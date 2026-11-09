@@ -2178,7 +2178,7 @@ mod tests {
         };
         assert_eq!(refusal.template, "task");
         assert!(
-            matches!(&refusal.fault, provenant_fabric_runtime::graph::template::ParameterFault::Unknown { key: Some(key), .. } if key == "bogus"),
+            matches!(&refusal.fault, provenant_fabric_runtime::graph::template::ParameterFault::Unknown { key: Some(key), accepted, .. } if key == "bogus" && accepted.is_empty()),
             "{refusal:?}"
         );
         let diagnostic = error.diagnostic();

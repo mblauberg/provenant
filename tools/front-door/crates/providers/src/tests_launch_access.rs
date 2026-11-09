@@ -560,6 +560,13 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         // Git selection is replaced after the adapter's environment is built.
         expected.push("PROVENANT_GIT");
         assert_eq!(keys, expected, "{id}");
+        if id == "codex" {
+            // This fixture grants provider-only networking. Cargo must use
+            // cached sources rather than attempting dependency downloads.
+            assert!(spec.env.iter().any(|(key, value)| {
+                key == "CARGO_NET_OFFLINE" && value == "true"
+            }));
+        }
         assert!(
             spec.env.iter().any(|(key, value)| {
                 key == "PROVENANT_GIT" && value == "/fixture/scratch/read-only-git/git"

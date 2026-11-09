@@ -486,11 +486,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             crate::writer::settle_launch_staging(attempt).map_err(custody_error)?;
         }
         release_and_reclaim(attempt, exit.scope, recovery)?;
-        // The lane's builds have ended: trim lane build output to its cap and
-        // the free-space floor. Best effort: it waits at most the 5 s ledger
-        // budget for admission, and only when there is something to remove.
-        let (state, _) = context.disk_roots();
-        crate::build_dir_gc::reclaim(state, &context.roots.home);
+        // Build output is surveyed by admission and GC, outside settlement.
         Ok(())
     }
 }
@@ -539,18 +535,11 @@ fn record_budget_warning(
 pub(crate) fn release_and_reclaim(
     attempt: &Directory,
     scope: custody::Scope,
-    recovery: &custody::Recovery,
+    _recovery: &custody::Recovery,
 ) -> custody::Result<()> {
     custody::publish_release(attempt, scope)?;
     crate::settlement::complete(attempt, scope).map_err(custody_error)?;
-    if object_import_refused(attempt, scope)
-        .map_err(custody_error)?
-        .is_none()
-        && let Ok(_commit) = recovery.verify_settlement(attempt)
-    {
-        // Hold the verified custody lock until temporary cleanup finishes.
-        let _ = crate::artifacts::remove_unreserved_terminal_temporary(attempt);
-    }
+    // Retention GC reclaims terminal temporary payloads under writer exclusion.
     Ok(())
 }
 
@@ -1167,6 +1156,9 @@ impl RunStore {
                         },
                     )
                 });
+                if let Ok(receipt) = result.as_ref() {
+                    self.record_delivered_ref(record, delivery, receipt, call);
+                }
                 let disposition = match result {
                     Ok(receipt)
                         if matches!(

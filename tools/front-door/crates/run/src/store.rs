@@ -1468,6 +1468,7 @@ impl RunStore {
                     state: WriterDeliveryState::NotAttempted {
                         extra: Default::default(),
                     },
+                    integration: None,
                 });
             }
         }

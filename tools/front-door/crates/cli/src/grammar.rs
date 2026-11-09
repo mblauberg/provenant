@@ -1452,6 +1452,10 @@ pub enum Internal {
     },
     ProviderUpdates,
     TickGc,
+    /// Collect a terminal lane after settlement publishes its cleanup intent.
+    LaneCleanup {
+        request: String,
+    },
     /// Detached cargo-seed refresh queued by the daily collector.
     TickSeed,
     /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count and wait come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`, `PROVENANT_BUILD_WAIT_SECS`), never from arguments.

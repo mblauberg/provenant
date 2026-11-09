@@ -8,10 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Debug)]
 struct WalkBudget {
     remaining: usize,
     started: Instant,
     reported: bool,
+    duration: Duration,
 }
 
 impl Default for WalkBudget {
@@ -22,13 +24,14 @@ impl Default for WalkBudget {
             remaining: 1_000_000,
             started: Instant::now(),
             reported: false,
+            duration: Duration::from_secs(10),
         }
     }
 }
 
 impl WalkBudget {
     fn reached_limit(&mut self, report: &mut DiskReport, path: &Path) -> bool {
-        let exhausted = self.remaining == 0 || self.started.elapsed() >= Duration::from_secs(10);
+        let exhausted = self.remaining == 0 || self.started.elapsed() >= self.duration;
         if exhausted && !self.reported {
             report.error(path, "walk entry or time budget reached");
             self.reported = true;
@@ -109,6 +112,15 @@ impl DiskEntry {
     }
 }
 
+/// Run-payload retention accounting from the last GC pass.
+#[derive(Debug, Default, Serialize)]
+pub struct PayloadRetention {
+    /// Payload bytes that custody, age or a continuation keeps out of eviction.
+    pub pinned_bytes: u64,
+    /// Payload bytes evicted over the store's lifetime.
+    pub reclaimed_bytes: u64,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct DiskTotal {
     pub count: u64,
@@ -135,11 +147,15 @@ pub struct DiskReport {
     pub entries: Vec<DiskEntry>,
     pub totals: BTreeMap<String, DiskTotal>,
     pub errors: Vec<DiskError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PayloadRetention>,
     // Only multiply linked non-directories need inode deduplication.
     #[serde(skip)]
     seen: HashSet<(u64, u64)>,
     #[serde(skip)]
     measured_worktrees: BTreeMap<PathBuf, (i128, bool)>,
+    #[serde(skip)]
+    walk_budget: WalkBudget,
 }
 
 impl DiskReport {
@@ -159,9 +175,31 @@ impl DiskReport {
             entries: Vec::new(),
             totals: BTreeMap::new(),
             errors: Vec::new(),
+            payload: None,
             seen: HashSet::new(),
             measured_worktrees: BTreeMap::new(),
+            walk_budget: WalkBudget::default(),
         }
+    }
+
+    /// Whether the report's shared traversal budget has been consumed.
+    pub fn traversal_exhausted(&self) -> bool {
+        self.walk_budget.remaining == 0
+            || self.walk_budget.started.elapsed() >= self.walk_budget.duration
+    }
+
+    /// Bound traversal across every measurement in this report. Exhaustion
+    /// preserves observed bytes as a lower bound and adds an explicit error.
+    pub fn with_walk_budget(
+        path: PathBuf,
+        available_bytes: u64,
+        max_entries: usize,
+        duration: Duration,
+    ) -> Self {
+        let mut report = Self::new(path, available_bytes);
+        report.walk_budget.remaining = max_entries;
+        report.walk_budget.duration = duration;
+        report
     }
 
     pub fn error(&mut self, path: impl AsRef<Path>, reason: impl ToString) {
@@ -207,7 +245,7 @@ impl DiskReport {
         let Some(comparison) = self.comparison_path(path) else {
             return;
         };
-        let mut budget = WalkBudget::default();
+        let mut budget = std::mem::take(&mut self.walk_budget);
         self.walk(
             parent,
             name,
@@ -218,6 +256,7 @@ impl DiskReport {
             0,
             &mut budget,
         );
+        self.walk_budget = budget;
     }
 
     /// Publish an aggregate, combining shared host-root observations.
@@ -272,10 +311,10 @@ impl DiskReport {
             parts: lane.then(DiskParts::default),
             ..DiskEntry::default()
         };
-        let mut budget = WalkBudget::default();
+        let mut budget = std::mem::take(&mut self.walk_budget);
         let errors_before = self.errors.len();
         let entries_before = self.entries.len();
-        if !self.walk(
+        let observed = self.walk(
             parent,
             name,
             path,
@@ -284,7 +323,9 @@ impl DiskReport {
             lane,
             0,
             &mut budget,
-        ) {
+        );
+        self.walk_budget = budget;
+        if !observed {
             return None;
         }
         if class == "worktree" {
@@ -559,6 +600,28 @@ impl DiskReport {
 mod tests {
     // Unit tests use a real monotonic sample to exercise expiration.
     #![allow(clippy::disallowed_methods)]
+
+    #[test]
+    fn measurement_budget_is_shared_across_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        let first = fixture.path().join("first");
+        let second = fixture.path().join("second");
+        std::fs::write(&first, b"one")?;
+        std::fs::write(&second, b"two")?;
+        let mut report = super::DiskReport::with_walk_budget(
+            fixture.path().into(),
+            0,
+            1,
+            std::time::Duration::from_secs(60),
+        );
+        assert!(report.measure("sample", &first).is_some());
+        assert!(report.measure("sample", &second).is_none());
+        assert!(report.traversal_exhausted());
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(std::fs::read(second)?, b"two");
+        Ok(())
+    }
 
     use super::*;
     use std::{

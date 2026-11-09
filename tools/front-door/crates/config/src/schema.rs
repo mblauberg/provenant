@@ -48,6 +48,7 @@ const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("idle_days", 1, 3650),
     FieldMetadata::int("graph_checkpoint_days", 1, 3650),
     FieldMetadata::new("free_floor", "string"),
+    FieldMetadata::new("lane_cargo_cache_max", "string"),
     FieldMetadata::new("alert_below", "string"),
     FieldMetadata::enumeration(
         "projects.{project}.foreign_worktrees",
@@ -63,6 +64,7 @@ const RETENTION_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::int("chair_log_replay_days", 7, 3650),
     FieldMetadata::int("chair_log_entries", 1, 100_000),
     FieldMetadata::int("chair_log_bytes", 65_536, 1_073_741_824),
+    FieldMetadata::int("payload_cap_bytes", 1_048_576, 1_125_899_906_842_624),
 ];
 const INSTALL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("bin_dir", "string"),

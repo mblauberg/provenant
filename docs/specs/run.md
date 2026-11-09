@@ -1250,7 +1250,10 @@ sealed owner and lineage; a changed owner or a live predecessor refuses reuse.
 An uninitialised gitlink is acceptable, while an initialised nested repository
 requires review because Git could follow lane-controlled configuration.
 
-Owned settlement can remove only its own clean checkout after successful
+Owned settlement records `cleanup_deferred: true` and atomically queues intent.
+It performs no network operations, recursive output survey or worktree removal.
+Deferred-intent receipts are never final. A detached worker can remove only its
+own clean checkout after successful
 execution or delivery, with the exact head proven retained by its creation base
 or delivered ref. Branch deletion also requires landed integration; push and
 open PRs retain branches. Ownership, terminal state, absent live work, custody,
@@ -1258,15 +1261,98 @@ registration, sequencer state and head are checked under removal locks.
 Only declared regenerable output may be discarded; other ignored files retain
 the checkout. Durable removal intent permits replay when the checkout is gone.
 
-Tracking-ref refresh is best effort, bounded and outside the collection lock.
+Tracking-ref refresh in the worker is best effort, bounded and outside the collection lock.
 Failure cannot change the attempt outcome or an adopted tree's receipt. The
 [lifecycle policy](../worktrees.md) owns operational guidance.
 
 - Why: cleanup may reclaim only owned work proven retained elsewhere.
 - Test: `crates/cli/src/run/worktree.rs::worktree_access_preserves_writer_and_implicit_reader_rules`;
   `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
-  `src/fabric/peer_writer_delivery.rs::settlement_records_tracking_ref_failure_without_failing_lane`
+  `src/fabric/peer_writer_delivery.rs::settlement_defers_tracking_ref_refresh`
 - Owner: `crates/confinement/src/worktrees/owner.rs`, `crates/cli/src/run/worktree.rs`, `src/fabric/settlement.rs`
+
+## Ref ownership and the landed check
+
+The ref ledger lives in host state at `<state>/worktrees/<project>/refs/`, one
+bounded atomic `RefRecord` per endpoint and full ref, shared by every writer
+for the repository. A record holds the repository's project ID, the endpoint
+(`local`, or `remote` with the remote name and push URL from the bound delivery
+endpoint), the full ref, a generation, the origin (`created` or `adopted`), the
+tip it saw, the time and optional attempt and operation IDs. Worktree creation
+records a branch it made as created and an existing branch as adopted, under
+the registry lock; a graph's local integration branch is recorded the same
+way. A delivered push records its remote branch as created when the remote
+did not have it, otherwise adopted. Integration targets are never claimed.
+Every creation or adoption is a new generation, so a ref recreated at the
+same commit never inherits an earlier proof. An adoption that finds the ref
+still at the recorded tip, or an attempt replaying its own observation, keeps
+the current generation. A ref with no record is unobserved and retained. A
+failed record write is a warning, never a creation failure.
+
+One landed check, `worktrees::landed`, decides whether a commit has landed. It
+is landed when it is an ancestor of the freshly read target tip, or when a
+chain of integration receipts carries it there: each delivered head contains
+the previous link, each receipt delivers the ref the previous one integrated
+into, each integration commit is the delivered head, a merge of the previous
+tip and the head, or a single commit on the previous tip, and the chain ends at
+the authorised root, which contains the last integration commit. A rewritten
+target, a missing commit or any broken link is unproven, which retains. Tree
+and patch-id equality are never evidence. Named and merged removal, GC, owned
+lane pruning and delivery's already-integrated test all use it.
+- Why: cleanup may only remove refs Provenant made, and only once their work
+  is proven to have landed.
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`;
+  `crates/confinement/src/worktrees/landed.rs::tests`;
+  `crates/run/src/git_context.rs::recorded_local_branch_is_created_once_then_adopted`.
+- Owner: `crates/confinement/src/worktrees/refs.rs`,
+  `crates/confinement/src/worktrees/landed.rs`
+
+## Removal on completion
+
+Settlement and `gc` remove what a finished lane leaves behind: its worktree,
+local branch, remote branch and remote-tracking ref. Only refs whose current
+ledger record is `created` are candidates; for a worktree owner that links a
+generation, the record must still be that generation. A candidate goes once
+the landed check proves it landed and its tip matches the ledger's recorded
+tip. Unlanded refs and refs with an unknown landing state stay regardless of
+age and are reported by GC. A branch any
+worktree has checked out, the landing target itself, dirty worktrees,
+worktrees with a live writer and declared keep paths are retained. Local refs
+are deleted with `update-ref -d` on the tip just read and remote branches with
+`git push --force-with-lease=REF:TIP` to the push URL the ledger recorded, so
+a ref that moved is kept. A removed or absent ref's record is forgotten only
+while it is still the generation acted on. `prune_owned` deletes an
+integrated lane's local branch only when it is created; settlement then
+removes an integrated lane's own created remote branch on the receipt's
+chain. `gc` lists the ledger, fetches each bound endpoint's default branch
+once, and judges local branches on those targets and the fetched default.
+Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
+`outcome`, `reason`, `head`): under `artefacts` in the settlement receipt and
+`worktree_cleanup[].refs` in `gc --json`. A failure warns and never fails the
+settlement or the pass. Completion requests with a final retention reason
+leave the queue even if output cleanup warned. Dirty trees, absent worktrees
+and unlanded work without requested delivery are final retentions. Transient
+failures retry at most five times with durable exponential backoff starting
+at ten minutes, with at most four dispatches per host tick. Exhausted requests
+move from `gc/completions` to `gc/completion-exhausted` for diagnosis.
+Settlement atomically publishes only its own request and never waits on a lock.
+Only the host tick enumerates and dispatches the queue. Each request contains
+its identity payload, attempt count, next-retry time and last cause; the filename
+hash covers only identity. A worker claims the entire record by rename to the
+same filename with `.claim` appended, under a non-blocking OS lock. The host tick
+retries abandoned claims after their durable backoff. Requeuing publishes fresh
+pending intent independently of any claimed record, including an exhausted one.
+Exhaustion renames the complete claimed record into diagnostics in one operation;
+there is no separate retry file or orphan reconciliation.
+- Why: finished lanes leave nothing behind once their work has landed, and
+  never take a ref Provenant did not make.
+- Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`
+  (`leased_ref_deletion_keeps_a_moved_or_checked_out_branch`,
+  `only_a_created_branch_at_its_linked_generation_is_a_removal_candidate`,
+  `ledger_lists_current_records_and_forgets_only_the_generation_acted_on`);
+  `src/lane_cleanup.rs::tests`.
+- Owner: `crates/confinement/src/worktrees/removal.rs`, `src/lane_cleanup.rs`,
+  `src/fabric/settlement.rs`
 
 ## Delivery modes and settled pickup
 

@@ -8,8 +8,11 @@ mod doctor;
 mod doctor_tests;
 mod gc;
 mod inventory;
+mod landed;
 mod lifecycle;
 mod owner;
+mod refs;
+mod removal;
 pub use census::*;
 pub use context::{
     with_context, with_context_using_facts, with_context_using_workers,
@@ -19,10 +22,19 @@ pub use custody::*;
 pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
 pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
 pub use inventory::*;
+pub use landed::{
+    CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
+    commit_parents, landed,
+};
 pub use lifecycle::*;
 pub use owner::{
-    WorktreeOrigin, WorktreeOwner, load_owner, owned_worktree_paths, prune_owned,
+    WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
     save_lane_owner_when_free, save_owner, update_owner_when_unchanged,
+};
+pub use refs::{RefEndpoint, RefLedger, RefObservation, RefOrigin, RefOwnership, RefRecord};
+pub use removal::{
+    Artefact, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out, created_branch,
+    delete_ref_leased, has_commit, landing_in_repo, ref_tip,
 };
 
 use crate::repo::{
@@ -618,6 +630,8 @@ pub enum RetainReason {
     GitFailure,
     Unregistered,
     LockedOrPrunable,
+    /// Provenant did not create the branch, or cannot observe that it did.
+    NotCreated,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize)]

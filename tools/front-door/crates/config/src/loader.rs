@@ -531,6 +531,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.idle_days",
         "gc.graph_checkpoint_days",
         "gc.free_floor",
+        "gc.lane_cargo_cache_max",
         "gc.alert_below",
         "gc.projects",
     ] {
@@ -554,6 +555,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     origins.insert("retention.chair_log_days".into(), compiled.clone());
     origins.insert("retention.chair_log_replay_days".into(), compiled.clone());
     origins.insert("retention.chair_log_entries".into(), compiled.clone());
+    origins.insert("retention.payload_cap_bytes".into(), compiled.clone());
     origins.insert("retention.chair_log_bytes".into(), compiled.clone());
     for provider in providers.keys() {
         for field in [

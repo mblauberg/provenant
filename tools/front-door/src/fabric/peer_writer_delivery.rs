@@ -2,9 +2,82 @@
 use super::*;
 
 #[test]
-fn adopted_writer_refresh_failure_does_not_change_receipt()
+fn completion_gc_retries_busy_collection_and_requeued_exhausted_request()
 -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::adopted_writer_refresh_failure_does_not_change_receipt")?
+    if host_test("fabric::peer_tests::peer_writer_delivery::completion_gc_retries_busy_collection_and_requeued_exhausted_request")? {
+        return Ok(());
+    }
+    let fixture = SettlementFixture::resumed()?;
+    settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    let requests = fixture.roots.state.as_path().join("gc/completions");
+    let request_path = std::fs::read_dir(&requests)?.next().ok_or("queued request")??.path();
+    let request = std::fs::read_to_string(&request_path)?;
+    let name = request_path.file_name().ok_or("request name")?;
+    let lock = crate::worktrees::collection_lock(&fixture.roots)?;
+    let old_wait = gc_cleanup::COLLECTION_WAIT_SECONDS.replace(1);
+    let result = gc_cleanup::run(&request, &FreeWorkers);
+    gc_cleanup::COLLECTION_WAIT_SECONDS.set(old_wait);
+    result?;
+    let claimed_path = requests.join(format!("{}.claim", name.to_string_lossy()));
+    assert!(claimed_path.exists(), "busy collection must retain its request");
+    assert!(fixture.worktree.exists());
+    let retry = std::fs::read(&claimed_path)?;
+    let record: serde_json::Value = serde_json::from_slice(&retry)?;
+    assert_eq!(record["retry"]["attempts"], 1);
+    assert_eq!(record["retry"]["last_cause"], crate::worktrees::COLLECTION_BUSY);
+    gc_cleanup::retry_pending(fixture.roots.state.as_path(), &fixture.rig.home)?;
+    assert_eq!(std::fs::read(&claimed_path)?, retry, "host tick must honour backoff");
+    drop(lock);
+    gc_cleanup::run(&request, &FreeWorkers)?;
+    assert!(!fixture.worktree.exists(), "later pass must clean the lane");
+    assert!(!request_path.exists());
+    assert!(!claimed_path.exists());
+
+    // The diagnostic record contains both payload and exhausted budget.
+    let exhausted = fixture.roots.state.as_path().join("gc/completion-exhausted");
+    std::fs::create_dir_all(&exhausted)?;
+    let mut record: serde_json::Value = serde_json::from_str(&request)?;
+    record["retry"] = serde_json::json!({"attempts":5,"next_at":0,"last_cause":"busy"});
+    std::fs::write(exhausted.join(name), serde_json::to_vec(&record)?)?;
+    gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
+    let fresh: serde_json::Value = serde_json::from_slice(&std::fs::read(&request_path)?)?;
+    assert_eq!(fresh["request"], record["request"]);
+    assert_eq!(fresh["retry"]["attempts"], 0, "identical requeue must get a fresh budget");
+    assert_eq!(fresh["retry"]["next_at"], 0);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(exhausted.join(name))?)?, record);
+    Ok(())
+}
+
+#[test]
+fn completion_queue_publishes_promptly_while_dispatch_is_contended()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::peer_writer_delivery::completion_queue_publishes_promptly_while_dispatch_is_contended")? {
+        return Ok(());
+    }
+    let fixture = SettlementFixture::resumed()?;
+    // Hold the old dispatch lock too: queue must never wait for either lock.
+    let locks = provenant_config::private_directory(
+        &fixture.roots.state.as_path().join("gc/completion-retries"), true)?;
+    let _dispatch = locks.try_lock("dispatch.lock".as_ref(), provenant_os::fs::LockMode::Exclusive)?;
+    let started = SystemClock.mono_now();
+    gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
+    assert!(SystemClock.mono_now().as_micros().saturating_sub(started.as_micros()) < 5_000_000);
+    let requests = fixture.roots.state.as_path().join("gc/completions");
+    let paths = std::fs::read_dir(&requests)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(paths.len(), 1);
+    let bytes = std::fs::read(paths[0].path())?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(record["retry"]["attempts"], 0);
+    assert!(record["request"].as_str().is_some());
+    gc_cleanup::queue(&fixture.settled, &fixture.roots, None)?;
+    assert_eq!(std::fs::read(paths[0].path())?, bytes);
+    Ok(())
+}
+
+#[test]
+fn settlement_defers_adopted_writer_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test("fabric::peer_tests::peer_writer_delivery::settlement_defers_adopted_writer_cleanup")?
     {
         return Ok(());
     }
@@ -38,29 +111,38 @@ fn adopted_writer_refresh_failure_does_not_change_receipt()
         cancel: &cancel,
     };
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    assert!(
-        fixture
-            .store
-            .worktree_settlement(fixture.settled.attempt_id, &call)?
-            .is_none()
-    );
-    let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":fixture.worktree, "reason":"existing reason"});
-    record_worktree_settlement(&fixture.store, fixture.settled.attempt_id, &receipt)?;
+    let mut receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+        .ok_or("deferred receipt")?;
+    assert_eq!(receipt["state"], "retained");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    assert!(fixture.worktree.exists());
+    let pending = provenant_config::private_directory(
+        &fixture.roots.state.as_path().join("gc/completions"), false,
+    )?;
+    let queued = pending.entries()?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(queued.len(), 1);
+    let first_request = pending.read_bounded(&queued[0], 128 * 1024)?;
+    let dispatch: serde_json::Value = serde_json::from_slice(&first_request)?;
+    assert_eq!(dispatch["retry"]["attempts"], 0);
+    // Repeating settlement preserves the pending request and its budget.
+    receipt.as_object_mut().ok_or("receipt object")?.remove("cleanup_warning");
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    assert_eq!(
-        fixture
-            .store
-            .worktree_settlement(fixture.settled.attempt_id, &call)?,
-        Some(receipt)
-    );
+    assert_eq!(fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?, Some(receipt));
+    assert_eq!(pending.read_bounded(&queued[0], 128 * 1024)?, first_request);
+    assert_eq!(pending.entries()?.collect::<Result<Vec<_>, _>>()?, queued);
+    gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    assert!(fixture.worktree.exists());
+    let retained = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("retained receipt")?;
+    assert_eq!(retained["state"], "retained");
+    assert_eq!(retained["cleanup_complete"], true);
     Ok(())
 }
 
 #[test]
-fn settlement_records_tracking_ref_failure_without_failing_lane()
+fn settlement_defers_tracking_ref_refresh()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_writer_delivery::settlement_records_tracking_ref_failure_without_failing_lane",
+        "fabric::peer_tests::peer_writer_delivery::settlement_defers_tracking_ref_refresh",
     )? {
         return Ok(());
     }
@@ -83,8 +165,13 @@ fn settlement_records_tracking_ref_failure_without_failing_lane()
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("settlement")?;
-    assert!(receipt["tracking_ref_warning"].is_string(), "{receipt}");
-    assert_eq!(receipt["state"], "pruned", "{receipt}");
+    assert!(receipt["tracking_ref_warning"].is_null(), "{receipt}");
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    let completed = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("completed receipt")?;
+    assert_eq!(completed["state"], "pruned", "{completed}");
+    assert!(completed["tracking_ref_warning"].is_string(), "{completed}");
     Ok(())
 }
 
@@ -159,8 +246,9 @@ fn resumed_lane_settlement_ignores_terminal_graph()
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("missing resumed settlement receipt")?;
-    assert_eq!(receipt["state"], "pruned", "{receipt}");
-    assert!(!fixture.worktree.exists());
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    assert!(fixture.worktree.exists());
     assert!(
         fixture
             .rig
@@ -176,9 +264,9 @@ fn resumed_lane_settlement_ignores_terminal_graph()
 }
 
 #[test]
-fn resumed_lane_settlement_prunes_and_records_its_receipt()
+fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
 -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_prunes_and_records_its_receipt")?
+    if host_test("fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_defers_cleanup_and_records_its_receipt")?
     {
         return Ok(());
     }
@@ -200,8 +288,21 @@ fn resumed_lane_settlement_prunes_and_records_its_receipt()
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("missing resumed settlement receipt")?;
-    assert_eq!(receipt["state"], "pruned", "{receipt}");
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true);
+    assert!(fixture.worktree.exists());
+    // Settlement only queues; the detached GC entry point owns actual removal.
+    let queue = fixture.roots.state.as_path().join("gc/completions");
+    let request = std::fs::read_dir(&queue)?.next().ok_or("missing completion request")??.path();
+    let request_json = std::fs::read_to_string(&request)?;
+    gc_cleanup::run(&request_json, &FreeWorkers)?;
     assert!(!fixture.worktree.exists());
+    assert!(!request.exists());
+    let completed = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("completed receipt")?;
+    assert_eq!(completed["state"], "pruned", "{completed}");
+    // A replay still completes after the worktree has gone.
+    gc_cleanup::run(&request_json, &FreeWorkers)?;
+
     assert!(
         fixture
             .rig
@@ -275,6 +376,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
             extra: Default::default(),
             pull_request: None,
         },
+        integration: None,
     };
     for outcome in [
         Outcome::Failed,

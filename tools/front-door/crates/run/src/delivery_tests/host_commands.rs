@@ -64,7 +64,7 @@ fn existing_pr_delivery_only_creates_after_positive_absence()
                 fixture
                     .prepare()?
                     .push(&fixture.writer, &fixture.request, head, "Lane fixture")
-                    .map(|url| url.expect("PR delivery returns a URL"))
+                    .map(|published| published.pull_request.expect("PR delivery returns a URL"))
             };
             if expected == "blocked" {
                 let Err(RunError::DeliveryReconciliation { reason, next }) = &result else {

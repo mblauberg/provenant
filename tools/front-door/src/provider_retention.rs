@@ -12,7 +12,7 @@ pub(crate) fn collect(
     days: u64,
     dry_run: bool,
 ) -> ProviderStateGc {
-    collect_with_logs(roots, home, assets, days, 30, dry_run)
+    collect_with_logs(roots, home, assets, days, 30, 16 << 30, dry_run)
 }
 
 pub(crate) fn collect_with_logs(
@@ -21,9 +21,20 @@ pub(crate) fn collect_with_logs(
     assets: &Path,
     days: u64,
     logs_days: u64,
+    payload_cap: u64,
     dry_run: bool,
 ) -> ProviderStateGc {
-    collect_retention(roots, home, assets, days, logs_days, dry_run, false, None)
+    collect_retention(
+        roots,
+        home,
+        assets,
+        days,
+        logs_days,
+        payload_cap,
+        dry_run,
+        false,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -34,10 +45,19 @@ pub(crate) fn collect_pressure(
     assets: &Path,
     days: u64,
     logs_days: u64,
+    payload_cap: u64,
     dry_run: bool,
 ) -> ProviderStateGc {
     collect_retention(
-        roots, home, assets, days, logs_days, dry_run, true, projects,
+        roots,
+        home,
+        assets,
+        days,
+        logs_days,
+        payload_cap,
+        dry_run,
+        true,
+        projects,
     )
 }
 
@@ -48,6 +68,7 @@ fn collect_retention(
     assets: &Path,
     days: u64,
     logs_days: u64,
+    payload_cap: u64,
     dry_run: bool,
     temporary_only: bool,
     projects: Option<&[ProjectId]>,
@@ -60,6 +81,7 @@ fn collect_retention(
         assets,
         days,
         logs_days,
+        payload_cap,
         dry_run,
         temporary_only,
         projects,
@@ -77,6 +99,7 @@ fn collect_store(
     assets: &Path,
     days: u64,
     logs_days: u64,
+    payload_cap: u64,
     dry_run: bool,
     temporary_only: bool,
     projects: Option<&[ProjectId]>,
@@ -155,6 +178,18 @@ fn collect_store(
             report.expired_events += collected.expired_events;
             report.kept.append(&mut collected.kept);
             report.errors.append(&mut collected.errors);
+            // Pressure collection at settlement reads the size ledger; only a
+            // full sweep walks payloads to refresh it.
+            let payload = store.gc_payloads(
+                &directory,
+                payload_cap,
+                clock.wall_now()?,
+                dry_run,
+                !temporary_only && !dry_run,
+                projects,
+                &call,
+            )?;
+            report.payload.absorb(payload);
         }
         Ok(())
     })();
@@ -234,10 +269,10 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     };
     store.owe_reaction(&reaction, &call)?;
     store.save_reaction(&reaction, &call)?;
-    let kept = collect_pressure(None, &roots, &home, &assets, 7, 20, false);
+    let kept = collect_pressure(None, &roots, &home, &assets, 7, 20, 16 << 30, false);
     assert!(kept.errors.is_empty(), "{:?}", kept.errors);
     assert!(store.reaction(attempt, &call)?.is_some());
-    let expired = collect_pressure(None, &roots, &home, &assets, 7, 5, false);
+    let expired = collect_pressure(None, &roots, &home, &assets, 7, 5, 16 << 30, false);
     assert!(expired.errors.is_empty(), "{:?}", expired.errors);
     assert!(store.reaction(attempt, &call)?.is_none());
     let candidate = child_path.join(format!(
@@ -343,6 +378,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         &assets,
         7,
         30,
+        16 << 30,
         false,
         false,
         None,

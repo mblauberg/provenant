@@ -2,7 +2,7 @@
 //! pipe, never in provider environment, launch records or the delivery receipt.
 use crate::{
     PathCheck, Result, RunError, WriterDeliveryReceipt, WriterDeliveryRequest,
-    WriterDeliveryStage as Stage, WriterDeliveryState, WriterRequest,
+    WriterDeliveryStage as Stage, WriterDeliveryState, WriterIntegration, WriterRequest,
 };
 use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
@@ -1587,7 +1587,7 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
         head: GitOid,
-    ) -> Result<()> {
+    ) -> Result<WriterIntegration> {
         let stage = Stage::Integrate;
         self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
@@ -1635,16 +1635,17 @@ impl HostDeliveryContext {
         };
         let expected_oid = GitOid::parse(&expected).map_err(|_| RunError::Delivery(stage))?;
         self.verify_objects(writer, expected_oid, stage)?;
-        if self
-            .command(
-                &writer.worktree,
-                "git",
-                &["merge-base", "--is-ancestor", &head.to_string(), &expected],
-                stage,
-            )
-            .is_ok()
-        {
-            return Ok(());
+        let integration = |integrated| WriterIntegration {
+            extra: Default::default(),
+            remote: bound.destination.remote.clone(),
+            push_url: remote.then(|| bound.push_url.clone()),
+            target: destination.clone(),
+            previous: Some(expected_oid),
+            integrated,
+        };
+        let target_ref = GitRefName::new(&destination).map_err(|_| RunError::Delivery(stage))?;
+        if self.landed(writer, head, target_ref, expected_oid, stage)? {
+            return Ok(integration(expected_oid));
         }
         let checkout = if !remote {
             let trees = self.command(
@@ -1806,7 +1807,30 @@ impl HostDeliveryContext {
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
         }
-        Ok(())
+        Ok(integration(candidate))
+    }
+    /// Whether `head` has landed on the target tip just read, through the
+    /// shared landed check over the host's object store.
+    fn landed(
+        &self,
+        writer: &WriterRequest,
+        head: GitOid,
+        reference: GitRefName,
+        tip: GitOid,
+        stage: Stage,
+    ) -> Result<bool> {
+        let graph = HostGraph {
+            host: self,
+            cwd: &writer.worktree,
+            stage,
+        };
+        let target = provenant_confinement::worktrees::LandingTarget {
+            reference: Some(reference),
+            tip,
+        };
+        provenant_confinement::worktrees::landed(&graph, head, &target, &[])
+            .map(|landing| landing.is_landed())
+            .map_err(|_| RunError::Delivery(stage))
     }
     // Bind the same default branch for lookup and creation. A failed lookup
     // is ambiguous and must never be treated as permission to create a PR.
@@ -1900,7 +1924,7 @@ impl HostDeliveryContext {
         request: &WriterDeliveryRequest,
         head: GitOid,
         body: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Published> {
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
         }
@@ -1911,8 +1935,10 @@ impl HostDeliveryContext {
             })?;
         self.clean(writer)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
-            self.integrate(writer, request, head)?;
-            return Ok(None);
+            return Ok(Published {
+                pull_request: None,
+                integration: Some(self.integrate(writer, request, head)?),
+            });
         }
         let bound = self
             .bound
@@ -1937,19 +1963,20 @@ impl HostDeliveryContext {
             &["ls-remote", "--", &bound.push_url, &destination],
             Stage::Push,
         )?;
-        let already_pushed = if advertised.is_empty() {
-            false
+        let previous = if advertised.is_empty() {
+            None
         } else {
             let mut lines = advertised.lines();
             let (oid, reference) = lines
                 .next()
                 .and_then(|line| line.split_once('\t'))
                 .ok_or(RunError::Delivery(Stage::Push))?;
-            if reference != destination || GitOid::parse(oid).is_err() || lines.next().is_some() {
+            if reference != destination || lines.next().is_some() {
                 return Err(RunError::Delivery(Stage::Push));
             }
-            oid == head.to_string()
+            Some(GitOid::parse(oid).map_err(|_| RunError::Delivery(Stage::Push))?)
         };
+        let already_pushed = previous == Some(head);
         if !already_pushed {
             let refspec = format!("{head}:{destination}");
             self.command(
@@ -1991,6 +2018,16 @@ impl HostDeliveryContext {
         if pushed != head.to_string() || self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Verify));
         }
+        // A retried push that finds its own head already there cannot tell
+        // whether it created the ref, so it records the head it found.
+        let integration = Some(WriterIntegration {
+            extra: Default::default(),
+            remote: bound.destination.remote.clone(),
+            push_url: Some(bound.push_url.clone()),
+            target: destination.clone(),
+            previous,
+            integrated: head,
+        });
         for (key, value) in [
             ("remote", request.remote.as_str()),
             ("merge", destination.as_str()),
@@ -2038,7 +2075,10 @@ impl HostDeliveryContext {
                 .ok_or(RunError::Delivery(Stage::PullRequest))?;
             let base_branch = self.pr_base(cwd, repo)?;
             if let Some(url) = self.existing_pr(cwd, repo, &request.branch, head, &base_branch)? {
-                return Ok(Some(url));
+                return Ok(Published {
+                    pull_request: Some(url),
+                    integration,
+                });
             }
             let url = self.command_with_input(
                 cwd,
@@ -2066,10 +2106,79 @@ impl HostDeliveryContext {
             if !url.starts_with("https://") || url.lines().count() != 1 {
                 return Err(RunError::Delivery(Stage::PullRequest));
             }
-            Ok(Some(url))
+            Ok(Published {
+                pull_request: Some(url),
+                integration,
+            })
         } else {
-            Ok(None)
+            Ok(Published {
+                pull_request: None,
+                integration,
+            })
         }
+    }
+}
+
+/// What a delivered push or integration published.
+#[derive(Debug)]
+pub(crate) struct Published {
+    pub(crate) pull_request: Option<String>,
+    pub(crate) integration: Option<WriterIntegration>,
+}
+
+/// The host's object store, read with delivery's own Git authority, for the
+/// shared landed check. A commit `rev-list` cannot read is missing. The
+/// parent listing stays small whatever the commit message's size.
+struct HostGraph<'a> {
+    host: &'a HostDeliveryContext,
+    cwd: &'a Path,
+    stage: Stage,
+}
+
+impl provenant_confinement::worktrees::CommitGraph for HostGraph<'_> {
+    fn parents(
+        &self,
+        commit: GitOid,
+    ) -> std::result::Result<Option<Vec<GitOid>>, provenant_confinement::worktrees::WorktreeError>
+    {
+        let commit = format!("{commit}^{{commit}}");
+        let Ok(listing) = self.host.command(
+            self.cwd,
+            "git",
+            &["rev-list", "--parents", "--max-count=1", &commit, "--"],
+            self.stage,
+        ) else {
+            return Ok(None);
+        };
+        let mut oids = listing.split_ascii_whitespace().map(GitOid::parse);
+        match oids.next() {
+            Some(Ok(_)) => oids
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map(Some)
+                .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput),
+            _ => Err(provenant_confinement::worktrees::WorktreeError::InvalidOutput),
+        }
+    }
+
+    fn contains(
+        &self,
+        ancestor: GitOid,
+        tip: GitOid,
+    ) -> std::result::Result<bool, provenant_confinement::worktrees::WorktreeError> {
+        Ok(self
+            .host
+            .command(
+                self.cwd,
+                "git",
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    &ancestor.to_string(),
+                    &tip.to_string(),
+                ],
+                self.stage,
+            )
+            .is_ok())
     }
 }
 
@@ -2459,6 +2568,70 @@ pub(crate) fn validate(request: &WriterDeliveryRequest) -> Result<()> {
 }
 
 impl crate::RunStore {
+    /// Record the remote branch a delivered push created, or found already
+    /// there, in the repository's shared ref ledger. The endpoint is the one
+    /// the receipt read back from the bound delivery. Integration only
+    /// advances a target that already existed, so it never claims one. A
+    /// failed record leaves the ref unobserved, which retains it.
+    pub(crate) fn record_delivered_ref(
+        &self,
+        record: &crate::AttemptRecord,
+        request: &WriterDeliveryRequest,
+        receipt: &WriterDeliveryReceipt,
+        call: &crate::Request<'_>,
+    ) {
+        use provenant_confinement::worktrees::{
+            RefEndpoint, RefLedger, RefObservation, RefOrigin, WorktreeError,
+        };
+        if matches!(request.mode, crate::DeliveryMode::Integrate(_))
+            || !matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+        {
+            return;
+        }
+        let Some(integration) = receipt.integration.as_ref() else {
+            return;
+        };
+        let Some(push_url) = integration.push_url.as_ref() else {
+            return;
+        };
+        let result = (|| -> std::result::Result<(), WorktreeError> {
+            let reference =
+                GitRefName::new(&integration.target).map_err(|_| WorktreeError::InvalidRequest)?;
+            let recorded_at = call
+                .clock
+                .wall_now()
+                .map_err(|_| WorktreeError::InvalidRequest)?;
+            RefLedger::open(&self.writer_registry, record.project_id)?.record(
+                RefObservation {
+                    endpoint: RefEndpoint::Remote {
+                        remote: integration.remote.clone(),
+                        push_url: push_url.clone(),
+                    },
+                    reference,
+                    origin: if integration.previous.is_none() {
+                        RefOrigin::Created
+                    } else {
+                        RefOrigin::Adopted
+                    },
+                    tip: integration.integrated,
+                    recorded_at,
+                    attempt_id: Some(record.attempt_id),
+                    operation_id: Some(record.operation_id.clone()),
+                },
+                call.clock,
+                call.cancel,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not record ownership of delivered ref {}: {error}; it is retained as unobserved",
+                integration.target
+            );
+        }
+    }
     pub fn delivered(
         &self,
         id: provenant_core::AttemptId,
@@ -2671,12 +2844,15 @@ impl crate::RunStore {
                 &format!("Run {}\nAttempt {id}", record.run_id),
             )
             .and_then(|body| host.push(&writer, &request, head, &body));
-        let state = match result {
-            Ok(pull_request) => WriterDeliveryState::Delivered {
-                extra: Default::default(),
-                pull_request,
-            },
-            Err(error) => failed_state(&error),
+        let (state, integration) = match result {
+            Ok(published) => (
+                WriterDeliveryState::Delivered {
+                    extra: Default::default(),
+                    pull_request: published.pull_request,
+                },
+                published.integration,
+            ),
+            Err(error) => (failed_state(&error), None),
         };
         let receipt = WriterDeliveryReceipt {
             extra: Default::default(),
@@ -2686,6 +2862,7 @@ impl crate::RunStore {
             head: Some(head),
             review_acceptance,
             state,
+            integration,
         };
         // Failed effects may be explicitly retried; successful effects replay.
         if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
@@ -2696,6 +2873,7 @@ impl crate::RunStore {
                 crate::RECORD_LIMIT,
             )?;
             publish_pickup(&attempt, &request, &receipt)?;
+            self.record_delivered_ref(&record, &request, &receipt, call);
             let _ = self.record_effect(
                 id,
                 record.generation,
@@ -2750,6 +2928,7 @@ pub(crate) fn deliver_once(
                 extra: Default::default(),
                 stage: Stage::Interrupted,
             },
+            integration: None,
         },
     };
     if started.is_some()
@@ -2790,10 +2969,13 @@ pub(crate) fn deliver_once(
                     )?;
                     host.push(writer, request, head, &body)
                 }) {
-                Ok(pull_request) => WriterDeliveryState::Delivered {
-                    extra: Default::default(),
-                    pull_request,
-                },
+                Ok(published) => {
+                    receipt.integration = published.integration;
+                    WriterDeliveryState::Delivered {
+                        extra: Default::default(),
+                        pull_request: published.pull_request,
+                    }
+                }
                 Err(error)
                     if matches!(error, RunError::Delivery(Stage::Push))
                         && !matches!(request.mode, crate::DeliveryMode::Integrate(_))

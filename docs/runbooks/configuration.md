@@ -308,6 +308,7 @@ provider_state_days = 7
 
 [gc]
 schedule = true
+lane_cargo_cache_max = "32G"
 # free_floor = "100G"
 
 # Use the project ID from `provenant fabric identity`.
@@ -320,7 +321,10 @@ foreign_worktrees = "keep" # opt in with "merged-clean"
 The [advanced reference](../reference/config-keys-all.md#host-gc-settings)
 lists every key with its default and bounds. [GC](gc.md) owns what each
 collection removes, keeps and reports; [disk inspection](disk.md) covers
-measuring what is using space.
+measuring what is using space. Completion cleanup is independent of the daily
+schedule: settlement publishes durable intent without waiting for collection or
+dispatch locks, and the host tick dispatches the worker. Unlanded refs remain
+regardless of age; there is no `cleanup.unlanded_days` setting.
 
 ## Provider updates
 

@@ -25,7 +25,7 @@ fn host_git(
     host_git_with_stderr(repo, executor, args, timeout, false)
 }
 
-fn host_git_with_stderr(
+pub(crate) fn host_git_with_stderr(
     repo: &Path,
     executor: &dyn Executor,
     args: &[&str],

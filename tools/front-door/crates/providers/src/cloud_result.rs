@@ -113,6 +113,7 @@ mod tests {
         assert_eq!(changed, result);
         assert!(
             result
+                .clone()
                 .check("job", "nonce", &"a".repeat(40), "model")
                 .unwrap()
                 .passed

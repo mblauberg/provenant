@@ -858,7 +858,10 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
         &clock,
     )?;
     crate::holder::release_and_reclaim(&attempt, observed.scope, &recovery)?;
-    assert_eq!(temporary.exists(), !valid_binding);
+    // Settlement publishes release without walking temporary payloads. GC
+    // reclaims them later, even when the reservation binding is valid.
+    assert!(temporary.exists());
+    assert_eq!(std::fs::read(temporary.join("payload.lock"))?, b"discard");
     assert!(
         attempt
             .metadata_at(std::ffi::OsStr::new("release.json"), false)
