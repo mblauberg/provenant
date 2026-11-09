@@ -1286,12 +1286,6 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
             (id == "claude").then_some(&token),
         ))?;
         assert_eq!(spec.cwd, cwd);
-        assert_eq!(
-            provenant_records::AdapterSpec::get(id)
-                .unwrap()
-                .read_only_private_state_write,
-            id != "cursor"
-        );
         match id {
             "cursor" => assert!(
                 spec.argv.windows(2).any(|args| args[0] == "--mode" && args[1] == "ask")

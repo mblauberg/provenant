@@ -157,8 +157,6 @@ pub struct AdapterSpec {
     pub login_check_names_account: bool,
     /// Synthetic account label and key for an adapter using its local login.
     pub local_account: (&'static str, &'static str),
-    /// Read-only native tools can update candidate-private progress state.
-    pub read_only_private_state_write: bool,
     pub argv_prompt: bool,
     pub authentication: Option<&'static str>,
     /// Files observed by metadata only, relative to the account directory.
@@ -397,7 +395,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::AccountAvailability,
         login_check_names_account: false,
         local_account: ("default", "local"),
-        read_only_private_state_write: true,
         argv_prompt: false,
         authentication: None,
         credential_files: &[".credentials.json", "settings.json"],
@@ -476,7 +473,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: false,
         local_account: ("default", "local"),
-        read_only_private_state_write: true,
         argv_prompt: false,
         authentication: Some("login"),
         credential_files: &["auth.json", "config.toml"],
@@ -559,7 +555,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: false,
         local_account: ("default", "local"),
-        read_only_private_state_write: false,
         argv_prompt: true,
         authentication: Some("login"),
         credential_files: &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
@@ -641,7 +636,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::Reprobe,
         login_check_names_account: true,
         local_account: ("default", "local"),
-        read_only_private_state_write: true,
         argv_prompt: true,
         authentication: Some("keychain"),
         credential_files: &[
@@ -727,7 +721,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::ExecutableOnly,
         login_check_names_account: false,
         local_account: ("go", "go"),
-        read_only_private_state_write: true,
         argv_prompt: false,
         authentication: Some("login"),
         credential_files: &[
@@ -807,7 +800,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::None,
         login_check_names_account: false,
         local_account: ("default", "local"),
-        read_only_private_state_write: true,
         argv_prompt: false,
         authentication: None,
         credential_files: &[],
@@ -884,7 +876,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::None,
         login_check_names_account: false,
         local_account: ("default", "local"),
-        read_only_private_state_write: true,
         argv_prompt: false,
         authentication: None,
         credential_files: &[],
@@ -960,7 +951,6 @@ adapter_specs! { $;
         login_observation: LoginObservation::None,
         login_check_names_account: false,
         local_account: ("fixture", "work"),
-        read_only_private_state_write: true,
         argv_prompt: false,
         authentication: None,
         credential_files: &[],

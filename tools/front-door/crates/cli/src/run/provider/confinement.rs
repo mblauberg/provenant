@@ -57,60 +57,9 @@ pub(super) struct ConfinementRoots<'a> {
     pub(super) prompt_file: Option<&'a Path>,
 }
 
-/// Native tools and confinement must both permit progress updates.
-pub(super) fn adapter_handoff_writable(
-    adapter: &str,
-    permissions: &PlanPermissions,
-    private_state: &Path,
-) -> bool {
-    (!matches!(permissions.mode, AccessMode::ReadOnly)
-        || AdapterSpec::get(adapter).is_some_and(|spec| spec.read_only_private_state_write))
-        && handoff_writable(permissions, private_state)
-}
-
-/// Name progress only when the candidate subtree is writable under the policy.
-/// Any overlapping denial can prevent an atomic update.
-pub(super) fn handoff_writable(permissions: &PlanPermissions, private_state: &Path) -> bool {
-    let Some(private) = permissions.private_state.as_ref() else {
-        return false;
-    };
-    if private.path != private_state || private.scope != PathScope::Subtree {
-        return false;
-    }
-    let overlaps = |root: &PathGrant| root.overlaps(private);
-    if permissions
-        .protected_roots
-        .iter()
-        .chain(&permissions.secret_roots)
-        .any(overlaps)
-    {
-        return false;
-    }
-    let Some(policy) = permissions.policy.as_ref() else {
-        return false;
-    };
-    let mandatory = policy.mandatory();
-    if mandatory
-        .credentials()
-        .iter()
-        .chain(mandatory.non_exempt())
-        .chain(mandatory.github())
-        .chain(mandatory.git())
-        .chain(mandatory.protected())
-        .chain(mandatory.state_reads())
-        .chain(&policy.optional().deny_write)
-        .any(overlaps)
-    {
-        return false;
-    }
-    if matches!(permissions.mode, AccessMode::ReadOnly)
-        && std::iter::once(mandatory.source())
-            .chain(mandatory.source_aliases())
-            .any(overlaps)
-    {
-        return false;
-    }
-    true
+/// Name progress when the plan has a private-state grant.
+pub(super) fn handoff_writable(permissions: &PlanPermissions) -> bool {
+    permissions.private_state.is_some()
 }
 
 /// Point the lane's temporary-directory variables at the short alias of

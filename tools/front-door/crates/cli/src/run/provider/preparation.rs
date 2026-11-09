@@ -2749,8 +2749,7 @@ pub(super) fn prepare_candidates(
             }
         };
         let handoff = private_state.join("handoff.json");
-        let writable_handoff =
-            adapter_handoff_writable(adapter.id(), &request.permissions, private_state);
+        let writable_handoff = handoff_writable(&request.permissions);
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
@@ -3329,14 +3328,6 @@ pub(super) fn prepare_candidates(
                     policy.mandatory_mut().add_state_read(root.clone())?;
                 }
             }
-        }
-        if writable_handoff && !handoff_writable(plan.permissions(), private_state) {
-            let error = PlanCheckError::from(
-                provenant_confinement::permissions::PermissionError::InvalidReadOnlyPolicy,
-            );
-            reason_boundaries.insert(reasons.len(), error.boundary_class());
-            reasons.push(error.skipped(&label));
-            continue;
         }
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,

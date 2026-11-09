@@ -147,18 +147,15 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
             let rendered =
                 provenant_confinement::permissions::snapshot::render(permissions, &profile, &home)?;
             let handoff = private_state.join("handoff.json");
-            assert!(handoff_writable(permissions, &private_state));
-            let writable = adapter_handoff_writable(adapter, permissions, &private_state);
+            let writable = handoff_writable(permissions);
             let brief = run::lane_preamble("policy", false, writable.then_some(handoff.as_path()));
-            assert_eq!(brief.contains("Progress handoff JSON"), adapter != "cursor");
-            assert_eq!(writable, adapter != "cursor");
+            assert!(brief.contains("Progress handoff JSON"));
             assert!(rendered.contains(&format!("(allow file-write* (subpath \"{}\"))", private_state.display())));
             let state_deny = rendered.lines().find(|line| line.starts_with("(deny file-write* (require-all") && line.contains(state.to_str().unwrap())).ok_or("state write denial")?;
             assert!(state_deny.contains(&format!("(require-not (subpath \"{}\"))", private_state.display())));
             let mut absent = permissions.clone();
             absent.private_state = None;
-            assert!(!handoff_writable(&absent, &private_state));
-            assert!(!adapter_handoff_writable(adapter, &absent, &private_state));
+            assert!(!handoff_writable(&absent));
             assert!(!run::lane_preamble("policy", false, None).contains("Progress handoff JSON"));
 
             if kind == "commit" {
