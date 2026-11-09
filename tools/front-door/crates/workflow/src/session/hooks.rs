@@ -38,7 +38,7 @@ fn split_intent(markdown: &str) -> (Option<String>, String) {
             intent.get_or_insert_with(String::new);
             continue;
         }
-        if inside && line.starts_with('#') {
+        if inside && (line.starts_with("# ") || line.starts_with("## ")) {
             inside = false;
         }
         let target = match (&mut intent, inside) {
@@ -445,4 +445,18 @@ fn encode(
     let mut bytes = serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec());
     bytes.push(b'\n');
     bytes
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::split_intent;
+
+    #[test]
+    fn a_sub_heading_stays_inside_the_intent_section() {
+        let (intent, rest) =
+            split_intent("# Title\n## Intent\nfirst\n### Ruling\nsecond\n## State\nlater\n");
+        assert_eq!(intent.as_deref(), Some("first\n### Ruling\nsecond"));
+        assert!(rest.contains("## State"));
+        assert!(!rest.contains("second"));
+    }
 }
