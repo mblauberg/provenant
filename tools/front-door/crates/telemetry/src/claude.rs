@@ -7,6 +7,7 @@ pub(crate) struct Raw {
     pub(crate) cache_creation_input_tokens: Option<u64>,
     pub(crate) cache_creation: Option<Split>,
     pub(crate) output_tokens: Option<u64>,
+    pub(crate) reasoning_tokens: Option<u64>,
 }
 #[derive(Clone, Default, Deserialize)]
 pub(crate) struct Split {
@@ -38,6 +39,7 @@ impl Raw {
             other.cache_creation_input_tokens,
         );
         self.output_tokens = max(self.output_tokens, other.output_tokens);
+        self.reasoning_tokens = max(self.reasoning_tokens, other.reasoning_tokens);
         let one_hour = |raw: &Self| raw.cache_creation.as_ref()?.ephemeral_1h_input_tokens;
         let merged = max(one_hour(self), one_hour(&other));
         self.cache_creation = merged.map(|n| Split {

@@ -740,6 +740,12 @@ impl RunStore {
         // but a stored refusal replays without depending on current host state.
         let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
             .free_floor_bytes(&self.writer_registry)?;
+        let telemetry_contexts: Vec<_> = input
+            .request
+            .tasks
+            .iter()
+            .map(|task| crate::telemetry_context::capture(task, input.created_at))
+            .collect();
         let run = RunRecord {
             extra: Default::default(),
             schema_version: 1,
@@ -842,7 +848,7 @@ impl RunStore {
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, cloud_observation: provenant_records::run::Transient(None), cloud_view: provenant_records::run::Transient(None), provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                     terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                     prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
-                    trace: provenant_records::Trace {extra: Default::default(),
+                    trace: provenant_records::Trace {extra: telemetry_contexts[index].clone(),
                         host: self.host,
                         project: Some(run.project_id),
                         run: Some(run.run_id),

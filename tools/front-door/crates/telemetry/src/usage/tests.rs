@@ -270,3 +270,33 @@ fn window_starting_on_a_record_start_keeps_that_record() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn failed_verb_retry_help_and_wait_poll_are_counted() -> Result {
+    let (_temp, base) = tempdir()?;
+    let roots = roots(&base)?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
+    // Native usage.jsonl format, with invented identities and values.
+    let log = concat!(
+        "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":2,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:00Z\",\"session\":\"fixture-session\"}\n",
+        "{\"kind\":\"cli.verb\",\"unit\":\"help\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:01Z\",\"session\":\"fixture-session\"}\n",
+        "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:02Z\",\"session\":\"fixture-session\"}\n",
+        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:03Z\",\"session\":\"fixture-session\",\"wait\":true}\n",
+        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:04Z\",\"session\":\"fixture-session\",\"wait\":false}\n",
+        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:05Z\"}\n"
+    );
+    let log = log.replace("\"session\":\"fixture-session\"", "\"session\":\"fixture-session\",\"trace\":{\"project\":\"01010101010101010101010101010101\"}")
+        + "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":2,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:06Z\",\"session\":\"fixture-unscoped\"}\n"
+        + "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:07Z\",\"session\":\"fixture-unscoped\"}\n";
+    std::fs::write(roots.state.as_path().join(LOG), log)?;
+    let report = ergonomics(&roots, None, None, None)?;
+    assert_eq!(report.help_calls, 1);
+    assert_eq!(report.failed_verb_then_retry, 1);
+    assert_eq!(report.first_attempts, 3);
+    assert_eq!(report.first_attempt_success, 2);
+    assert_eq!(report.sequence_unknown, 3);
+    assert_eq!(report.wait_calls, 1);
+    assert_eq!(report.poll_calls, 1);
+    assert_eq!(report.wait_mode_unknown, 1);
+    Ok(())
+}

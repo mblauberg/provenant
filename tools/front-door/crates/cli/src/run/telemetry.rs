@@ -228,6 +228,31 @@ pub(super) fn stats_inner(
         context.project_id,
     )?;
     let partial = partial_signal_counts(&selected, store.as_ref(), &call)?;
+    let mut chair_bindings = BTreeMap::new();
+    // This is the explicit real-time deadline of the read-only Fabric boundary.
+    #[allow(clippy::disallowed_methods)]
+    let chair_index = provenant_fabric_runtime::chairs::ChairIndex::open_read_only(
+        &edge.roots.state,
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    if let Ok(Some(index)) = chair_index {
+        let index_call = provenant_fabric_runtime::chairs::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+        };
+        let runs: std::collections::BTreeSet<_> =
+            selected.iter().filter_map(|fact| fact.trace.run).collect();
+        for run in runs {
+            if let Ok(Some(binding)) = index.read(context.project_id, run, &index_call)
+                && let Some(session) = binding.chair.and_then(|chair| chair.session)
+            {
+                chair_bindings.insert(run, session);
+            }
+        }
+    }
+    let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings, &prices)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
+    let task_context = super::telemetry_context::report(&selected, &graph_quality, edge, &prices)?;
     let decision_ids = command.detail.then(|| {
         selected
             .iter()
@@ -401,25 +426,70 @@ pub(super) fn stats_inner(
     ));
     let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    data["attempt_context"] = json!(attempt_context);
+    data["task_context"] = task_context;
+    human.push_str("context coverage: inspect attempt_context and task_context with --json; missing observations remain unknown\n");
+    human.push_str("comparability: release, harness experiments, task difficulty and user activity cannot be separated when observations are missing or change together\n");
+    human.push_str(&format!(
+        "accepted outcomes: {} (distinct delivery IDs with recorded accepted workflow receipts among selected attempts; cost includes linked attempts only)\n",
+        data["task_context"]["accepted_outcomes"]["denominator"]
+    ));
+    match provenant_telemetry::usage::ergonomics(edge.roots, command.since, command.until, None) {
+        Ok(ergonomics) => {
+            data["cli_ergonomics"] = json!({
+                "scope": "host demand log in selected time window; lossy best-effort capture",
+                "counts": ergonomics,
+            });
+        }
+        Err(error) => {
+            data["cli_ergonomics"] = json!({"unavailable": error.to_string()});
+        }
+    }
     // Native rows are a host-wide breakdown of chair usage already included
     // above; expose the attribution without adding it to totals a second time.
     if selected_run.is_none() {
         let native = provenant_telemetry::native_attempts::read(edge.roots);
-        let rows = provenant_telemetry::ingest::read_rows(
+        let mut rows = provenant_telemetry::ingest::read_rows(
             edge.roots,
             &provenant_telemetry::ingest::RowFilter::default(),
         );
+        if let Ok(rows) = &mut rows {
+            rows.retain(|row| {
+                row.timestamp
+                    .parse::<jiff::Timestamp>()
+                    .ok()
+                    .is_some_and(|at| {
+                        command.since.is_none_or(|since| at >= since)
+                            && command.until.is_none_or(|until| at < until)
+                    })
+            });
+            let thinking = provenant_telemetry::signals::thinking(rows);
+            let unknown_reasoning: u64 =
+                thinking.values().map(|group| group.reasoning_unknown).sum();
+            human.push_str(&format!(
+                    "thinking per trigger (host native replies): provider-reported reasoning tokens; {} replies without reasoning counts; output_tokens_proxy is separate\n",
+                    unknown_reasoning,
+                ));
+            for (trigger, group) in &thinking {
+                let label = serde_json::to_value(trigger)
+                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+                human.push_str(&format!(
+                        "  {}: {} reasoning tokens, {} known / {} unknown replies; {} output_tokens_proxy\n",
+                        label.as_str().unwrap_or("unknown"), group.reasoning_tokens,
+                        group.reasoning_known, group.reasoning_unknown, group.output_tokens_proxy,
+                    ));
+            }
+            data["reply_context"] = json!({
+                "scope": "host native replies in selected time window; breakdown only, never added to project totals",
+                "reasoning_unit": "provider-reported reasoning tokens",
+                "proxy_unit": "output tokens (output_tokens_proxy); not reasoning",
+                "thinking_per_trigger": thinking,
+                "trigger_labels": "inferred labels; recorded structural events remain distinct in ingest rows",
+                "compaction_coverage": {"known": rows.iter().filter(|row| row.reply.is_some()).count(), "unknown": rows.iter().filter(|row| row.reply.is_none()).count()},
+            });
+        }
         match (native, rows) {
-            (Ok(attempts), Ok(mut rows)) => {
-                rows.retain(|row| {
-                    row.timestamp
-                        .parse::<jiff::Timestamp>()
-                        .ok()
-                        .is_some_and(|at| {
-                            command.since.is_none_or(|since| at >= since)
-                                && command.until.is_none_or(|until| at < until)
-                        })
-                });
+            (Ok(attempts), Ok(rows)) => {
                 let native = provenant_telemetry::native_attempts::report(attempts, &rows);
                 if !native.attempts.is_empty() || !native.unlinked.is_empty() {
                     human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
@@ -464,6 +534,7 @@ pub(super) fn stats_inner(
             (_, Err(error)) => {
                 human.push_str(&format!("native usage unavailable: {error}\n"));
                 data["native_subagents_error"] = json!(error.to_string());
+                data["reply_context_error"] = json!(error.to_string());
             }
         }
     }

@@ -1344,3 +1344,68 @@ fn effective_dates_must_be_ordered_real_dates() {
         assert_eq!(validate_prices(&config).is_ok(), ok, "{from:?} {to:?}");
     }
 }
+
+#[test]
+fn lane_context_fixture_joins_existing_chair_and_graph() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::telemetry_context::TelemetryContext;
+    let mut lane = fact(1, Some(42));
+    // Real persisted trace wire format; every value and identity is invented.
+    lane.trace = serde_json::from_value(json!({
+        "attempt": lane.attempt_id,
+        "run": "11111111111111111111111111111111",
+        "telemetry_context": {
+            "provenant_version": {"value": "0.0.1", "source": "compiled_package", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "provenant-run package"},
+            "provenant_digest": {"value": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 400}, "source": "current_exe", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "complete host executable bytes"},
+            "instructions": {"value": {"sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bytes": 12}, "source": "source_checkout", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "source-root AGENTS.md bytes"},
+            "harness_version": {"value": "fixture-host-1", "source": "host_metadata", "effective_at": "1970-01-01T00:00:00.000000Z", "scope": "host version"}
+        }
+    }))?;
+    lane.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some("fixture-graph".into()),
+        node_id: Some("fixture-node".into()),
+        ..Default::default()
+    });
+    let restored: provenant_records::Trace =
+        serde_json::from_value(serde_json::to_value(&lane.trace)?)?;
+    assert_eq!(
+        TelemetryContext::from_trace(&restored),
+        TelemetryContext::from_trace(&lane.trace)
+    );
+    let chairs = BTreeMap::from([(
+        lane.trace.run.ok_or("fixture run")?,
+        "fixture-chair".to_owned(),
+    )]);
+    let report = crate::context::report(&[&lane], &chairs, &prices(Some(1_000_000)))?;
+    assert_eq!(report.attempts[0].attempt, lane.attempt_id);
+    assert_eq!(
+        report.attempts[0].chair_session.as_deref(),
+        Some("fixture-chair")
+    );
+    assert_eq!(report.attempts[0].graph.as_deref(), Some("fixture-graph"));
+    assert_eq!(
+        report.attempts[0]
+            .lane
+            .cost
+            .complete
+            .as_ref()
+            .ok_or("known fixture lane cost")?
+            .microdollars,
+        42
+    );
+    assert_eq!(report.attempts[0].lane.usage.uncached_input.known, 42);
+    assert_eq!(report.coverage["provenant_digest"].known, 1);
+    assert_eq!(report.coverage["instructions"].known, 1);
+    assert_eq!(report.coverage["harness_version"].known, 1);
+    assert_eq!(report.coverage["system_prompt"].unknown, 1);
+    assert_eq!(lane.usage.uncached_input, Some(42));
+    // A pre-enrichment pending trace still decodes, without backfilling history.
+    let legacy: provenant_records::Trace = serde_json::from_str("{}")?;
+    lane.trace = legacy;
+    let historical = crate::context::report(&[&lane], &chairs, &prices(None))?;
+    assert!(historical.attempts[0].lane.cost.complete.is_none());
+    assert_eq!(historical.attempts[0].lane.cost.missing_attempts, 1);
+    assert_eq!(historical.coverage["provenant_version"].unknown, 1);
+    assert_eq!(historical.coverage["chair_join"].unknown, 1);
+    assert_eq!(lane.usage.uncached_input, Some(42));
+    Ok(())
+}

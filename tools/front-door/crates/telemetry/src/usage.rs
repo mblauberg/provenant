@@ -57,6 +57,9 @@ struct Event {
     /// directory, so its transcript can be found without a registered account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config: Option<String>,
+    /// Explicit wait mode from the parsed status command; historical values unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wait: Option<bool>,
 }
 
 fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
@@ -121,7 +124,40 @@ pub fn record_cli(
     duration_ms: u64,
     project_id: Option<ProjectId>,
 ) {
+    record_cli_context(
+        roots,
+        clock,
+        verb,
+        exit_code,
+        duration_ms,
+        project_id,
+        None,
+        None,
+        None,
+    );
+}
+
+/// Count parsed command metadata only. `session` is an existing host identity,
+/// not a new telemetry identity; flags contain no argument values.
+#[allow(clippy::too_many_arguments)]
+pub fn record_cli_context(
+    roots: &Roots,
+    clock: &dyn Clock,
+    verb: &str,
+    exit_code: u8,
+    duration_ms: u64,
+    project_id: Option<ProjectId>,
+    session: Option<&str>,
+    attempt: Option<provenant_core::AttemptId>,
+    wait: Option<bool>,
+) {
     let Ok(now) = clock.wall_now() else { return };
+    let session = session.filter(|value| {
+        value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    });
     let _ = append(
         roots,
         Event {
@@ -131,14 +167,21 @@ pub fn record_cli(
             outcome: None,
             duration_ms,
             timestamp: now.to_string(),
-            trace: project_trace(project_id),
+            trace: Some(Trace {
+                project: project_id,
+                attempt,
+                ..Trace::default()
+            })
+            .filter(|trace| trace.project.is_some() || trace.attempt.is_some()),
             account: None,
-            session: None,
+            session: session.map(str::to_owned),
             config: None,
+            wait,
         },
         true,
     );
 }
+
 pub fn record_tool(
     roots: &Roots,
     clock: &dyn Clock,
@@ -161,6 +204,7 @@ pub fn record_tool(
             account: None,
             session: None,
             config: None,
+            wait: None,
         },
         false,
     );
@@ -195,6 +239,7 @@ pub fn record_chair(
             account: Some(account.into()),
             session: Some(session.into()),
             config: config.map(str::to_owned),
+            wait: None,
         },
         true,
     );
@@ -379,6 +424,93 @@ pub fn report(
         until: until.map(|s| s.to_string()),
         units,
     })
+}
+
+/// Local command ergonomics. Sequences require the same recorded session and
+/// project; historical uncorrelated commands remain unknown, never a retry.
+#[derive(Debug, Default, Serialize)]
+pub struct Ergonomics {
+    pub cli_calls: u64,
+    pub help_calls: u64,
+    pub failed_verb_then_retry: u64,
+    pub first_attempt_success: u64,
+    pub first_attempts: u64,
+    pub sequence_unknown: u64,
+    pub wait_calls: u64,
+    pub poll_calls: u64,
+    pub wait_mode_unknown: u64,
+}
+
+pub fn ergonomics(
+    roots: &Roots,
+    since: Option<jiff::Timestamp>,
+    until: Option<jiff::Timestamp>,
+    project: Option<ProjectId>,
+) -> Result<Ergonomics, UsageError> {
+    let mut observed = events(roots)?;
+    observed.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    let mut result = Ergonomics::default();
+    let mut previous = BTreeMap::<
+        (
+            Option<String>,
+            Option<provenant_core::AttemptId>,
+            Option<ProjectId>,
+        ),
+        (String, bool, jiff::Timestamp),
+    >::new();
+    for event in observed {
+        if event.kind != "cli.verb" {
+            continue;
+        }
+        let event_project = event.trace.as_ref().and_then(|trace| trace.project);
+        let attempt = event.trace.as_ref().and_then(|trace| trace.attempt);
+        if project.is_some() && event_project != project {
+            continue;
+        }
+        let Ok(at) = event.timestamp.parse::<jiff::Timestamp>() else {
+            continue;
+        };
+        if since.is_some_and(|since| at < since) || until.is_some_and(|until| at >= until) {
+            continue;
+        }
+        result.cli_calls += 1;
+        if event.unit == "help" {
+            result.help_calls += 1;
+        }
+        if event.unit == "status" {
+            match event.wait {
+                Some(true) => result.wait_calls += 1,
+                Some(false) => result.poll_calls += 1,
+                None => result.wait_mode_unknown += 1,
+            }
+        }
+        // Help does not interrupt a failed command's repair sequence.
+        if event.unit == "help" {
+            continue;
+        }
+        let Some(code) = event.exit_code else {
+            result.sequence_unknown += 1;
+            continue;
+        };
+        if (event.session.is_none() || event_project.is_none()) && attempt.is_none() {
+            result.sequence_unknown += 1;
+            continue;
+        }
+        let key = (event.session, attempt, event_project);
+        let retry = previous.get(&key).is_some_and(|(verb, failed, time)| {
+            verb == &event.unit && *failed && at.as_second().saturating_sub(time.as_second()) <= 300
+        });
+        if retry {
+            result.failed_verb_then_retry += 1;
+        } else {
+            result.first_attempts += 1;
+            if code == 0 {
+                result.first_attempt_success += 1;
+            }
+        }
+        previous.insert(key, (event.unit, code != 0, at));
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

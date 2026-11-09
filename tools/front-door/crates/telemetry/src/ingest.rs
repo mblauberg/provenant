@@ -87,6 +87,11 @@ pub struct Row {
     /// Native tool-use ID, present when an attempt matches this transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_attempt: Option<String>,
+    /// Provider-reported reasoning tokens; absent means unreported, never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<crate::signals::ReplyContext>,
 }
 
 impl Row {
@@ -233,6 +238,7 @@ struct Pending {
     source: Source,
     agent_id: Option<String>,
     native_config: Option<String>,
+    reply: crate::signals::ReplyContext,
 }
 
 /// A message ID or model name is a short opaque token, never free text.
@@ -376,6 +382,11 @@ struct Cursor {
     inode: u64,
     offset: u64,
     tail: String,
+    /// Pending structural events survive ingestion and routine upgrades.
+    #[serde(default)]
+    reply: crate::signals::ReplyContext,
+    #[serde(default)]
+    last_reply: Option<String>,
 }
 
 fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
@@ -420,7 +431,9 @@ fn read_cursors(directory: &Directory, store: &[u8]) -> BTreeMap<String, Cursor>
     }
     serde_json::from_slice::<CursorStore>(&bytes)
         .ok()
-        .filter(|cursor| cursor.schema_version == 1 && cursor.store_digest == digest(store))
+        // Version 1 did not retain pending structural events. Replay those
+        // transcripts rather than treating discarded observations as zero.
+        .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == digest(store))
         .map(|cursor| cursor.files)
         .unwrap_or_default()
 }
@@ -474,6 +487,13 @@ fn read_transcript(
     );
     let mut offset = start;
     let mut complete = start;
+    let mut last_reply = cursor
+        .filter(|_| start > 0)
+        .and_then(|cursor| cursor.last_reply.clone());
+    let mut reply = cursor
+        .filter(|_| start > 0)
+        .map(|cursor| cursor.reply.clone())
+        .unwrap_or_default();
     let mut line = Vec::new();
     'read_loop: loop {
         if expired(deadline) {
@@ -519,8 +539,10 @@ fn read_transcript(
         } else if incremental {
             break;
         }
-        // Most lines are prompts and tool results; only an assistant record
-        // carries a `usage` object.
+        // Parse transiently; persist structural enums only, never content.
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) {
+            reply.observe_native(&value);
+        }
         if !line.windows(7).any(|window| window == b"\"usage\"") {
             continue;
         }
@@ -547,6 +569,14 @@ fn read_transcript(
             .or(effort)
             .filter(|effort| valid_effort(effort));
         let key = (transcript.session.clone(), id);
+        // A distinct assistant boundary consumes preceding events even when
+        // its timestamp is excluded or unavailable. Stream repeats do not.
+        let observed_reply = if last_reply.as_ref() != Some(&key.1) {
+            last_reply = Some(key.1.clone());
+            std::mem::take(&mut reply)
+        } else {
+            crate::signals::ReplyContext::default()
+        };
         if let Some(pending) = messages.get_mut(&key) {
             if pending.model == model {
                 pending.raw.merge(usage);
@@ -581,6 +611,7 @@ fn read_transcript(
                 source: transcript.source,
                 agent_id: transcript.agent_id.clone(),
                 native_config: transcript.native_config.clone(),
+                reply: observed_reply,
             },
         );
     }
@@ -591,6 +622,8 @@ fn read_transcript(
         inode,
         offset: complete,
         tail,
+        reply,
+        last_reply,
     })
 }
 
@@ -624,6 +657,8 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         agent_id: pending.agent_id,
         native_config: pending.native_config,
         native_attempt: None,
+        reasoning_tokens: raw.reasoning_tokens,
+        reply: Some(pending.reply),
     }
 }
 
@@ -760,6 +795,14 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             previous.cache_write_1h = previous.cache_write_1h.max(current.cache_write_1h);
             previous.cache_write = total_write.saturating_sub(previous.cache_write_1h);
             previous.output = previous.output.max(current.output);
+            previous.reasoning_tokens = previous.reasoning_tokens.max(current.reasoning_tokens);
+            if previous
+                .reply
+                .as_ref()
+                .is_none_or(|reply| reply.recorded.is_empty())
+            {
+                previous.reply = current.reply;
+            }
             if previous.agent_id.is_none() {
                 previous.agent_id = current.agent_id;
                 previous.native_config = current.native_config;
@@ -845,7 +888,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     if request.incremental && !report.store_full {
         let bytes = serde_json::to_vec(&CursorStore {
-            schema_version: 1,
+            schema_version: 2,
             store_digest: digest(if changed { &out } else { &existing }),
             files: cursors,
         })
