@@ -802,3 +802,37 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
     assert_eq!(previews[0].policy, PacingPolicy::Pace);
     Ok(())
 }
+
+#[test]
+fn account_level_exhausted_record_stands_by_when_the_model_windows_are_unprobed()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let mut spent = quota(
+        "claude/claude-sonnet-5-5",
+        "michael",
+        QuotaStatus::Exhausted,
+        1,
+        80,
+        120,
+    )?;
+    spent.snapshot.account.adapter = "claude".into();
+    spent.snapshot.windows = vec![QuotaWindow {
+        pool: "seven_day".into(),
+        window_seconds: Some(604_800),
+        used_basis_points: 10_000,
+        resets_unix_seconds: Some(604_900),
+    }];
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"]}}}
+    }))?;
+    let route = profile_preview(
+        config,
+        "claude/claude-haiku-5-5",
+        "michael",
+        vec![],
+        vec![spent],
+    )?;
+    let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+    assert_eq!(candidate.factor_basis_points, 0);
+    Ok(())
+}

@@ -908,3 +908,289 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     );
     Ok(())
 }
+
+/// Re-run the named test in a child with the host's OpenCode environment
+/// removed, so the walk sees only the fixture accounts. Returns true in the
+/// parent once the child has passed.
+fn rerun_in_clean_environment(test: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    const CHILD: &str = "PROVENANT_TEST_EXHAUSTED_WALK_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return Ok(false);
+    }
+    let argv = [
+        std::env::current_exe()?.into_os_string(),
+        "--exact".into(),
+        format!("run::provider::tests::{test}").into(),
+        "--nocapture".into(),
+    ];
+    let mut env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| {
+            !matches!(
+                key.to_str(),
+                Some(
+                    "XDG_CONFIG_HOME"
+                        | "XDG_DATA_HOME"
+                        | "XDG_CACHE_HOME"
+                        | "XDG_STATE_HOME"
+                        | "OPENCODE_DB"
+                        | "OPENCODE_CONFIG"
+                        | "OPENCODE_CONFIG_DIR"
+                        | "OPENCODE_CONFIG_CONTENT"
+                )
+            ) && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+        })
+        .collect();
+    env.push((CHILD.into(), "1".into()));
+    let cwd = std::env::current_dir()?;
+    let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(60));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 65536 };
+    options.stderr = StreamPolicy::Capture { limit: 65536 };
+    let out = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+    assert!(!out.timed_out, "{out:?}");
+    Ok(true)
+}
+
+/// Prepare one unpinned (or pinned) OpenCode Go launch over two registered
+/// accounts, `spent` being recorded with a full allowance window.
+fn prepare_over_two_accounts(
+    spent: &[&str],
+    pin: Option<&str>,
+) -> Result<Result<run::PreparedLaunch, PrepareError>, Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_os::exec::SystemExecutor;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    // `ready` registers first and sorts first. Pacing scores each spent account
+    // 0, so an unpinned lane draws an unspent account before any spent one.
+    let mut config = String::from("schema_version=1\n");
+    for label in ["ready", "spent-a", "spent-b"] {
+        let directory = home.join(format!("opencode-{label}"));
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        config.push_str(&format!(
+            "[domains.accounts.entries.{label}]\nadapter='opencode'\nlabel='{label}'\nkey='{label}'\ndirectory='{}'\n",
+            directory.display()
+        ));
+    }
+    std::fs::write(state.join("config.toml"), config)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    let quota = state.join("quota");
+    std::fs::DirBuilder::new().mode(0o700).create(&quota)?;
+    for key in spent {
+        let account = provenant_quota::AccountScope {
+            adapter: "opencode".into(),
+            account_key: (*key).into(),
+            label: (*key).into(),
+        };
+        let mut record = provenant_quota::AccountRecord::empty(account.clone());
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            schema_version: 1,
+            account,
+            revision: 0,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: now,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![provenant_quota::QuotaWindow {
+                pool: "five_hour".into(),
+                window_seconds: None,
+                used_basis_points: 10000,
+                resets_unix_seconds: None,
+            }],
+        });
+        let directory = quota.join(key);
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let path = directory.join("opencode.json");
+        std::fs::write(&path, serde_json::to_vec(&record)?)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let executable = assets.join("opencode/bin/opencode");
+    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    let run_id = RunId::from_bytes([2; 16]);
+    let attempt_id = AttemptId::from_bytes([1; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("exhausted-walk-fixture")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+    let prompt = "exhausted account walk";
+    let task = run::TaskRequest {
+        cloud: None,
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: None,
+        head: None,
+        source_head: None,
+        base_ref: None,
+        task_id: TaskId::from_bytes([3; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "opencode".into(),
+            model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+            effort: None,
+        },
+        account: pin.map(Into::into),
+        authority_digest: Digest::from_bytes([4; 32]),
+        writer: None,
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+        repo_facts: Default::default(),
+    };
+    Ok(prepare_with(
+        &registry,
+        &task,
+        prompt,
+        &paths,
+        None,
+        |name| {
+            if name == "opencode" {
+                Ok(executable.clone())
+            } else {
+                Err("fixture provider unavailable".into())
+            }
+        },
+        None,
+    ))
+}
+
+#[test]
+fn an_exhausted_account_stands_by_while_an_unspent_one_remains()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_in_clean_environment("an_exhausted_account_stands_by_while_an_unspent_one_remains")? {
+        return Ok(());
+    }
+    let prepared =
+        prepare_over_two_accounts(&["spent-a"], None)?.map_err(|error| format!("{error}"))?;
+    // Pacing scores the spent account 0, so the walk never draws it while an
+    // unprobed account remains. Either unprobed account is a valid pick; the
+    // router breaks the tie between them, so the test does not pin which one.
+    assert!(
+        matches!(
+            prepared.route.account_key.as_deref(),
+            Some("ready" | "spent-b")
+        ),
+        "{:?}",
+        prepared.route.account_key
+    );
+    assert!(
+        !prepared
+            .skipped_routes
+            .iter()
+            .any(|skipped| skipped.detail.contains("account spent-a")),
+        "{:?}",
+        prepared.skipped_routes
+    );
+    Ok(())
+}
+
+#[test]
+fn every_refused_account_is_named_when_the_lane_is_usage_limited()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_in_clean_environment("every_refused_account_is_named_when_the_lane_is_usage_limited")?
+    {
+        return Ok(());
+    }
+    let refused = prepare_over_two_accounts(&["ready", "spent-a", "spent-b"], None)?;
+    let Err(PrepareError::Candidates {
+        fallback_outcome,
+        message,
+        ..
+    }) = refused
+    else {
+        return Err("every account is spent, so no launch is prepared".into());
+    };
+    assert_eq!(
+        fallback_outcome,
+        Some(provenant_records::run::PreparationFailure::UsageLimited)
+    );
+    // The message lists each refused account as `accounts skipped: <label>: …`.
+    for label in ["ready", "spent-a", "spent-b"] {
+        assert!(message.contains(&format!("{label}: ")), "{message}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_pinned_account_is_not_swapped_when_its_allowance_is_refused()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_in_clean_environment("a_pinned_account_is_not_swapped_when_its_allowance_is_refused")?
+    {
+        return Ok(());
+    }
+    match prepare_over_two_accounts(&["spent-a"], Some("spent-a"))? {
+        Ok(prepared) => Err(format!(
+            "the pinned account is spent, yet the lane ran on {:?}",
+            prepared.route.account_key
+        )
+        .into()),
+        Err(PrepareError::Candidates { message, .. }) => {
+            assert!(message.contains("allowance is exhausted"), "{message}");
+            assert!(!message.contains("account ready"), "{message}");
+            Ok(())
+        }
+        Err(other) => Err(format!("{other}").into()),
+    }
+}

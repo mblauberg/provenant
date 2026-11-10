@@ -1655,6 +1655,24 @@ fn next_permitted_candidate(
     Ok(None)
 }
 
+/// Availability left once every account that admission refused for its
+/// allowance is removed, so a redraw can only land on an untried account.
+fn without_refused_accounts(
+    availability: &[provenant_providers::AvailabilityRecord],
+    refused: &std::collections::BTreeSet<(String, String)>,
+) -> Vec<provenant_providers::AvailabilityRecord> {
+    availability
+        .iter()
+        .filter(|record| {
+            !refused.contains(&(
+                record.adapter.clone(),
+                record.account_key.clone().unwrap_or_default(),
+            ))
+        })
+        .cloned()
+        .collect()
+}
+
 fn redraw_candidates(
     result: Result<provenant_records::ResolvedRoute, crate::route::DispatchError>,
     reasons: &mut Vec<SkippedRoute>,
@@ -2282,6 +2300,7 @@ pub(super) fn prepare_candidates(
     let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
     let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
     let mut reprobed_accounts = std::collections::BTreeSet::new();
+    let mut refused_accounts = std::collections::BTreeSet::<(String, String)>::new();
     let mut candidate = 0usize;
     // A login resolved for one route serves every later route and the reader path.
     let mut gh_login: Option<std::ffi::OsString> = None;
@@ -2618,7 +2637,48 @@ pub(super) fn prepare_candidates(
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
         {
-            reasons.push(skip(&label, SkipKind::Unavailable, error));
+            // Admission refuses an account whose allowance is spent. Another
+            // account may still serve the same model, so move on to it once per
+            // account, never past a pinned one.
+            let spent = error.contains("allowance exhausted");
+            let refused_key = route
+                .account_key
+                .clone()
+                .filter(|_| spent && selected.is_none());
+            let Some(key) = refused_key else {
+                reasons.push(skip(&label, SkipKind::Unavailable, error));
+                continue;
+            };
+            let name = entries
+                .iter()
+                .find(|entry| entry.adapter == route.adapter && entry.key == key)
+                .map_or_else(
+                    || "unregistered account".to_owned(),
+                    |entry| entry.label.clone(),
+                );
+            let mut skipped = skip(
+                &label,
+                SkipKind::Account,
+                format!("account {name}: {error}"),
+            );
+            skipped.set_cause(provenant_records::RouteExclusionReason::Exhausted);
+            reasons.push(skipped);
+            previous_outcome = provenant_routing::FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::Exhausted,
+            );
+            refused_accounts.insert((route.adapter.clone(), key));
+            let remaining = without_refused_accounts(&availability, &refused_accounts);
+            if remaining
+                .iter()
+                .any(|record| record.adapter == route.adapter)
+            {
+                if let Ok(model) = provenant_routing::ModelId::parse(&label) {
+                    rejected.retain(|tried| *tried != model);
+                }
+                if let Ok(next) = resolve(&remaining, &rejected) {
+                    queue.extend(candidates(next));
+                }
+            }
             continue;
         }
         let entry = entries
@@ -4156,6 +4216,31 @@ mod candidate_walk_regressions {
         );
         assert!(queue.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn refused_accounts_leave_only_untried_accounts() {
+        let record = |key: &str| provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "claude".into(),
+            executable: "/fixture/claude".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: Some(key.into()),
+            observed_models: vec![],
+            observed_unix_seconds: 0,
+            expires_unix_seconds: 1,
+        };
+        let all = [record("spent"), record("ready")];
+        let mut refused = std::collections::BTreeSet::new();
+        refused.insert(("claude".to_owned(), "spent".to_owned()));
+        let left = without_refused_accounts(&all, &refused);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].account_key.as_deref(), Some("ready"));
+        refused.insert(("claude".to_owned(), "ready".to_owned()));
+        assert!(without_refused_accounts(&all, &refused).is_empty());
     }
 
     #[test]
