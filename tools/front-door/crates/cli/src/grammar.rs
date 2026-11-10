@@ -1162,16 +1162,13 @@ pub enum StatsBy {
 #[derive(Debug, Args)]
 pub struct Stats {
     /// Include offline post-merge outcomes and stratified ranking
-    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    #[arg(long, conflicts_with_all = ["usage", "by"])]
     pub outcomes: bool,
     /// Include advisory expiring suggestions from offline pipeline evidence
-    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    #[arg(long, conflicts_with_all = ["usage", "by"])]
     pub suggest: bool,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
-    /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
-    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id", "by"])]
-    pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,
@@ -1583,7 +1580,7 @@ pub struct Status {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
     /// Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)
-    #[arg(long, catalog_requires = "wait")]
+    #[arg(long)]
     pub target: Vec<String>,
     /// Return when all targets are terminal (use `any` for the first transition)
     #[arg(long, catalog_requires = "wait", value_enum, default_value = "all")]

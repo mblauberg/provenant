@@ -22,7 +22,6 @@ fn row() -> LaneRow {
         waiting_for: None,
         requested_route: json!({"kind": "named", "name": "utility"}),
         host: None,
-        resolved_route: Some(Value::Null),
         applied_route: Value::Null,
         skipped_routes: json!([]),
         account: Value::Null,

@@ -216,7 +216,7 @@ impl ModelPolicy {
             lines.push(format!("Compaction payback estimate: {turns:.1} future turns for a 15k summary and zero rework. Rework raises this estimate; use judgement at the task boundary."));
         }
         if self.compaction.mode == Some(CompactionMode::TaskBoundary) {
-            lines.push(format!("Compact deliberately at a task boundary while the cache is warm, after at least {} turns. Continue the original brief after compaction. Compaction window guidance: {:?} tokens.", self.compaction.min_turns.unwrap_or(0), self.compaction.window));
+            lines.push(format!("Compact deliberately at a task boundary while the cache is warm, after at least {} turns. Continue the original brief after compaction. Compaction window guidance: {} tokens.", self.compaction.min_turns.unwrap_or(0), self.compaction.window.map_or_else(|| "unknown".to_string(), |window| window.to_string())));
         } else if self.compaction.mode == Some(CompactionMode::Never) {
             lines.push("Do not deliberately compact; keep the handoff current so the original brief can continue.".into());
         }
@@ -1734,5 +1734,15 @@ mod tests {
                 .guidance()
                 .contains("must include these exact section lines")
         );
+    }
+
+    #[test]
+    fn guidance_renders_the_compaction_window_as_a_number() {
+        let mut policy = ModelPolicy::default();
+        policy.compaction.mode = Some(CompactionMode::TaskBoundary);
+        policy.compaction.window = Some(275_000);
+        let guidance = policy.guidance();
+        assert!(guidance.contains("guidance: 275000 tokens"), "{guidance}");
+        assert!(!guidance.contains("Some("), "{guidance}");
     }
 }

@@ -73,8 +73,12 @@ pub fn next_due(
     let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
     };
+    // A failed reading is re-probed by the next owner tick whatever the
+    // failure, so a repaired account (a new login, a created keychain, an
+    // installed CLI) is routable at once. Only a provider rate limit keeps its
+    // retry window, because probing it again cannot clear it.
     let event_auth_retry = record.auth_retry_pending
-        || (trigger == Trigger::Manual && record.last_error.is_some_and(ProbeFailure::needs_login));
+        || (trigger == Trigger::Manual && record.last_error.is_some_and(ProbeFailure::repairable));
     let mut due = match record.last_attempt_unix_seconds {
         Some(at) if !event_auth_retry && record.last_error != Some(ProbeFailure::Network) => {
             add(at, ttl)?
@@ -819,6 +823,126 @@ mod tests {
                 tick.power
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn next_owner_tick_reprobes_a_repaired_isolated_keychain() {
+        let mut agy = account();
+        agy.adapter = "agy".into();
+        let mut record = AccountRecord::empty(agy.clone());
+        let reserved = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&record),
+            &agy,
+            100,
+            "first",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        record = complete(
+            &reserved,
+            "first",
+            110,
+            Err(ProbeFailure::IsolatedKeychainUnavailable),
+            None,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        assert_eq!(record.backoff_until_unix_seconds, Some(3710));
+        let detection = Detection {
+            adapter: "agy".into(),
+            accounts: Some(vec![agy.clone()]),
+            status: QuotaStatus::Available,
+        };
+        let plan = |record: &AccountRecord, trigger, now| {
+            plan_tick(
+                crate::source::TEST_POLICIES,
+                std::slice::from_ref(record),
+                std::slice::from_ref(&detection),
+                &QuotaTick {
+                    adapter: None,
+                    trigger,
+                    power: Power::Ac,
+                },
+                now,
+            )
+            .unwrap()
+            .batches
+        };
+        // The keychain was created a minute later: the owner's next tick
+        // probes it instead of waiting out the hour's backoff.
+        assert_eq!(plan(&record, Trigger::Manual, 170), vec![vec![agy.clone()]]);
+        // A timer tick keeps the backoff unless a credential change was seen.
+        assert!(plan(&record, Trigger::Timer, 170).is_empty());
+        let mut changed = record.clone();
+        changed.auth_retry_pending = true;
+        assert_eq!(plan(&changed, Trigger::Timer, 170), vec![vec![agy.clone()]]);
+        let reserved = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&record),
+            &agy,
+            170,
+            "second",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let repaired = complete(
+            &reserved,
+            "second",
+            180,
+            Ok(QuotaSnapshot {
+                schema_version: 1,
+                account: agy.clone(),
+                revision: 0,
+                status: QuotaStatus::Available,
+                observed_unix_seconds: 175,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                details: None,
+                windows: vec![],
+            }),
+            None,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let row = report(
+            crate::source::TEST_POLICIES,
+            &[repaired],
+            std::slice::from_ref(&detection),
+            &QuotaQuery { adapter: None },
+            180,
+            "report.json".into(),
+        )
+        .unwrap()
+        .accounts
+        .remove(0);
+        assert_eq!(row.status, QuotaStatus::Available);
+        assert_eq!(row.error, None);
+    }
+    #[test]
+    fn manual_tick_keeps_a_provider_rate_limit_window() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        record.last_error = Some(ProbeFailure::RateLimited);
+        record.failures = 1;
+        record.backoff_until_unix_seconds = Some(220);
+        assert_eq!(
+            next_due(
+                crate::source::TEST_POLICIES,
+                &record,
+                Trigger::Manual,
+                Power::Ac
+            )
+            .unwrap(),
+            Some(220)
         );
     }
     #[test]

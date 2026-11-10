@@ -1,6 +1,6 @@
 # Telemetry and quota
 Owner: provenant-telemetry
-Anchor: [`telemetry tests`](../../tools/front-door/crates/telemetry/src/tests.rs); [`native.rs`](../../tools/front-door/crates/telemetry/src/native.rs)
+Anchor: [`telemetry tests`](../../tools/front-door/crates/telemetry/src/tests.rs)
 
 `provenant telemetry stats` reduces retained terminal attempt facts with prices
 from `config/telemetry-prices.toml`. Optional `--since`, `--until DATE`,
@@ -41,20 +41,6 @@ For a wave digest, review `provenant inbox --state open` and then run
 `provenant telemetry stats --by pr --since <wave-start>`. The inbox command
 lists open requests across kinds; select the decision requests for the chair
 summary. Both results are local reads, and PR rows include only merged PRs.
-
-To inspect native Claude Code sub-agents for a session, run
-`provenant telemetry stats --claude-subagents PATH`, where `PATH` is that
-session's `subagents` directory under `~/.claude*/projects/<project>/<session>`.
-The importer reads regular, non-symlink `agent-*.jsonl` files and skips unrelated files. This is an
-explicit import and produces a separate usage and API-equivalent cost report
-grouped by model; it does not add those calls to supervised attempt totals.
-The import uses usage metadata, not message bodies. It cannot be combined with
-`--run-id`, `--since`, `--until` or `--usage`.
-With `--json`, the `native_claude_subagents` section reports agent and message
-counts, usage, price-table billing and cost by model, with `cost_basis` set to
-`api_equivalent_estimate`. A model's `cost_usd` is
-null when its usage or price is incomplete. Model prices are matched exactly;
-dated aliases are not inferred.
 
 ## Native session ingest
 
@@ -270,7 +256,7 @@ time, account key and label, provider, the plan the account reports, every
 window (pool, window seconds, used basis points, reset time), credit balance
 and reset credits. It marks a `reset` when a window's use falls or its reset
 time advances, and a `plan.change` when the plan label changes between two
-known values. `tier` is null until a provider response carries one. Records
+known values. Records
 hold no credentials, provider payloads or prompt text. Nothing is backfilled,
 and no provider call is added: readings are what the existing refresh already
 fetches, so resolution is the refresh cadence.

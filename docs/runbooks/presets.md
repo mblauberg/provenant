@@ -18,7 +18,7 @@ provenant status
 provenant output TARGET
 ```
 
-Register the writer worktree first with `provenant worktree create delivery --base BASE`.
+Register the writer worktree first with `provenant worktree create delivery --base BASE`, or pass `--branch NAME --base REF` to `run` to create an owned one.
 Use its absolute path and literal write scope. For `delivery.toml`, bind the
 same parameters in a reusable node document:
 
@@ -93,7 +93,6 @@ Apply it, or set any one setting alone, in a run document or a template's
 ```sh
 provenant run --use review --file brief.md --set 'attempt.preset="light"'
 provenant run --use task --file brief.md --set 'attempt.isolation="shared"' --set 'attempt.receipts="none"'
-provenant run --use task --file brief.md --knob lanes.supervision=minimal
 ```
 
 An explicit setting beats the preset. The preset skips only steps a read-only
@@ -117,8 +116,9 @@ writer's latest progress handoff. Commits and uncommitted edits stay in place.
 The setting is off (0) by default, because restart has not yet been shown to
 keep completion. The suggested setting is 200000:
 
-```sh
-provenant run --use task --file brief.md --knob lanes.context_handoff_tokens=200000
+```toml
+[knobs]
+"lanes.context_handoff_tokens" = 200000
 ```
 
 Set it in a profile or host configuration `[knobs]` table to apply it to every

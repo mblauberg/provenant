@@ -1166,6 +1166,7 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant status" => &[
             "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
+            "--target without --wait reports each target's current status once",
             "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
             "follow waits for all targets to be terminal; land targets only observe their PR",
         ],
@@ -1725,16 +1726,19 @@ mod tests {
             .iter()
             .find(|c| c.command == "provenant status")
             .unwrap();
-        for name in ["target", "until", "follow"] {
-            assert_eq!(
-                status
-                    .arguments
-                    .iter()
-                    .find(|a| a.name == name)
-                    .unwrap()
-                    .requires,
-                ["wait"]
-            );
+        let requires = |name: &str| {
+            status
+                .arguments
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap()
+                .requires
+                .clone()
+        };
+        // `--target` alone reports each target's status once (#3124).
+        assert!(requires("target").is_empty());
+        for name in ["until", "follow"] {
+            assert_eq!(requires(name), ["wait"]);
         }
         assert!(
             status
@@ -2180,7 +2184,7 @@ mod tests {
         invalid(&["status", "--wait=0"]);
         invalid(&["status", "--wait=5h"]);
         invalid(&["status", "--follow"]);
-        invalid(&["status", "--target", "pr:2721"]);
+        valid(&["status", "--target", "pr:2721"]);
         for wait in ["1", "14400"] {
             valid(&["status", &format!("--wait={wait}")]);
         }
@@ -2330,20 +2334,6 @@ mod tests {
                 .iter()
                 .any(|c| c.command == "provenant steer")
         );
-    }
-    #[test]
-    fn native_claude_import_requires_unfiltered_stats() {
-        valid(&["telemetry", "stats", "--claude-subagents", "subagents"]);
-        for filter in [
-            vec!["--usage"],
-            vec!["--since", "2026-10-24"],
-            vec!["--until", "2026-10-24"],
-            vec!["--run-id", "11111111111111111111111111111111"],
-        ] {
-            let mut args = vec!["telemetry", "stats", "--claude-subagents", "subagents"];
-            args.extend(filter);
-            invalid(&args);
-        }
     }
     #[test]
     fn telemetry_stats_parses_every_grouping_dimension() {

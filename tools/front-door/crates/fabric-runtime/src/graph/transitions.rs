@@ -120,6 +120,8 @@ pub(super) struct ObservationFacts {
     pub fallback_evidence: Option<PreparationFallbackEvidence>,
     pub evidence_unreadable: bool,
     pub fallback_cause: Option<provenant_records::RouteExclusionReason>,
+    /// Accounts an unlaunched quota refusal passed over, by label.
+    pub skipped_accounts: Vec<provenant_records::SkippedAccount>,
     pub review_range: ReviewRange,
 }
 
@@ -147,6 +149,7 @@ pub(super) fn apply_attempt_observation(
         fallback_evidence,
         evidence_unreadable,
         fallback_cause,
+        skipped_accounts,
         review_range,
     } = facts;
     // Synthesis retains qualified evidence even without a disposition contract.
@@ -477,6 +480,7 @@ pub(super) fn apply_attempt_observation(
                                 unreadable: evidence_unreadable,
                                 review_limit_reached,
                                 cause: fallback_cause.as_ref(),
+                                skipped_accounts: &skipped_accounts,
                             },
                         ) {
                             SettlementFallback::Continue => true,
@@ -1706,6 +1710,7 @@ mod tests {
                     fallback_evidence: None,
                     evidence_unreadable: false,
                     fallback_cause: None,
+                    skipped_accounts: Vec::new(),
                     review_range: ReviewRange::Unknown,
                 },
             )

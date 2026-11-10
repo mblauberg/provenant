@@ -34,12 +34,12 @@ pub enum Check {
     },
     /// Check a release range for blocking findings
     Release {
-        /// Base commit of the range
+        /// Base revision of the range: a commit, tag or branch
         #[arg(long, catalog_requires = "head")]
-        base: Option<GitOid>,
-        /// Head commit of the range
+        base: Option<String>,
+        /// Head revision of the range: a commit, tag or branch
         #[arg(long, catalog_requires = "base")]
-        head: Option<GitOid>,
+        head: Option<String>,
         #[command(flatten)]
         page: Page,
     },
@@ -578,6 +578,21 @@ pub fn install_page(
         )?;
     }
     paginate(scan, selector, page)
+}
+/// Resolve a user-given revision to the commit it names.
+pub fn resolve_revision(git: &GitContext<'_>, revision: &str) -> Result<GitOid, CheckError> {
+    let revision = provenant_confinement::repo::GitRevision::new(revision)
+        .map_err(|_| CheckError::Invalid("release revision is not a valid Git revision"))?;
+    let outcome = git.read_release(GitRead::ResolveRevision { revision })?;
+    if outcome.termination != Termination::Exit(0) {
+        return Err(CheckError::Invalid(
+            "release revision does not name exactly one commit",
+        ));
+    }
+    let text = std::str::from_utf8(&outcome.stdout.bytes)
+        .map_err(|_| CheckError::Evidence("Git returned a malformed object ID"))?;
+    GitOid::parse(text.trim())
+        .map_err(|_| CheckError::Evidence("Git returned a malformed object ID"))
 }
 pub fn release_page(
     git: &GitContext<'_>,

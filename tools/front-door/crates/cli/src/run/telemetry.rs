@@ -134,47 +134,6 @@ pub(super) fn stats_inner(
             provenant_telemetry::validate_prices(&config).map_err(|error| error.to_string())
         })
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error))?;
-    if let Some(path) = command.claude_subagents.as_deref() {
-        let native =
-            provenant_telemetry::claude_subagents(path, &prices).map_err(|error| match error {
-                provenant_telemetry::NativeError::Input(message) => {
-                    Fail::new(Status::Invalid, ErrorKind::Invalid, message)
-                }
-                provenant_telemetry::NativeError::Io(message) => {
-                    Fail::new(Status::Error, ErrorKind::Io, message)
-                }
-            })?;
-        let mut human = format!("{} native Claude subagents\n", native.agents);
-        if native.skipped_incomplete_lines > 0 {
-            human.push_str(&format!(
-                "{} incomplete final lines skipped\n",
-                native.skipped_incomplete_lines
-            ));
-        }
-        for row in &native.models {
-            let cost = row.cost_usd.as_ref().map_or_else(
-                || "unknown".to_owned(),
-                |cost| format!("est. API-equivalent ${}", cost.usd),
-            );
-            let billing = match row.price_table_billing {
-                Some(provenant_telemetry::BillingKind::Subscription) => {
-                    " (price-table subscription model)"
-                }
-                _ => "",
-            };
-            human.push_str(&format!(
-                "  {}: {} agents, {} messages, cost {}{}\n",
-                plain_text(&row.model, usize::MAX),
-                row.agents,
-                row.messages,
-                cost,
-                billing
-            ));
-        }
-        let mut data = json!({ "native_claude_subagents": native });
-        attach_freshness(&prices, &mut data, &mut human)?;
-        return Ok((data, human));
-    }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
             .transpose()
@@ -227,7 +186,7 @@ pub(super) fn stats_inner(
         &edge.roots.state,
         context.project_id,
     )?;
-    let partial = partial_signal_counts(&selected, store.as_ref(), &call)?;
+    let partial = partial_signal_counts(&selected, store.as_ref(), &call);
     let mut route_evidence = Vec::new();
     let mut requests = BTreeMap::new();
     for fact in &selected {
@@ -567,7 +526,13 @@ pub(super) fn stats_inner(
                 let native = provenant_telemetry::native_attempts::report(attempts, &rows);
                 if !native.attempts.is_empty() || !native.unlinked.is_empty() {
                     human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
-                    for item in &native.attempts {
+                    if !command.detail {
+                        human.push_str(&format!(
+                            "  {} attempts; per-attempt rows with --detail or --json\n",
+                            native.attempts.len()
+                        ));
+                    }
+                    for item in native.attempts.iter().filter(|_| command.detail) {
                         if item.models.is_empty() {
                             human.push_str(&format!(
                                 "  {} {}: no linked messages\n",
@@ -630,7 +595,11 @@ pub(super) fn stats_inner(
     }
     data["cache_read_share"] = cache_kpis;
     data["cache_read_share"]["overall"] = json!(total_share);
-    let plan_value = plan_value_rows(&report, &config.domains.accounts, edge)?;
+    let plan_value =
+        plan_value_rows(&report, &config.domains.accounts, edge).unwrap_or_else(|cause| {
+            data["plan_value_unavailable"] = json!(cause);
+            Vec::new()
+        });
     if !plan_value.is_empty() {
         human.push_str(&format!("plan value: {} accounts\n", plan_value.len()));
         for row in &plan_value {
@@ -675,17 +644,19 @@ pub(super) fn stats_inner(
     data["route_outcomes"] = json!(route_outcomes);
 
     // Every grouping reports partial finishes, not only graph groups.
-    if !partial.is_empty() {
-        human.push_str(&format!(
+    match &partial {
+        Ok(partial) if partial.is_empty() => {}
+        Ok(partial) => human.push_str(&format!(
             "partial signals: {}\n",
             partial
                 .iter()
                 .map(|(name, count)| format!("{name}={count}"))
                 .collect::<Vec<_>>()
                 .join(" ")
-        ));
+        )),
+        Err(cause) => human.push_str(&format!("partial signals: unavailable ({cause})\n")),
     }
-    data["partial_signals"] = json!(partial);
+    data["partial_signals"] = partial_signals_value(partial);
     data["unfinished_attempts_excluded"] = json!(unfinished);
     if let Some(pipeline) = pipeline {
         human.push_str(&format!(

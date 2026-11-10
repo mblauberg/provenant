@@ -60,7 +60,8 @@ mod resolved_route;
 pub use resolved_route::{
     ResolvedRoute, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
     RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionCandidate,
-    RouteSelectionReceipt, RouteSelectionRedraw, TooManyAlternatives,
+    RouteSelectionReceipt, RouteSelectionRedraw, SKIPPED_ACCOUNTS, SkippedAccount,
+    TooManyAlternatives,
 };
 
 pub mod result_capture;

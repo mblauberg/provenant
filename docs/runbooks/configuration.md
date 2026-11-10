@@ -32,7 +32,7 @@ are edited by hand.
 The file needs `schema_version = 1`; a missing file selects defaults. A knob in
 `[knobs]` wins over the `profile` preset (`balanced` or `economy`), which wins
 over the registry default. There is no project overlay or environment layer.
-A dispatch's `--knob NAME=VALUE`, or `knobs: ["NAME=VALUE"]` on `fabric_run`,
+A `knobs: ["NAME=VALUE"]` on `fabric_run`
 wins over configuration. Each sealed task and attempt records the profile,
 effective knob values and dispatch overrides, and continuations keep that
 stamp.
@@ -297,7 +297,7 @@ provider:
 | `none` | subcommands that do not compile | every compiling command |
 
 A refused command exits 1 with one line naming the knob and saying CI runs it.
-Set it under `[knobs]` for the host, with `--knob lanes.local_cargo=check` for
+Set it under `[knobs]` for the host, with `--set 'attempt.local_cargo="check"'` for
 a run, or with `"attempt": {"local_cargo": "check"}` for one graph node, which
 wins over the run. A cargo nested inside an allowed command is not checked
 again, and a lane that calls `~/.cargo/bin/cargo` or `rustc` directly is not
