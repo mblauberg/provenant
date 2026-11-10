@@ -235,10 +235,10 @@ fn api_may_run(args: &[&str]) -> bool {
                 let Some(value) = inline.or_else(|| iter.next()) else {
                     return false;
                 };
-                if let Some(text) = value.strip_prefix("query=") {
-                    if query.replace(text).is_some() {
-                        return false;
-                    }
+                if let Some(text) = value.strip_prefix("query=")
+                    && query.replace(text).is_some()
+                {
+                    return false;
                 }
             }
             flag if VALUE_FLAGS.contains(&flag) => {
@@ -529,7 +529,7 @@ fn load_policy(project: &Path, owner: Option<&str>) -> Option<GithubAppConfig> {
     let binding = provenant_config::lookup_project(&resolved.roots, &location).ok()??;
     provenant_config::GithubPolicy::read(&resolved.roots.state, binding.project_id())
         .ok()?
-        .app_for(owner.as_deref())
+        .app_for(owner)
         .cloned()
 }
 

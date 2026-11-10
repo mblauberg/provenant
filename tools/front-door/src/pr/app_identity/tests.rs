@@ -121,7 +121,7 @@ fn private_key_never_reaches_jwt_token_or_warnings() {
 fn base64url_matches_known_vectors() {
     assert_eq!(base64url(b""), "");
     assert_eq!(base64url(b"f"), "Zg");
-    assert_eq!(base64url(b"fo"), "Zm8");
+    assert_eq!(base64url(b"ab"), "YWI");
     assert_eq!(base64url(b"foo"), "Zm9v");
     assert_eq!(base64url(&[0xfb, 0xff]), "-_8");
 }
