@@ -1547,6 +1547,45 @@ mod stale_readiness_tests {
     }
 }
 
+/// Name, by registered label only, each account an unpinned route passed over
+/// with its own reason. Routing records opaque keys; a key without a
+/// registration is never shown, since a key can carry a sign-in identity.
+fn name_skipped_accounts(
+    mut skipped: SkippedRoute,
+    route: &provenant_records::ResolvedRoute,
+    entries: &[provenant_providers::accounts::Registration],
+) -> SkippedRoute {
+    let provenant_records::RouteReadiness::Unavailable { extra, .. } = &route.readiness else {
+        return skipped;
+    };
+    let accounts: Vec<_> = provenant_records::SkippedAccount::read(extra)
+        .into_iter()
+        .map(|account| provenant_records::SkippedAccount {
+            account: entries
+                .iter()
+                .find(|entry| entry.adapter == route.adapter && entry.key == account.account)
+                .map_or_else(
+                    || "unregistered account".into(),
+                    |entry| entry.label.clone(),
+                ),
+            reason: account.reason,
+        })
+        .collect();
+    if accounts.is_empty() {
+        return skipped;
+    }
+    skipped.detail = format!(
+        "{}; accounts skipped: {}",
+        skipped.detail,
+        provenant_records::SkippedAccount::describe(&accounts)
+    );
+    skipped.extra.insert(
+        provenant_records::SKIPPED_ACCOUNTS.into(),
+        serde_json::json!(accounts),
+    );
+    skipped
+}
+
 fn setup_skip(route: &str, detail: impl Into<String>) -> SkippedRoute {
     let mut skipped = skip(route, SkipKind::Setup, detail);
     skipped.set_cause(provenant_records::RouteExclusionReason::SetupFailed);
@@ -2476,7 +2515,7 @@ pub(super) fn prepare_candidates(
                     if *kind == SkipKind::AuthRequired {
                         skipped.detail = provenant_records::diagnostic::safe_text(detail);
                     }
-                    reasons.push(skipped);
+                    reasons.push(name_skipped_accounts(skipped, &route, &entries));
                     continue;
                 }
                 let relevant: Vec<_> = entries
@@ -2501,7 +2540,7 @@ pub(super) fn prepare_candidates(
                         relevant.into_iter().cloned().collect::<Vec<_>>().join("; "),
                     );
                     skipped.set_cause(reason.clone());
-                    reasons.push(skipped);
+                    reasons.push(name_skipped_accounts(skipped, &route, &entries));
                     continue;
                 }
             }
@@ -2521,7 +2560,7 @@ pub(super) fn prepare_candidates(
                 // This detail is assembled from registered account facts, not
                 // provider output. Remote projections still use typed facts.
                 skipped.detail = provenant_records::diagnostic::safe_text(&detail);
-                reasons.push(skipped);
+                reasons.push(name_skipped_accounts(skipped, &route, &entries));
                 continue;
             }
             if matches!(
@@ -2534,7 +2573,7 @@ pub(super) fn prepare_candidates(
                 let mut skipped = skip(&label, SkipKind::AuthRequired, &detail);
                 skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
                 skipped.detail = provenant_records::diagnostic::safe_text(&detail);
-                reasons.push(skipped);
+                reasons.push(name_skipped_accounts(skipped, &route, &entries));
                 continue;
             }
             previous_outcome = outcome;
@@ -2549,7 +2588,7 @@ pub(super) fn prepare_candidates(
                 // Keep the router's readiness classification alongside the plan fact.
                 skipped.kind = SkipKind::Unavailable;
                 skipped.set_cause(reason.clone());
-                reasons.push(skipped);
+                reasons.push(name_skipped_accounts(skipped, &route, &entries));
                 continue;
             }
             if matches!(
@@ -2573,7 +2612,7 @@ pub(super) fn prepare_candidates(
                 provenant_routing::exclusion_detail(reason),
             );
             skipped.set_cause(reason.clone());
-            reasons.push(skipped);
+            reasons.push(name_skipped_accounts(skipped, &route, &entries));
             continue;
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)

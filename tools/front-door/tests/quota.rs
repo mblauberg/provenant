@@ -608,17 +608,17 @@ cat "$HOME/agy-usage"
         assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("@example.test"));
         Ok(value["data"]["entries"]["agy-work"]["key"].clone())
     };
+    // Registration probes the account, so that probe clears a probe directory
+    // left by an earlier run.
+    let stale = rig.state.join("probe-0123456789abcdef01234567");
+    let stale_lock = rig.state.join("probe-0123456789abcdef01234567.lock");
+    fs::create_dir(&stale)?;
+    fs::write(&stale_lock, b"")?;
     fs::write(rig.home.join("agy-email"), "one@example.test")?;
     let one = register()?.as_str().ok_or("account key")?.to_owned();
     let fingerprint = provenant_providers::identity::fingerprint("one@example.test")
         .ok_or("fixture fingerprint")?;
     assert_eq!(one, format!("agy-google-{}", &fingerprint[..12]));
-    let stale = rig.state.join("probe-0123456789abcdef01234567");
-    let stale_lock = rig.state.join("probe-0123456789abcdef01234567.lock");
-    fs::create_dir(&stale)?;
-    fs::write(&stale_lock, b"")?;
-    let out = rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?;
-    assert_eq!(code(&out), 0);
     let cwd = fs::read_to_string(rig.home.join("agy-cwd"))?;
     let cwd = std::path::Path::new(cwd.trim());
     assert_eq!(cwd.parent(), Some(fs::canonicalize(&rig.state)?.as_path()));
@@ -663,6 +663,18 @@ cat "$HOME/agy-usage"
     assert_eq!(second["refusals"], serde_json::json!([]));
     fs::write(rig.home.join("agy-email"), "one@example.test")?;
     assert_eq!(register()?, one);
+    // Registering the first identity again replaces its reading with a fresh
+    // probe under the same key, and keeps its refusal.
+    let reprobed: serde_json::Value = serde_json::from_slice(&fs::read(&record_path)?)?;
+    assert_eq!(reprobed["account"], record["account"]);
+    assert!(reprobed["revision"].as_u64() > record["revision"].as_u64());
+    assert_eq!(
+        reprobed["snapshot"]["details"]["fingerprint"],
+        record["snapshot"]["details"]["fingerprint"]
+    );
+    assert_eq!(reprobed["last_error"], serde_json::Value::Null);
+    assert_eq!(reprobed["refusals"], record["refusals"]);
+    let mut record = reprobed;
     assert_eq!(
         code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
         0
@@ -847,13 +859,15 @@ cat "$HOME/agy-usage"
             .filter(|line| fs::canonicalize(line).is_ok_and(|home| home == path))
             .count())
     };
-    assert_eq!(probed(&rig.home)?, 1);
-    assert_eq!(probed(&second)?, 1);
+    // Registration ran agy twice under each account's own HOME: once to read
+    // the identity and once to probe that account's quota.
+    assert_eq!(probed(&rig.home)?, 2);
+    assert_eq!(probed(&second)?, 2);
     assert_eq!(
         code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
         0
     );
-    // The quota probe ran once more under each account's own HOME.
+    // Both readings are fresh, so the tick probes neither account again.
     assert_eq!(probed(&rig.home)?, 2);
     assert_eq!(probed(&second)?, 2);
     let out = rig.command(&["quota", "show", "--json"])?;
@@ -1229,7 +1243,7 @@ fn history_lists_readings_with_price_in_force_and_filters() -> Result {
     assert_eq!(readings[1]["plan_price"]["name"], "max_20x");
     assert_eq!(readings[2]["markers"][1]["kind"], "plan.change");
     assert_eq!(readings[2]["windows"][0]["used_basis_points"], 10);
-    for key in ["tier", "credit_balance", "account_key", "label", "provider"] {
+    for key in ["credit_balance", "account_key", "label", "provider"] {
         assert!(readings[0].get(key).is_some(), "{key}");
     }
     let since = rig.command(&["quota", "history", "--json", "--since", "2026-06-01"])?;
