@@ -1,11 +1,13 @@
 //! Whether a review still covers a head that moved after it.
 //!
-//! A review of head `H` read against base `B` covers a new head `H'` when
-//! `H' == H`, or when, with `B'` the merge base of `H'` and the fetched target,
-//! `B` is an ancestor of `B'`, `B'` is an ancestor of the target and
-//! `tree(H')` equals `merge_tree(H, B')`. That is a merge-in from the target,
-//! or a rebase with an unchanged delta. Anything else needs a review of the
-//! changed delta.
+//! A review of head `H` read against base `B` covers a head `H'` when, with
+//! `B'` the merge base of `H'` and the fetched target, `H' == H` and
+//! `B' == B`, or when `B` is an ancestor of `B'`, `B'` is an ancestor of the
+//! target and `tree(H')` equals `merge_tree(H, B')`. That is the reviewed
+//! head on the reviewed base, a merge-in from the target, or a rebase with an
+//! unchanged delta. An unchanged head whose base moved off the reviewed base,
+//! such as a stacked pull request retargeted past the branch below it, is
+//! held to the same proof. Anything else needs a review of the changed delta.
 
 /// The Git reads the proof needs, owned by the caller's repository boundary.
 pub trait ReviewGit {
@@ -27,7 +29,7 @@ pub struct Reviewed<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coverage {
-    /// The head is the reviewed head.
+    /// The head is the reviewed head on the reviewed base.
     Exact,
     /// The head carries the reviewed delta unchanged onto a later base.
     CarriedOver,
@@ -47,7 +49,7 @@ impl Coverage {
     }
     pub fn reason(self) -> &'static str {
         match self {
-            Self::Exact => "the head is the reviewed head",
+            Self::Exact => "the head is the reviewed head on the reviewed base",
             Self::CarriedOver => "the head carries the reviewed delta onto a later base",
             Self::MissingBase => "the head moved and the review recorded no base",
             Self::Unrelated => "the head shares no history with the target",
@@ -64,15 +66,20 @@ pub fn coverage<G: ReviewGit + ?Sized>(
     head: &str,
     target: &str,
 ) -> Result<Coverage, G::Error> {
-    if head == reviewed.head {
-        return Ok(Coverage::Exact);
-    }
     let Some(base) = reviewed.base else {
-        return Ok(Coverage::MissingBase);
+        // Without a recorded base only the reviewed head itself is known.
+        return Ok(if head == reviewed.head {
+            Coverage::Exact
+        } else {
+            Coverage::MissingBase
+        });
     };
     let Some(new_base) = git.merge_base(head, target)? else {
         return Ok(Coverage::Unrelated);
     };
+    if head == reviewed.head && new_base == base {
+        return Ok(Coverage::Exact);
+    }
     if !git.is_ancestor(base, &new_base)? || !git.is_ancestor(&new_base, target)? {
         return Ok(Coverage::BaseNotForward);
     }
@@ -236,5 +243,41 @@ mod tests {
         let result = coverage(&mut git, reviewed, "back", "m1");
         assert_eq!(result, Ok(Coverage::BaseNotForward));
         assert!(!Coverage::BaseNotForward.covers());
+    }
+
+    /// A stacked pull request reviewed at `h` against `l1`, the head of the
+    /// branch below it, which branches from m0.
+    fn stacked() -> (History, Reviewed<'static>) {
+        let mut git = history();
+        git.commit("l1", &["m0"], &["lower"]);
+        git.commit("sh", &["l1"], &["x"]);
+        let reviewed = Reviewed {
+            head: "sh",
+            base: Some("l1"),
+        };
+        (git, reviewed)
+    }
+
+    #[test]
+    fn an_unchanged_head_retargeted_past_its_reviewed_base_needs_review() {
+        let (mut git, reviewed) = stacked();
+        // Retargeted to main without the branch below: `lower` was never reviewed here.
+        let result = coverage(&mut git, reviewed, "sh", "m1");
+        assert_eq!(result, Ok(Coverage::BaseNotForward));
+        assert!(!result.unwrap().covers());
+    }
+
+    #[test]
+    fn an_unchanged_head_keeps_its_review_once_its_reviewed_base_lands() {
+        let (mut git, reviewed) = stacked();
+        assert_eq!(
+            coverage(&mut git, reviewed, "sh", "l1"),
+            Ok(Coverage::Exact)
+        );
+        git.commit("m2", &["m1", "l1"], &[]);
+        assert_eq!(
+            coverage(&mut git, reviewed, "sh", "m2"),
+            Ok(Coverage::Exact)
+        );
     }
 }

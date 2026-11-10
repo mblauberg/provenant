@@ -424,6 +424,51 @@ mod tests {
         );
         Ok(())
     }
+    /// A receipt whose proof cannot be read at revalidation withdraws its pull
+    /// request from publication, with the reason; the provable one stays.
+    #[test]
+    fn revalidation_excludes_a_receipt_whose_proof_cannot_be_read() -> Result<(), LandingError> {
+        use crate::pr::landing::{approval::Approvals, fakes::FakeReviews, ports::ReviewRecord};
+        use provenant_cli::domains::ApprovalSource;
+        let mut forge = FakeForge::default();
+        prepare(&mut forge);
+        forge.approvals_at_head.clear();
+        let mut repo = FakeRepo::default();
+        for (commit, parents) in [
+            ("base", vec!["fork"]),
+            ("head-1", vec!["fork"]),
+            ("reviewed-2", vec!["fork"]),
+            // PR 2 merged the target into its reviewed head; its tree is unreadable.
+            ("head-2", vec!["reviewed-2", "base"]),
+        ] {
+            repo.parents
+                .insert(commit.into(), parents.into_iter().map(Into::into).collect());
+        }
+        let record = |number: u64, head: &str| ReviewRecord {
+            reference: format!("approval-{number}"),
+            reviewer: "reviewer".into(),
+            head: head.into(),
+            base: "fork".into(),
+        };
+        let reviews = FakeReviews(std::collections::BTreeMap::from([
+            (1, vec![record(1, "head-1")]),
+            (2, vec![record(2, "reviewed-2")]),
+        ]));
+        let c = candidate();
+        let excluded = revalidate_with_reasons(
+            &mut forge,
+            &mut Approvals::new(ApprovalSource::Receipt, &reviews).at(&mut repo, "base"),
+            &c,
+        )?;
+        assert_eq!(excluded.len(), 1, "{excluded:?}");
+        assert_eq!(excluded[0].0, c.steps[1].pr);
+        assert!(
+            excluded[0].1.starts_with("unprovable: approval-2"),
+            "{}",
+            excluded[0].1
+        );
+        Ok(())
+    }
     #[test]
     fn fast_forward_requires_ancestry_and_expected_base() -> Result<(), LandingError> {
         let mut repo = FakeRepo {

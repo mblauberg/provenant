@@ -114,9 +114,11 @@ chair-supplied `LegBlocker` and `user_approval` references.
 
 A receipt records the chair's decision about its subject. An accepted PR
 receipt can stand as landing approval when the host sets `land.approval =
-"receipt"`: the lander accepts the reviewed head, or a later head that Git
-proves carries the reviewed delta unchanged against the base the receipt
-recorded. A changed subject resets the decision and needs fresh review. Each save
+"receipt"`: the lander accepts the reviewed head on the base the receipt
+recorded, or a head that Git proves carries the reviewed delta unchanged
+forward from that base. An unchanged head whose base moved off the recorded
+base, such as a stacked PR retargeted past the branch below it, needs a new
+receipt. A changed subject resets the decision and needs fresh review. Each save
 rechecks derived risk against the effective policy and recorded changed paths.
 A downgrade uses a chair record with actor, evidence and a nonblank reason of
 at most 4096 bytes, stored alongside the path snapshot. Routing compiles the
@@ -135,9 +137,10 @@ the reason; an ordinary save warns, keeps the chosen tier and records no
 paths. Terminal saves need no diff. Review reports never query GitHub: they
 validate recorded paths against the effective policy. A downgraded receipt
 without recorded paths must be re-saved with `workflow receipt save`. A
-receipt of a retired schema version is reported as `receipt shape retired:
-save it again` by every reader, and a save at its revision replaces it with
-the next revision. Non-PR
+receipt of a retired schema version approves nothing. Receipt reads and
+landing's receipt approval report it as `receipt shape retired: save it
+again`; telemetry counts it as not accepted, as it does any unreadable
+receipt. A save at its revision replaces it with the next revision. Non-PR
 subjects have no diffable commits, so downgrades are refused without changing
 ordinary tier selection. Any path matching an effective crucial or terminal floor
 refuses the downgrade and names the path; owners may remove or lower bundled

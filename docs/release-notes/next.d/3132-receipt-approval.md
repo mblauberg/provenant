@@ -1,7 +1,7 @@
 ## Behaviour changes
 ### Commands
 
-- `provenant land` takes `land.approval = "receipt"` to let an accepted delivery receipt stand as a pull request's approval. A merge-in from the target or a rebase with an unchanged delta keeps the review; any other change needs a new receipt. The graph land node accepts the same carried-over heads. (#3132)
+- `provenant land` takes `land.approval = "receipt"` to let an accepted delivery receipt stand as a pull request's approval. A merge-in from the target or a rebase with an unchanged delta keeps the review; any other change, including a stacked pull request retargeted past the branch below it, needs a new receipt. The graph land node accepts the same carried-over heads. (#3132)
 
 ## Breaking changes
 

@@ -72,9 +72,11 @@ forge's. The receipt's pull request subject records the reviewed head `H` and
 base `B`, which the save reads from the forge as the head's merge base with the
 branch the pull request merges into; for a stack member `B` is the head of the
 branch below. Receipts are matched by repository and pull request number. A head `H'`
-keeps the review when `H' == H`, or when, with `B'` the merge base of `H'` and
-the fetched target, `B` is an ancestor of `B'`, `B'` is an ancestor of the
-target and `tree(H')` equals `merge_tree(H, B')`. Selection, revalidation
+keeps the review when, with `B'` the merge base of `H'` and the fetched
+target, `H' == H` and `B' == B`, or `B` is an ancestor of `B'`, `B'` is an
+ancestor of the target and `tree(H')` equals `merge_tree(H, B')`. An unchanged
+head is held to the base too: a stack member retargeted past the branch below
+it brings that branch's unreviewed changes into its diff, so it fails. Selection, revalidation
 before and during publication, recovery and the post-merge approval recheck all
 apply this proof against the target they already read; a head that fails it is
 excluded and never merged. A record whose proof cannot be read excludes only

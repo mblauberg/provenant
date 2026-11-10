@@ -980,6 +980,9 @@ mod tests {
         repo.parents
             .insert(target.clone(), vec![reviewed_base.clone()]);
         let reviewed = |n: u64| format!("{:040x}", 0xa0 + n);
+        // PR 1's head is the reviewed head, on the reviewed base.
+        repo.parents
+            .insert(format!("{:040x}", 1), vec![reviewed_base.clone()]);
         for n in [2, 3] {
             let head = format!("{n:040x}");
             repo.parents
@@ -1060,6 +1063,10 @@ mod tests {
         // PR 2 merged the target into its reviewed head; its tree is unreadable.
         repo.parents
             .insert(format!("{:040x}", 2), vec![reviewed.clone(), target]);
+        for n in [1, 3] {
+            repo.parents
+                .insert(format!("{n:040x}"), vec![reviewed_base.clone()]);
+        }
         let record = |n: u64, head: String| ReviewRecord {
             reference: format!("delivery-{n}"),
             reviewer: "reviewer".into(),
@@ -1092,6 +1099,49 @@ mod tests {
             "{}",
             report.exclusion_reasons[&2]
         );
+        Ok(())
+    }
+
+    /// PR 1 was reviewed at its current head against the head of the branch
+    /// below it, then retargeted past that branch. The head is unchanged but
+    /// the lower branch's changes were never reviewed, so the record does not
+    /// approve it.
+    #[test]
+    fn a_receipt_does_not_approve_its_head_once_the_base_leaves_the_reviewed_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
+        forge.approvals_at_head.clear();
+        let fork = "b".repeat(40);
+        let lower = "c".repeat(40);
+        let head = forge.pull_requests[&1].head.clone();
+        repo.parents.insert(repo.target.clone(), vec![fork.clone()]);
+        repo.parents.insert(lower.clone(), vec![fork]);
+        repo.parents.insert(head.clone(), vec![lower.clone()]);
+        let reviews = FakeReviews(BTreeMap::from([(
+            1,
+            vec![ReviewRecord {
+                reference: "delivery-1".into(),
+                reviewer: "reviewer".into(),
+                head,
+                base: lower,
+            }],
+        )]));
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
+        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
         Ok(())
     }
 

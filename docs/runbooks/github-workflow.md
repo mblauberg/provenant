@@ -300,8 +300,10 @@ the base, which is the head's merge base with the branch the pull request
 merges into (for a stacked pull request, the head of the branch below). The
 changed paths and their risk floors come from that base, so a receipt for a
 delta review still covers the whole pull request. The lander proves each head
-against the fetched target: the reviewed head itself, a merge-in from the
-target, or a rebase with an unchanged delta keeps the review; any other change
+against the fetched target: the reviewed head on the reviewed base, a
+merge-in from the target, or a rebase with an unchanged delta keeps the
+review. An unchanged head retargeted past the branch below it does not,
+because that branch's changes were never reviewed; any other change
 excludes the pull request until a new receipt covers it. A receipt whose proof
 cannot be read excludes only its pull request, as `unprovable`, and one saved
 before this shape is reported as `receipt shape retired: save it again`. Forge rules
