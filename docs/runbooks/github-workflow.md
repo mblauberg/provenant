@@ -292,6 +292,17 @@ needs `post_merge.bisect` to name a culprit. Unknown cost never refuses;
 `budget.cap_micros` refuses only priced spend. For a migration from a bespoke lander, see
 [landing migration](landing-migration.md).
 
+`approval_tier` sets how much approval a pull request needs: `none` is CI
+only, `carry` is the receipt rules below, and `delta` also wants a review of
+every change after the review. `auto`, the default, is `none` for a pull
+request that touches only tests, docs or review-exempt paths and `carry`
+otherwise. Single and batch landing decide alike. A change after a review that
+touches only tests, docs or review-exempt paths keeps it, and the landing
+receipt lists the paths. Any other change needs a review of just that delta:
+save a receipt whose `subject` adds `delta_from`, the reviewed head, so its base
+is that head. `provenant land N --accept-delta REASON` lands without one; it
+warns and records the reason and your forge login in the receipt.
+
 `approval` names what stands as a pull request's approval. `forge`, the
 default, needs an approving forge review at the head. `receipt` takes an
 accepted delivery receipt for the pull request instead; this repository's

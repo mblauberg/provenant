@@ -509,6 +509,12 @@ impl Forge for GhForge {
             rest_pull(&|argv| self.reader().read(argv), &number.to_string()).map_err(failed)?;
         Ok(pull_info(number, pull))
     }
+    fn actor(&mut self) -> Result<String, LandingError> {
+        self.json("user")?["login"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| LandingError::Failed("the forge reported no login".into()))
+    }
     fn target_branch(&mut self) -> Result<String, LandingError> {
         self.json("repos/{owner}/{repo}")?["default_branch"]
             .as_str()
@@ -1102,6 +1108,20 @@ impl Repo for GitRepo<'_> {
                 "git merge-base failed: {error}"
             ))),
         }
+    }
+    fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError> {
+        let (code, out, error) = self.exit(&[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            object_id(from)?,
+            object_id(to)?,
+        ])?;
+        if code != 0 {
+            return Err(LandingError::Failed(format!("git diff failed: {error}")));
+        }
+        Ok(out.split_terminator('\0').map(str::to_owned).collect())
     }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.ensure(commit)?;

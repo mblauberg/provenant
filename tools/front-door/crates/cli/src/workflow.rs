@@ -270,13 +270,17 @@ enum DecisionInput {
 }
 /// What a save names as its subject. A pull request is named by its number
 /// and reviewed head only: the edge reads its repository and reviewed base
-/// from the forge, and ignores any the request carries.
+/// from the forge, and ignores any the request carries. `delta_from` names the
+/// reviewed head a review of only the changes since reads the head against,
+/// in place of the head's merge base with the branch it merges into.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SubjectRequest {
     Pr {
         number: u64,
         head: provenant_core::GitOid,
+        #[serde(default)]
+        delta_from: Option<provenant_core::GitOid>,
     },
     Document {
         #[serde(flatten)]
@@ -878,8 +882,9 @@ fn with_git_reads<T>(
 
 /// The subject a save records. The request names a pull request and its
 /// head; the forge and the checkout supply its repository and the base its
-/// head was read against, so a request can neither choose the paths a
-/// review covers nor the repository it approves in. A stored subject at the
+/// head was read against, so a request cannot choose the repository it
+/// approves in. Only a delta review names its base, the reviewed head, and
+/// landing honours it only when a review that covers that head stands. A stored subject at the
 /// same head was resolved by an earlier save and is kept.
 fn resolve_subject(
     cwd: &Path,
@@ -887,8 +892,12 @@ fn resolve_subject(
     stored: Option<&DeliveryReceipt>,
     cancel: &CancelToken,
 ) -> Result<Subject, Error> {
-    let (number, head) = match request {
-        SubjectRequest::Pr { number, head } => (number, head),
+    let (number, head, delta_from) = match request {
+        SubjectRequest::Pr {
+            number,
+            head,
+            delta_from,
+        } => (number, head, delta_from),
         SubjectRequest::Document {
             extra,
             path,
@@ -902,7 +911,8 @@ fn resolve_subject(
         }
     };
     if let Some(receipt) = stored
-        && matches!(receipt.subject(), Subject::Pr { number: n, head: h, .. } if *n == number && *h == head)
+        && matches!(receipt.subject(), Subject::Pr { number: n, head: h, base, .. }
+            if *n == number && *h == head && delta_from.is_none_or(|from| from == *base))
     {
         return Ok(receipt.subject().clone());
     }
@@ -911,8 +921,11 @@ fn resolve_subject(
     if pull.head != head {
         return Err(invalid("PR head differs from receipt subject"));
     }
-    let base = with_git_reads(cwd, cancel, |read| reviewed_base(pull.base_tip, head, read))
-        .map_err(|e| invalid(format!("cannot establish the PR's base: {e}")))?;
+    let base = match delta_from {
+        Some(from) => from,
+        None => with_git_reads(cwd, cancel, |read| reviewed_base(pull.base_tip, head, read))
+            .map_err(|e| invalid(format!("cannot establish the PR's base: {e}")))?,
+    };
     Ok(Subject::Pr {
         extra: Default::default(),
         repository: pull.repository,

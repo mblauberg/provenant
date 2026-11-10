@@ -62,6 +62,9 @@ impl Forge for FakeForge {
     fn target_branch(&mut self) -> Result<String, LandingError> {
         Ok(self.target_branch.clone())
     }
+    fn actor(&mut self) -> Result<String, LandingError> {
+        Ok("chair".into())
+    }
     fn head(&mut self, number: u64) -> Result<String, LandingError> {
         if let Some(head) = self
             .head_reads
@@ -235,6 +238,8 @@ pub struct FakeRepo {
     pub conflicts: BTreeSet<(String, String)>,
     pub refs: BTreeMap<String, String>,
     pub trees: BTreeMap<String, String>,
+    /// Paths between two commits or trees; any other pair changes `src/lib.rs`.
+    pub paths: BTreeMap<(String, String), Vec<String>>,
     pub parents: BTreeMap<String, Vec<String>>,
     pub pushes: Vec<(String, String, Option<String>)>,
     pub push_attempts: Vec<String>,
@@ -365,6 +370,13 @@ impl Repo for FakeRepo {
             }
         }
         Ok(false)
+    }
+    fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError> {
+        Ok(self
+            .paths
+            .get(&(from.to_owned(), to.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| vec!["src/lib.rs".into()]))
     }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.trees

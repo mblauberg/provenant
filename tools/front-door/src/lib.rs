@@ -1149,6 +1149,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             batch,
             shadow,
             tier,
+            accept_delta,
         } => pr::landing::run(
             pr::landing::Options {
                 numbers,
@@ -1159,6 +1160,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 batch,
                 shadow,
                 tier,
+                accept_delta,
             },
             globals,
             process.workers(),

@@ -8,7 +8,7 @@ use super::{
     ports::{AlarmSink, Forge, GateRunner, Repo},
     publish, receipt, reconcile, split,
 };
-use provenant_cli::domains::{ApprovalSource, LandSettings};
+use provenant_cli::domains::LandSettings;
 use std::collections::{BTreeMap, VecDeque};
 
 pub struct Request<'a> {
@@ -38,13 +38,25 @@ fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<Strin
     }
 }
 
-/// The fetched target a review record is proved against. A forge approval is
-/// bound to the head alone and needs none.
+/// The fetched target a review record or a pull request's paths are read
+/// against. A forge approval of a set tier is bound to the head alone and
+/// needs none.
 fn approval_target(repo: &mut dyn Repo, request: &Request<'_>) -> Result<String, LandingError> {
-    match request.approvals.source() {
-        ApprovalSource::Forge => Ok(String::new()),
-        ApprovalSource::Receipt => fetch_target(repo, request.target, request.shadow),
+    if request.approvals.needs_target() {
+        fetch_target(repo, request.target, request.shadow)
+    } else {
+        Ok(String::new())
     }
+}
+
+/// The warning for a pull request landed on the chair's word.
+pub(super) fn accepted_warning(pr: &EligiblePr) -> Option<String> {
+    pr.accepted.as_ref().map(|accepted| {
+        format!(
+            "warning: pull request #{} lands without a review covering its delta; accepted by {}: {}",
+            pr.number, accepted.actor, accepted.reason
+        )
+    })
 }
 
 fn cleanup_unpublished<T>(
@@ -218,6 +230,8 @@ fn run_inner(
                 number,
                 head: info.head,
                 approval: String::new(),
+                carried_paths: Vec::new(),
+                accepted: None,
                 base_branch: info.base_branch,
             };
             report.outcomes.insert(number, Outcome::Landed);
@@ -241,6 +255,9 @@ fn run_inner(
             request.settings.batch_wait_seconds,
         )?;
         report.exclusion_reasons.extend(reasons);
+        report
+            .warnings
+            .extend(selected.iter().filter_map(accepted_warning));
         for number in numbers {
             if !selected.iter().any(|pr| pr.number == *number) {
                 report.outcomes.entry(*number).or_insert(Outcome::Excluded);
@@ -687,7 +704,7 @@ fn run_inner(
 mod tests {
     use super::*;
     use crate::pr::landing::fakes::{FakeAlarms, FakeForge, FakeGate, FakeRepo};
-    use provenant_cli::domains::LandOverride;
+    use provenant_cli::domains::{ApprovalSource, LandOverride};
     use std::collections::BTreeMap;
 
     #[test]
@@ -1921,6 +1938,8 @@ mod tests {
                         number: 1,
                         head: pr.head.clone(),
                         approval: "approval-1".into(),
+                        carried_paths: Vec::new(),
+                        accepted: None,
                         base_branch: "main".into(),
                     },
                     commit: "candidate".into(),
@@ -1999,6 +2018,8 @@ mod tests {
                         number: 1,
                         head: pr.head.clone(),
                         approval: "approval-1".into(),
+                        carried_paths: Vec::new(),
+                        accepted: None,
                         base_branch: "main".into(),
                     },
                     commit: "candidate".into(),
@@ -2079,6 +2100,8 @@ mod tests {
                     number: 1,
                     head: head.clone(),
                     approval: "approval-1".into(),
+                    carried_paths: Vec::new(),
+                    accepted: None,
                     base_branch: "main".into(),
                 },
                 commit: "candidate".into(),
@@ -2204,6 +2227,8 @@ mod tests {
                         number,
                         head: forge.pull_requests[&number].head.clone(),
                         approval: format!("approval-{number}"),
+                        carried_paths: Vec::new(),
+                        accepted: None,
                         base_branch: "main".into(),
                     },
                     commit: format!("step-{number}"),
@@ -2295,6 +2320,8 @@ mod tests {
                     number: 1,
                     head: head.clone(),
                     approval: "approval-1".into(),
+                    carried_paths: Vec::new(),
+                    accepted: None,
                     base_branch: "main".into(),
                 },
                 commit: "candidate".into(),
@@ -2367,6 +2394,8 @@ mod tests {
                 number: 1,
                 head: forge.pull_requests[&1].head.clone(),
                 approval: "revoked".into(),
+                carried_paths: Vec::new(),
+                accepted: None,
                 base_branch: "main".into(),
             },
             commit: "candidate".into(),
@@ -2452,6 +2481,8 @@ mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
+                    carried_paths: Vec::new(),
+                    accepted: None,
                     base_branch: "main".into(),
                 },
                 commit: format!("step-{n}"),
@@ -2510,6 +2541,8 @@ mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
+                    carried_paths: Vec::new(),
+                    accepted: None,
                     base_branch: "main".into(),
                 },
                 commit: format!("step-{n}"),
@@ -2584,6 +2617,8 @@ mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
+                    carried_paths: Vec::new(),
+                    accepted: None,
                     base_branch: "main".into(),
                 },
                 commit: format!("step-{n}"),
@@ -2673,6 +2708,8 @@ mod tests {
                     number: n,
                     head: forge.pull_requests[&n].head.clone(),
                     approval: format!("approval-{n}"),
+                    carried_paths: Vec::new(),
+                    accepted: None,
                     base_branch: "main".into(),
                 },
                 commit: format!("step-{n}"),
@@ -2779,6 +2816,8 @@ mod tests {
                         number,
                         head: pr.head.clone(),
                         approval: format!("approval-{number}"),
+                        carried_paths: Vec::new(),
+                        accepted: None,
                         base_branch: "main".into(),
                     },
                     commit: commit.into(),

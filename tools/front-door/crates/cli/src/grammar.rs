@@ -125,6 +125,9 @@ pub enum Command {
         /// Show the resolved landing policy without landing
         #[arg(long)]
         explain: bool,
+        /// Land a delta no review covers, recording this reason and who accepted it
+        #[arg(long, value_name = "REASON")]
+        accept_delta: Option<String>,
     },
     /// Read graph, node or attempt output
     #[command(add = crate::metadata::CoreCommand(2, "provenant output ID"))]

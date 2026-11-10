@@ -176,7 +176,8 @@ Accepted by every command, before or after the subcommand.
         "head",
         "wait",
         "poll",
-        "explain"
+        "explain",
+        "accept_delta"
       ],
       "multiple": true,
       "name": "Land",

@@ -118,7 +118,13 @@ receipt can stand as landing approval when the host sets `land.approval =
 recorded, or a head that Git proves carries the reviewed delta unchanged
 forward from that base. An unchanged head whose base moved off the recorded
 base, such as a stacked PR retargeted past the branch below it, needs a new
-receipt. A changed subject resets the decision and needs fresh review. Each save
+receipt, unless every path changed since touches only tests, docs or
+review-exempt paths, or a receipt reviews only the delta: its subject is the new
+head and its base, named by `delta_from`, is a head an earlier receipt covers.
+`land --accept-delta REASON` lands a changed delta no receipt covers and records
+the reason and actor. `land.approval_tier` (`auto`, `none`, `carry`, `delta`)
+sets how much approval a PR needs; single and batch landing decide alike. A
+changed subject resets the decision and needs fresh review. Each save
 rechecks derived risk against the effective policy and recorded changed paths.
 A downgrade uses a chair record with actor, evidence and a nonblank reason of
 at most 4096 bytes, stored alongside the path snapshot. Routing compiles the

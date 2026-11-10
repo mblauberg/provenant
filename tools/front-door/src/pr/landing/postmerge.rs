@@ -1,6 +1,6 @@
 use super::{
     LandingError,
-    approval::Approvals,
+    approval::{Approvals, Decision},
     model::*,
     ports::{AlarmSink, Forge, GateRunner, Repo},
 };
@@ -206,9 +206,10 @@ fn follow_with(
     // Approvals must still stand at the approved head after publication,
     // proved against the target the candidate was built on.
     for pr in receipt.pull_requests.clone() {
-        let standing = approvals
-            .standing(forge, repo, pr.number, &pr.head, &receipt.base)?
-            .includes(&pr.approval);
+        let standing = matches!(
+            approvals.at(repo, &receipt.base).decide(forge, pr.number, &pr.head, "")?,
+            Decision::Approved(approved) if approved.reference == pr.approval
+        );
         if !standing {
             let message = format!(
                 "approval {} for pull request {} is no longer present at {}",
@@ -449,6 +450,8 @@ mod tests {
                 number: n,
                 head: format!("h{n}"),
                 approval: format!("a{n}"),
+                carried_paths: Vec::new(),
+                accepted: None,
                 base_branch: "main".into(),
             };
             forge.approvals_at_head.insert(

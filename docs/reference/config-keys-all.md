@@ -74,6 +74,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `batch_size` | 8 | Maximum pull requests in a batch. (1 or more). |
 | `batch_wait_seconds` | 30 | Maximum batch collection time. (0 or more seconds). |
 | `approval` | forge | What approves a pull request for batch landing: an independent forge review of its head, or an accepted Provenant delivery receipt whose review covers the head, carried over a merge-in or an unchanged rebase. Forge rules still apply at merge. (forge or receipt). |
+| `approval_tier` | auto | What approval a pull request needs. none: CI only. carry: a review that still covers the head, a change after it that touches only tests, docs or review-exempt paths, or a review of the delta since. delta: as carry, but every change after the review needs its own review. auto is none for a pull request that touches only tests, docs or review-exempt paths, and carry otherwise. (auto, none, carry or delta). |
 | `candidate_ref_prefix` | land/ | Prefix for temporary candidate refs. (valid Git ref prefix). |
 | `publish_settle_seconds` | 30 | Time to wait before observing an unresolved publication again. (0 or more seconds). |
 | `publish_unknown_warn_seconds` | 3600 | Warn when a publication remains unknown for this long. (0 or more seconds). |
@@ -107,6 +108,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `projects.{project}.batch_size` | inherited | Override batch_size for this project; omitted fields inherit lower layers. (1 or more). |
 | `projects.{project}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
 | `projects.{project}.approval` | inherited | Override approval for this project; omitted fields inherit lower layers. (forge or receipt). |
+| `projects.{project}.approval_tier` | inherited | Override approval_tier for this project; omitted fields inherit lower layers. (auto, none, carry or delta). |
 | `projects.{project}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this project; omitted fields inherit lower layers. (valid Git ref prefix). |
 | `projects.{project}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
 | `projects.{project}.publish_unknown_warn_seconds` | inherited | Override publish_unknown_warn_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
@@ -140,6 +142,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `tiers.{tier}.batch_size` | inherited | Override batch_size for this risk tier; omitted fields inherit lower layers. (1 or more). |
 | `tiers.{tier}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
 | `tiers.{tier}.approval` | inherited | Override approval for this risk tier; omitted fields inherit lower layers. (forge or receipt). |
+| `tiers.{tier}.approval_tier` | inherited | Override approval_tier for this risk tier; omitted fields inherit lower layers. (auto, none, carry or delta). |
 | `tiers.{tier}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this risk tier; omitted fields inherit lower layers. (valid Git ref prefix). |
 | `tiers.{tier}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
 | `tiers.{tier}.publish_unknown_warn_seconds` | inherited | Override publish_unknown_warn_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |

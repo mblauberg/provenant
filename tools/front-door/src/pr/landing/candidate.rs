@@ -1,6 +1,6 @@
 use super::{
     LandingError,
-    approval::Approver,
+    approval::{Approver, Decision},
     model::*,
     ports::{Forge, MergeTree, PullRequestState, Repo},
 };
@@ -128,25 +128,23 @@ pub fn select_batch_with_reasons(
                 reasons.insert(number, "pull request author is missing".into());
                 continue;
             }
-            let standing = approver.approvals(forge, number, &info.head)?;
-            let approval = standing.approvals.iter().find(|approval| {
-                !approval.reference.is_empty() && approver.independent(approval, &info.author)
-            });
-            if let Some(approval) = approval {
-                selected.push(EligiblePr {
-                    number,
-                    head: info.head,
-                    approval: approval.reference.clone(),
-                    base_branch: info.base_branch,
-                });
-                if selected.len() == limit {
-                    break;
+            match approver.decide(forge, number, &info.head, &info.author)? {
+                Decision::Approved(approved) => {
+                    selected.push(EligiblePr {
+                        number,
+                        head: info.head,
+                        approval: approved.reference,
+                        base_branch: info.base_branch,
+                        carried_paths: approved.carried,
+                        accepted: approved.accepted,
+                    });
+                    if selected.len() == limit {
+                        break;
+                    }
                 }
-            } else {
-                reasons.insert(
-                    number,
-                    standing.exclusion("no independent approval for the current head"),
-                );
+                Decision::Refused(reason) => {
+                    reasons.insert(number, reason);
+                }
             }
         }
         if selected.len() == limit
@@ -442,6 +440,8 @@ mod tests {
                 number,
                 head: format!("{number:040x}"),
                 approval: "approved".into(),
+                carried_paths: Vec::new(),
+                accepted: None,
                 base_branch: "main".into(),
             })
             .collect();

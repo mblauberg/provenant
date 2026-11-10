@@ -31,6 +31,11 @@ fn rig() -> Result<TestRig> {
         rig.project.join("checks.json"),
         r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#,
     )?;
+    // The fake forge has no reviews or target to read, so land on CI alone.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\napproval_tier = 'none'\n",
+    )?;
     Ok(rig)
 }
 #[path = "support/rest_calls.rs"]
@@ -473,7 +478,7 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
     );
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.pr.land]\nbatch_wait_seconds = 0\n",
+        "schema_version = 1\n[domains.pr.land]\napproval_tier = 'carry'\nbatch_wait_seconds = 0\n",
     )?;
     let output = rig.command(&["land", "1668", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;

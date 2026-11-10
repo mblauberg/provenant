@@ -200,11 +200,21 @@ A verdict covers the diff it read: the head it judged against the base recorded
 for it. Every gate, landing included, accepts a head only when it is that head
 or Git proves it carries the same delta unchanged: a merge-in from the target,
 or a rebase whose tree equals the reviewed head merged onto the new base. Such a
-head needs only CI, and candidate CI covers the landing head. Any other later
-commit, including repairs and conflict resolutions, needs review of its delta,
-or a full re-plan when risk or scope expanded; a verdict with no recorded base
-covers only its own head. A pull request's base comes from the forge, so a
-receipt for a delta review still covers every path the pull request changes.
+head needs only CI, and candidate CI covers the landing head. A later change
+that touches only tests, docs or review-exempt paths keeps the verdict too, and
+the landing receipt lists those paths. Any other later commit, including repairs
+and conflict resolutions, needs a review of only that delta, from the reviewed
+head to the new head, which can run at junior tier, or a full re-plan when risk
+or scope expanded; the chair may land it unreviewed with
+`land --accept-delta REASON`, which warns and records the reason and actor in
+the receipt. A verdict with no recorded base covers only its own head. Landing
+tiers set the approval a pull request needs: `none` is CI only, `carry` is the
+rules above, `delta` also reviews every later change; `auto`, the default, is
+`none` for a pull request that touches only tests, docs or review-exempt paths
+and `carry` otherwise, and `land.approval_tier` overrides it. Single-pull-request
+and batch landing apply the same rules. A pull request's base comes from the
+forge, so a receipt for a full review still covers every path the pull request
+changes; a delta review names its base, the reviewed head, with `delta_from`.
 
 A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
 lenses that raised them, checking closure and relevant tests. After three repair
