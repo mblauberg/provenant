@@ -232,6 +232,9 @@ squash-only equivalence, does not.
   registered linked worktrees. With no project entry, a root `Cargo.toml`
   defaults it to `["target"]`; other projects default to empty. An explicit
   entry overrides the default.
+- Provenant's own lane scratch, `.provenant/scratch`, is always regenerable
+  when Git reports it ignored, in addition to `regenerable`. Removing a worktree
+  whose only ignored output is that scratch needs no declaration.
 - `keep` lists worktree-relative paths. They, their descendants and any matching
   directory containing them are preserved, as are tracked paths. `.git`,
   `.worktrees`, absolute names and parent traversal are refused. Declared output
