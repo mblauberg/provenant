@@ -48,7 +48,8 @@ mod tests {
         .unwrap();
         raw.merge(later);
         assert_eq!(
-            raw.cache_creation.and_then(|split| split.ephemeral_1h_input_tokens),
+            raw.cache_creation
+                .and_then(|split| split.ephemeral_1h_input_tokens),
             Some(7)
         );
     }
