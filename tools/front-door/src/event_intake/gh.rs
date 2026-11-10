@@ -124,7 +124,24 @@ impl Forge for Gh {
             argv.extend(["-H".into(), format!("If-None-Match:{etag}").into()]);
         }
         argv.push(path.into());
-        let mut environment: Vec<_> = std::env::vars_os()
+        let cwd = match &self.cwd {
+            Some(cwd) => cwd.clone(),
+            None => std::env::current_dir()?,
+        };
+        // The CI observer draws on the App's quota, not the user's, when an
+        // App is configured for this checkout.
+        let argv_text: Vec<String> = argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let argv_refs: Vec<&str> = argv_text.iter().map(String::as_str).collect();
+        let app = self
+            .cwd
+            .as_ref()
+            .and_then(|cwd| crate::pr::app_identity::environment(cwd, &argv_refs));
+        let mut environment: Vec<_> = app
+            .unwrap_or_else(|| std::env::vars_os().collect())
+            .into_iter()
             .filter(|(key, _)| {
                 key != "PROVENANT_INTAKE_SECRET" && !(self.path.is_some() && key == "PATH")
             })
@@ -132,10 +149,6 @@ impl Forge for Gh {
         if let Some(path) = &self.path {
             environment.push(("PATH".into(), path.into()));
         }
-        let cwd = match &self.cwd {
-            Some(cwd) => cwd.clone(),
-            None => std::env::current_dir()?,
-        };
         let timeout = self.timeout.unwrap_or(Duration::from_secs(60));
         let mut options = ExecOptions::new(&argv, &cwd, timeout);
         options.env = Some(&environment);

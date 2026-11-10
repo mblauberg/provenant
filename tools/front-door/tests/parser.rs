@@ -452,7 +452,8 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     let compact = schema["data"]["fields"]
         .as_array()
         .ok_or("compact fields")?;
-    assert!(compact.len() <= 40);
+    // 41: the compact surface gained `lanes.github_request_budget`.
+    assert!(compact.len() <= 41);
     assert!(
         !compact
             .iter()

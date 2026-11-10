@@ -967,6 +967,7 @@ impl Driver<'_> {
         let mut slot_extended_ms = 0_u64;
         let mut budget_warned = false;
         let mut budget_stop_sent = false;
+        let mut gh_budget_stop_sent = false;
         let mut context_stop_sent = false;
         let spawn_result = self.spawn_provider(
             argv,
@@ -1281,12 +1282,19 @@ impl Driver<'_> {
                 && !budget_stop_sent
                 && !terminal
                 && exit.is_none();
+            let gh_requests = count_gh_requests(&self.attempt);
+            let over_gh_budget = plan.github_request_budget > 0
+                && gh_requests > plan.github_request_budget
+                && !gh_budget_stop_sent
+                && !terminal
+                && exit.is_none();
             let context_reached = context_handoff_due(
                 plan.context_handoff,
                 out_events.context().or_else(|| err_events.context()),
             ) && !context_stop_sent
                 && !budget_stop_sent
                 && !over_budget
+                && !over_gh_budget
                 && !terminal
                 && exit.is_none();
             let event = if signal {
@@ -1300,6 +1308,7 @@ impl Driver<'_> {
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
                     machine::StopReason::TokenBudget => Event::TokenBudget,
                     machine::StopReason::ContextHandoff => Event::ContextHandoff,
+                    machine::StopReason::GithubRequestBudget => Event::GithubRequestBudget,
                     machine::StopReason::WallDeadline
                     | machine::StopReason::PostTerminalCleanup
                         if state.stop_attempts().iter().any(|attempt| {
@@ -1315,6 +1324,9 @@ impl Driver<'_> {
             } else if over_budget {
                 budget_stop_sent = true;
                 Event::TokenBudget
+            } else if over_gh_budget {
+                gh_budget_stop_sent = true;
+                Event::GithubRequestBudget
             } else if context_reached {
                 context_stop_sent = true;
                 warn(
@@ -2454,6 +2466,22 @@ fn stream_policy(
             sink: sink.unwrap_or(&ClosedTee),
         },
     }
+}
+
+pub fn count_gh_requests(attempt: &Directory) -> u64 {
+    let Ok(scratch) = attempt.open_verified_directory(std::ffi::OsStr::new("scratch")) else {
+        return 0;
+    };
+    let Ok(mut file) = scratch.open_read(std::ffi::OsStr::new("gh-requests")) else {
+        return 0;
+    };
+    let mut bytes = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+    let mut count = bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        count += 1;
+    }
+    count
 }
 
 #[cfg(test)]

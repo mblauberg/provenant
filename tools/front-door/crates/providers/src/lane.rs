@@ -486,6 +486,11 @@ fn install_git(
     Ok(())
 }
 
+/// One line per gh invocation, appended beside `bin/`, counted by the host
+/// against `lanes.github_request_budget`. A failed append never blocks gh.
+const GH_REQUEST_COUNT: &str =
+    "printf 'x\\n' >> \"$(dirname \"$0\")/../gh-requests\" 2>/dev/null || :\n";
+
 fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy) -> String {
     let mut guard = String::new();
     for verb in &policy.deny_verbs {
@@ -513,7 +518,7 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
         guard.push_str("      case \"$value\" in *,*) value=${value#*,} ;; *) break ;; esac\n    done\n    shift\n  done\n}\ncheck_labels \"$@\"\n");
     }
     format!(
-        "#!/bin/sh\n{guard}GH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\nexec {} \"$@\"\n",
+        "#!/bin/sh\n{guard}GH_CONFIG_DIR={gh_config}\nexport GH_CONFIG_DIR\n{GH_REQUEST_COUNT}exec {} \"$@\"\n",
         shell_quote(gh)
     )
 }
@@ -1741,6 +1746,33 @@ mod tests {
     }
 
     #[test]
+    fn gh_wrapper_logs_one_line_per_request_beside_bin() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+        let temp = tempfile::tempdir()?;
+        fs::create_dir(temp.path().join("bin"))?;
+        let shim = temp.path().join("bin/gh");
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
+        let policy = provenant_config::GithubPolicy::default();
+        fs::write(
+            &shim,
+            gh_wrapper(real_gh.to_str().unwrap(), "'/tmp'", &policy),
+        )?;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+        let executor = SystemExecutor::new(1)?;
+        for _ in 0..3 {
+            let argv = [shim.as_os_str().to_owned(), OsString::from("api")];
+            let output =
+                executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))?;
+            assert_eq!(output.termination, Termination::Exit(0));
+        }
+        assert_eq!(fs::read(temp.path().join("gh-requests"))?, b"x\nx\nx\n");
+        Ok(())
+    }
+
+    #[test]
     fn github_policy_guards_labels_and_verb_prefixes() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
         use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
@@ -1752,6 +1784,7 @@ mod tests {
         let policy = provenant_config::GithubPolicy {
             deny_verbs: vec!["release create".into()],
             deny_labels: vec![" ci ".into(), "".into(), "needs review".into()],
+            ..Default::default()
         };
         fs::write(
             &shim,

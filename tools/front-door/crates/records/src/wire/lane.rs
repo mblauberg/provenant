@@ -34,7 +34,7 @@ lane_row! {
         state: String => string();
         exit_code: Option<i64> => nullable(integer());
         reason: Option<String> => nullable(string());
-        settlement: Option<LaneSettlement> => nullable(object(&[("reason", nullable(string()))], &[]));
+        settlement: Option<LaneSettlement> => nullable(object(&[("reason", nullable(string()))], &[("github_requests", nullable(integer()))]));
         lane_class: Option<String> => nullable(string());
         waiting_for: Option<String> => nullable(string());
         requested_route: Value => any();
@@ -175,6 +175,7 @@ pub struct LaneProjectionFacts {
     pub retained_git_objects: Option<crate::StructuredPathWire>,
     /// Retention evicted the attempt's bulk payload; its records remain.
     pub payload_evicted: bool,
+    pub github_requests: Option<u64>,
 }
 
 fn project_route(route: Option<&crate::run::RouteRecord>) -> Value {
@@ -369,6 +370,12 @@ impl LaneRow {
         let settlement =
             matches!(lane.state, AttemptState::Terminal { .. }).then_some(LaneSettlement {
                 reason: terminal_reason,
+                github_requests: facts.github_requests.or_else(|| match &lane.state {
+                    AttemptState::Terminal { extra, .. } => {
+                        extra.get("github_requests").and_then(Value::as_u64)
+                    }
+                    _ => None,
+                }),
             });
         Self {
             project_id: lane.project_id.to_string(),
@@ -476,6 +483,8 @@ impl LaneRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LaneSettlement {
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_requests: Option<u64>,
 }
 
 /// A pointer to the provider's own transcript; never a copy.
@@ -572,6 +581,7 @@ mod terminal_cause_tests {
             TerminalCause::IdentityUnobserved,
             TerminalCause::StoppedNoWork,
             TerminalCause::ContextHandoff,
+            TerminalCause::GithubRequestBudget,
         ] {
             let mut extra = crate::ExtraFields::default();
             extra.insert(

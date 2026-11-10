@@ -1377,6 +1377,12 @@ impl RunStore {
                 serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
             );
         }
+        if let Ok(attempt) = self.attempt_dir(old.run_id, id, false) {
+            let requests = provenant_supervisor::count_gh_requests(&attempt);
+            if requests > 0 {
+                terminal_extra.insert("github_requests".into(), requests.into());
+            }
+        }
         next.state = AttemptState::Terminal {
             extra: terminal_extra,
             outcome: publication.outcome,

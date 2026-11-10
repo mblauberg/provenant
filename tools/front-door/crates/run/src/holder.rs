@@ -1559,7 +1559,10 @@ impl RunStore {
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
                 Some(
-                    StopReason::WallDeadline | StopReason::TokenBudget | StopReason::ContextHandoff,
+                    StopReason::WallDeadline
+                    | StopReason::TokenBudget
+                    | StopReason::ContextHandoff
+                    | StopReason::GithubRequestBudget,
                 ) => decoded.outcome = Outcome::TimedOut,
                 Some(StopReason::ExplicitCancellation) if cancelled => {
                     decoded.outcome = Outcome::Cancelled
@@ -1608,6 +1611,24 @@ impl RunStore {
             let limit = format!(
                 "runtime deadline exceeded: provider stopped after {}s",
                 task.provider_timeout_seconds
+            );
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(detail) if detail != "provider output is partial" => {
+                    format!("{limit}; {detail}")
+                }
+                _ => limit,
+            });
+        }
+        if decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::GithubRequestBudget)
+        {
+            decoded.terminal_cause = Some(TerminalCause::GithubRequestBudget);
+            let budget = task
+                .profile
+                .knob_u64("lanes.github_request_budget")
+                .unwrap_or_else(provenant_supervisor::custody::default_github_request_budget);
+            let limit = format!(
+                "github request budget reached: provider stopped after exceeding {budget} requests"
             );
             decoded.reason = Some(match decoded.reason.take() {
                 Some(detail) if detail != "provider output is partial" => {

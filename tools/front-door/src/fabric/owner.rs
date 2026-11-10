@@ -3610,7 +3610,7 @@ impl BoundGraphOwner<'_> {
                                 AttemptState::Terminal { extra, .. }
                                     if extra.get("terminal_cause").cloned()
                                         .and_then(|value| serde_json::from_value::<provenant_records::run::TerminalCause>(value).ok())
-                                        == Some(provenant_records::run::TerminalCause::TokenBudget)
+                                        .is_some_and(|cause| matches!(cause, provenant_records::run::TerminalCause::TokenBudget | provenant_records::run::TerminalCause::GithubRequestBudget))
                             ) => AttemptOutcome::OtherFailure,
                             Outcome::TimedOut if node.deadline_seconds.is_some() => {
                                 AttemptOutcome::DeadlineExceeded

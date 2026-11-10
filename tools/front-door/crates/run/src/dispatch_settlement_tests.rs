@@ -843,6 +843,67 @@ fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
     Ok(())
 }
 #[test]
+fn a_lane_over_its_github_budget_stops_with_the_budget_cause_and_settles_the_count() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
+    let _ = dir.mkdir(std::ffi::OsStr::new("scratch"), 0o700);
+    let scratch = dir.open_verified_directory(std::ffi::OsStr::new("scratch"))?;
+    std::io::Write::write_all(
+        &mut scratch.create_new(std::ffi::OsStr::new("gh-requests"))?,
+        "x\n".repeat(7).as_bytes(),
+    )?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.termination = Some(Termination::Signal(15));
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::GithubRequestBudget);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Failed),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        extra,
+        outcome,
+        reason,
+        ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::TimedOut);
+    assert_eq!(
+        extra.get("terminal_cause"),
+        Some(&serde_json::json!(
+            provenant_records::run::TerminalCause::GithubRequestBudget
+        ))
+    );
+    assert_eq!(extra.get("github_requests"), Some(&serde_json::json!(7)));
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|text| text.contains("github request budget reached"))
+    );
+    Ok(())
+}
+#[test]
 fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

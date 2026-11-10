@@ -198,3 +198,65 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
     }
     Ok(())
 }
+
+#[test]
+fn app_key_paths_are_denied_to_every_adapter() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let source = base.join("repo");
+    let scratch = state.join("scratch");
+    let private_state = state.join("private");
+    let assets = base.join("assets");
+    for path in [&home, &state, &source, &assets, &scratch, &private_state] {
+        provenant_os::fixture::private_state_dir(path)?;
+    }
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    // A GitHub policy belongs to a registered project, so bind one first.
+    let common = source.join(".git");
+    std::fs::create_dir_all(&common)?;
+    let project =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?
+            .project_id();
+    std::fs::write(
+        state
+            .join("projects")
+            .join(project.to_string())
+            .join("github.json"),
+        r#"{"app":{"app_id":1,"private_key_path":"/fixture/app/key.pem"}}"#,
+    )?;
+    for adapter in ["codex", "claude", "cursor", "agy", "opencode", "command"] {
+        let request = confinement_request(
+            project,
+            ConfinementRoots {
+                host_roots: Some(&roots),
+                cwd: &source,
+                home: &home,
+                state: &state,
+                credential_roots: &[],
+                github_roots: &[],
+                protected_worktrees: &[],
+                scratch: &scratch,
+                private_state: &private_state,
+                assets: &assets,
+                prompt_file: None,
+            },
+            None,
+            &Default::default(),
+            &Default::default(),
+            adapter,
+            false,
+        )?;
+        let plan = ConfinedPlan::new(request)?;
+        let denied = &plan.permissions().policy.as_ref().ok_or("policy")?.optional().deny_read;
+        let path = "/fixture/app/key.pem";
+        assert!(
+            denied.iter().any(|d| d.path == Path::new(path)),
+            "{adapter}: {path}"
+        );
+    }
+    Ok(())
+}

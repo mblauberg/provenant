@@ -1739,3 +1739,14 @@ fn tracking_batches_fork_churn_but_publishes_initial_state_immediately() {
     assert_eq!(publications, [0, 1_000, 2_000]);
     assert!(super::tracking_publication_due(2_100, last, true));
 }
+
+#[test]
+fn github_requests_are_counted_from_the_gh_wrapper_log() {
+    let root = tempfile::tempdir().unwrap();
+    let attempt = Directory::open_anchor(root.path()).unwrap();
+    assert_eq!(super::count_gh_requests(&attempt), 0);
+    std::fs::create_dir(root.path().join("scratch")).unwrap();
+    assert_eq!(super::count_gh_requests(&attempt), 0);
+    std::fs::write(root.path().join("scratch/gh-requests"), "x\nx\nx\n").unwrap();
+    assert_eq!(super::count_gh_requests(&attempt), 3);
+}

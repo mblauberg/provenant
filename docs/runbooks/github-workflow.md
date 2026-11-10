@@ -366,6 +366,44 @@ reports `cleanup_pending: true` in `data.steps` and the merge still exits 0;
 fix the cause and rerun, and an already-merged PR retries only the cleanup.
 `land 148 --full` shows every step.
 
+### Automation identity (GitHub App)
+
+Landing, the CI observer and status reads can authenticate as a GitHub App
+installation, which gives them their own REST bucket instead of the user's
+5,000 per hour. Owner setup, once per repository:
+
+1. Create a GitHub App with repository permissions Contents and Pull requests
+   read and write, and Issues, Actions and Statuses read. Install it on the
+   repository. Do not add it to any ruleset's bypass or reviewer lists.
+2. Store the private key outside every repository in a regular file with mode
+   0600 (`chmod 0600 /path/to/key.pem`). The key is supported only as a file:
+   Keychain storage is not supported because a key in any keychain stays
+   readable by Keychain-granted lanes (agy), as securityd opens the keychain
+   on the lane's behalf and denying the file path is not a boundary. Provenant
+   denies reads of the configured key file path to every lane's sandbox,
+   whatever its role, so it is not reachable from a lane.
+3. Add an `app` object to the project's `github.json` in the state directory:
+   `{"app": {"app_id": 123, "installation_id": 456, "private_key_path": "/absolute/path/key.pem"}}`.
+   `installation_id` is optional and is looked up when absent. To serve
+   every repository under one owner, key the entry by owner instead:
+   `{"apps": {"OWNER": {"app_id": 123, "private_key_path": "/absolute/path/key.pem"}}}`.
+   An `app` entry in a project's own `github.json` overrides the owner's.
+
+Provenant mints a one-hour installation token, reuses it until five minutes
+before expiry, and reads the key only when minting. With no App configured it
+uses the user's `gh` login and warns once per process. The App identity only
+reads and merges, and only on exact endpoints (REST reads, the pull-request
+merge call, inline GraphQL queries); review verdicts, approvals, comments and
+every GraphQL mutation stay on the user's identity. Each token is limited to the
+one target repository. A lane never mints a token, and every lane's sandbox
+denies reads of the key file. Lanes keep the user's login. `lanes.github_request_budget`
+(default 100, 0 off) stops a lane that makes more `gh` requests than that, and
+the lane's settlement records its `github_requests`.
+
+The request budget is a pacing aid, not a security boundary. It counts `gh`
+invocations, so one `gh api --paginate` call makes many requests but counts
+once, and the counter file lives in the lane's scratch, so the lane can write it.
+
 ### Merge author identity
 
 REST merges use the authenticated GitHub account's commit email; local

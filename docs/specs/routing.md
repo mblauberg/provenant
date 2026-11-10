@@ -373,6 +373,19 @@ authority reference.
 - Test: none (gap); `CredentialAuthority` covers lane dispatch only.
 - Owner: `crates/providers/src/quota_live.rs`
 
+### GitHub App key custody
+
+The GitHub App private key lives in a mode-0600 file outside any repository.
+Keychain storage is not supported because securityd opens keychains on behalf
+of Keychain-granted lanes, so denying file paths is not a boundary. It is read
+only when an installation token is minted, passed to `openssl` on stdin, and
+never logged, written to run files, placed in a lane environment or copied into
+a lane. The App identity never acts as a reviewer: only reads and merges use it.
+A lane never mints a token, and a lane whose sandbox reaches the key path is refused at launch. The per-lane request budget is a pacing aid, not a security boundary.
+- Why (default): a leaked App key would let any lane act as the repository's automation.
+- Test: `src/pr/app_identity/tests.rs`
+- Owner: `src/pr/app_identity.rs`
+
 ## Quota
 
 ### Unknown is not exhausted; refusals are scoped
