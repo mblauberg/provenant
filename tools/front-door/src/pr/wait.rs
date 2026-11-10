@@ -400,10 +400,14 @@ pub(super) fn checks(
     .map_err(|error| ci_failure(error, &reader.retry_command))?;
     checks_with(
         &|argv| reader.read(argv),
-        &mut |commit| {
-            // A waiter shares answers younger than its poll; a one-shot
-            // decision revalidates.
-            let max_age = wait.map_or(Duration::ZERO, |_| Duration::from_secs(poll));
+        &mut |commit, revalidate| {
+            // A waiter shares answers younger than its poll to keep waiting;
+            // a decision revalidates.
+            let max_age = if revalidate {
+                Duration::ZERO
+            } else {
+                wait.map_or(Duration::ZERO, |_| Duration::from_secs(poll))
+            };
             observer
                 .checks(
                     &commit.to_string(),
@@ -428,7 +432,8 @@ pub(super) fn checks(
 #[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
 fn checks_with(
     read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
-    ci: &mut dyn FnMut(GitOid) -> Result<Vec<Check>>,
+    // Reads the checks of a commit; `true` demands a revalidated answer.
+    ci: &mut dyn FnMut(GitOid, bool) -> Result<Vec<Check>>,
     deadline: Instant,
     now: &impl Fn() -> Instant,
     sleep: &impl Fn(Duration),
@@ -492,16 +497,26 @@ fn checks_with(
         let _ = check_head()?;
         // Read the pinned commit, not whichever head the PR has while gh runs.
         // Before/after head reads alone cannot protect against an A-B-A update.
-        let checks = ci(expected)?;
-        let mergeable = check_head()?;
-        let expired = now() >= deadline;
-        match observe(
-            &checks,
-            &policy.checks,
-            jiff::Timestamp::now(),
-            mergeable.as_deref(),
-            expired,
-        ) {
+        // A shared answer may keep a waiter waiting, but a pass is decided
+        // only on an answer revalidated with GitHub.
+        let mut revalidated = wait.is_none();
+        let (checks, state) = loop {
+            let checks = ci(expected, revalidated)?;
+            let mergeable = check_head()?;
+            let state = observe(
+                &checks,
+                &policy.checks,
+                jiff::Timestamp::now(),
+                mergeable.as_deref(),
+                now() >= deadline,
+            );
+            if state == State::Passed && !revalidated {
+                revalidated = true;
+                continue;
+            }
+            break (checks, state);
+        };
+        match state {
             State::Conflict => {
                 return Err(failure(
                     "CI_CONFLICT",
@@ -662,6 +677,65 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)]
+    fn a_shared_pass_is_revalidated_before_it_is_decided() {
+        use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
+        use std::cell::RefCell;
+        let clock = Instant::now();
+        let oid = head();
+        let read = |args: &[&str]| -> Result<ExecOutcome> {
+            let endpoint = args
+                .iter()
+                .find(|arg| arg.starts_with("repos/"))
+                .unwrap_or(&"");
+            let body = if endpoint.contains("/pulls/") {
+                json!({"state":"open", "head":{"sha":oid,"ref":"feat","repo":{"full_name":"owner/repo"}}, "base":{"sha":oid,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"test"})
+            } else if endpoint.contains("/rules/") {
+                json!([[]])
+            } else {
+                json!({"protected":false})
+            };
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream {
+                    bytes: serde_json::to_vec(&body)?,
+                    ..Default::default()
+                },
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        };
+        let asked = RefCell::new(Vec::new());
+        // The shared answer is green, but GitHub now reports a failure.
+        let result = checks_with(
+            &read,
+            &mut |_, revalidate| {
+                asked.borrow_mut().push(revalidate);
+                Ok(vec![check(
+                    "build",
+                    if revalidate { "fail" } else { "pass" },
+                )])
+            },
+            clock + Duration::from_secs(600),
+            &|| clock,
+            &|_| {},
+            7,
+            oid,
+            "repos/owner/repo",
+            "main",
+            Some(600),
+            10,
+            true,
+        );
+        assert!(result.is_err(), "a stale green must not pass");
+        assert_eq!(*asked.borrow(), [false, true]);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
     fn default_pacing_limits_calls_over_ninety_minutes() {
         use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
         use std::cell::Cell;
@@ -698,7 +772,7 @@ mod tests {
         };
         let result = checks_with(
             &read,
-            &mut |_| {
+            &mut |_, _| {
                 calls.set(calls.get() + 1);
                 Ok(vec![check("build", "pending")])
             },

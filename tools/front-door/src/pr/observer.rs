@@ -12,10 +12,7 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use crate::event_intake::{
-    gh::{Gh, rate_limit_reset},
-    reconcile::{Forge, Response},
-};
+use crate::event_intake::gh::{Forge, Gh, Response, rate_limit_reset};
 use provenant_core::{CancelToken, Clock as _, DurationMicros, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
@@ -83,14 +80,16 @@ impl Clock for WallClock {
 /// `gh api` in the project checkout, each request bounded by the read budget.
 pub(crate) struct GhTransport {
     project: PathBuf,
-    deadline: std::time::Instant,
+    left: Duration,
 }
 impl Forge for GhTransport {
+    fn bound(&mut self, left: Duration) {
+        self.left = left;
+    }
     #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
     fn get(&mut self, path: &str, etag: Option<&str>) -> std::io::Result<Response> {
         let left = self
-            .deadline
-            .saturating_duration_since(std::time::Instant::now())
+            .left
             .clamp(Duration::from_secs(1), Duration::from_secs(60));
         Gh::in_checkout(self.project.clone(), left).get(path, etag)
     }
@@ -138,7 +137,7 @@ impl Observer<GhTransport, WallClock> {
     ) -> Result<Self, ObserveError> {
         let transport = GhTransport {
             project: project.to_owned(),
-            deadline: std::time::Instant::now() + budget,
+            left: budget,
         };
         Self::with(state, repository, transport, WallClock)
     }
@@ -216,6 +215,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             if left.is_zero() {
                 return Err(ObserveError::Expired);
             }
+            self.forge.bound(left);
             let lock = format!("{commit}.lock");
             let guard = self
                 .dir
@@ -273,6 +273,11 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                         fetched
                     }
                     Err(Fetch::Limited(reset)) => {
+                        // A reset already past still pauses, and a later
+                        // recorded reset is never replaced by an earlier one.
+                        let reset = reset
+                            .max(now.as_second().saturating_add(1))
+                            .max(self.recorded_reset());
                         if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset }) {
                             let _ = self.dir.atomic_write(
                                 OsStr::new(RATE_FILE),
@@ -316,6 +321,14 @@ impl<F: Forge, C: Clock> Observer<F, C> {
     }
 
     /// The reset of a rate limit another waiter recorded, while it lasts.
+    fn recorded_reset(&self) -> i64 {
+        self.dir
+            .read_bounded(OsStr::new(RATE_FILE), 4096)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RateLimit>(&bytes).ok())
+            .map_or(0, |limit| limit.reset)
+    }
+
     fn rate_limited(&self, now: jiff::Timestamp) -> Option<i64> {
         let bytes = self.dir.read_bounded(OsStr::new(RATE_FILE), 4096).ok()?;
         let limit: RateLimit = serde_json::from_slice(&bytes).ok()?;
@@ -450,8 +463,10 @@ fn prune_runs(body: Value) -> Value {
                         "started_at",
                         "completed_at",
                         "details_url",
+                        "id",
                     ],
                 );
+                entry["check_suite"] = pick(&run["check_suite"], &["id"]);
                 entry["app"] = pick(&run["app"], &["id", "slug"]);
                 entry["output"] = pick(&run["output"], &["title", "summary", "text"]);
                 entry
@@ -626,6 +641,8 @@ mod tests {
         statuses: BTreeMap<String, Value>,
         /// Unix second until which every request is rate limited.
         limited_until: Option<i64>,
+        /// The next request is limited with a reset already past.
+        past_limit: bool,
         delay: Duration,
     }
     #[derive(Clone, Default)]
@@ -656,6 +673,14 @@ mod tests {
             self.with(|world| {
                 let mut headers = BTreeMap::new();
                 let now = world.now_ms / 1000;
+                if std::mem::take(&mut world.past_limit) {
+                    headers.insert("retry-after".into(), "0".into());
+                    return Ok(Response {
+                        status: 429,
+                        headers,
+                        body: Vec::new(),
+                    });
+                }
                 if let Some(until) = world.limited_until.filter(|until| *until > now) {
                     headers.insert("x-ratelimit-remaining".into(), "0".into());
                     headers.insert("x-ratelimit-reset".into(), until.to_string());
@@ -838,6 +863,52 @@ mod tests {
         assert_eq!(checks[0].bucket, "pass");
         assert!(shared.with(|world| world.now_ms) >= reset * 1000);
         assert_eq!(shared.requests(), 3);
+    }
+
+    #[test]
+    fn a_rate_limit_whose_reset_is_past_still_pauses() {
+        let shared = Shared::new();
+        shared.with(|world| {
+            world.runs.insert(
+                HEAD.into(),
+                page(vec![run("build", "completed", Some("success"))]),
+            );
+            world.past_limit = true;
+        });
+        let dir = state();
+        let checks = shared
+            .observer(dir.path())
+            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .expect("after pause");
+        assert_eq!(checks[0].bucket, "pass");
+        assert!(shared.with(|world| world.now_ms) >= START + 1000);
+    }
+
+    #[test]
+    fn trimming_keeps_the_ids_a_rerun_needs() {
+        let shared = Shared::new();
+        let mut kept = run("build", "completed", Some("failure"));
+        kept["id"] = json!(42);
+        kept["check_suite"] = json!({"id": 7, "app": {"id": 1}});
+        shared.with(|world| {
+            world.runs.insert(HEAD.into(), page(vec![kept]));
+        });
+        let dir = state();
+        shared
+            .observer(dir.path())
+            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .expect("checks");
+        let repository = std::fs::read_dir(dir.path().join("ci-observer"))
+            .expect("root")
+            .next()
+            .expect("repository")
+            .expect("entry")
+            .path();
+        let text = std::fs::read_to_string(repository.join(format!("{HEAD}.json"))).expect("cache");
+        let cached: Cached = serde_json::from_str(&text).expect("cached");
+        let run = &cached.runs[0].body["check_runs"][0];
+        assert_eq!(run["id"], 42);
+        assert_eq!(run["check_suite"], json!({"id": 7}));
     }
 
     #[test]

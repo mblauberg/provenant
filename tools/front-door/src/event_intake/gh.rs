@@ -1,11 +1,25 @@
 //! `gh api` transport for conditional requests.
-use super::reconcile::{Forge, Response};
 use std::{
     collections::BTreeMap,
     io,
     path::PathBuf,
     time::{Duration, Instant},
 };
+
+/// A response from an authenticated conditional REST request.
+#[derive(Debug)]
+pub struct Response {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+/// A serial REST adapter. Header names in responses must be lowercase.
+pub trait Forge {
+    fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response>;
+    /// Bounds later requests to `left`. Adapters without a deadline ignore it.
+    fn bound(&mut self, _left: Duration) {}
+}
 
 /// A single-worker adapter. It honors per-resource GitHub poll intervals.
 #[derive(Default)]
