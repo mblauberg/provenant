@@ -1209,28 +1209,28 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     // Settlement appends the work-location note to the blocker. This
                     // fixture's private Git holds no refs, so the note says the files
                     // were not restored, and why.
-                    let expected_reason = match record
-                        .settlement_receipts
-                        .as_ref()
-                        .and_then(|receipts| match &receipts.git_import {
-                            run::EffectDisposition::Failed {
-                                retryable: false,
-                                reason,
-                            } => Some(reason.clone()),
-                            _ => None,
+                    let expected_reason =
+                        match record.settlement_receipts.as_ref().and_then(|receipts| {
+                            match &receipts.git_import {
+                                run::EffectDisposition::Failed {
+                                    retryable: false,
+                                    reason,
+                                } => Some(reason.clone()),
+                                _ => None,
+                            }
                         }) {
-                        Some(reason) => {
-                            assert!(
-                                reason.strip_prefix(blocker).is_some_and(|note| {
-                                    note.strip_prefix("; worktree files not restored: ")
-                                        .is_some_and(|why| !why.is_empty())
-                                }),
-                                "{found:?}"
-                            );
-                            reason
-                        }
-                        None => panic!("unexpected git_import disposition: {record:?}"),
-                    };
+                            Some(reason) => {
+                                assert!(
+                                    reason.strip_prefix(blocker).is_some_and(|note| {
+                                        note.strip_prefix("; worktree files not restored: ")
+                                            .is_some_and(|why| !why.is_empty())
+                                    }),
+                                    "{found:?}"
+                                );
+                                reason
+                            }
+                            None => panic!("unexpected git_import disposition: {record:?}"),
+                        };
                     for command in ["status", "output"] {
                         let crate::ParseOutcome::Invocation(inv) = crate::parse(
                             [command.to_owned(), id.to_string(), "--full".into()]
