@@ -214,10 +214,7 @@ fn stats_default_output_omits_attempt_rows_and_leaves_other_sections_unchanged()
     register_account(&rig, "claude", "current", "current", &config)?;
     let directory = config.join("projects/-fixture");
     fs::create_dir_all(&directory)?;
-    fs::write(
-        directory.join("chair-session.jsonl"),
-        message("chair", 1),
-    )?;
+    fs::write(directory.join("chair-session.jsonl"), message("chair", 1))?;
     let subagents = directory.join("chair-session/subagents");
     fs::create_dir_all(&subagents)?;
     fs::write(subagents.join("agent-a.jsonl"), message("linked", 45))?;
