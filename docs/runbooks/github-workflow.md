@@ -335,6 +335,31 @@ reports `cleanup_pending: true` in `data.steps` and the merge still exits 0;
 fix the cause and rerun, and an already-merged PR retries only the cleanup.
 `land 148 --full` shows every step.
 
+### Automation identity (GitHub App)
+
+Landing, the CI observer and status reads can authenticate as a GitHub App
+installation, which gives them their own REST bucket instead of the user's
+5,000 per hour. Owner setup, once per repository:
+
+1. Create a GitHub App with repository permissions Contents and Pull requests
+   read and write, and Issues, Actions and Statuses read. Install it on the
+   repository. Do not add it to any ruleset's bypass or reviewer lists.
+2. Store the private key outside every repository: in the macOS Keychain
+   (`security add-generic-password -s provenant-github-app -a ACCOUNT -w "$(cat key.pem)"`),
+   or as a file with mode 0600.
+3. Add an `app` object to the project's `github.json` in the state directory:
+   `{"app": {"app_id": 123, "installation_id": 456, "keychain_account": "ACCOUNT"}}`
+   or `"private_key_path": "/absolute/path/key.pem"`. `installation_id` is
+   optional and is looked up when absent.
+
+Provenant mints a one-hour installation token, reuses it until five minutes
+before expiry, and reads the key only when minting. With no App configured it
+uses the user's `gh` login and warns once per process. The App identity only
+reads and merges; review verdicts, approvals and comments always stay on the
+user's identity. Lanes keep the user's login. `lanes.github_request_budget`
+(default 100, 0 off) stops a lane that makes more `gh` requests than that, and
+the lane's settlement records its `github_requests`.
+
 ### Merge author identity
 
 REST merges use the authenticated GitHub account's commit email; local

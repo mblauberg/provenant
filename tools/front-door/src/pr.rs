@@ -10,6 +10,7 @@ use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
+mod app_identity;
 pub(super) mod contributions;
 mod git;
 pub(crate) mod land;
@@ -84,10 +85,13 @@ fn execute_cancellable(
     stdin: Option<&[u8]>,
     cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<ExecOutcome> {
+    let argv_text = argv;
     let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
     let mut options = ExecOptions::new(&argv, project, timeout);
     options.stdin = stdin;
     options.cancel = cancel;
+    let app_environment = app_identity::environment(project, &argv_text);
+    options.env = app_environment.as_deref();
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
     // Discard repeated progress so long CI runs cannot fill capture.

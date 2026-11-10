@@ -18,6 +18,7 @@ pub mod machine;
 pub mod process_tree;
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
+pub use guardian::count_gh_requests;
 
 /// Test process whose lifetime owns fixture-only guardians.
 #[cfg(feature = "fixture")]

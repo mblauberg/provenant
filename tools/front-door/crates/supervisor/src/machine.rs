@@ -545,6 +545,16 @@ mod tests {
     }
 
     #[test]
+    fn a_github_request_budget_stop_is_a_typed_stop() {
+        let (state, effects) = step(running(), Event::GithubRequestBudget, Tick::at(1));
+        assert_eq!(state.phase(), Phase::Stopping);
+        assert_eq!(
+            effects,
+            vec![Effect::DeliverStop(StopReason::GithubRequestBudget)]
+        );
+    }
+
+    #[test]
     fn prelaunch_cancel_and_wall_expiry_publish_never_spawned_without_signalling() {
         let (cancelled, effects) = step(
             State::prepared(Budgets::with_cleanup(100, 10, 5)),

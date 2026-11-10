@@ -2468,7 +2468,7 @@ fn stream_policy(
     }
 }
 
-pub(crate) fn count_gh_requests(attempt: &Directory) -> u64 {
+pub fn count_gh_requests(attempt: &Directory) -> u64 {
     let Ok(scratch) = attempt.open_verified_directory(std::ffi::OsStr::new("scratch")) else {
         return 0;
     };
