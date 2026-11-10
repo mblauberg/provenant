@@ -576,6 +576,7 @@ fn lane_with_committed_merge() -> std::result::Result<
     Box<dyn std::error::Error>,
 > {
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    use std::os::unix::fs::PermissionsExt;
     let fixture = PrepareFixture::new()?;
     fixture.git(&["update-ref", "refs/remotes/origin/main", "refs/heads/lane"])?;
     fixture.git(&[
@@ -590,6 +591,11 @@ fn lane_with_committed_merge() -> std::result::Result<
     let attempt_path = fixture.root.join("attempt");
     let scratch = attempt_path.join("tmp/candidate-0");
     std::fs::create_dir_all(&scratch)?;
+    // The utility runtime refuses a home that group or others can reach.
+    std::fs::set_permissions(
+        fixture.root.join("home"),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
     let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();

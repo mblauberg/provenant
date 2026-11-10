@@ -1205,10 +1205,11 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         &call,
                     )?;
                     let record = session.store.record(id, &call)?;
+                    // Settlement appends where the lane's work is to the blocker.
                     assert!(
                         matches!(record.settlement_receipts.unwrap().git_import,
                         run::EffectDisposition::Failed { retryable: false, ref reason }
-                        if reason == blocker),
+                        if reason.starts_with(blocker)),
                         "{found:?}"
                     );
                     for command in ["status", "output"] {
