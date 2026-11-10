@@ -396,6 +396,10 @@ pub(crate) fn graph_coverage(
 }
 
 #[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "custom worktree harness includes tests without the test runner"
+)]
 mod tests {
     use super::*;
     use crate::pr::landing::{
@@ -480,7 +484,7 @@ mod tests {
         let mut repo = repo(&["src/a.rs"]);
         assert!(refused(&decide(
             &mut repo,
-            &[full.clone()],
+            std::slice::from_ref(&full),
             ApprovalTier::Carry,
             None
         )));
