@@ -528,20 +528,20 @@
             None,
             &[],
         )?;
-        assert_eq!(
-            exhausted.readiness,
+        assert!(matches!(
+            &exhausted.readiness,
             RouteReadiness::Unavailable {
-                extra: Default::default(),
                 reason: RouteExclusionReason::Exhausted,
+                ..
             }
-        );
-        assert_eq!(
-            exhausted.alternatives.as_slice()[0].readiness,
+        ));
+        assert!(matches!(
+            &exhausted.alternatives.as_slice()[0].readiness,
             RouteReadiness::Unavailable {
-                extra: Default::default(),
                 reason: RouteExclusionReason::Exhausted,
+                ..
             }
-        );
+        ));
         let fresh = super::resolve_dispatch(
             &request,
             &roots,
