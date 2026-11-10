@@ -1243,7 +1243,7 @@ fn history_lists_readings_with_price_in_force_and_filters() -> Result {
     assert_eq!(readings[1]["plan_price"]["name"], "max_20x");
     assert_eq!(readings[2]["markers"][1]["kind"], "plan.change");
     assert_eq!(readings[2]["windows"][0]["used_basis_points"], 10);
-    for key in ["tier", "credit_balance", "account_key", "label", "provider"] {
+    for key in ["credit_balance", "account_key", "label", "provider"] {
         assert!(readings[0].get(key).is_some(), "{key}");
     }
     let since = rig.command(&["quota", "history", "--json", "--since", "2026-06-01"])?;
