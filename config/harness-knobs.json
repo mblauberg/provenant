@@ -16,6 +16,7 @@
       "routing.exclude",
       "routing.graph_exclude",
       "fabric.accept_handoff",
+      "fabric.mcp_server",
       "usage.project_attribution",
       "domains.run.writer_token_budget",
       "domains.pr.land.integration",
@@ -441,6 +442,12 @@
       "reader": "tools/front-door/src/handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
       "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
+    },
+    "fabric.mcp_server": {
+      "type": "bool", "default": false, "status": "wired",
+      "reader": "tools/front-door/crates/config/src/harness.rs",
+      "effect": "Register the Fabric MCP server (`provenant fabric mcp`) in installed harness configurations and launch lanes with it, for clients without a shell.",
+      "trade_off": "Off keeps every default session and lane free of the MCP tool surface, since the `provenant fabric` CLI covers each tool; on adds the server and its tool schemas to every session context."
     },
     "config.history_max_entries": {
       "type": "int",
