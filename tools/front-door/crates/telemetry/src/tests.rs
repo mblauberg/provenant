@@ -1346,7 +1346,7 @@ fn effective_dates_must_be_ordered_real_dates() {
 }
 
 #[test]
-fn route_outcomes_report_success_cost_time_access_effort_and_assignment() {
+fn route_outcomes_report_success_time_access_effort_and_assignment() {
     use crate::route_outcomes::{Evidence, report};
     let mut first = fact(1, Some(1_000_000));
     first.provider_ms = Some(100);
@@ -1358,35 +1358,32 @@ fn route_outcomes_report_success_cost_time_access_effort_and_assignment() {
     let mut failed = fact(4, Some(1_000_000));
     failed.terminal_state = AttemptOutcome::Failed;
     failed.provider_ms = Some(100);
-    let rows = report(
-        vec![
-            Evidence {
-                fact: failed,
-                access: Some("worktree-write".into()),
-                pool: Some("senior".into()),
-                partial: false,
-            },
-            Evidence {
-                fact: first,
-                access: Some("worktree-write".into()),
-                pool: Some("senior".into()),
-                partial: false,
-            },
-            Evidence {
-                fact: stopped,
-                access: Some("worktree-write".into()),
-                pool: Some("senior".into()),
-                partial: true,
-            },
-            Evidence {
-                fact: exact,
-                access: Some("read-only".into()),
-                pool: None,
-                partial: false,
-            },
-        ],
-        &prices(Some(1_000_000)),
-    )
+    let rows = report(vec![
+        Evidence {
+            fact: failed,
+            access: Some("worktree-write".into()),
+            pool: Some("senior".into()),
+            partial: false,
+        },
+        Evidence {
+            fact: first,
+            access: Some("worktree-write".into()),
+            pool: Some("senior".into()),
+            partial: false,
+        },
+        Evidence {
+            fact: stopped,
+            access: Some("worktree-write".into()),
+            pool: Some("senior".into()),
+            partial: true,
+        },
+        Evidence {
+            fact: exact,
+            access: Some("read-only".into()),
+            pool: None,
+            partial: false,
+        },
+    ])
     .unwrap();
     assert_eq!(rows.len(), 2);
     let writer = rows
@@ -1397,7 +1394,6 @@ fn route_outcomes_report_success_cost_time_access_effort_and_assignment() {
     assert_eq!(writer.samples, 3);
     assert_eq!(writer.successes, 1);
     assert_eq!(writer.success_rate, Some(1.0 / 3.0));
-    assert_eq!(writer.cost_per_success_microdollars, Some(4_000_000.0));
     assert_eq!(writer.time_per_success_ms, Some(500.0));
     assert_eq!(writer.comparison, "hash_assigned_pool");
     let reader = rows.iter().find(|row| row.access == "read-only").unwrap();
@@ -1407,20 +1403,16 @@ fn route_outcomes_report_success_cost_time_access_effort_and_assignment() {
 }
 
 #[test]
-fn route_outcomes_zero_success_and_unknown_cost_remain_unknown() {
+fn route_outcomes_zero_success_and_unknown_time_remain_unknown() {
     use crate::route_outcomes::{Evidence, report};
-    let rows = report(
-        vec![Evidence {
-            fact: fact(1, None),
-            access: None,
-            pool: None,
-            partial: true,
-        }],
-        &prices(None),
-    )
+    let rows = report(vec![Evidence {
+        fact: fact(1, None),
+        access: None,
+        pool: None,
+        partial: true,
+    }])
     .unwrap();
     assert_eq!(rows[0].success_rate, Some(0.0));
-    assert_eq!(rows[0].cost_per_success_microdollars, None);
     assert_eq!(rows[0].time_per_success_ms, None);
     assert_eq!(rows[0].access, "unknown");
 }

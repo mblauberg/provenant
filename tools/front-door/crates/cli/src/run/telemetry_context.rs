@@ -2,31 +2,27 @@
 use super::*;
 use provenant_records::workflow::DecisionStatus;
 
-const ACCEPTED_DEFINITION: &str = "distinct delivery IDs with a recorded accepted workflow receipt, among selected finished project attempts; provider success alone is not acceptance";
+pub(super) const ACCEPTED_DEFINITION: &str = "distinct delivery IDs with a recorded accepted workflow receipt, among selected finished project attempts; provider success alone is not acceptance";
 
 fn coverage(known: usize, total: usize) -> Value {
     json!({"known": known, "unknown": total.saturating_sub(known)})
 }
 
-fn accepted_cost(denominator: usize, cost: &provenant_telemetry::CostTotal) -> Value {
+/// `stats` reports the accepted count only. Its cost is a cost producer's
+/// output, so it is read with `telemetry value`.
+fn accepted_outcomes(denominator: usize) -> Value {
     json!({
         "definition": ACCEPTED_DEFINITION,
         "denominator": denominator,
-        "numerator_scope": "API-equivalent cost of selected attempts linked to accepted deliveries; includes retries, excludes chair cost without a delivery attribution",
-        "cost": cost,
-        "microdollars_per_accepted_outcome": if denominator == 0 { None } else { cost.complete.as_ref().map(|money| json!({"numerator": money.microdollars, "denominator": denominator, "unit": "microdollars"})) },
+        "numerator_command": "telemetry value",
     })
 }
 
-/// Latest receipt state and graph snapshot are labelled separately from the
-/// attempt's effective time. Missing receipts never imply rejection.
-pub(super) fn report(
+/// Latest receipt state per delivery, read once for each delivery in `facts`.
+fn delivery_states(
     facts: &[&provenant_records::AttemptFact],
-    graphs: &[Value],
     edge: &Edge<'_>,
-    prices: &provenant_telemetry::PriceTable,
-) -> Result<Value, Fail> {
-    let mut accepted = std::collections::BTreeSet::new();
+) -> BTreeMap<provenant_core::DeliveryId, Option<(DecisionStatus, String)>> {
     let mut states = BTreeMap::new();
     for fact in facts {
         if let Some(delivery) = fact.delivery_id {
@@ -48,25 +44,46 @@ pub(super) fn report(
             });
         }
     }
-    for (id, state) in &states {
-        if state
-            .as_ref()
-            .is_some_and(|(status, _)| *status == DecisionStatus::Accepted)
-        {
-            accepted.insert(*id);
-        }
-    }
-    let accepted_facts: Vec<_> = facts
+    states
+}
+
+fn accepted_deliveries(
+    states: &BTreeMap<provenant_core::DeliveryId, Option<(DecisionStatus, String)>>,
+) -> std::collections::BTreeSet<provenant_core::DeliveryId> {
+    states
+        .iter()
+        .filter(|(_, state)| {
+            state
+                .as_ref()
+                .is_some_and(|(status, _)| *status == DecisionStatus::Accepted)
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// The accepted-delivery count among `facts`, and the attempts that carry one.
+pub(super) fn accepted_attempts_among(
+    facts: &[&provenant_records::AttemptFact],
+    edge: &Edge<'_>,
+) -> (usize, std::collections::BTreeSet<String>) {
+    let accepted = accepted_deliveries(&delivery_states(facts, edge));
+    let attempts = facts
         .iter()
         .filter(|fact| fact.delivery_id.is_some_and(|id| accepted.contains(&id)))
-        .map(|fact| (**fact).clone())
+        .map(|fact| fact.attempt_id.to_string())
         .collect();
-    let accepted_totals = provenant_telemetry::stats(
-        accepted_facts,
-        prices,
-        provenant_telemetry::Window::default(),
-    )
-    .map_err(|error| Fail::new(Status::Error, ErrorKind::Invalid, error.to_string()))?;
+    (accepted.len(), attempts)
+}
+
+/// Latest receipt state and graph snapshot are labelled separately from the
+/// attempt's effective time. Missing receipts never imply rejection.
+pub(super) fn report(
+    facts: &[&provenant_records::AttemptFact],
+    graphs: &[Value],
+    edge: &Edge<'_>,
+) -> Result<Value, Fail> {
+    let states = delivery_states(facts, edge);
+    let accepted = accepted_deliveries(&states);
     let mut risks = BTreeMap::<String, usize>::new();
     let mut known_risks = 0;
     let mut graph_nodes = std::collections::BTreeSet::new();
@@ -145,7 +162,7 @@ pub(super) fn report(
         "risk_tiers": risks,
         "slices": {"known": graph_nodes.len(), "definition": "distinct observed graph_id/node_id pairs; not an inferred count of planned work slices", "attempts_without_graph_node": facts.iter().filter(|fact| fact.context.as_ref().is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())).count()},
         "graph_outcomes": graphs,
-        "accepted_outcomes": accepted_cost(accepted.len(), &accepted_totals.totals.cost),
+        "accepted_outcomes": accepted_outcomes(accepted.len()),
         "comparability": "observational evidence cannot separate release effects from harness experiments, task difficulty or user activity when their coverage or independent variation is missing",
     }))
 }
@@ -155,35 +172,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepted_outcome_definition_and_denominator_preserve_unknown_cost() {
-        let cost = provenant_telemetry::CostTotal {
-            cost_basis: "API-equivalent",
-            complete: Some(provenant_telemetry::Money {
-                microdollars: 12,
-                usd: "0.000012".into(),
-            }),
-            known_lower_bound: None,
-            priced_attempts: 0,
-            missing_attempts: 0,
-            subscription_attempts: 0,
-        };
-        let empty = accepted_cost(0, &cost);
-        assert_eq!(empty["denominator"], 0);
-        assert!(empty["microdollars_per_accepted_outcome"].is_null());
-        let measured = accepted_cost(2, &cost);
-        assert_eq!(measured["denominator"], 2);
-        assert_eq!(
-            measured["microdollars_per_accepted_outcome"]["numerator"],
-            12
-        );
-        assert_eq!(
-            measured["microdollars_per_accepted_outcome"]["denominator"],
-            2
-        );
-        let mut incomplete = cost;
-        incomplete.complete = None;
-        let measured = accepted_cost(2, &incomplete);
-        assert!(measured["microdollars_per_accepted_outcome"].is_null());
-        assert_eq!(measured["definition"], ACCEPTED_DEFINITION);
+    fn stats_accepted_outcomes_report_only_the_denominator() {
+        let accepted = accepted_outcomes(2);
+        assert_eq!(accepted["denominator"], 2);
+        assert_eq!(accepted["definition"], ACCEPTED_DEFINITION);
+        assert_eq!(accepted["numerator_command"], "telemetry value");
+        assert!(accepted.get("cost").is_none());
+        assert!(accepted.get("microdollars_per_accepted_outcome").is_none());
     }
 }

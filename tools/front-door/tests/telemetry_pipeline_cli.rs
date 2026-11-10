@@ -186,14 +186,14 @@ fn stats_reports_route_access_effort_outcomes_and_nonrandom_comparison() -> Resu
     assert_eq!(row["samples"], 1);
     assert_eq!(row["successes"], 0);
     assert_eq!(row["success_rate"], 0.0);
-    assert!(row["cost_per_success_microdollars"].is_null());
+    assert!(row.get("cost_per_success_microdollars").is_none());
     assert!(row["time_per_success_ms"].is_null());
     assert_eq!(row["comparison"], "observational_not_hash_assigned");
     let output = rig.command(&["telemetry", "stats"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let human = String::from_utf8(output.stdout.bytes)?;
     assert!(human.contains("access=read-only effort=unknown n=1"));
-    assert!(human.contains("cost/success_microdollars=unknown"));
+    assert!(!human.contains("cost"));
     assert!(human.contains("time/success_ms=unknown"));
     Ok(())
 }
@@ -216,8 +216,11 @@ fn backfill_copies_each_attempt_once_and_outlives_the_run_store() -> Result {
     assert_eq!(first["added"], totals["attempts"]);
     let ledger = provenant_telemetry::ledger::read(&rig.state)?;
     assert!(ledger.unrecognised.is_empty(), "{:?}", ledger.unrecognised);
-    let spend = provenant_telemetry::ledger::spend(&ledger.rows, None, None, None)?;
-    assert_eq!(serde_json::to_value(&spend.cost)?, totals["cost"]);
+    assert!(totals.get("cost").is_none(), "stats no longer reports cost");
+    let cost = rig.command(&["telemetry", "cost", "--json"])?;
+    assert_eq!(code(&cost), 0, "{cost:?}");
+    let cost: Value = serde_json::from_slice(&cost.stdout.bytes)?;
+    assert_eq!(cost["data"]["totals"]["attempts"], 2, "{cost}");
     assert!(
         ledger
             .rows

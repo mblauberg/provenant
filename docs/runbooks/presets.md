@@ -64,10 +64,10 @@ measures in `provenant telemetry stats`, checking the sample size and whether
 assignments came from a hash-drawn pool before changing weights.
 The `route_outcomes` rows group terminal attempts by route, access, effort and
 pool assignment. Success requires a successful settlement without a retained
-partial-completion signal. Cost per success uses the whole group's estimated
-API-equivalent spend, including failures; time per success uses the whole
-group's recorded provider milliseconds. Missing costs or times remain unknown,
-and a group with no successes has no cost or time per success. Preference
+partial-completion signal. Time per success uses the whole group's recorded
+provider milliseconds, including failures. Missing times remain unknown, and a
+group with no successes has no time per success; for cost use
+`provenant telemetry cost --by route`. Preference
 choices, fallback draws and exact routes are marked observational. The success
 rate is an attempt outcome, not evidence that a delivered change passed review.
 
@@ -126,7 +126,7 @@ writer. Only providers that report each call's context are stopped (Claude
 today); other lanes keep today's behaviour. The restart is the graph's one
 automatic continuation for that writer, on another eligible route, so pool
 routes suit it best. Compare spend before and after with
-`provenant telemetry stats --since DATE --until DATE`: its spend by context band
+`provenant telemetry stats --since DATE --until DATE`: its usage by context band
 (`context_bands` in `--json`) shows how much was spent above 200k.
 
 ## Deliver through CI to land

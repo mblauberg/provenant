@@ -15,10 +15,10 @@ Read what exists, and mark what is absent `unknown` rather than inferring
 success from a clean final answer:
 
 - `provenant telemetry stats --by preset` (or `pr`, `issue`, `role`) for
-  attempts, cost and retries; `provenant telemetry trace` for one run's path;
+  attempts and retries; `provenant telemetry cost --by route` for spend; `provenant telemetry trace` for one run's path;
   `provenant telemetry experiments show NAME` for arm comparisons.
-- `provenant quota usage` and `provenant quota history` for spend against
-  allowance.
+- `provenant quota usage` and `provenant quota history` for quota against
+  allowance; `provenant telemetry value` for plan value.
 - Review and repair history, escaped defects, the PR threads and any human
   correction of an unattended run. A correction names a class of defect: sweep
   for the class.
