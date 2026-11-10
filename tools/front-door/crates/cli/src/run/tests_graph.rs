@@ -267,25 +267,6 @@ fn stats_summary_reports_cost_coverage() {
     assert_eq!(totals_cache_read_share(&totals), Some(0.9));
     totals.usage.cache_write.missing = 1;
     assert_eq!(totals_cache_read_share(&totals), None);
-    assert_eq!(
-        cost_summary(&totals),
-        "3 attempts, cost unknown (3 attempts missing cost data)\n"
-    );
-    totals.cost.known_lower_bound = Some(Money {
-        microdollars: 2_000_000,
-        usd: "2.000000".into(),
-    });
-    totals.cost.priced_attempts = 1;
-    totals.cost.missing_attempts = 2;
-    assert_eq!(
-        cost_summary(&totals),
-        "3 attempts, est. API-equivalent at least $2.000000 (1 of 3 attempts priced)\n"
-    );
-    totals.cost.complete = totals.cost.known_lower_bound.clone();
-    assert_eq!(
-        cost_summary(&totals),
-        "3 attempts, est. API-equivalent $2.000000\n"
-    );
 }
 #[test]
 fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {

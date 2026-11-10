@@ -89,7 +89,7 @@ fn fixture() -> Result<TestRig> {
 }
 
 #[test]
-fn three_readings_give_exact_mileage_capacity_and_effective_rates() -> Result {
+fn three_readings_give_exact_mileage_and_capacity() -> Result {
     let rig = fixture()?;
     let output = rig.command(&["telemetry", "mileage", "--json"])?;
     assert_eq!(
@@ -109,28 +109,7 @@ fn three_readings_give_exact_mileage_capacity_and_effective_rates() -> Result {
     assert_eq!(window["n"], 2);
     assert_eq!(window["priced_share_basis_points"], 10_000);
     assert_eq!(window["step_change"]["status"], "inconclusive");
-    let effective = &window["effective"];
-    assert_eq!(effective["latest_used_basis_points"], 6_000);
-    assert_eq!(effective["coverage_basis_points"], 10_000);
-    assert_eq!(effective["period_days"], 7);
-    // Coverage is priced usage only, so the report still states the bound.
-    assert!(
-        effective["note"]
-            .as_str()
-            .is_some_and(|note| note.contains("lower bound"))
-    );
-    let output = effective["buckets"]
-        .as_array()
-        .and_then(|buckets| buckets.iter().find(|bucket| bucket["bucket"] == "output"))
-        .ok_or("output bucket")?;
-    assert_eq!(output["tokens"], 2_500_000);
-    // Seven days hold 33.6 five-hour windows, so the period capacity is $3,360
-    // and the prorated weekly price is $23.333333. Realised is that price over
-    // the 2.5M output tokens.
-    assert_eq!(effective["capacity"]["usd"], "3360.000000");
-    assert_eq!(effective["price"]["usd"], "23.333333");
-    assert_eq!(output["potential"]["usd"], "0.138889");
-    assert_eq!(output["realised"]["usd"], "9.333333");
+    assert!(window.get("effective").is_none());
     Ok(())
 }
 
@@ -148,11 +127,5 @@ fn filters_narrow_the_report_and_missing_usage_is_a_lower_bound() -> Result {
     let window = &json["data"]["accounts"][0]["windows"][0];
     assert!(window["mileage_usd_per_percent"].is_null());
     assert_eq!(window["priced_share_basis_points"], 0);
-    let effective = &window["effective"];
-    assert!(
-        effective["note"]
-            .as_str()
-            .is_some_and(|note| note.contains("lower bound"))
-    );
     Ok(())
 }

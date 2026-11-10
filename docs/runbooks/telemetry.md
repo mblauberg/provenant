@@ -32,11 +32,6 @@ unknown allocations and counted at full value. PR lookup requires `gh` access
 to the current repository. Add `--since` and `--until` to bound both the
 attempt window and the merged-PR snapshot.
 
-When a quota-history reading matches an account with configured plan prices,
-JSON includes `plan_value`: the configured monthly price and API-equivalent
-usage for the selected attempt window. These periods may differ; this is a
-comparison, not a realised monthly rate or a bill.
-
 For a wave digest, review `provenant inbox --state open` and then run
 `provenant telemetry stats --by pr --since <wave-start>`. The inbox command
 lists open requests across kinds; select the decision requests for the chair
@@ -98,16 +93,25 @@ segments on each side, and `inconclusive` otherwise; change the judgement with
 `--min-runs`, `--fall-percent` and `--recent-days`. A plan change also reports
 the capacity change around the upgrade.
 
-`effective` reports, per bucket, the potential rate at full use (the API rate
-times the plan's `price / capacity` discount) and the realised rate (the plan
-price over tokens actually used), with the window's latest used percentage, `n`
-and priced token coverage. The monthly plan price is prorated to the report
-window, and one window's capacity is expanded to the full windows in it. Every
-effective report says token use is a lower bound and the realised rate is an
-upper bound, because ingest coverage of the account is not checked. Fitted
-bucket weights appear only with their sample size and R-squared, and only when
-they explain at least half the variance. A missing price table leaves rates
-unknown rather than guessing.
+Fitted bucket weights appear only with their sample size and R-squared, and
+only when they explain at least half the variance.
+
+## Cost and plan value
+
+`provenant telemetry cost [TARGET] [--by route|account|model|graph|node]
+[--since T]` reads the usage ledger. With a `TARGET` (attempt, task or run ID
+or prefix, or a graph or `graph/node` name) it is a few lines, small enough to
+call from inside a lane. Without one it covers the whole host. Unpriced
+attempts are counted and make the cost a lower bound ("at least"); a cost with
+nothing priced reads `unknown`, never `$0`. Attempts with no account form the
+`unattributed` group under `--by account`.
+
+`provenant telemetry value [--account LABEL] [--window POOL] [--since T]`
+gives one row per account with a quota reading and a configured plan: plan
+price, the latest quota windows, and API-equivalent usage since `--since`
+(default 30 days) with its coverage. Compare a full billing period with quota
+history before acting on it. Run `telemetry backfill` first on a host that has
+not yet copied its run history into the ledger.
 
 ## Cache-read share
 

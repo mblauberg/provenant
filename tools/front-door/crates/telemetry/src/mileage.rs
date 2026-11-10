@@ -16,7 +16,6 @@ pub const MIN_FIT_R2: f64 = 0.5;
 const RESET_TOLERANCE_SECONDS: i64 = 60;
 /// The note on every effective-rate report. Token use is not shown to cover
 /// all of the account's usage, so it is a bound.
-const BOUND_NOTE: &str = "token use is a lower bound and realised rates are upper bounds, because ingest coverage of the account is not checked";
 
 #[derive(Clone, Debug)]
 pub struct Reading {
@@ -519,104 +518,6 @@ pub fn fit(rows: &[Observation], min_n: u32) -> Option<Fit> {
     })
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct EffectiveInput {
-    /// Plan price in force for the account, prorated to `period_days`, in
-    /// microdollars.
-    pub price_microdollars: Option<u64>,
-    /// Tokens actually used in the period, by bucket.
-    pub usage: [u64; 5],
-    /// Of those, tokens whose price is known.
-    pub priced_usage: [u64; 5],
-    /// Average API-equivalent rate per million tokens, by bucket.
-    pub api_rates: [Option<u64>; 5],
-    /// Segments backing the mileage, for `n`.
-    pub n: u64,
-    /// Length of the reported billing period.
-    pub period_days: u32,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct BucketRate {
-    pub bucket: &'static str,
-    pub tokens: u64,
-    /// Rate at full use of the window, per million tokens.
-    pub potential: Option<Money>,
-    /// Plan price over tokens actually used, per million tokens.
-    pub realised: Option<Money>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Effective {
-    pub price: Option<Money>,
-    pub capacity: Option<Money>,
-    /// The window's used share at its latest reading, in basis points. It is
-    /// not averaged over the period.
-    pub latest_used_basis_points: Option<u64>,
-    pub n: u64,
-    /// Priced tokens as a share of all used tokens, in basis points.
-    pub coverage_basis_points: Option<u64>,
-    /// Length of the billing period the price and tokens cover.
-    pub period_days: u32,
-    /// Always set: token use is a lower bound, so realised rates are upper
-    /// bounds, until ingest coverage of the account is checked.
-    pub note: &'static str,
-    pub buckets: Vec<BucketRate>,
-}
-
-/// Potential and realised rates against one window's capacity. Potential
-/// applies the plan's discount factor `price / capacity` to the API rate;
-/// realised divides the plan price by tokens actually used.
-pub fn effective(
-    input: &EffectiveInput,
-    capacity: Option<Money>,
-    latest_used_basis_points: Option<u64>,
-) -> Effective {
-    let total: u64 = input.usage.iter().sum();
-    let priced: u64 = input.priced_usage.iter().sum();
-    let coverage = (total > 0)
-        .then(|| u64::try_from(u128::from(priced) * 10_000 / u128::from(total)).unwrap_or(10_000));
-    let price = input.price_microdollars.map(Money::new);
-    let buckets = (0..5)
-        .map(|index| {
-            let tokens = input.usage[index];
-            let realised = match (input.price_microdollars, tokens) {
-                (Some(price), tokens) if tokens > 0 => {
-                    round_div(u128::from(price) * 1_000_000, u128::from(tokens)).map(Money::new)
-                }
-                _ => None,
-            };
-            let potential = match (
-                input.api_rates[index],
-                input.price_microdollars,
-                capacity.as_ref().map(|money| money.microdollars),
-            ) {
-                (Some(rate), Some(price), Some(capacity)) if capacity > 0 => u128::from(rate)
-                    .checked_mul(u128::from(price))
-                    .and_then(|numerator| round_div(numerator, u128::from(capacity)))
-                    .map(Money::new),
-                _ => None,
-            };
-            BucketRate {
-                bucket: BUCKETS[index],
-                tokens,
-                potential,
-                realised,
-            }
-        })
-        .collect();
-    Effective {
-        price,
-        capacity,
-        latest_used_basis_points,
-        n: input.n,
-        coverage_basis_points: coverage,
-        period_days: input.period_days,
-        note: BOUND_NOTE,
-        buckets,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,65 +763,5 @@ mod tests {
             .map(|n| ([n, 0, 0, 0, 0], if n % 2 == 0 { 1 } else { 100 }))
             .collect();
         assert!(fit(&noisy, 10).is_none());
-    }
-
-    #[test]
-    fn effective_rates_report_utilisation_coverage_and_a_lower_bound() {
-        let input = EffectiveInput {
-            price_microdollars: Some(100_000_000),
-            usage: [1_000_000, 0, 0, 0, 1_000_000],
-            priced_usage: [1_000_000, 0, 0, 0, 500_000],
-            api_rates: [
-                Some(1_000_000),
-                Some(100_000),
-                Some(1_250_000),
-                None,
-                Some(10_000_000),
-            ],
-            n: 4,
-            period_days: 30,
-        };
-        let effective = effective(&input, Some(Money::new(200_000_000)), Some(4_000));
-        assert_eq!(effective.price.unwrap().microdollars, 100_000_000);
-        assert_eq!(effective.latest_used_basis_points, Some(4_000));
-        assert_eq!(effective.coverage_basis_points, Some(7_500));
-        assert_eq!(effective.n, 4);
-        assert!(effective.note.contains("lower bound"));
-        // Potential halves the API rate because the plan costs half capacity.
-        assert_eq!(
-            effective.buckets[0]
-                .potential
-                .as_ref()
-                .unwrap()
-                .microdollars,
-            500_000
-        );
-        // Realised is the price over the million tokens actually used.
-        assert_eq!(
-            effective.buckets[0].realised.as_ref().unwrap().microdollars,
-            100_000_000
-        );
-        assert_eq!(
-            effective.buckets[4].realised.as_ref().unwrap().microdollars,
-            100_000_000
-        );
-        assert!(effective.buckets[1].realised.is_none());
-    }
-
-    #[test]
-    fn full_price_coverage_still_reports_the_bound_note() {
-        // Priced coverage alone does not show that ingest covers the account.
-        let input = EffectiveInput {
-            price_microdollars: Some(100_000_000),
-            usage: [1_000_000, 0, 0, 0, 0],
-            priced_usage: [1_000_000, 0, 0, 0, 0],
-            api_rates: [Some(1_000_000), None, None, None, None],
-            n: 2,
-            period_days: 7,
-        };
-        let effective = effective(&input, Some(Money::new(200_000_000)), None);
-        assert_eq!(effective.coverage_basis_points, Some(10_000));
-        assert!(effective.note.contains("lower bound"));
-        assert!(effective.note.contains("upper bounds"));
     }
 }

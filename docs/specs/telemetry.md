@@ -291,7 +291,7 @@ collection or parallel identity store is introduced.
 - Owner: `crates/telemetry/src/context.rs`, `crates/telemetry/src/signals.rs`,
   `crates/run/src/telemetry_context.rs`, `crates/cli/src/run/telemetry_context.rs`
 
-## Mileage and effective rates
+## Mileage
 
 `provenant telemetry mileage [--account] [--window] [--model] [--since] [--json]`
 joins the quota history to ingested usage priced by the reviewed table. Mileage
@@ -310,15 +310,6 @@ the same plan and tier. It is `flagged` only for a fall of at least 20% with at
 least ten priced segments on both sides; otherwise it is `inconclusive`. A
 `plan.change` run boundary reports the capacity change around the upgrade.
 
-Effective rates apply the plan's discount factor `price / capacity` to the
-average API rate per bucket for the potential rate at full use, and divide the
-plan price by tokens actually used for the realised rate. The period is the
-report window: the monthly plan price is prorated to it, and one window's
-capacity is expanded to the number of full windows in the period. Both carry
-the window's latest used percentage (`latest_used_basis_points`, the value at
-its latest reading, not averaged over the period), `n` and priced token
-coverage. Every effective report says token use is a lower bound and realised
-rates are upper bounds, because ingest coverage of the account is not checked.
 `--model` narrows only the tokens: quota deltas cover every model, so mileage
 under a model filter is understated.
 Fitted non-negative weights for `delta used = sum w_b x tokens_b` are reported
@@ -331,10 +322,39 @@ microdollars, rounded once.
   `crates/telemetry/src/mileage.rs::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
   `crates/telemetry/src/mileage.rs::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
   `crates/telemetry/src/mileage.rs::reset_time_jitter_under_a_minute_stays_in_one_window`;
-  `crates/telemetry/src/mileage.rs::full_price_coverage_still_reports_the_bound_note`;
   `crates/cli/src/mileage.rs::tests::an_interval_takes_each_row_once_in_its_half_open_bounds`;
-  `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_capacity_and_effective_rates`
+  `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_and_capacity`
 - Owner: `crates/telemetry/src/mileage.rs`, `crates/cli/src/mileage.rs`
+
+## Plan value and cost read the usage ledger
+
+`provenant telemetry cost [TARGET] [--by route|account|model|graph|node] [--since]`
+and `provenant telemetry value [--account] [--window] [--since]` are the only
+producers of cost and plan value. Both read the usage ledger and price nothing:
+a row carries the cost settled with its attempt. `stats`, `mileage` and
+`quota usage` report no cost. `TARGET` takes the target form of the other lane
+commands (attempt, task or run ID or prefix, or a graph or `graph/node` name);
+rows backfilled from format 1 are selected by their opaque labels. One
+attempt's report is a few lines, so a lane may call it.
+
+A figure that is not known is absent, never zero. An attempt the price table
+could not fully price counts as `unpriced` and makes the cost a lower bound
+(`complete: false`); when no attempt priced anything the cost is null. An
+attempt with no account is reported as `unattributed`, as a group under
+`--by account` and as its own line in `value`, never added to another account.
+`value` gives one row per account that has both a quota reading and a
+configured plan: the plan price in force, the reading's quota windows, the
+API-equivalent usage since `--since` (default 30 days) and the coverage of that
+usage (attempts, priced and unpriced). It is a comparison, not a bill.
+A ledger line this build cannot read is named in the reply, not skipped.
+- Why (default): cost had three producers that disagreed on what was missing;
+  one reader of one ledger cannot.
+- Test: `crates/telemetry/src/ledger/report.rs::tests`;
+  `tests/telemetry_value_cost.rs::cost_for_one_attempt_is_small_and_works_inside_a_lane`;
+  `tests/telemetry_value_cost.rs::cost_reports_unpriced_and_unattributed_attempts_without_zero_filling`;
+  `tests/telemetry_value_cost.rs::value_has_a_row_per_account_with_readings_and_states_coverage`
+- Owner: `crates/telemetry/src/ledger/report.rs`, `crates/cli/src/telemetry_value.rs`,
+  `crates/cli/src/telemetry_args.rs`
 
 ## Trace export
 

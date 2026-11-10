@@ -216,8 +216,11 @@ fn backfill_copies_each_attempt_once_and_outlives_the_run_store() -> Result {
     assert_eq!(first["added"], totals["attempts"]);
     let ledger = provenant_telemetry::ledger::read(&rig.state)?;
     assert!(ledger.unrecognised.is_empty(), "{:?}", ledger.unrecognised);
-    let spend = provenant_telemetry::ledger::spend(&ledger.rows, None, None, None)?;
-    assert_eq!(serde_json::to_value(&spend.cost)?, totals["cost"]);
+    assert!(totals.get("cost").is_none(), "stats no longer reports cost");
+    let cost = rig.command(&["telemetry", "cost", "--json"])?;
+    assert_eq!(code(&cost), 0, "{cost:?}");
+    let cost: Value = serde_json::from_slice(&cost.stdout.bytes)?;
+    assert_eq!(cost["data"]["totals"]["attempts"], 2, "{cost}");
     assert!(
         ledger
             .rows
