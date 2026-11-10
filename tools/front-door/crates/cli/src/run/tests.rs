@@ -1209,15 +1209,28 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     // Settlement appends the work-location note to the blocker. This
                     // fixture's private Git holds no refs, so the note says the files
                     // were not restored, and why.
-                    assert!(
-                        matches!(record.settlement_receipts.unwrap().git_import,
-                        run::EffectDisposition::Failed { retryable: false, ref reason }
-                        if reason.strip_prefix(blocker).is_some_and(|note| {
-                            note.strip_prefix("; worktree files not restored: ")
-                                .is_some_and(|why| !why.is_empty())
-                        })),
-                        "{found:?}"
-                    );
+                    let expected_reason = match record
+                        .settlement_receipts
+                        .as_ref()
+                        .and_then(|receipts| match &receipts.git_import {
+                            run::EffectDisposition::Failed {
+                                retryable: false,
+                                reason,
+                            } => Some(reason.clone()),
+                            _ => None,
+                        }) {
+                        Some(reason) => {
+                            assert!(
+                                reason.strip_prefix(blocker).is_some_and(|note| {
+                                    note.strip_prefix("; worktree files not restored: ")
+                                        .is_some_and(|why| !why.is_empty())
+                                }),
+                                "{found:?}"
+                            );
+                            reason
+                        }
+                        None => panic!("unexpected git_import disposition: {record:?}"),
+                    };
                     for command in ["status", "output"] {
                         let crate::ParseOutcome::Invocation(inv) = crate::parse(
                             [command.to_owned(), id.to_string(), "--full".into()]
@@ -1238,7 +1251,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             &reply.result.data
                         };
                         assert_eq!(row["state"], "failed");
-                        assert_eq!(row["git_import_failure"]["reason"], blocker);
+                        assert_eq!(row["git_import_failure"]["reason"], expected_reason);
                         assert_eq!(row["git_import_failure"]["head"], "a".repeat(40));
                         assert_eq!(
                             row["git_import_failure"]["retained_objects"],
