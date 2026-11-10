@@ -1,12 +1,13 @@
 //! What happens once a lane has settled, beyond its own outcome: graphs
-//! advance, the chair that dispatched it is notified, and its session log
-//! gains an entry.
+//! advance, the chair that dispatched it is notified, its session log gains
+//! an entry, and the usage ledger gains the attempt's row.
 //!
 //! The run store owns the obligation. The row that says a settlement owes
 //! these reactions is written in the transaction that commits the terminal
 //! record, with its payload frozen there. A drain replays that payload at
-//! least once, from the normal seam and from crash recovery alike; the notice
-//! and the log are idempotent by attempt, so the effect is exactly once.
+//! least once, from the normal seam and from crash recovery alike; the notice,
+//! the log and the ledger row are idempotent by attempt, so the effect is
+//! exactly once.
 use provenant_core::{ActorId, CancelToken, MessageId, OperationId, ProjectId, Roots, RunId};
 use provenant_fabric_store::{HostStore, Message, MessageKind, Request, Store};
 use provenant_os::clock::SystemClock;
