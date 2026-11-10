@@ -8,6 +8,7 @@
       "lanes.silence_seconds",
       "lanes.slot_wait_seconds",
       "lanes.context_handoff_tokens",
+      "lanes.github_request_budget",
       "lanes.publish",
       "lanes.local_cargo",
       "lanes.isolation",
@@ -530,6 +531,12 @@
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
       "effect": "Context size, in tokens one provider call sent, at which the host stops a writer so a fresh attempt continues from its handoff on the same worktree. The stop settles as a declared stop and uses the graph's one automatic continuation; commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; others keep today's behaviour.",
       "trade_off": "Lower stops paying for very large contexts sooner but restarts more often, and a restart may lose working state that the handoff does not record; off until a trial shows restart does not lower completion."
+    },
+    "lanes.github_request_budget": {
+      "type": "int", "min": 0, "max": 10000, "default": 100, "status": "wired",
+      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "Maximum GitHub requests a lane may make through gh. When the lane makes more requests than this budget, the host stops it with a cause naming the budget. 0 turns the limit off.",
+      "trade_off": "Lower stops a runaway or looping lane before it exhausts the repository's REST quota; higher accommodates lanes with legitimate extensive GitHub interactions."
     },
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",

@@ -114,6 +114,10 @@ pub fn capture_plan(
                 provenant_supervisor::custody::default_slot_wait_ms,
                 |seconds| seconds.saturating_mul(1000),
             ),
+        github_request_budget: task
+            .profile
+            .knob_u64("lanes.github_request_budget")
+            .unwrap_or_else(provenant_supervisor::custody::default_github_request_budget),
         ..CapturePlan::default()
     }
 }

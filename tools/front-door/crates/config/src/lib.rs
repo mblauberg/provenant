@@ -18,7 +18,7 @@ pub use gc::{
     PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
     WRITER_LANES_CEILING, deserialize_auto, parse_cache_size,
 };
-pub use github_policy::GithubPolicy;
+pub use github_policy::{GithubAppConfig, GithubPolicy};
 mod harness;
 mod hooks;
 pub use harness::mcp_entry;

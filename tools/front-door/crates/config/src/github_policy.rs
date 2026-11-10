@@ -3,7 +3,19 @@ use crate::ConfigError;
 use provenant_core::{ProjectId, StateRoot};
 use provenant_os::fs::Directory;
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, io::Read};
+use std::{ffi::OsStr, io::Read, path::PathBuf};
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GithubAppConfig {
+    pub app_id: u64,
+    #[serde(default)]
+    pub installation_id: Option<u64>,
+    #[serde(default)]
+    pub private_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub keychain_account: Option<String>,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +24,8 @@ pub struct GithubPolicy {
     pub deny_verbs: Vec<String>,
     #[serde(default)]
     pub deny_labels: Vec<String>,
+    #[serde(default)]
+    pub app: Option<GithubAppConfig>,
 }
 
 impl GithubPolicy {

@@ -955,10 +955,17 @@ pub struct CapturePlan {
     /// provider that reports no context figure is never stopped for it.
     #[serde(default)]
     pub context_handoff: u64,
+    /// Maximum GitHub requests the attempt may make through gh. 0 is off.
+    #[serde(default = "default_github_request_budget")]
+    pub github_request_budget: u64,
     /// The most time spent queued for a build slot that is kept off the wall
     /// deadline, in total.
     #[serde(default = "default_slot_wait_ms")]
     pub slot_wait_ms: u64,
+}
+/// Registry default for lanes.github_request_budget.
+pub fn default_github_request_budget() -> u64 {
+    100
 }
 /// Registry default for lanes.slot_wait_seconds, in milliseconds.
 pub fn default_slot_wait_ms() -> u64 {
@@ -983,6 +990,7 @@ impl Default for CapturePlan {
             silence_ms: default_silence_ms(),
             token_budget: 0,
             context_handoff: 0,
+            github_request_budget: default_github_request_budget(),
             slot_wait_ms: default_slot_wait_ms(),
         }
     }

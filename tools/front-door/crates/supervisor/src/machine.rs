@@ -32,6 +32,8 @@ pub enum StopReason {
     /// A writer's context reached the context handoff threshold, from the
     /// context size its provider reported for one call.
     ContextHandoff,
+    /// A lane passed its GitHub request budget.
+    GithubRequestBudget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -238,6 +240,8 @@ pub enum Event {
     TokenBudget,
     /// One call's context reached the context handoff threshold.
     ContextHandoff,
+    /// Requests passed the GitHub request budget.
+    GithubRequestBudget,
     RetryStop(StopReason),
     Silence,
     CaptureFailure,
@@ -360,6 +364,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             | Event::ProtocolRejected
             | Event::TokenBudget
             | Event::ContextHandoff
+            | Event::GithubRequestBudget
             | Event::RetryStop(_)
             | Event::Silence
             | Event::CaptureFailure
@@ -387,6 +392,9 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             Event::TokenBudget => request_stop(&mut state, StopReason::TokenBudget, &mut effects),
             Event::ContextHandoff => {
                 request_stop(&mut state, StopReason::ContextHandoff, &mut effects)
+            }
+            Event::GithubRequestBudget => {
+                request_stop(&mut state, StopReason::GithubRequestBudget, &mut effects)
             }
             Event::Silence
             | Event::CaptureFailure
@@ -418,6 +426,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                     | Event::Terminal
                     | Event::TokenBudget
                     | Event::ContextHandoff
+                    | Event::GithubRequestBudget
                     | Event::Silence
                     | Event::CaptureFailure
                     | Event::ObservationFailure
