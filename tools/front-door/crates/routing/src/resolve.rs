@@ -887,6 +887,30 @@ fn pacing_factor_basis_points(
         }
         _ => format!("{detail} unobserved windows neutral"),
     };
+    // An account-level exhausted record dominates unprobed per-model windows.
+    let account_exhausted = result.is_none()
+        && context.quota.iter().any(|o| {
+            o.snapshot.schema_version == 1
+                && o.snapshot.account.adapter == model.adapter()
+                && Some(o.snapshot.account.account_key.as_str()) == account
+                && o.snapshot.status == QuotaStatus::Exhausted
+                && o.snapshot.observed_unix_seconds <= context.now_seconds()
+                && o.snapshot.observed_unix_seconds < o.expires_unix_seconds
+                && o.expires_unix_seconds > context.now_seconds()
+                && quota_reading_spent(
+                    &o.snapshot,
+                    model,
+                    context.catalogue.quota_pool(model),
+                    context.now_seconds(),
+                )
+        });
+    if account_exhausted {
+        return (
+            0,
+            format!("{detail} account exhausted; model windows unobserved standby"),
+            true,
+        );
+    }
     result.map_or(
         (NEUTRAL_FACTOR_BASIS_POINTS, neutral_detail, false),
         |(factor, window, standby)| {

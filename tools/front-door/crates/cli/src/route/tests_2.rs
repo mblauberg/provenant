@@ -436,6 +436,105 @@
     }
 
     #[test]
+    fn spent_account_yields_to_a_ready_account_for_the_same_model() -> Result<(), Box<dyn Error>> {
+        use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let catalogue = super::Catalogue::bundled()?;
+        let mut availability = Vec::new();
+        for (key, status) in [
+            ("fresh", QuotaStatus::Available),
+            ("exhausted", QuotaStatus::Exhausted),
+        ] {
+            let account = AccountScope {
+                adapter: "codex".into(),
+                account_key: key.into(),
+                label: key.into(),
+            };
+            let mut record = AccountRecord::empty(account.clone());
+            record.snapshot = Some(QuotaSnapshot {
+                schema_version: 1,
+                account,
+                revision: 0,
+                status,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                details: None,
+                windows: Vec::new(),
+            });
+            let quota = roots.state.as_path().join("quota");
+            let directory = quota.join(key);
+            std::fs::create_dir_all(&directory)?;
+            for directory in [roots.state.as_path(), quota.as_path(), directory.as_path()] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let path = directory.join("codex.json");
+            std::fs::write(&path, serde_json::to_vec(&record)?)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            availability.push(provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: "codex".into(),
+                executable: "/fixture/codex".into(),
+                version: "fixture".into(),
+                last_update: None,
+                fixture_ref: "fixture".into(),
+                catalogue_revision: catalogue.revision().into(),
+                account_key: Some(key.into()),
+                observed_models: Vec::new(),
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+            });
+        }
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model("codex/gpt-6-luna".into())),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let access = [provenant_routing::AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        // The spent account is listed first: it must not be drawn.
+        let resolved = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        assert!(matches!(&resolved.readiness, RouteReadiness::Ready { .. }));
+        assert_eq!(resolved.account_key.as_deref(), Some("fresh"));
+        Ok(())
+    }
+
+
+    #[test]
     fn unlisted_exact_models_keep_account_quota_gates() -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
         use provenant_records::RouteExclusionReason;
