@@ -29,6 +29,7 @@ retained-seed = []
 fixture = []
 
 [dev-dependencies]
+provenant-core = { workspace = true, features = ["fixture"] }
 provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

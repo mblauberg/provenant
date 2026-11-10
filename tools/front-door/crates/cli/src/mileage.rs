@@ -6,13 +6,12 @@ use crate::run::{Edge, Reply};
 use provenant_records::{CommandError, CommandResult, Outcome as Status};
 use provenant_run::ErrorKind;
 use provenant_telemetry::ingest;
-use provenant_telemetry::mileage::{self, Effective, Observation, Reading, Series};
+use provenant_telemetry::mileage::{self, Observation, Reading, Series};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
 const SCHEMA_VERSION: u64 = 1;
-const DAY: i64 = 86_400;
 
 pub fn run(command: Mileage, edge: &Edge<'_>) -> Reply {
     match inner(&command, edge) {
@@ -149,15 +148,6 @@ fn price_of(
         .then_some(microdollars as u64)
 }
 
-fn api_rates_of(tally: &Tally) -> [Option<u64>; 5] {
-    std::array::from_fn(|index| {
-        let tokens = tally.priced_usage[index];
-        (tokens > 0)
-            .then(|| tally.numerator[index] / u128::from(tokens))
-            .and_then(|rate| u64::try_from(rate).ok())
-    })
-}
-
 fn human_money(value: &Option<mileage::Money>) -> String {
     value
         .as_ref()
@@ -290,23 +280,6 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
                 series.readings.push(reading);
             }
             let report = mileage::analyse(&series, options);
-            let effective = effective(
-                key,
-                provider,
-                label,
-                latest,
-                account_rows,
-                table.as_ref(),
-                &report.mileage.capacity,
-                report.window_seconds,
-                series
-                    .readings
-                    .last()
-                    .map(|reading| reading.used_basis_points),
-                report.mileage.n,
-                command.recent_days,
-                accounts,
-            );
             for (model, observations) in observations {
                 if let Some(fit) = mileage::fit(&observations, command.min_runs) {
                     fits.push(json!({
@@ -317,7 +290,6 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
                 }
             }
             human.push_str(&human_series(&report));
-            human.push_str(&human_effective(&effective));
             window_reports.push(json!({
                 "window": report.window,
                 "mileage_usd_per_percent": report.mileage.mileage.as_ref().map(|m| m.usd.clone()),
@@ -330,7 +302,6 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
                 "runs": report.runs,
                 "step_change": report.step_change,
                 "upgrade": report.upgrade,
-                "effective": effective,
             }));
         }
         reports.push(json!({
@@ -405,90 +376,6 @@ fn human_series(report: &mileage::SeriesReport) -> String {
         ));
     }
     human
-}
-
-fn human_effective(effective: &Effective) -> String {
-    let mut human = format!(
-        "  effective: latest used {}.{:02}%, n={}, coverage {}.{:02}%\n",
-        effective.latest_used_basis_points.unwrap_or(0) / 100,
-        effective.latest_used_basis_points.unwrap_or(0) % 100,
-        effective.n,
-        effective.coverage_basis_points.unwrap_or(0) / 100,
-        effective.coverage_basis_points.unwrap_or(0) % 100,
-    );
-    for bucket in &effective.buckets {
-        if bucket.tokens == 0 && bucket.potential.is_none() {
-            continue;
-        }
-        human.push_str(&format!(
-            "    {}: {} tokens, potential {}, realised {}\n",
-            bucket.bucket,
-            bucket.tokens,
-            human_money(&bucket.potential),
-            human_money(&bucket.realised),
-        ));
-    }
-    human.push_str(&format!("    note: {}\n", effective.note));
-    human
-}
-
-#[allow(clippy::too_many_arguments)]
-fn effective(
-    key: &str,
-    provider: &str,
-    label: &str,
-    latest: i64,
-    rows: &Timed<'_>,
-    prices: Option<&provenant_telemetry::PriceTable>,
-    capacity: &Option<mileage::Money>,
-    window_seconds: Option<u64>,
-    latest_used: Option<u64>,
-    n: u64,
-    recent_days: u32,
-    accounts: &BTreeMap<String, provenant_providers::accounts::Registration>,
-) -> Effective {
-    let period_seconds = i128::from(recent_days) * i128::from(DAY);
-    // The plan price is monthly; report the effective rate for the days the
-    // tokens cover, and expand one window's capacity to that whole period.
-    let period_capacity = capacity.as_ref().and_then(|one_window| {
-        window_seconds
-            .filter(|seconds| *seconds > 0)
-            .and_then(|seconds| {
-                round_ratio(
-                    u128::from(one_window.microdollars) * u128::try_from(period_seconds).ok()?,
-                    u128::from(seconds),
-                )
-            })
-            .map(mileage::Money::new)
-    });
-    let period_price = price_of(accounts, provider, key, label, latest).and_then(|monthly| {
-        round_ratio(
-            u128::from(monthly) * u128::try_from(period_seconds).ok()?,
-            u128::try_from(30 * i128::from(DAY)).ok()?,
-        )
-    });
-    let tally = interval(rows, latest - i64::from(recent_days) * DAY, latest, prices);
-    let input = mileage::EffectiveInput {
-        price_microdollars: period_price,
-        usage: tally.usage,
-        priced_usage: tally.priced_usage,
-        api_rates: api_rates_of(&tally),
-        n,
-        period_days: recent_days,
-    };
-    mileage::effective(&input, period_capacity, latest_used)
-}
-
-fn round_ratio(numerator: u128, denominator: u128) -> Option<u64> {
-    if denominator == 0 {
-        return None;
-    }
-    u64::try_from(
-        numerator
-            .checked_add(denominator / 2)?
-            .checked_div(denominator)?,
-    )
-    .ok()
 }
 
 #[cfg(test)]

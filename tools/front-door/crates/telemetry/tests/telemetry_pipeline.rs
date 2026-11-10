@@ -64,7 +64,6 @@ fn evidence(sample: &str) -> Evidence {
         pattern: Some("council".into()),
         lens: Some("correctness".into()),
         model: Some("p/model".into()),
-        cost_microdollars: Some(1_000_000),
         confirmed: Some(1),
         false_positives: Some(0),
         ..Evidence::default()
@@ -187,7 +186,6 @@ fn ranking_rows(
     choice: &str,
     confirmed: u64,
     false_positives: u64,
-    cost: u64,
     escape: bool,
 ) -> Vec<Attributed> {
     (0..n)
@@ -198,7 +196,6 @@ fn ranking_rows(
             e.task_kind = Some("repair".into());
             e.confirmed = Some(confirmed);
             e.false_positives = Some(false_positives);
-            e.cost_microdollars = Some(cost);
             Attributed {
                 merge: Some(e.sample.clone()),
                 evidence: e,
@@ -216,8 +213,8 @@ fn ranking_rows(
 #[test]
 fn model_suggestion_contains_expiring_config_row() -> Result {
     let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
-    let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
-    rows.extend(ranking_rows(20, "noisy", 20, 80, 100_000_000, true));
+    let mut rows = ranking_rows(20, "efficient", 10, 0, false);
+    rows.extend(ranking_rows(20, "noisy", 5, 80, true));
     for row in &mut rows {
         row.evidence.model = Some(
             if row.evidence.pattern.as_deref() == Some("efficient") {
@@ -255,8 +252,8 @@ fn model_suggestion_contains_expiring_config_row() -> Result {
 #[test]
 fn pattern_and_lens_suggestions_remain_advisory() -> Result {
     let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
-    let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
-    rows.extend(ranking_rows(20, "noisy", 20, 80, 100_000_000, true));
+    let mut rows = ranking_rows(20, "efficient", 10, 0, false);
+    rows.extend(ranking_rows(20, "noisy", 5, 80, true));
     for row in &mut rows {
         row.evidence.lens = row.evidence.pattern.clone();
     }
@@ -283,9 +280,9 @@ fn pattern_and_lens_suggestions_remain_advisory() -> Result {
 #[test]
 fn ranking_uses_verified_value_strata_minimum_and_expiry() -> Result {
     let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
-    let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
-    // Raw volume is higher, but poor precision, spend and escaped outcomes lose.
-    rows.extend(ranking_rows(20, "noisy", 20, 80, 100_000_000, true));
+    let mut rows = ranking_rows(20, "efficient", 10, 0, false);
+    // The noisy arm has far more dispositions, but lower yield, poor precision and escapes.
+    rows.extend(ranking_rows(20, "noisy", 5, 80, true));
     let mut report = Outcomes {
         ci_coverage_from: None,
         skipped_ci_runs: 0,
@@ -331,7 +328,7 @@ fn ranking_uses_verified_value_strata_minimum_and_expiry() -> Result {
 #[test]
 fn incomplete_or_immature_evidence_never_generates_advice() -> Result {
     let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
-    let rows = ranking_rows(20, "a", 10, 0, 1_000_000, false);
+    let rows = ranking_rows(20, "a", 10, 0, false);
     let mut report = Outcomes {
         ci_coverage_from: None,
         skipped_ci_runs: 0,
@@ -340,12 +337,7 @@ fn incomplete_or_immature_evidence_never_generates_advice() -> Result {
         unattributed_rows: 0,
         rows,
     };
-    report
-        .rows
-        .extend(ranking_rows(20, "b", 1, 1, 10_000_000, true));
-    report.rows[0].evidence.cost_microdollars = None;
-    assert!(suggest::rank(&report, 20, 14, now)?.suggestions.is_empty());
-    report.rows[0].evidence.cost_microdollars = Some(1_000_000);
+    report.rows.extend(ranking_rows(20, "b", 1, 1, true));
     report.rows[0].evidence.confirmed = None;
     assert!(suggest::rank(&report, 20, 14, now)?.suggestions.is_empty());
     report.rows[0].evidence.confirmed = Some(10);

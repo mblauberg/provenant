@@ -3,6 +3,19 @@ use provenant_core::{ProjectId, StateRoot};
 use provenant_os::fs::{Directory, FsError};
 use std::ffi::OsStr;
 
+/// An existing collection directory, such as every delivery of a project.
+pub(crate) fn collection(
+    root: &StateRoot,
+    project: ProjectId,
+    collection: &str,
+) -> Result<Directory, FsError> {
+    let mut dir = Directory::open_anchor(root.as_path())?;
+    for name in ["workflow", "projects", &project.to_string(), collection] {
+        dir = dir.open_verified_directory(OsStr::new(name))?;
+    }
+    Ok(dir)
+}
+
 pub(crate) fn directory(
     root: &StateRoot,
     project: ProjectId,

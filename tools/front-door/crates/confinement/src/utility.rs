@@ -107,6 +107,32 @@ pub enum UtilityError {
     Execution(#[from] ExecError),
 }
 
+impl UtilityError {
+    /// The error's fixed text, for a variant whose text names no path, value,
+    /// Git output or source error. Edges may disclose it as a failure's cause.
+    pub fn safe_cause(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::InvalidHome => "utility home must be an absolute private directory",
+            Self::InvalidBudget => "utility budget is outside its supported bounds",
+            Self::InvalidOperationValue => "utility operation has an invalid or unsupported value",
+            Self::UnreadableGitConfiguration => "repository Git configuration could not be read",
+            Self::AttributeSourceUnsupported => {
+                "pinned Git does not support a verified attribute source"
+            }
+            Self::UnprobedRepository => {
+                "verified repository was not opened with its required Git probes"
+            }
+            Self::TimedOut => "utility command timed out; output cannot be used as evidence",
+            Self::Cancelled => "utility read was cancelled; output cannot be used as evidence",
+            Self::Incomplete => {
+                "utility capture or transport reported data loss; output cannot be used as evidence"
+            }
+            Self::Repo(error) => return error.safe_cause(),
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UtilityBudget {
     timeout: Duration,
@@ -2053,6 +2079,33 @@ fn read_config_file(
         .map_err(|_| UtilityError::UnreadableGitConfiguration)
 }
 
+/// Whether two scans of `repo` describe the same configuration view. Only
+/// other branches' tracking keys from the common config may differ.
+fn same_view(repo: &VerifiedRepo, first: &ConfigScan, second: &ConfigScan) -> bool {
+    if first == second {
+        return true;
+    }
+    if first.overrides != second.overrides
+        || first.files != second.files
+        || first.head_sensitive != second.head_sensitive
+        || first.lane_files != second.lane_files
+    {
+        return false;
+    }
+    let head = repo.config_head();
+    let sibling = crate::repo::SiblingTrackingKeys::for_head(&head);
+    let common = crate::transport::normalise(&repo.common_git_dir().join("config"));
+    let own = |entry: &&ConfigEntry| {
+        !(entry.file(repo.root_path()).as_deref() == Some(common.as_path())
+            && sibling.matches(entry.key.as_bytes()))
+    };
+    first
+        .entries
+        .iter()
+        .filter(own)
+        .eq(second.entries.iter().filter(own))
+}
+
 /// Probe one repository or worktree: neutralise lane-influenced configuration,
 /// resolve its object format and prove the attribute-source option works.
 /// `inherited` is the primary checkout's probe, whose object format and
@@ -2080,10 +2133,13 @@ fn probe_repository(
     // A lane could change an included file between Git reading it and the
     // digest above. Read again: the same view and the same bytes mean the
     // overrides describe what later commands will see, and any later edit
-    // makes the handle stale.
+    // makes the handle stale. Sibling writers may set their own branches'
+    // tracking keys in the common config meanwhile; those are not part of
+    // this checkout's view, as in the repository identity digest.
     if !scan.files.is_empty() {
         let again = scan_configuration(executor, repo, runtime, budget, cancel)?;
-        if again != scan || repo.included_digest(&scan.files, scan.head_sensitive)? != files_digest
+        if !same_view(repo, &scan, &again)
+            || repo.included_digest(&scan.files, scan.head_sensitive)? != files_digest
         {
             return Err(RepoError::IdentityChanged.into());
         }
@@ -3770,6 +3826,52 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             status(&fixture, &repo),
             Err(UtilityError::Repo(RepoError::IdentityChanged))
         ));
+        Ok(())
+    }
+
+    /// Sibling writers record their own lanes' upstreams in the common config
+    /// while another launch rescans it. Those keys are not this checkout's
+    /// view; its own branch's tracking keys and any other key still are.
+    #[test]
+    fn a_sibling_tracking_write_between_scans_keeps_the_view() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let lane = LaneInclude::new(&fixture)?;
+        let target = fixture.root.join(".worktrees/lane.cfg");
+        lane.write(&target, "")?;
+        lane.include(&fixture, &target)?;
+        let repo = open(&fixture)?;
+        let scan = || -> Result<ConfigScan, Box<dyn Error>> {
+            Ok(scan_configuration(
+                &fixture.executor,
+                &repo,
+                &fixture.runtime,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?)
+        };
+        let first = scan()?;
+        assert!(
+            !first.files.is_empty(),
+            "the rescan only runs with includes"
+        );
+        fixture.run(&["config", "branch.sibling.remote", "origin"])?;
+        fixture.run(&["config", "branch.sibling.merge", "refs/heads/sibling"])?;
+        let sibling = scan()?;
+        assert!(first != sibling);
+        assert!(same_view(&repo, &first, &sibling));
+
+        let head = repo.config_head();
+        let branch = std::str::from_utf8(&head)?
+            .trim_end()
+            .strip_prefix("ref: refs/heads/")
+            .ok_or("fixture HEAD names no branch")?
+            .to_owned();
+        fixture.run(&["config", &format!("branch.{branch}.remote"), "origin"])?;
+        let own = scan()?;
+        assert!(!same_view(&repo, &sibling, &own));
+        fixture.run(&["config", "user.name", "Sibling Writer"])?;
+        let other = scan()?;
+        assert!(!same_view(&repo, &own, &other));
         Ok(())
     }
 

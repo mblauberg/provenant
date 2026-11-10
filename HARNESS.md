@@ -196,10 +196,15 @@ for the same lens without reducing the count. Counted reviewers at
 `substantial` and above meet or exceed the highest author tier. Unknown
 provenance leaves coverage incomplete. Evidence decides claims, not votes.
 
-A verdict covers the diff it read. A later commit needs review of its delta,
-including repairs and conflict resolutions; a clean base merge needs only CI.
-Landing gates stay exact-head: a head that moved after review needs a review of the delta (or a full
-re-plan when risk or scope expanded), and candidate CI covers the landing head.
+A verdict covers the diff it read: the head it judged against the base recorded
+for it. Every gate, landing included, accepts a head only when it is that head
+or Git proves it carries the same delta unchanged: a merge-in from the target,
+or a rebase whose tree equals the reviewed head merged onto the new base. Such a
+head needs only CI, and candidate CI covers the landing head. Any other later
+commit, including repairs and conflict resolutions, needs review of its delta,
+or a full re-plan when risk or scope expanded; a verdict with no recorded base
+covers only its own head. A pull request's base comes from the forge, so a
+receipt for a delta review still covers every path the pull request changes.
 
 A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
 lenses that raised them, checking closure and relevant tests. After three repair

@@ -371,6 +371,7 @@ fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
             operation: "submit: access Fabric database".into(),
             path: None,
         }
@@ -384,6 +385,7 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         operation: "submit: open writer repository".into(),
         path: Some("/repo".into()),
     };
@@ -395,6 +397,7 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         }
@@ -405,6 +408,7 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         operation: "open writer repository".into(),
         path: Some("/repo".into()),
     };
@@ -416,6 +420,7 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         }
@@ -490,6 +495,7 @@ fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std:
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
             operation: "openat directory".into(),
             path: Some("/state/worktrees".into()),
         },

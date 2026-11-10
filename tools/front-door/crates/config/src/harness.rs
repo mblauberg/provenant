@@ -402,35 +402,52 @@ pub(crate) fn capture(
         }
         let sel = selector(target.harness);
         let before = get_for(&bytes, sel, target.harness)?;
-        let want = mcp(target.harness, targets)?;
         let wire = AbsolutePath::new(path)?;
-        if before.as_ref() != Some(&want) {
-            if let Some(current) = &before
-                && !expected_previous(previous, &wire, sel, current)
-                && (!targets.adopt_existing || !safe_adoption(current))
-            {
-                return Err(InstallError::Conflict(path.clone()));
+        let initial = bytes.clone();
+        if targets.fabric_mcp {
+            let want = mcp(target.harness, targets)?;
+            if before.as_ref() != Some(&want) {
+                if let Some(current) = &before
+                    && !expected_previous(previous, &wire, sel, current)
+                    && (!targets.adopt_existing || !safe_adoption(current))
+                {
+                    return Err(InstallError::Conflict(path.clone()));
+                }
+                bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
+                plan.changes
+                    .entry(path.clone())
+                    .or_default()
+                    .push(SelectorChange {
+                        selector: sel.into(),
+                        before,
+                        after: Some(want.clone()),
+                    });
             }
-            bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
+            plan.owned.push(OwnedEntry {
+                extra: Default::default(),
+                path: wire,
+                harness: Some(target.harness),
+                selector: sel.into(),
+                expected: OwnedValue::Selector {
+                    extra: Default::default(),
+                    value: want,
+                },
+            });
+        } else if let Some(current) = before
+            && expected_previous(previous, &wire, sel, &current)
+        {
+            // The server is opt-in. Only an owned entry still as recorded is
+            // removed; a foreign or edited one stays.
+            bytes = set_for(&bytes, sel, None, target.harness)?;
             plan.changes
                 .entry(path.clone())
                 .or_default()
                 .push(SelectorChange {
                     selector: sel.into(),
-                    before,
-                    after: Some(want.clone()),
+                    before: Some(current),
+                    after: None,
                 });
         }
-        plan.owned.push(OwnedEntry {
-            extra: Default::default(),
-            path: wire,
-            harness: Some(target.harness),
-            selector: sel.into(),
-            expected: OwnedValue::Selector {
-                extra: Default::default(),
-                value: want,
-            },
-        });
         // Hooks are one choice for every target of a harness. A target whose
         // account directory has none yet follows the targets that do.
         let inherited_hooks = !targets.remove_hooks
@@ -668,6 +685,9 @@ pub(crate) fn capture(
                     }
                 }
             }
+        }
+        if snap.is_none() && !targets.fabric_mcp && bytes == initial {
+            continue;
         }
         if snap.as_ref().is_none_or(|s| {
             s.value
@@ -961,6 +981,7 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     let settings = crate::load_with_domains(&targets.roots, Some(bytes.as_slice()), sections)?;
     {
         settings.install.validate()?;
+        targets.fabric_mcp = settings.fabric_mcp_server();
         if let Some(bin) = settings.install.bin_dir {
             targets.bin_dir = bin;
         }

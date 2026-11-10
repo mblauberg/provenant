@@ -471,6 +471,37 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
     )?
 }
 #[test]
+fn default_listing_shows_every_active_lane_and_counts_omitted_settled() {
+    let mut rows: Vec<_> = (0..crate::limits::SUMMARY_ROWS + 5)
+        .map(|n| serde_json::json!({"attempt_id": format!("{n:032x}"), "state": "running"}))
+        .collect();
+    rows.extend((0..3).map(
+        |n| serde_json::json!({"attempt_id": format!("{:032x}", 1000 + n), "state": "succeeded"}),
+    ));
+    let data = serde_json::json!({ "lanes": rows });
+    let summary = status::lane_summary(&status::lane_lines(&data), None);
+    let listed = summary
+        .lines
+        .iter()
+        .filter(|line| line.split_whitespace().nth(1) == Some("running"))
+        .count();
+    assert_eq!(
+        listed,
+        crate::limits::SUMMARY_ROWS + 5,
+        "{:?}",
+        summary.lines
+    );
+    assert!(
+        summary
+            .lines
+            .iter()
+            .any(|line| line.starts_with("3 settled lanes not listed")),
+        "{:?}",
+        summary.lines
+    );
+    assert_eq!(summary.omitted, 0);
+}
+#[test]
 fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::OpenOptionsExt;

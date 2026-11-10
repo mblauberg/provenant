@@ -1,5 +1,6 @@
 use super::{
     LandingError,
+    approval::{Approvals, Approver},
     model::*,
     ports::{Forge, Repo},
 };
@@ -77,9 +78,10 @@ pub fn decide_candidate(
 /// Return PRs whose pinned head or approval changed immediately before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     candidate: &Candidate,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    Ok(revalidate_with_reasons(forge, candidate)?
+    Ok(revalidate_with_reasons(forge, approver, candidate)?
         .into_iter()
         .map(|(pr, _)| pr)
         .collect())
@@ -87,6 +89,7 @@ pub fn revalidate(
 
 pub fn revalidate_with_reasons(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     candidate: &Candidate,
 ) -> Result<Vec<(EligiblePr, String)>, LandingError> {
     let mut excluded = Vec::new();
@@ -94,20 +97,16 @@ pub fn revalidate_with_reasons(
         let pr = &step.pr;
         let head = forge.head(pr.number)?;
         let reason = if forge.pull_request(pr.number)?.base_branch != pr.base_branch {
-            Some("base branch changed")
+            Some("base branch changed".to_owned())
         } else if head != pr.head {
-            Some("head changed")
-        } else if !forge
-            .approvals(pr.number, &pr.head)?
-            .iter()
-            .any(|approval| approval.reference == pr.approval)
-        {
-            Some("approval for the pinned head changed")
+            Some("head changed".to_owned())
         } else {
-            None
+            let standing = approver.approvals(forge, pr.number, &pr.head)?;
+            (!standing.includes(&pr.approval))
+                .then(|| standing.exclusion("approval for the pinned head changed"))
         };
         if let Some(reason) = reason {
-            excluded.push((pr.clone(), reason.to_owned()));
+            excluded.push((pr.clone(), reason));
         }
     }
     Ok(excluded)
@@ -168,9 +167,14 @@ pub fn fast_forward(
     })
 }
 /// Merge in order at pinned heads and record an alarm if the final tree differs from the gated tree.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ordered publication needs its boundaries"
+)]
 pub fn rest_ordered(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     target: &str,
     candidate: &Candidate,
     method: MergeMethod,
@@ -189,6 +193,7 @@ pub fn rest_ordered(
         }
         if !revalidate(
             forge,
+            &mut approvals.at(repo, &candidate.base),
             &Candidate {
                 steps: vec![step.clone()],
                 ..candidate.clone()
@@ -379,7 +384,11 @@ mod tests {
         forge.heads.insert(2, "head-2".into());
         let c = candidate();
         assert_eq!(
-            revalidate(&mut forge, &c)?,
+            revalidate(
+                &mut forge,
+                &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+                &c
+            )?,
             vec![c.steps[0].pr.clone(), c.steps[1].pr.clone()]
         );
         forge.heads.insert(1, "head-1".into());
@@ -392,13 +401,72 @@ mod tests {
                 }],
             );
         }
-        assert!(revalidate(&mut forge, &c)?.is_empty());
+        assert!(
+            revalidate(
+                &mut forge,
+                &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+                &c
+            )?
+            .is_empty()
+        );
         forge
             .pull_requests
             .get_mut(&1)
             .expect("fixture")
             .base_branch = "other".into();
-        assert_eq!(revalidate(&mut forge, &c)?, vec![c.steps[0].pr.clone()]);
+        assert_eq!(
+            revalidate(
+                &mut forge,
+                &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+                &c
+            )?,
+            vec![c.steps[0].pr.clone()]
+        );
+        Ok(())
+    }
+    /// A receipt whose proof cannot be read at revalidation withdraws its pull
+    /// request from publication, with the reason; the provable one stays.
+    #[test]
+    fn revalidation_excludes_a_receipt_whose_proof_cannot_be_read() -> Result<(), LandingError> {
+        use crate::pr::landing::{approval::Approvals, fakes::FakeReviews, ports::ReviewRecord};
+        use provenant_cli::domains::ApprovalSource;
+        let mut forge = FakeForge::default();
+        prepare(&mut forge);
+        forge.approvals_at_head.clear();
+        let mut repo = FakeRepo::default();
+        for (commit, parents) in [
+            ("base", vec!["fork"]),
+            ("head-1", vec!["fork"]),
+            ("reviewed-2", vec!["fork"]),
+            // PR 2 merged the target into its reviewed head; its tree is unreadable.
+            ("head-2", vec!["reviewed-2", "base"]),
+        ] {
+            repo.parents
+                .insert(commit.into(), parents.into_iter().map(Into::into).collect());
+        }
+        let record = |number: u64, head: &str| ReviewRecord {
+            reference: format!("approval-{number}"),
+            reviewer: "reviewer".into(),
+            head: head.into(),
+            base: "fork".into(),
+        };
+        let reviews = FakeReviews::of(std::collections::BTreeMap::from([
+            (1, vec![record(1, "head-1")]),
+            (2, vec![record(2, "reviewed-2")]),
+        ]));
+        let c = candidate();
+        let excluded = revalidate_with_reasons(
+            &mut forge,
+            &mut Approvals::new(ApprovalSource::Receipt, &reviews).at(&mut repo, "base"),
+            &c,
+        )?;
+        assert_eq!(excluded.len(), 1, "{excluded:?}");
+        assert_eq!(excluded[0].0, c.steps[1].pr);
+        assert!(
+            excluded[0].1.starts_with("unprovable: approval-2"),
+            "{}",
+            excluded[0].1
+        );
         Ok(())
     }
     #[test]
@@ -447,6 +515,7 @@ mod tests {
             rest_ordered(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
@@ -487,6 +556,7 @@ mod tests {
             rest_ordered(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
@@ -511,6 +581,7 @@ mod tests {
         let result = rest_ordered(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             "main",
             &candidate(),
             MergeMethod::Squash,

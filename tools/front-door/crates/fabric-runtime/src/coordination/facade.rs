@@ -563,6 +563,9 @@ pub enum FacadeError {
         resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_failure: Option<provenant_records::diagnostic::IoFact>,
+        /// The source error's fixed text, kept in-process for local edges.
+        #[serde(skip)]
+        cause: Option<&'static str>,
     },
 }
 
@@ -859,6 +862,9 @@ impl FacadeError {
             Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
                 projected = projected.detail("repository fact output exceeded its capture limit");
             }
+            // Only the in-process fixed cause is disclosed: operation text can
+            // arrive from a peer and the path is unanchored.
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(*cause),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
@@ -1207,8 +1213,26 @@ impl FacadeError {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
             operation: operation.into(),
             path: None,
+        }
+    }
+
+    /// A local I/O failure whose source error has the fixed text `cause`.
+    pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
+        let mut error = Self::io(operation);
+        if let Self::Io { cause: slot, .. } = &mut error {
+            *slot = cause;
+        }
+        error
+    }
+
+    /// The source error's fixed text, when this failure kept one.
+    pub fn cause(&self) -> Option<&'static str> {
+        match self {
+            Self::Io { cause, .. } => *cause,
+            _ => None,
         }
     }
 
@@ -1240,6 +1264,7 @@ impl FacadeError {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
             operation: operation.into(),
             path: path
                 .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
@@ -1358,6 +1383,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "access Fabric store".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -1367,6 +1393,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "verify Fabric store path".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -1525,6 +1552,7 @@ mod diagnostic_tests {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
         };
         let diagnostic = error.diagnostic();
         assert_eq!(diagnostic.code, "io");
@@ -1533,6 +1561,21 @@ mod diagnostic_tests {
         let wire = serde_json::to_string(&diagnostic).unwrap();
         assert!(!wire.contains("TOKEN_SENTINEL"));
         assert!(!wire.contains("/private/host"));
+    }
+
+    #[test]
+    fn generic_io_discloses_its_fixed_cause_only_in_process() {
+        let cause = "verified repository path or Git metadata changed";
+        let error = FacadeError::io_caused("locate writer project", Some(cause));
+        assert_eq!(error.cause(), Some(cause));
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "io");
+        assert_eq!(diagnostic.detail.as_deref(), Some(cause));
+        let wire = serde_json::to_value(&error).unwrap();
+        assert!(!wire.to_string().contains(cause), "{wire}");
+        let received: FacadeError = serde_json::from_value(wire).unwrap();
+        assert_eq!(received.cause(), None);
+        assert!(received.diagnostic().detail.is_none());
     }
 
     #[test]
@@ -1627,6 +1670,7 @@ mod diagnostic_tests {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "openat read".into(),
                 path: None,
             }
