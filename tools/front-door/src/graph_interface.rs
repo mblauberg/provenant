@@ -170,7 +170,10 @@ fn lane_lines(checkpoint: &Value) -> String {
             ids.len() - provenant_cli::limits::SUMMARY_ROWS
         );
     }
-    for node in checkpoint["nodes"].as_array().map_or(&[][..], Vec::as_slice) {
+    for node in checkpoint["nodes"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+    {
         if node["advance_error_code"] == "preparation_refused"
             && let Some(message) = node["advance_error"].as_str()
         {

@@ -475,9 +475,9 @@ fn default_listing_shows_every_active_lane_and_counts_omitted_settled() {
     let mut rows: Vec<_> = (0..crate::limits::SUMMARY_ROWS + 5)
         .map(|n| serde_json::json!({"attempt_id": format!("{n:032x}"), "state": "running"}))
         .collect();
-    rows.extend((0..3).map(|n| {
-        serde_json::json!({"attempt_id": format!("{:032x}", 1000 + n), "state": "succeeded"})
-    }));
+    rows.extend((0..3).map(
+        |n| serde_json::json!({"attempt_id": format!("{:032x}", 1000 + n), "state": "succeeded"}),
+    ));
     let data = serde_json::json!({ "lanes": rows });
     let summary = status::lane_summary(&status::lane_lines(&data), None);
     let listed = summary
@@ -485,9 +485,17 @@ fn default_listing_shows_every_active_lane_and_counts_omitted_settled() {
         .iter()
         .filter(|line| line.contains(" running"))
         .count();
-    assert_eq!(listed, crate::limits::SUMMARY_ROWS + 5, "{:?}", summary.lines);
+    assert_eq!(
+        listed,
+        crate::limits::SUMMARY_ROWS + 5,
+        "{:?}",
+        summary.lines
+    );
     assert!(
-        summary.lines.iter().any(|line| line.starts_with("3 settled lanes not listed")),
+        summary
+            .lines
+            .iter()
+            .any(|line| line.starts_with("3 settled lanes not listed")),
         "{:?}",
         summary.lines
     );
