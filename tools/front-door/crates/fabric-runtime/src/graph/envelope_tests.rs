@@ -249,6 +249,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
+                blocked: true,
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
                 expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),

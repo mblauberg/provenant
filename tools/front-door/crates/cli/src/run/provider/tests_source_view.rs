@@ -161,7 +161,7 @@ fn source_view_names_the_failing_step_and_cause() -> Result<(), Box<dyn std::err
     let refusal = PrepareError::from(error).into_refusal();
     assert_eq!(
         refusal.terminal_cause,
-        Some(provenant_records::run::TerminalCause::SourceViewRefused)
+        provenant_records::run::TerminalCause::SourceViewRefused
     );
     let note = refusal.terminal_note.ok_or("note")?;
     assert!(note.contains("tree listing") && note.contains("Git exited with status"));
