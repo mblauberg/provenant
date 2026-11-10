@@ -361,6 +361,12 @@
       "build_dir_survey_interval_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "300 (5 minutes)", "effect": "Legacy survey interval, retained for readable existing configurations. Settlement no longer surveys lane caches; manual and scheduled GC own those surveys."}
     }
   },
+  "host_review_settings": {
+    "path": "domains.routing.review",
+    "settings": {
+      "diversity": {"type": "enum", "allowed": "advisory or strict", "default": "advisory", "effect": "How a review panel that cannot meet its `minimum_family_counts` is handled. advisory resolves the panel and records one warning per short family, with the required and met counts and the exclusions, in the review-family resolution and each reviewer's preamble; strict refuses the review instead. A run document's `[review]` table can set `diversity` for one review. A lens's own `required_family` always refuses when unmet."}
+    }
+  },
   "host_review_lens_settings": {
     "path": "domains.routing.review.lenses.by_paths",
     "settings": {

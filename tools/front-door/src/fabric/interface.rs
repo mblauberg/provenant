@@ -4467,6 +4467,7 @@ mod tests {
         );
         let mut child = input.clone();
         child["tier"] = json!("missing-family-pool");
+        child["document"]["review"]["diversity"] = json!("strict");
         let error = factory.child_request(&child).unwrap_err();
         let FacadeError::DispatchRefused { reason, .. } = error else {
             return Err(format!("expected child family refusal, received {error:?}").into());
@@ -4476,8 +4477,35 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("unknown named route"), "{reason}");
+        let mut advisory = input.clone();
+        advisory["document"]["exclude"] = json!(["codex"]);
+        let response = factory.graph_document(advisory, budget, &cancel)?;
+        let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        let record: provenant_routing::PanelResolution = serde_json::from_str(
+            document.extra["template_resolvers"]["review-family-resolution"][0]
+                .as_str()
+                .ok_or("family resolution")?,
+        )?;
+        assert!(
+            record
+                .slots
+                .iter()
+                .all(|slot| slot.satisfied_family.is_none())
+        );
+        let [warning] = record.warnings.as_slice() else {
+            return Err(format!("expected one warning, received {:?}", record.warnings).into());
+        };
+        assert!(
+            warning.contains(family) && warning.contains("count 2"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("excluded by") && warning.contains("codex"),
+            "{warning}"
+        );
         let mut refused = input;
         refused["document"]["exclude"] = json!(["codex"]);
+        refused["document"]["review"]["diversity"] = json!("strict");
         let error = factory
             .graph_document(refused, budget, &cancel)
             .unwrap_err();

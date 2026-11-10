@@ -905,6 +905,7 @@ fn finish_reactions(store: &RunStore) -> TestResult {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
+            reaction.ledger_done = true;
             Ok(())
         })?;
     }

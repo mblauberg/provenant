@@ -1315,9 +1315,8 @@ sealed owner and lineage; a changed owner or a live predecessor refuses reuse.
 An uninitialised gitlink is acceptable, while an initialised nested repository
 requires review because Git could follow lane-controlled configuration.
 
-Owned settlement atomically queues intent under a non-blocking per-request lock.
-The lock holder owns the receipt; a successful holder records `cleanup_deferred: true`.
-A queue failure records a retryable retained receipt with a warning.
+Owned settlement records `cleanup_deferred: true`, unless a worker already
+began pruning, and then spawns one detached collection. A failed spawn records nothing.
 It performs no network operations, recursive output survey or worktree removal.
 Deferred-intent receipts are never final. A detached worker can remove only its
 own clean checkout after successful
@@ -1396,21 +1395,14 @@ once, and judges local branches on those targets and the fetched default.
 Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
 `outcome`, `reason`, `head`): under `artefacts` in the settlement receipt and
 `worktree_cleanup[].refs` in `gc --json`. A failure warns and never fails the
-settlement or the pass. Completion requests with a final retention reason
-leave the queue even if output cleanup warned. Dirty trees, absent worktrees
-and unlanded work without requested delivery are final retentions. Transient
-failures retry at most five times with durable exponential backoff starting
-at ten minutes, with at most four dispatches per host tick. Exhausted requests
-move from `gc/completions` to `gc/completion-exhausted` for diagnosis.
-Settlement atomically publishes only its own request, using a non-blocking per-request lock.
-Only the host tick enumerates and dispatches the queue. Each request contains
-its identity payload, attempt count, next-retry time and last cause; the filename
-hash covers only identity. A worker claims the entire record by rename to the
-same filename with `.claim` appended, under a non-blocking OS lock. The host tick
-retries abandoned claims after their durable backoff. Requeuing publishes fresh
-pending intent independently of any claimed record, including an exhausted one.
-Exhaustion renames the complete claimed record into diagnostics in one operation;
-there is no separate retry file or orphan reconciliation.
+settlement or the pass. Completion cleanup is one detached attempt per
+settlement and keeps no queue or retry state. A transient failure leaves a
+non-final receipt. The next applied `gc` sweep runs the same owner-bound
+collection, under the collection lock it holds, for each terminal lane whose
+receipt is deferred, retryable or pruning and whose worktree exists, landing
+against the fetched default branch (falling back to the owner's base when the
+fetch fails, there is no origin, or the sweep is a pressure sweep, matching
+settlement); dirty trees and unlanded work are retained by both.
 - Why (default): finished lanes leave nothing behind once their work has landed, and
   never take a ref Provenant did not make.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`

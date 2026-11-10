@@ -52,11 +52,17 @@ pub struct Reaction {
     pub notice_done: bool,
     #[serde(default)]
     pub log_done: bool,
+    /// The attempt's usage row is in the usage ledger.
+    #[serde(default)]
+    pub ledger_done: bool,
 }
 
 impl Reaction {
     pub fn pending(&self) -> bool {
-        !(self.graph_done || !self.graph) || !self.notice_done || !self.log_done
+        !(self.graph_done || !self.graph)
+            || !self.notice_done
+            || !self.log_done
+            || !self.ledger_done
     }
 }
 
@@ -180,6 +186,7 @@ impl RunStore {
             graph_done: false,
             notice_done: false,
             log_done: false,
+            ledger_done: false,
         })
     }
 

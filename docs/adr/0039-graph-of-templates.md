@@ -135,3 +135,20 @@ while broken formats block until drained or overridden with `--yes`.
 Unreadable records are preserved and reported. Event sourcing with a projected
 checkpoint is rejected: it would replace a working recovery authority without
 solving a present need.
+
+## Amendment: review and repair are a kernel-owned domain
+
+Review and repair belong to the kernel's domain, not to a template or to the
+agent's prompt. The kernel owns panel resolution, the repair loop and the
+records they persist. A change to a persisted shape in this domain bumps
+`STATE_FORMAT_VERSION` by default; an additive change that an older reader
+safely ignores may leave it unchanged only when the change says why. The
+ceilings on this domain become defaults a chair can override: panel family
+diversity is advisory unless the chair asks for strict, and `max_repair_cycles`
+defaults to three with no ceiling. Within the default budget the third review
+still asks the principal for design judgement; a budget the chair raises runs
+until it is used up and then reaches the principal. `PanelResolution` gains
+`diversity` and `warnings` without a version bump: both are serde-defaulted and
+the record does not deny unknown fields, so an older reader ignores them.
+Separately, outside the kernel, the CI check of skill-negative coverage reports
+gaps instead of failing. Part of #3078 (wave 1, #3135).

@@ -14,6 +14,7 @@ pub(super) mod contributions;
 mod git;
 pub(crate) mod land;
 pub(crate) mod landing;
+pub(crate) mod observer;
 mod open;
 pub(crate) mod status;
 mod wait;
@@ -53,13 +54,8 @@ pub(crate) fn code_of(
 #[error("external command timed out")]
 pub(crate) struct TimedOut;
 
-fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
-    execute_for(
-        project,
-        argv,
-        Duration::from_secs(if watch { 86_400 } else { 60 }),
-        watch,
-    )
+fn execute(project: &Path, argv: &[&str]) -> Result<ExecOutcome> {
+    execute_for(project, argv, Duration::from_secs(60), false)
 }
 /// Run an external command to completion within `timeout`. A `watch` run
 /// discards repeated progress so a long CI wait cannot fill capture.
@@ -191,9 +187,7 @@ fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Re
     Ok(serde_json::from_slice(&bytes)?)
 }
 fn head(project: &Path, number: &str) -> Result<GitOid> {
-    Ok(rest_pull(&|argv| execute(project, argv, false), number)?
-        .head
-        .sha)
+    Ok(rest_pull(&|argv| execute(project, argv), number)?.head.sha)
 }
 /// The pull request a graph lands: found by head branch, never by `gh pr
 /// view BRANCH`, which reads a numeric branch as a pull request number.
@@ -204,9 +198,7 @@ struct BranchPull {
     head: GitOid,
 }
 fn pull_for_branch(project: &Path, branch: &str, head: GitOid) -> Result<BranchPull> {
-    pull_for_branch_with(branch, head, &|argv| {
-        successful(execute(project, argv, false)?)
-    })
+    pull_for_branch_with(branch, head, &|argv| successful(execute(project, argv)?))
 }
 /// The one same-repository pull request whose head branch is `branch` and
 /// that is open or already at `head`. A fork's namesake, or an earlier pull
@@ -286,66 +278,69 @@ fn pull_for_branch_with(
 /// it asks. A push is followed by a gap before any workflow registers.
 const UNREPORTED_WAIT: Duration = Duration::from_secs(180);
 const UNREPORTED_POLL: Duration = Duration::from_secs(10);
+/// The longest `pr watch` follows the CI of one head.
+const WATCH_BUDGET: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// `gh pr checks` fails, rather than waits, until a check has been reported.
-fn unreported(output: &ExecOutcome) -> bool {
-    output.termination != Termination::Exit(0)
-        && String::from_utf8_lossy(&output.stderr.bytes)
-            .to_ascii_lowercase()
-            .contains("no checks reported")
-}
-/// Run a `gh pr checks` read, retrying while no check has been reported yet
-/// and giving up with a clear message once `UNREPORTED_WAIT` has passed.
-fn when_reported(
-    run: &dyn Fn() -> Result<ExecOutcome>,
+type Observed = std::result::Result<Vec<observer::Check>, observer::ObserveError>;
+
+/// Follow the CI of one head until no check is pending, then require that
+/// every check passed or was skipped and that at least one passed. A head
+/// with no check yet waits `UNREPORTED_WAIT` for its first one.
+fn watch_with(
+    read: &mut dyn FnMut() -> Observed,
     sleep: &dyn Fn(Duration),
     number: &str,
-) -> Result<ExecOutcome> {
+) -> Result<()> {
     let mut waited = Duration::ZERO;
     loop {
-        let output = run()?;
-        if !unreported(&output) {
-            return Ok(output);
+        let checks = read()
+            .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
+        if checks.is_empty() {
+            if waited >= UNREPORTED_WAIT {
+                return Err(wait::failure(
+                    "CI_NOT_SCHEDULED",
+                    format!(
+                        "no checks were reported for #{number} within {}s; next: check the workflow triggers or push an empty commit to start CI",
+                        UNREPORTED_WAIT.as_secs()
+                    ),
+                ));
+            }
+            sleep(UNREPORTED_POLL);
+            waited += UNREPORTED_POLL;
+            continue;
         }
-        if waited >= UNREPORTED_WAIT {
-            return Err(wait::failure(
-                "CI_NOT_SCHEDULED",
-                format!(
-                    "no checks were reported for #{number} within {}s; next: check the workflow triggers or push an empty commit to start CI",
-                    UNREPORTED_WAIT.as_secs()
-                ),
-            ));
+        if checks.iter().any(|check| check.bucket == "pending") {
+            sleep(observer::POLL);
+            continue;
         }
-        sleep(UNREPORTED_POLL);
-        waited += UNREPORTED_POLL;
+        if !checks.iter().any(|check| check.bucket == "pass")
+            || checks
+                .iter()
+                .any(|check| !matches!(check.bucket.as_str(), "pass" | "skipping"))
+        {
+            return Err("CI checks have not passed".into());
+        }
+        return Ok(());
     }
 }
+// The `pr watch` edge owns its real clock and sleep.
 #[allow(clippy::disallowed_methods)]
-fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()> {
-    if watch {
-        successful(when_reported(
-            &|| execute(project, &["gh", "pr", "checks", number, "--watch"], true),
-            &std::thread::sleep,
-            number,
-        )?)?;
-    }
-    #[derive(Deserialize)]
-    struct Check {
-        bucket: String,
-    }
-    let bytes = successful(execute(
-        project,
-        &["gh", "pr", "checks", number, "--json", "bucket"],
-        false,
-    )?)?;
-    let checks: Vec<Check> = serde_json::from_slice(&bytes)?;
-    if !checks.iter().any(|check| check.bucket == "pass")
-        || checks
-            .iter()
-            .any(|check| !matches!(check.bucket.as_str(), "pass" | "skipping"))
-    {
-        return Err("CI checks have not passed".into());
-    }
+fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &str) -> Result<()> {
+    let started = std::time::Instant::now();
+    let mut ci = observer::Observer::open(state, project, repository, WATCH_BUDGET)
+        .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
+    let commit = head.to_string();
+    watch_with(
+        &mut || {
+            ci.checks(
+                &commit,
+                observer::POLL,
+                WATCH_BUDGET.saturating_sub(started.elapsed()),
+            )
+        },
+        &std::thread::sleep,
+        number,
+    )?;
     if self::head(project, number)? != head {
         return Err(format!("pull request head moved from {head}").into());
     }
@@ -433,9 +428,18 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
     let result = (|| -> Result<()> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let number = number.to_string();
-        let current = head(&project, &number)?;
+        let pull = rest_pull(&|argv| execute(&project, argv), &number)?;
+        let current = pull.head.sha;
         captured = Some(current);
-        checks(&project, &number, current, true)?;
+        let repository = pull
+            .base
+            .repo
+            .map(|repo| repo.full_name)
+            .ok_or("pull request base repository is unavailable")?;
+        let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
+            .roots
+            .state;
+        watch(&project, state.as_path(), &number, current, &repository)?;
         Ok(())
     })();
     let Some(head) = captured else {
@@ -574,23 +578,20 @@ mod branch_pull_tests {
 #[cfg(test)]
 #[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod unreported_checks_tests {
+    use super::observer::{Check, ObserveError};
     use super::*;
-    use provenant_os::exec::CapturedStream;
     use std::cell::Cell;
 
-    fn outcome(code: i64, stderr: &str) -> ExecOutcome {
-        ExecOutcome {
-            termination: Termination::Exit(code),
-            stdout: CapturedStream::default(),
-            stderr: CapturedStream {
-                bytes: stderr.as_bytes().to_vec(),
-                ..Default::default()
-            },
-            timed_out: false,
-            drain_truncated: false,
-            overflow_stopped: false,
-            cancelled: false,
-            elapsed_micros: 0,
+    fn check(bucket: &str) -> Check {
+        Check {
+            name: format!("ci-{bucket}"),
+            bucket: bucket.into(),
+            app: None,
+            app_slug: None,
+            conclusion: None,
+            registered: None,
+            url: None,
+            excerpt: String::new(),
         }
     }
 
@@ -598,29 +599,28 @@ mod unreported_checks_tests {
     fn watch_waits_while_no_check_is_reported_then_proceeds() {
         let reads = Cell::new(0);
         let slept = Cell::new(Duration::ZERO);
-        let result = when_reported(
-            &|| {
+        watch_with(
+            &mut || {
                 reads.set(reads.get() + 1);
-                Ok(if reads.get() < 4 {
-                    outcome(1, "no checks reported on the 'feature' branch\n")
-                } else {
-                    outcome(0, "")
+                Ok(match reads.get() {
+                    1..=3 => Vec::new(),
+                    4 => vec![check("pending")],
+                    _ => vec![check("pass"), check("skipping")],
                 })
             },
             &|delay| slept.set(slept.get() + delay),
             "7",
         )
-        .expect("checks registered after three empty reads");
-        assert_eq!(result.termination, Termination::Exit(0));
-        assert_eq!(reads.get(), 4);
-        assert_eq!(slept.get(), UNREPORTED_POLL * 3);
+        .expect("checks registered after three empty reads and then passed");
+        assert_eq!(reads.get(), 5);
+        assert_eq!(slept.get(), UNREPORTED_POLL * 3 + observer::POLL);
     }
 
     #[test]
     fn watch_reports_unscheduled_checks_at_the_bound() {
         let slept = Cell::new(Duration::ZERO);
-        let error = when_reported(
-            &|| Ok(outcome(1, "no checks reported on the 'feature' branch\n")),
+        let error = watch_with(
+            &mut || Ok(Vec::new()),
             &|delay| slept.set(slept.get() + delay),
             "7",
         )
@@ -630,26 +630,39 @@ mod unreported_checks_tests {
             .downcast_ref::<wait::Failure>()
             .expect("typed failure");
         assert_eq!(failure.code, "CI_NOT_SCHEDULED");
-        assert!(
-            failure
-                .message
-                .contains("no checks were reported for #7 within 180s")
-        );
+        assert!(failure.message.contains("#7 within 180s"));
     }
 
     #[test]
-    fn watch_does_not_retry_other_failures() {
+    fn watch_fails_a_finished_run_that_did_not_pass_without_waiting() {
+        for buckets in [vec!["fail"], vec!["pass", "cancel"], vec!["skipping"]] {
+            let error = watch_with(
+                &mut || Ok(buckets.iter().map(|bucket| check(bucket)).collect()),
+                &|_| panic!("a finished run must not wait"),
+                "7",
+            );
+            assert!(error.is_err(), "{buckets:?}");
+        }
+    }
+
+    #[test]
+    fn watch_names_a_rate_limit_and_does_not_retry_it() {
         let reads = Cell::new(0);
-        let result = when_reported(
-            &|| {
+        let error = watch_with(
+            &mut || {
                 reads.set(reads.get() + 1);
-                Ok(outcome(1, "HTTP 502 Bad Gateway"))
+                Err(ObserveError::RateLimited {
+                    reset: "2026-01-01T00:00:00Z".parse().unwrap(),
+                })
             },
-            &|_| panic!("a failed check must not wait"),
+            &|_| panic!("the observer owns the rate-limit wait"),
             "7",
         )
-        .expect("the failure is handed to the caller");
-        assert_eq!(result.termination, Termination::Exit(1));
+        .expect_err("the rate limit outlasts the budget");
         assert_eq!(reads.get(), 1);
+        let failure = error
+            .downcast_ref::<wait::Failure>()
+            .expect("typed failure");
+        assert_eq!(failure.code, "RATE_LIMITED");
     }
 }

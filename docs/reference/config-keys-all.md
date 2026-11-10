@@ -254,6 +254,14 @@ Set these in `[domains.fabric.limits]` in the host configuration. Omit a key for
 |---|---|---|
 | `store_busy_timeout_ms` | 30000 (30 seconds) | Milliseconds a command waits for a contended local store, both the SQLite busy timeout and the stores' own advisory locks, before it reports contention. Read once when a command starts; zero fails fast (0 to 600000). |
 
+## Host review settings
+
+Set these in `[domains.routing.review]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `diversity` | advisory | How a review panel that cannot meet its `minimum_family_counts` is handled. advisory resolves the panel and records one warning per short family, with the required and met counts and the exclusions, in the review-family resolution and each reviewer's preamble; strict refuses the review instead. A run document's `[review]` table can set `diversity` for one review. A lens's own `required_family` always refuses when unmet. (advisory or strict). |
+
 ## Host review lens settings
 
 Set these in `[domains.routing.review.lenses.by_paths]` in the host configuration. Omit the table for the bundled rules.

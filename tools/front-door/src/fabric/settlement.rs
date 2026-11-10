@@ -357,15 +357,11 @@ pub(crate) fn settle_owned_worktree(
             return Ok(());
         }
     }
-    // Settlement publishes intent only. Fetching refs, inspecting output trees
-    // and removing worktrees/caches belong to the detached completion GC worker.
+    // Settlement only starts collection. Fetching refs, inspecting output trees
+    // and removing worktrees/caches belong to the detached completion worker.
     // Replay completed/pruning receipts without walking a worktree.
-    if let Some(receipt) = replay_worktree_settlement(
-        store
-            .worktree_settlement(record.attempt_id, &call)?
-            .as_ref(),
-        &writer.worktree,
-    )? {
+    let prior = store.worktree_settlement(record.attempt_id, &call)?;
+    if let Some(receipt) = replay_worktree_settlement(prior.as_ref(), &writer.worktree)? {
         record_worktree_settlement(&store, record.attempt_id, &receipt)?;
         return Ok(());
     }
@@ -374,34 +370,29 @@ pub(crate) fn settle_owned_worktree(
         .or(pickup.as_ref().map(|(_, receipt)| receipt))
         .or(record.delivery.as_ref());
     let reason = settlement_retention_reason(&record.state, task.deliver.is_some(), delivery)
-        .unwrap_or("worktree cleanup queued for completion GC");
-    // Hold the request lock until the receipt is written so a worker cannot
-    // finish and have its final receipt overwritten by this deferred one.
-    match super::gc_cleanup::queue(settled, roots, delivery_override) {
-        Ok(Some(_lock)) => record_worktree_settlement(
-            &store,
-            record.attempt_id,
-            &serde_json::json!({
-                "schema_version":1,
-                "state":"retained",
-                "worktree":writer.worktree,
-                "reason":reason,
-                "cleanup_deferred":true,
-            }),
-        )?,
-        Ok(None) => {} // The current worker owns the receipt.
-        Err(error) => record_worktree_settlement(
-            &store,
-            record.attempt_id,
-            &serde_json::json!({
-                "schema_version":1,
-                "state":"retained",
-                "worktree":writer.worktree,
-                "reason":"could not queue completion GC",
-                "cleanup_warning":error.to_string(),
-                "retryable":true,
-            }),
-        )?,
+        .unwrap_or("worktree cleanup deferred to completion GC");
+    // Record before spawning so the worker's receipt always comes later. A
+    // worker that began pruning owns the receipt and its replay, so the check
+    // runs under the receipt lock rather than against `prior`.
+    store.record_worktree_settlement_if(
+        record.attempt_id,
+        &serde_json::json!({
+            "schema_version":1,
+            "state":"retained",
+            "worktree":writer.worktree,
+            "reason":reason,
+            "cleanup_deferred":true,
+        }),
+        |current| current.is_none_or(|receipt| receipt["state"] != "pruning"),
+        &call,
+    )?;
+    // One attempt. A miss records nothing; the gc sweep walks every lane.
+    if let Err(error) = super::gc_cleanup::spawn(settled, delivery_override) {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: completion GC did not start: {error}; the next gc sweep collects the worktree"
+        );
     }
     Ok(())
 }
