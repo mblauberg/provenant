@@ -272,7 +272,6 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
                     used_basis_points: window.used_basis_points,
                     resets_unix_seconds: window.resets_unix_seconds,
                     plan: record.plan.clone(),
-                    tier: record.tier.clone(),
                     cost_microdollars: tally.cost(),
                     usage: tally.usage,
                     priced: tally.priced(),

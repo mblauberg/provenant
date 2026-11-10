@@ -1022,6 +1022,43 @@ impl BoundGraphOwner<'_> {
     }
 }
 
+impl BoundGraphOwner<'_> {
+    /// The skipped routes of this graph attempt's own unlaunched run record.
+    fn preparation_skipped_routes(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<Vec<provenant_records::run::SkippedRoute>>, FacadeError> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some(record.skipped_routes))
+    }
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
         let before =
@@ -1536,33 +1573,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         key: &provenant_fabric_runtime::graph::AttemptKey,
         reference: &str,
     ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
-        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-        if host != self.factory.context.identity.host.to_string() {
-            return Ok(None);
-        }
-        let owner = BinaryRunOwner {
-            factory: self.factory,
-            allow_remote: false,
-            actor: None,
-            chair: None,
-        };
-        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
-        let call = owner.call(self.cancel);
-        let record = store
-            .record(
-                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
-                &call,
-            )
-            .map_err(run_error)?;
-        if record.operation_id != graph_operation("graph-attempt-operation", key)?
-            || record.context.as_ref().is_none_or(|context| {
-                context.graph_id.as_deref() != Some(key.graph_id.as_str())
-                    || context.node_id.as_deref() != Some(key.node_id.as_str())
-            })
-        {
-            return Ok(None);
-        }
-        Ok(unanimous_preparation_cause(&record.skipped_routes))
+        Ok(self
+            .preparation_skipped_routes(key, reference)?
+            .and_then(|skipped| unanimous_preparation_cause(&skipped)))
+    }
+
+    fn preparation_skipped_accounts(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Vec<provenant_records::SkippedAccount>, Self::Error> {
+        Ok(self
+            .preparation_skipped_routes(key, reference)?
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|route| provenant_records::SkippedAccount::read(&route.extra))
+            .collect())
     }
 
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {

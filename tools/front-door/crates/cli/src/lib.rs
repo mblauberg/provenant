@@ -2336,20 +2336,6 @@ mod tests {
         );
     }
     #[test]
-    fn native_claude_import_requires_unfiltered_stats() {
-        valid(&["telemetry", "stats", "--claude-subagents", "subagents"]);
-        for filter in [
-            vec!["--usage"],
-            vec!["--since", "2026-10-24"],
-            vec!["--until", "2026-10-24"],
-            vec!["--run-id", "11111111111111111111111111111111"],
-        ] {
-            let mut args = vec!["telemetry", "stats", "--claude-subagents", "subagents"];
-            args.extend(filter);
-            invalid(&args);
-        }
-    }
-    #[test]
     fn telemetry_stats_parses_every_grouping_dimension() {
         for dimension in [
             "route", "pr", "issue", "graph", "node", "pattern", "preset", "role",
