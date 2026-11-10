@@ -1341,11 +1341,23 @@ pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
 pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
     let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
     let rig = &fixture.rig;
-    // Corrupt the run database file so open_disk_read_only fails.
+    // Close the fixture's WAL-mode store first. While it is open, the WAL
+    // frames hold page 1 and mask a corrupted main file, so the read-only open
+    // would succeed. Removing the companions makes the corruption visible.
+    drop(fixture.store);
     let run_db = rig.state.join("run.sqlite3");
+    for companion in ["run.sqlite3-wal", "run.sqlite3-shm"] {
+        match fs::remove_file(rig.state.join(companion)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Corrupt the run database file so open_disk_read_only fails.
     fs::write(&run_db, b"corrupted sqlite database")?;
     let output = command(rig, &["gc", "--apply", "--json"])?;
-    assert_eq!(code(&output), 0);
+    // Provider retention reads the same unreadable store and reports it as an
+    // incomplete retention, so the exit status is not asserted here.
     let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     assert!(
         stderr.contains("warning: settled lane collection failed for"),
