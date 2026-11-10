@@ -20,14 +20,11 @@ pub struct Row {
     pub effort: String,
     pub pool: Option<String>,
     pub comparison: &'static str,
-    pub cost_basis: &'static str,
     pub samples: u64,
     pub successes: u64,
     pub success_rate: Option<f64>,
     pub success_interval: Option<crate::suggest::Interval>,
-    pub cost_per_success_microdollars: Option<f64>,
     pub time_per_success_ms: Option<f64>,
-    pub missing_cost: u64,
     pub missing_time: u64,
 }
 
@@ -58,12 +55,11 @@ pub fn hash_assigned(selection: &provenant_records::RouteSelectionReceipt) -> bo
             == Some("weighted_draw")
 }
 
-/// Cost and time include failed attempts: dividing only successful attempts'
-/// spend would hide the cost of failures. Success means a successful terminal
+/// Time includes failed attempts: dividing only successful attempts
+/// time would hide the delay of failures. Success means a successful terminal
 /// settlement with no retained partial-completion signal.
 pub fn report(
     evidence: impl IntoIterator<Item = Evidence>,
-    prices: &crate::PriceTable,
 ) -> Result<Vec<Row>, crate::TelemetryError> {
     let mut groups = BTreeMap::<_, Vec<Evidence>>::new();
     for (index, item) in evidence.into_iter().enumerate() {
@@ -115,12 +111,6 @@ pub fn report(
                     missing_time += 1;
                 }
             }
-            let totals = crate::stats(
-                items.into_iter().map(|item| item.fact),
-                prices,
-                crate::Window::default(),
-            )?
-            .totals;
             Ok(Row {
                 route,
                 access,
@@ -131,19 +121,12 @@ pub fn report(
                     "observational_not_hash_assigned"
                 },
                 pool,
-                cost_basis: totals.cost.cost_basis,
                 samples,
                 successes,
                 success_rate: (samples > 0).then(|| successes as f64 / samples as f64),
                 success_interval: crate::suggest::wilson(successes, samples),
-                cost_per_success_microdollars: totals
-                    .cost
-                    .complete
-                    .filter(|_| successes > 0)
-                    .map(|cost| cost.microdollars as f64 / successes as f64),
                 time_per_success_ms: (successes > 0 && missing_time == 0)
                     .then(|| time as f64 / successes as f64),
-                missing_cost: totals.cost.missing_attempts,
                 missing_time,
             })
         })

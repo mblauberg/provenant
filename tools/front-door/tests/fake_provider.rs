@@ -287,6 +287,7 @@ fn account_placement() -> Result {
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes([1; 16]),
                 assets: &rig.project,
+                fabric_mcp: true,
             },
         })?;
         let auth = account.directory().join("auth.json");

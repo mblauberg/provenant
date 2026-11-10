@@ -1394,7 +1394,7 @@ fn unavailable_cause(error: &run::RunError) -> String {
 }
 
 /// Why the quota history could not be read, without its source text.
-fn history_unavailable_cause(error: &crate::quota::EdgeError) -> String {
+pub(crate) fn history_unavailable_cause(error: &crate::quota::EdgeError) -> String {
     use crate::quota::EdgeError as E;
     use provenant_os::fs::FsError;
     match error {
@@ -1514,115 +1514,13 @@ fn totals_cache_read_share(totals: &provenant_telemetry::Totals) -> Option<f64> 
     )
 }
 
-fn cost_summary(totals: &provenant_telemetry::Totals) -> String {
-    let cost = &totals.cost;
-    let human = if let Some(money) = &cost.complete {
-        format!("est. API-equivalent ${}", money.usd)
-    } else if let Some(money) = &cost.known_lower_bound {
-        format!(
-            "est. API-equivalent at least ${} ({} of {} attempts priced)",
-            money.usd, cost.priced_attempts, totals.attempts
-        )
-    } else {
-        format!(
-            "cost unknown ({} attempts missing cost data)",
-            cost.missing_attempts
-        )
-    };
-    format!("{} attempts, {human}\n", totals.attempts)
-}
-
-/// Compare API-equivalent lane usage with configured account plans, anchored
-/// to the latest quota-history reading in the selected time window.
-fn plan_value_rows(
-    report: &provenant_telemetry::StatsReport,
-    accounts: &provenant_providers::accounts::Settings,
-    edge: &Edge<'_>,
-) -> Result<Vec<Value>, String> {
-    let until = report
-        .window
-        .until
-        .map(|time| time.as_timestamp().as_second().saturating_sub(1));
-    let history = crate::quota_history::read(
-        edge.roots.state.as_path(),
-        &crate::quota_history::Query {
-            // The effective plan may have been recorded just before the
-            // selected attempt window began.
-            since: None,
-            until,
-            account: None,
-        },
-    )
-    .map_err(|error| history_unavailable_cause(&error))?;
-    let mut latest = BTreeMap::new();
-    for record in history {
-        latest.insert((record.provider.clone(), record.label.clone()), record);
-    }
-    Ok(latest
-        .into_iter()
-        .filter_map(|((provider, label), reading)| {
-            let entry = accounts.entries.values().find(|entry| {
-                entry.adapter == provider
-                    && entry.label == label
-                    && entry.key == reading.account_key
-            })?;
-            let price =
-                provenant_quota::price_in_force(&entry.plans, reading.observed_unix_seconds)?;
-            let (api_equivalent, complete) = api_equivalent_for_account(report, &provider, &label);
-            Some(json!({
-                "account": label,
-                "provider": provider,
-                "plan": reading.plan.as_deref().or(Some(price.name.as_str())),
-                "observed_unix_seconds": reading.observed_unix_seconds,
-                "monthly_price": {"amount": price.price, "currency": price.currency},
-                "notional_usd_month": price.notional_usd,
-                "api_equivalent_usd_in_selected_window": api_equivalent,
-                "api_equivalent_complete": complete,
-                "quota_windows": reading.windows.iter().map(|window| json!({
-                    "pool": window.pool,
-                    "used_basis_points": window.used_basis_points,
-                    "window_seconds": window.window_seconds,
-                })).collect::<Vec<_>>(),
-                "comparison_basis": "selected_window_api_equivalent_vs_monthly_plan_price"
-            }))
-        })
-        .collect::<Vec<_>>())
-}
-
-fn api_equivalent_for_account(
-    report: &provenant_telemetry::StatsReport,
-    provider: &str,
-    account: &str,
-) -> (Option<String>, bool) {
-    let mut micros = 0u128;
-    let mut found = false;
-    let mut complete = true;
-    for route in &report.routes {
-        if route.route.provider.as_deref() != Some(provider)
-            || route.route.account_label.as_deref() != Some(account)
-        {
-            continue;
-        }
-        found = true;
-        if let Some(cost) = &route.totals.cost.complete {
-            micros += u128::from(cost.microdollars);
-        } else if let Some(cost) = &route.totals.cost.known_lower_bound {
-            micros += u128::from(cost.microdollars);
-            complete = false;
-        } else {
-            complete = false;
-        }
-        if route.totals.cost.complete.is_none() {
-            complete = false;
-        }
-    }
-    let dollars = format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000);
-    (found.then_some(dollars), complete)
+fn attempts_summary(totals: &provenant_telemetry::Totals) -> String {
+    format!("{} attempts\n", totals.attempts)
 }
 
 fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
     let totals = &report.totals;
-    let mut text = cost_summary(totals);
+    let mut text = attempts_summary(totals);
     if totals.attempts == 0
         && let Some(project) = report.window.project
     {
@@ -1658,15 +1556,8 @@ fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
     if let Some(chair) = &report.chair {
         let unread: u64 = chair.unread.values().sum();
         text.push_str(&format!(
-            "chair: {} sessions on this host ({unread} unread), {}\n",
-            chair.sessions,
-            chair.cost.complete.as_ref().map_or_else(
-                || chair.cost.known_lower_bound.as_ref().map_or_else(
-                    || "cost unknown".to_owned(),
-                    |money| format!("est. API-equivalent at least ${}", money.usd),
-                ),
-                |money| format!("est. API-equivalent ${}", money.usd)
-            )
+            "chair: {} sessions on this host ({unread} unread)\n",
+            chair.sessions
         ));
     }
     text
