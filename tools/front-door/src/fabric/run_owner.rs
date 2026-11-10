@@ -817,22 +817,6 @@ impl BinaryRunOwner<'_> {
         )
         .map_err(|error| scope_io(error, "submit"))
     }
-    fn retained_operation(
-        &self,
-        operation_id: &provenant_core::OperationId,
-        cancel: &CancelToken,
-    ) -> Result<bool, FacadeError> {
-        let session = match self.read_session(cancel) {
-            Ok(session) => session,
-            Err(FacadeError::NotFound) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(session
-            .store
-            .operation(operation_id, &self.call(cancel))
-            .map_err(run_error)?
-            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
-    }
 
     /// Read an accepted graph operation in the authenticated owner's namespace.
     pub(crate) fn retained_graph_receipt(
@@ -913,36 +897,6 @@ impl BinaryRunOwner<'_> {
         }))
     }
 
-    fn guard_graph_admission(
-        &self,
-        operation_id: &provenant_core::OperationId,
-        host: Option<provenant_core::HostId>,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        let refusal =
-            match crate::install::cutover_admission_guard(&self.factory.context.roots.state) {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-        let retained = if let Some(host) =
-            host.filter(|host| *host != self.factory.context.identity.host)
-        {
-            let actor = self
-                .actor
-                .unwrap_or(self.factory.context.identity.inbox.actor);
-            matches!(self.peer(host, PeerAction::Receipt {
-                extra: [("graph_launch_actor".into(), serde_json::json!(actor))].into(),
-                operation_id: operation_id.clone(),
-            }, budget, cancel), Ok(PeerResult::Submitted { data, .. })
-                if data.operation_id == *operation_id && !data.targets.is_empty()
-                    && data.worktree.is_none() && data.targets.iter().all(|target| target.host == Some(host)))
-        } else {
-            self.retained_operation(operation_id, cancel)?
-        };
-        if retained { Ok(()) } else { Err(refusal) }
-    }
-
     #[allow(clippy::disallowed_methods)] // Translate the caller's remaining wait to the launcher's deadline.
     fn launch_graph_attempt(
         &mut self,
@@ -1013,7 +967,6 @@ impl BinaryRunOwner<'_> {
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
-            self.guard_graph_admission(&operation_id, Some(host), budget, cancel)?;
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             let mut extra = provenant_records::ExtraFields::default();
@@ -1064,7 +1017,6 @@ impl BinaryRunOwner<'_> {
                 "attempt placement".into(),
             )));
         }
-        self.guard_graph_admission(&operation_id, host, budget, cancel)?;
         let launch_directory = tasks
             .iter()
             .find_map(|task| {

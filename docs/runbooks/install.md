@@ -56,23 +56,38 @@ provenant upgrade
 provenant upgrade --from-source /absolute/path/to/provenant --hosts all
 ```
 
-Before upgrading, check each host for running work. A release that breaks state
-readability requires pending graphs to be finished or stopped and active writers
-to settle before upgrading. Graph nodes have been observed launching on the new
-binary after a swap; a lane process running across a swap has not been shown end
-to end. Preserve and report unreadable records; never drop them. Check
-`provenant status`, collect `provenant output TARGET` and inspect
-`provenant output TARGET --trace` before using `retry` for unfinished work.
+Before upgrading, check each host for running work. Graph nodes have been
+observed launching on the new binary after a swap; a lane process running
+across a swap has not been shown end to end. Check `provenant status`, collect
+`provenant output TARGET` and inspect `provenant output TARGET --trace` before
+using `retry` for unfinished work.
 
-The staged release checks each host for pending graphs, live lanes, unreadable
-records and user presets before installation. If a release breaks state
-readability between the installed and target versions, or if unreadable records,
-legacy pending graphs or live lanes, or legacy presets are present, the preflight
-blocks and reports the findings;
-resolve them and rerun the upgrade, or pass `--yes` to `provenant upgrade` or
-`install.sh --upgrade` to proceed despite them. On routine releases without
-state format breaks, other in-flight work is reported as a warning and the upgrade
-proceeds without `--yes`. A failure to inspect the state stops the upgrade.
+The staged release checks each host before installation. It reads the state
+format only from the install receipt and from which store files exist, and it
+never opens a store. If the receipt names an older format, or there is no
+receipt and format-1 stores are present, the install is blocked with
+`STATE_FORMAT_BREAK` and lists what will be dropped, what is kept, and the
+worktrees with commits the main checkout lacks, read from Git. `--yes` does not
+acknowledge this. Pass `--reset-state` to `provenant install`, `provenant
+upgrade` or `install.sh --upgrade`, or type `reset` when `install.sh` asks. A
+Provenant lane process holding its custody lock blocks the install even with
+`--reset-state`; let it finish or stop it first. The install then deletes the
+run store and run files, attempt tmp, graph journals, mail, claims, the work
+index and PR contributions. The usage ledger, quota history, provider history,
+session checkpoints, the chair log, and every worktree and branch are left as
+they were. The deletion is not an archive: copy the state directory first if
+you want one. A failure to inspect the state stops the upgrade.
+
+### Cutting over to 2.0.0
+
+Run it in one sitting with no other session or lane active:
+
+1. Land or park work in every lane worktree. Unlanded commits survive the
+   reset, but their run records do not.
+2. Copy the state directory if you want an archive.
+3. Run `provenant upgrade --reset-state` (or `install.sh --upgrade
+   --reset-state`) and read the dropped and kept lists.
+4. Run `provenant check install`.
 
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.

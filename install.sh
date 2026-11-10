@@ -17,6 +17,7 @@ ask() {
 }
 
 yes=false
+reset=false
 source_dir=
 tag=
 state=${PROVENANT_STATE_DIR:-"$HOME/.local/share/provenant/v1"}
@@ -25,6 +26,7 @@ upgrade=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes) yes=true; shift ;;
+        --reset-state) reset=true; shift ;;
         --source|--from-source)
             source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
             shift
@@ -35,7 +37,7 @@ while [ "$#" -gt 0 ]; do
             shift 2 ;;
         --upgrade) upgrade=true; shift ;;
         --help)
-            printf '%s\n' 'Usage: install.sh [--yes] [--upgrade] [--source|--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
+            printf '%s\n' 'Usage: install.sh [--yes] [--reset-state] [--upgrade] [--source|--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
             exit 0 ;;
         *) die 2 "Unknown option: $1" ;;
     esac
@@ -262,19 +264,32 @@ fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
 if "$upgrade"; then
-    if "$release/bin/provenant" --state-dir "$state" install --source "$release" --upgrade-preflight </dev/null; then
+    # A format break is never passed by --yes: it needs --reset-state or the
+    # typed word below. The staged binary prints what will be dropped and kept.
+    preflight() {
+        set -- --state-dir "$state" install --source "$release" --upgrade-preflight
+        if "$reset"; then set -- "$@" --reset-state; fi
+        "$release/bin/provenant" "$@" </dev/null
+    }
+    if preflight; then
         :
     else
         preflight_status=$?
         [ "$preflight_status" -eq 2 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
-        if ! "$yes"; then die 2 'Upgrade stopped by preflight; resolve the findings or rerun with --yes'; fi
-        printf '%s\n' 'Proceeding despite upgrade preflight findings (--yes).' >&2
+        if ! "$reset" && { ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
+            ask "Type reset to delete the dropped state listed above" no
+            [ "$answer" = reset ] && reset=true
+        fi
+        if ! "$reset" || ! preflight; then
+            die 2 'Upgrade stopped by preflight; rerun with --reset-state to acknowledge'
+        fi
     fi
 fi
 
 # Existing receipts always use their recorded selection, paths and hooks, and
 # every registered account directory is installed too.
 set -- --state-dir "$state" install --source "$release"
+if "$reset"; then set -- "$@" --reset-state; fi
 if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
 providers=
 register=false

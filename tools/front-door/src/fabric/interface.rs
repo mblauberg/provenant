@@ -1074,9 +1074,6 @@ impl Factory {
                 return self.launch_submission(execution.document, input, budget, cancel, announce);
             }
         }
-        if input["explain"] != true {
-            crate::install::cutover_admission_guard(&self.context.roots.state)?;
-        }
         let raw = input.get("document");
         if let Some(document) = raw {
             provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
@@ -1534,7 +1531,6 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        crate::install::cutover_admission_guard(&self.context.roots.state)?;
         let selector = required(input, "id")?;
         let id = match self.graph_target(selector)? {
             Some(target) => target.graph,
@@ -1602,7 +1598,6 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        crate::install::cutover_admission_guard(&self.context.roots.state)?;
         let mut target = self
             .graph_target(required(input, "id")?)?
             .ok_or(FacadeError::NotFound)?;
