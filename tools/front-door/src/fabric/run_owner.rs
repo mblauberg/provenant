@@ -165,7 +165,9 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     path: "inspect worktree registration".into(),
                 };
             }
-            Some(DiagnosticFact::Filesystem { operation }) => return FacadeError::io(*operation),
+            Some(DiagnosticFact::Filesystem { operation, cause }) => {
+                return FacadeError::io_caused(*operation, *cause);
+            }
             Some(DiagnosticFact::DiskPressure {
                 available,
                 floor,
@@ -211,6 +213,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         delivery_stage: None,
                         resource: Some(Box::new(*fact)),
                         input_failure: None,
+                        cause: None,
                     };
                 }
                 return FacadeError::ConfinementRefused {
@@ -230,12 +233,14 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             delivery_stage,
             resource,
             input_failure,
+            cause,
             ..
         }) => FacadeError::Io {
             delivery_limit,
             delivery_stage,
             resource,
             input_failure,
+            cause,
             operation,
             path: None,
         },

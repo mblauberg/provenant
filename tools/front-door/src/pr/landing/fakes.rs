@@ -197,6 +197,33 @@ impl Forge for FakeForge {
         Ok(9000 + number)
     }
 }
+/// Accepted Provenant review records by pull request, the receipts that
+/// cannot be read as one, and an optional store-wide read failure.
+#[derive(Default)]
+pub struct FakeReviews {
+    pub records: BTreeMap<u64, Vec<ReviewRecord>>,
+    pub unusable: BTreeMap<u64, Vec<String>>,
+    pub failure: Option<String>,
+}
+impl FakeReviews {
+    pub fn of(records: BTreeMap<u64, Vec<ReviewRecord>>) -> Self {
+        Self {
+            records,
+            ..Self::default()
+        }
+    }
+}
+impl ReviewRecords for FakeReviews {
+    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+        if let Some(failure) = &self.failure {
+            return Err(LandingError::Failed(failure.clone()));
+        }
+        Ok(Reviews {
+            records: self.records.get(&number).cloned().unwrap_or_default(),
+            unusable: self.unusable.get(&number).cloned().unwrap_or_default(),
+        })
+    }
+}
 #[derive(Default)]
 pub struct FakeRepo {
     pub target: String,
@@ -344,6 +371,19 @@ impl Repo for FakeRepo {
             .get(commit)
             .cloned()
             .ok_or_else(|| LandingError::Failed("missing tree".into()))
+    }
+    fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError> {
+        let mut pending = vec![left.to_owned()];
+        let mut seen = BTreeSet::new();
+        while let Some(commit) = pending.pop() {
+            if self.is_ancestor(&commit, right)? {
+                return Ok(Some(commit));
+            }
+            if seen.insert(commit.clone()) {
+                pending.extend(self.parents.get(&commit).cloned().unwrap_or_default());
+            }
+        }
+        Ok(None)
     }
 }
 #[derive(Default)]

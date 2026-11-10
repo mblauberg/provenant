@@ -110,23 +110,37 @@ chair-supplied `LegBlocker` and `user_approval` references.
 
 ## Receipts
 
-### A receipt records a decision, not a merge
+### A receipt records a decision about the change it covers
 
-A receipt records the chair's decision and is not a merge certificate. A
-changed subject resets the decision and needs fresh review. Each save
+A receipt records the chair's decision about its subject. An accepted PR
+receipt can stand as landing approval when the host sets `land.approval =
+"receipt"`: the lander accepts the reviewed head on the base the receipt
+recorded, or a head that Git proves carries the reviewed delta unchanged
+forward from that base. An unchanged head whose base moved off the recorded
+base, such as a stacked PR retargeted past the branch below it, needs a new
+receipt. A changed subject resets the decision and needs fresh review. Each save
 rechecks derived risk against the effective policy and recorded changed paths.
 A downgrade uses a chair record with actor, evidence and a nonblank reason of
 at most 4096 bytes, stored alongside the path snapshot. Routing compiles the
 matched boundary floors from effective configuration into workflow policy at the edge.
-PR subjects retain their repository ID and bind the head OID. For a PR save
-below terminal, the edge reuses recorded paths when the stored head is unchanged.
-Otherwise it resolves the PR from the checkout, verifies its head, and computes
-paths from the actual base/head merge base, including both names of renames.
-If the diff cannot be read, a downgrade refuses with the reason; an ordinary
-save warns, keeps the chosen tier and records no paths. Terminal saves need no
-diff. Review reports never query GitHub: they validate recorded paths against
-the effective policy. A downgraded receipt without recorded paths must be
-re-saved with `workflow receipt save`. Non-PR
+A PR save request names only the pull request number and its reviewed head.
+The edge resolves the PR from the checkout through the forge, refuses a head
+that differs, and records the repository ID (from the PR's
+`host/owner/name`) and the base: the head's merge base with the branch the PR
+merges into, which for a stack member is the head of the branch below. A
+request's own repository or base is ignored, so a delta review cannot shrink
+the paths a receipt covers. A save that cannot establish the base refuses.
+Changed paths come from that base to the head, including both names of
+renames; a re-save at the stored head reuses the stored subject and paths
+without querying GitHub. If the diff cannot be read, a downgrade refuses with
+the reason; an ordinary save warns, keeps the chosen tier and records no
+paths. Terminal saves need no diff. Review reports never query GitHub: they
+validate recorded paths against the effective policy. A downgraded receipt
+without recorded paths must be re-saved with `workflow receipt save`. A
+receipt of a retired schema version approves nothing. Receipt reads and
+landing's receipt approval report it as `receipt shape retired: save it
+again`; telemetry counts it as not accepted, as it does any unreadable
+receipt. A save at its revision replaces it with the next revision. Non-PR
 subjects have no diffable commits, so downgrades are refused without changing
 ordinary tier selection. Any path matching an effective crucial or terminal floor
 refuses the downgrade and names the path; owners may remove or lower bundled
@@ -135,6 +149,8 @@ binding, including with owner approval. Owner decision approvals remain separate
 Accepting refuses `REVIEW_INCOMPLETE` unless coverage passes.
 - Why (default): acceptance must track the exact subject reviewed.
 - Test: `crates/workflow/src/store/tests.rs::changing_subject_resets_decision_and_requires_fresh_review`;
+  `crates/workflow/src/store/tests.rs::a_retired_receipt_names_the_remedy_and_is_replaced_by_saving_again`;
+  `tests/workflow.rs::pr_receipt_base_and_repository_come_from_the_forge`;
   `tests/workflow.rs::substantial_acceptance_is_refused_until_reviews_cover_it`
 - Owner: `crates/workflow/src/receipt.rs`
 

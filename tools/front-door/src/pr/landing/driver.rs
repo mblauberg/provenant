@@ -1,12 +1,14 @@
 //! Landing orchestration. Lane-owned decisions and I/O remain behind their ports.
 use super::{
-    LandingError, budget, candidate, gate,
+    LandingError,
+    approval::Approvals,
+    budget, candidate, gate,
     model::*,
     policy::LandPolicy,
     ports::{AlarmSink, Forge, GateRunner, Repo},
     publish, receipt, reconcile, split,
 };
-use provenant_cli::domains::LandSettings;
+use provenant_cli::domains::{ApprovalSource, LandSettings};
 use std::collections::{BTreeMap, VecDeque};
 
 pub struct Request<'a> {
@@ -17,6 +19,7 @@ pub struct Request<'a> {
     pub gate: &'a GateDefinition,
     pub shadow: bool,
     pub state: &'a std::path::Path,
+    pub approvals: Approvals<'a>,
 }
 #[derive(Debug, Default)]
 pub struct Report {
@@ -32,6 +35,15 @@ fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<Strin
         repo.fetch_target_untracked(target)
     } else {
         repo.fetch_target(target)
+    }
+}
+
+/// The fetched target a review record is proved against. A forge approval is
+/// bound to the head alone and needs none.
+fn approval_target(repo: &mut dyn Repo, request: &Request<'_>) -> Result<String, LandingError> {
+    match request.approvals.source() {
+        ApprovalSource::Forge => Ok(String::new()),
+        ApprovalSource::Receipt => fetch_target(repo, request.target, request.shadow),
     }
 }
 
@@ -80,6 +92,7 @@ fn recover(
     let result = reconcile::recover_pending(
         forge,
         repo,
+        request.approvals,
         runner,
         alarms,
         request.state,
@@ -217,8 +230,10 @@ fn run_inner(
     }
     let mut deferred = Vec::new();
     for numbers in open.chunks(limit) {
+        let approval_target = approval_target(repo, &request)?;
         let (selected, reasons) = candidate::select_batch_with_reasons(
             forge,
+            &mut request.approvals.at(repo, &approval_target),
             numbers,
             &open,
             request.target,
@@ -396,11 +411,12 @@ fn run_inner(
                 repo,
                 &candidate,
             )?;
-            let excluded = cleanup_unpublished(
-                publish::revalidate_with_reasons(forge, &candidate),
-                repo,
+            let revalidated = publish::revalidate_with_reasons(
+                forge,
+                &mut request.approvals.at(repo, &candidate.base),
                 &candidate,
-            )?;
+            );
+            let excluded = cleanup_unpublished(revalidated, repo, &candidate)?;
             if !excluded.is_empty() {
                 for (pr, reason) in &excluded {
                     report.outcomes.insert(pr.number, Outcome::Excluded);
@@ -454,6 +470,7 @@ fn run_inner(
                     PublishMode::RestOrdered => publish::rest_ordered(
                         forge,
                         repo,
+                        request.approvals,
                         request.target,
                         &candidate,
                         request.settings.method,
@@ -514,6 +531,7 @@ fn run_inner(
                         let record = reconcile::finish_settled(
                             forge,
                             repo,
+                            request.approvals,
                             runner,
                             alarms,
                             request.state,
@@ -610,6 +628,7 @@ fn run_inner(
                 let record = reconcile::finish_settled(
                     forge,
                     repo,
+                    request.approvals,
                     runner,
                     alarms,
                     request.state,
@@ -637,7 +656,15 @@ fn run_inner(
                     true
                 };
                 if ready {
-                    let selected = candidate::select_batch(forge, &[number], request.target, 1, 0)?;
+                    let approval_target = approval_target(repo, &request)?;
+                    let selected = candidate::select_batch(
+                        forge,
+                        &mut request.approvals.at(repo, &approval_target),
+                        &[number],
+                        request.target,
+                        1,
+                        0,
+                    )?;
                     if !selected.is_empty() {
                         report.outcomes.remove(&number);
                         queue.push_back(selected);
@@ -695,6 +722,7 @@ mod tests {
             &mut runner,
             &mut alarms,
             Request {
+                approvals: Approvals::forge(),
                 numbers: &[],
                 target: "main",
                 settings: &settings,
@@ -776,6 +804,34 @@ mod tests {
         shadow: bool,
         state: &std::path::Path,
     ) -> Result<Report, LandingError> {
+        exercise_with(
+            forge,
+            repo,
+            runner,
+            settings,
+            definition,
+            numbers,
+            shadow,
+            state,
+            Approvals::forge(),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test rig passes independent boundaries"
+    )]
+    fn exercise_with(
+        forge: &mut FakeForge,
+        repo: &mut FakeRepo,
+        runner: &mut FakeGate,
+        settings: &LandSettings,
+        definition: &GateDefinition,
+        numbers: &[u64],
+        shadow: bool,
+        state: &std::path::Path,
+        approvals: Approvals<'_>,
+    ) -> Result<Report, LandingError> {
         let policy = LandPolicy::resolve(
             settings,
             &BTreeMap::new(),
@@ -797,6 +853,7 @@ mod tests {
                 gate: definition,
                 shadow,
                 state,
+                approvals,
             },
         )
         .map_err(|error| match error {
@@ -907,6 +964,264 @@ mod tests {
         assert_eq!(report.outcomes[&2], Outcome::Landed);
         assert_eq!(forge.stack_merge_attempts, vec![1, 2]);
         assert_eq!(report.receipts.len(), 2);
+        Ok(())
+    }
+
+    /// PR 1 was reviewed at its head, PR 2 at an older head it has since
+    /// merged the target into, and PR 3 at an older head before one more change.
+    #[test]
+    fn receipt_approval_lands_reviewed_pull_requests_without_forge_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(3);
+        forge.approvals_at_head.clear();
+        let target = repo.target.clone();
+        let reviewed_base = "b".repeat(40);
+        repo.parents
+            .insert(target.clone(), vec![reviewed_base.clone()]);
+        let reviewed = |n: u64| format!("{:040x}", 0xa0 + n);
+        // PR 1's head is the reviewed head, on the reviewed base.
+        repo.parents
+            .insert(format!("{:040x}", 1), vec![reviewed_base.clone()]);
+        for n in [2, 3] {
+            let head = format!("{n:040x}");
+            repo.parents
+                .insert(head.clone(), vec![reviewed(n), target.clone()]);
+            let tree = format!("tree-{}-{target}", reviewed(n));
+            let tree = if n == 3 { format!("{tree}+line") } else { tree };
+            repo.trees.insert(head, tree);
+        }
+        let record = |n: u64, head: String| ReviewRecord {
+            reference: format!("delivery-{n}"),
+            reviewer: "reviewer".into(),
+            head,
+            base: reviewed_base.clone(),
+        };
+        let reviews = FakeReviews::of(BTreeMap::from([
+            (1, vec![record(1, format!("{:040x}", 1))]),
+            (2, vec![record(2, reviewed(2))]),
+            (3, vec![record(3, reviewed(3))]),
+        ]));
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2, 3],
+            false,
+            state.path(),
+        )?;
+        assert!(
+            report
+                .outcomes
+                .values()
+                .all(|outcome| *outcome == Outcome::Excluded)
+        );
+        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+
+        settings.approval = ApprovalSource::Receipt;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2, 3],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Landed);
+        assert_eq!(report.outcomes[&3], Outcome::Excluded);
+        assert_eq!(
+            report.receipts[0]
+                .pull_requests
+                .iter()
+                .map(|pr| pr.approval.as_str())
+                .collect::<Vec<_>>(),
+            ["delivery-1", "delivery-2"]
+        );
+        Ok(())
+    }
+
+    /// PR 2's record names a head whose history this repository lacks, so
+    /// its proof cannot be read. That excludes PR 2 alone, with the reason.
+    #[test]
+    fn an_unprovable_review_record_excludes_only_its_pull_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(3);
+        forge.approvals_at_head.clear();
+        let target = repo.target.clone();
+        let reviewed_base = "b".repeat(40);
+        repo.parents
+            .insert(target.clone(), vec![reviewed_base.clone()]);
+        let reviewed = format!("{:040x}", 0xa2);
+        // PR 2 merged the target into its reviewed head; its tree is unreadable.
+        repo.parents
+            .insert(format!("{:040x}", 2), vec![reviewed.clone(), target]);
+        for n in [1, 3] {
+            repo.parents
+                .insert(format!("{n:040x}"), vec![reviewed_base.clone()]);
+        }
+        let record = |n: u64, head: String| ReviewRecord {
+            reference: format!("delivery-{n}"),
+            reviewer: "reviewer".into(),
+            head,
+            base: reviewed_base.clone(),
+        };
+        let reviews = FakeReviews::of(BTreeMap::from([
+            (1, vec![record(1, format!("{:040x}", 1))]),
+            (2, vec![record(2, reviewed)]),
+            (3, vec![record(3, format!("{:040x}", 3))]),
+        ]));
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2, 3],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Excluded);
+        assert_eq!(report.outcomes[&3], Outcome::Landed);
+        assert!(
+            report.exclusion_reasons[&2].starts_with("unprovable: delivery-2"),
+            "{}",
+            report.exclusion_reasons[&2]
+        );
+        Ok(())
+    }
+
+    /// PR 1 was reviewed at its current head against the head of the branch
+    /// below it, then retargeted past that branch. The head is unchanged but
+    /// the lower branch's changes were never reviewed, so the record does not
+    /// approve it.
+    #[test]
+    fn a_receipt_does_not_approve_its_head_once_the_base_leaves_the_reviewed_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
+        forge.approvals_at_head.clear();
+        let fork = "b".repeat(40);
+        let lower = "c".repeat(40);
+        let head = forge.pull_requests[&1].head.clone();
+        repo.parents.insert(repo.target.clone(), vec![fork.clone()]);
+        repo.parents.insert(lower.clone(), vec![fork]);
+        repo.parents.insert(head.clone(), vec![lower.clone()]);
+        let reviews = FakeReviews::of(BTreeMap::from([(
+            1,
+            vec![ReviewRecord {
+                reference: "delivery-1".into(),
+                reviewer: "reviewer".into(),
+                head,
+                base: lower,
+            }],
+        )]));
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
+        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+        Ok(())
+    }
+
+    /// An unreadable review store is not a missing approval: the run fails
+    /// with the reason and merges nothing.
+    #[test]
+    fn a_review_store_read_failure_fails_the_run_and_merges_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::fakes::FakeReviews;
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        forge.approvals_at_head.clear();
+        let reviews = FakeReviews {
+            failure: Some("read review records: store unreadable".into()),
+            ..FakeReviews::default()
+        };
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let result = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        );
+        let error = result.err().ok_or("the run should fail")?;
+        assert!(error.to_string().contains("store unreadable"), "{error}");
+        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+        Ok(())
+    }
+
+    /// A retired receipt beside an accepted record that covers the head does
+    /// not block it; a pull request with only a retired receipt is excluded
+    /// with the remedy.
+    #[test]
+    fn an_accepted_record_lands_despite_a_retired_receipt() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        forge.approvals_at_head.clear();
+        let reviewed_base = "b".repeat(40);
+        repo.parents
+            .insert(repo.target.clone(), vec![reviewed_base.clone()]);
+        for n in [1u64, 2] {
+            repo.parents
+                .insert(format!("{n:040x}"), vec![reviewed_base.clone()]);
+        }
+        let retired = "receipt shape retired: save it again".to_owned();
+        let reviews = FakeReviews {
+            records: BTreeMap::from([(
+                1,
+                vec![ReviewRecord {
+                    reference: "delivery-1".into(),
+                    reviewer: "reviewer".into(),
+                    head: format!("{:040x}", 1),
+                    base: reviewed_base,
+                }],
+            )]),
+            unusable: BTreeMap::from([(1, vec![retired.clone()]), (2, vec![retired.clone()])]),
+            failure: None,
+        };
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Excluded);
+        assert_eq!(report.exclusion_reasons[&2], retired);
         Ok(())
     }
 
@@ -1255,6 +1570,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
                 settings: &settings,
@@ -1284,6 +1600,7 @@ mod tests {
             &mut gate,
             &mut alarms,
             Request {
+                approvals: Approvals::forge(),
                 numbers: &[1],
                 target: "main",
                 settings: &settings,
@@ -1506,6 +1823,7 @@ mod tests {
             reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -1556,6 +1874,7 @@ mod tests {
         reconcile::recover_pending(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut alarms,
             state.path(),
@@ -1641,6 +1960,7 @@ mod tests {
             let result = reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -1714,6 +2034,7 @@ mod tests {
             let result = reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -1807,6 +2128,7 @@ mod tests {
         let result = reconcile::recover_pending(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -1928,6 +2250,7 @@ mod tests {
             let result = reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -2009,6 +2332,7 @@ mod tests {
         reconcile::recover_pending(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2069,6 +2393,7 @@ mod tests {
         let result = reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2099,6 +2424,7 @@ mod tests {
         reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2136,6 +2462,7 @@ mod tests {
         let result = reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2199,6 +2526,7 @@ mod tests {
         let unknown = reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2220,6 +2548,7 @@ mod tests {
         reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2300,6 +2629,7 @@ mod tests {
         let result = reconcile::recover_pending(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut FakeAlarms::default(),
             state.path(),
@@ -2389,6 +2719,7 @@ mod tests {
             reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -2483,6 +2814,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
                 settings: &settings,
@@ -2624,6 +2956,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
                 settings: &settings,
@@ -2679,6 +3012,7 @@ mod tests {
             &mut gate,
             &mut FakeAlarms::default(),
             Request {
+                approvals: Approvals::forge(),
                 numbers: &[1, 2],
                 target: "main",
                 settings: &settings,
@@ -2765,6 +3099,7 @@ mod tests {
                 &mut gate,
                 &mut alarms,
                 Request {
+                    approvals: Approvals::forge(),
                     numbers: &[1],
                     target: "main",
                     settings: &settings,
@@ -2788,6 +3123,7 @@ mod tests {
         reconcile::recover_pending(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             &mut gate,
             &mut alarms,
             state.path(),
@@ -2862,6 +3198,7 @@ mod tests {
             reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -2913,6 +3250,7 @@ mod tests {
             reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
@@ -2967,6 +3305,7 @@ mod tests {
             reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 &mut gate,
                 &mut FakeAlarms::default(),
                 state.path(),
