@@ -684,13 +684,20 @@ fn unavailable_account_moves_selection_to_an_alternate_account()
     assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
     // Every account refused leaves the route unavailable with the refusal.
     let none = pick(vec![refused("work", "*"), refused("review", "*")])?;
-    assert!(matches!(
-        none.readiness,
-        RouteReadiness::Unavailable {
+    let RouteReadiness::Unavailable { reason, extra } = &none.readiness else {
+        return Err("expected an unavailable route".into());
+    };
+    assert_eq!(reason, &RouteExclusionReason::ProviderRefused);
+    // Each passed-over account keeps its own reason for the refusal message.
+    let mut skipped = provenant_records::SkippedAccount::read(extra);
+    skipped.sort_by(|a, b| a.account.cmp(&b.account));
+    assert_eq!(
+        skipped,
+        ["review", "work"].map(|account| provenant_records::SkippedAccount {
+            account: account.into(),
             reason: RouteExclusionReason::ProviderRefused,
-            ..
-        }
-    ));
+        })
+    );
     Ok(())
 }
 

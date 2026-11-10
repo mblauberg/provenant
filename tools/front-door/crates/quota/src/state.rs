@@ -277,6 +277,13 @@ impl ProbeFailure {
         }
     }
 
+    /// Failures the owner can repair locally, so a credential change or an
+    /// owner tick re-probes them at once instead of waiting out the backoff.
+    /// A provider rate limit is the one failure only time clears.
+    pub fn repairable(self) -> bool {
+        self != Self::RateLimited
+    }
+
     /// Failures only a login or re-registration repairs; the account is
     /// reported as `auth_required` until then.
     pub fn needs_login(self) -> bool {
