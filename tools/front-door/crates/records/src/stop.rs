@@ -1,0 +1,382 @@
+//! The format-2 stop: one typed cause and the writer's handoff, sealed at
+//! settlement, and the one table of what follows each cause.
+//!
+//! [`STOP_TABLE`] owns the default next step of every cause. The override
+//! point is the graph node's `on_stop` entry for a cause, applied by
+//! [`StopCause::next_step`]; a pinned cause ignores it. Route availability and
+//! the continuation budget are applied after this, by the runtime's one
+//! decision function, and can only turn a step into [`NextStep::Chair`].
+//! `docs/specs/run.md#what-follows-a-stop` mirrors the table and a test keeps
+//! the two equal.
+use crate::handoff::{HANDOFF_BYTES, Handoff, HandoffStatus};
+use serde::{Deserialize, Serialize};
+
+/// Why an attempt ended without finishing its brief. A finished attempt seals
+/// no stop. Each cause is one fact; facts about the worktree, such as whether
+/// it holds a new commit, live beside the stop, not in its cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopCause {
+    // Declared by the writer or read from its final answer.
+    /// The handoff says `stopped_early`: work remains and the writer could
+    /// not finish it in this attempt.
+    StoppedEarly,
+    /// The handoff says `blocked`: an owner decision, a missing capability
+    /// or an external change prevents progress. The stop carries the
+    /// handoff, so its note names what blocks it.
+    Blocked,
+    /// A writer on a model route ended without a valid final handoff.
+    HandoffMissing,
+    /// The provider ended with an empty final message.
+    EmptyResult,
+    /// A writer left edits it did not commit.
+    Uncommitted,
+    /// The lane asked for input; the ask is an open inbox request.
+    InputRequired,
+
+    // The host stopped a running writer.
+    /// The writer reached `lanes.context_handoff_tokens`; a fresh attempt
+    /// continues from its handoff on the same worktree.
+    ContextHandoff,
+    /// The writer reached its token budget.
+    TokenBudget,
+    /// The attempt reached its runtime deadline.
+    Deadline,
+    /// The owner or the chair cancelled the attempt.
+    Cancelled,
+
+    // The provider ended the attempt.
+    /// The provider reported a stop other than a finished turn.
+    ProviderStop,
+    ProcessCrash,
+    AuthRequired,
+    /// A rate, quota or free-pool limit.
+    UsageLimited,
+    ModelUnavailable,
+    AdapterUnavailable,
+    PermissionDenied,
+    IdentityUnobserved,
+
+    // The host refused before the provider started.
+    PreparationRefused,
+    SourceViewRefused,
+    RouteRefused,
+    AccessPolicyRefused,
+    DiskFloor,
+    DiskUnobserved,
+    PromptUnreadable,
+    WriteGrantsRefused,
+    WorktreeBusy,
+    LaunchHandoffRefused,
+    RetainedWriterImport,
+    UnsupportedPlatform,
+    UnknownPacingAccount,
+    UnregisteredAccount,
+    CredentialHelperFailed,
+    CommandUnavailable,
+    HostNativeUnconfigured,
+    SpawnFailure,
+
+    // Settlement could not establish the attempt's end.
+    SettlementFailed,
+    Lost,
+    Unsettled,
+    Quarantined,
+}
+
+/// How the next attempt starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Continuation {
+    /// Continue the provider session of the stopped attempt.
+    Resume,
+    /// Start a new session on the same worktree, briefed with the handoff.
+    Fresh,
+}
+
+/// What follows a stop. A session never crosses routes, so a new route is
+/// always a fresh continuation; the chair is not a continuation at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum NextStep {
+    /// Another attempt on the route that stopped.
+    SameRoute { continuation: Continuation },
+    /// Another attempt on a different route: another declared route, or a
+    /// redraw of the alias pool without the routes that stopped.
+    NewRoute,
+    /// No automatic attempt. The graph pauses for the chair.
+    Chair,
+}
+
+impl NextStep {
+    pub const fn continuation(self) -> Option<Continuation> {
+        match self {
+            Self::SameRoute { continuation } => Some(continuation),
+            Self::NewRoute => Some(Continuation::Fresh),
+            Self::Chair => None,
+        }
+    }
+}
+
+/// One row of [`STOP_TABLE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopRule {
+    pub cause: StopCause,
+    pub default: NextStep,
+    /// A pinned cause always takes its default; `on_stop` cannot move it.
+    pub pinned: bool,
+}
+
+const NEW: NextStep = NextStep::NewRoute;
+const CHAIR: NextStep = NextStep::Chair;
+
+const fn rule(cause: StopCause, default: NextStep) -> StopRule {
+    StopRule {
+        cause,
+        default,
+        pinned: false,
+    }
+}
+
+const fn pinned(cause: StopCause) -> StopRule {
+    StopRule {
+        cause,
+        default: CHAIR,
+        pinned: true,
+    }
+}
+
+/// The one table of what follows a stop: exactly one row per cause.
+pub const STOP_TABLE: &[StopRule] = {
+    use StopCause::*;
+    &[
+        rule(StoppedEarly, NEW),
+        pinned(Blocked),
+        rule(HandoffMissing, CHAIR),
+        rule(EmptyResult, CHAIR),
+        rule(Uncommitted, CHAIR),
+        pinned(InputRequired),
+        rule(ContextHandoff, NEW),
+        rule(TokenBudget, CHAIR),
+        rule(Deadline, CHAIR),
+        pinned(Cancelled),
+        rule(ProviderStop, CHAIR),
+        rule(ProcessCrash, CHAIR),
+        rule(AuthRequired, NEW),
+        rule(UsageLimited, NEW),
+        rule(ModelUnavailable, NEW),
+        rule(AdapterUnavailable, NEW),
+        rule(PermissionDenied, CHAIR),
+        rule(IdentityUnobserved, CHAIR),
+        rule(PreparationRefused, CHAIR),
+        rule(SourceViewRefused, CHAIR),
+        rule(RouteRefused, CHAIR),
+        rule(AccessPolicyRefused, CHAIR),
+        rule(DiskFloor, CHAIR),
+        rule(DiskUnobserved, CHAIR),
+        rule(PromptUnreadable, CHAIR),
+        rule(WriteGrantsRefused, CHAIR),
+        rule(WorktreeBusy, CHAIR),
+        rule(LaunchHandoffRefused, CHAIR),
+        rule(RetainedWriterImport, CHAIR),
+        rule(UnsupportedPlatform, CHAIR),
+        rule(UnknownPacingAccount, CHAIR),
+        rule(UnregisteredAccount, CHAIR),
+        rule(CredentialHelperFailed, CHAIR),
+        rule(CommandUnavailable, CHAIR),
+        rule(HostNativeUnconfigured, CHAIR),
+        rule(SpawnFailure, CHAIR),
+        rule(SettlementFailed, CHAIR),
+        rule(Lost, CHAIR),
+        rule(Unsettled, CHAIR),
+        rule(Quarantined, CHAIR),
+    ]
+};
+
+impl StopCause {
+    /// This cause's row. A cause without a row goes to the chair; the table
+    /// test makes that unreachable.
+    pub fn rule(self) -> StopRule {
+        STOP_TABLE
+            .iter()
+            .copied()
+            .find(|rule| rule.cause == self)
+            .unwrap_or(StopRule {
+                cause: self,
+                default: CHAIR,
+                pinned: true,
+            })
+    }
+
+    pub fn default_next(self) -> NextStep {
+        self.rule().default
+    }
+
+    /// The default, or the node's `on_stop` override for this cause unless
+    /// the cause is pinned.
+    pub fn next_step(self, on_stop: Option<NextStep>) -> NextStep {
+        let rule = self.rule();
+        match on_stop {
+            Some(step) if !rule.pinned => step,
+            _ => rule.default,
+        }
+    }
+
+    /// The cause a handoff declares, when it declares unfinished work.
+    pub const fn declared(status: HandoffStatus) -> Option<Self> {
+        match status {
+            HandoffStatus::Done => None,
+            HandoffStatus::StoppedEarly => Some(Self::StoppedEarly),
+            HandoffStatus::Blocked => Some(Self::Blocked),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        use StopCause::*;
+        match self {
+            StoppedEarly => "stopped_early",
+            Blocked => "blocked",
+            HandoffMissing => "handoff_missing",
+            EmptyResult => "empty_result",
+            Uncommitted => "uncommitted",
+            InputRequired => "input_required",
+            ContextHandoff => "context_handoff",
+            TokenBudget => "token_budget",
+            Deadline => "deadline",
+            Cancelled => "cancelled",
+            ProviderStop => "provider_stop",
+            ProcessCrash => "process_crash",
+            AuthRequired => "auth_required",
+            UsageLimited => "usage_limited",
+            ModelUnavailable => "model_unavailable",
+            AdapterUnavailable => "adapter_unavailable",
+            PermissionDenied => "permission_denied",
+            IdentityUnobserved => "identity_unobserved",
+            PreparationRefused => "preparation_refused",
+            SourceViewRefused => "source_view_refused",
+            RouteRefused => "route_refused",
+            AccessPolicyRefused => "access_policy_refused",
+            DiskFloor => "disk_floor",
+            DiskUnobserved => "disk_unobserved",
+            PromptUnreadable => "prompt_unreadable",
+            WriteGrantsRefused => "write_grants_refused",
+            WorktreeBusy => "worktree_busy",
+            LaunchHandoffRefused => "launch_handoff_refused",
+            RetainedWriterImport => "retained_writer_import",
+            UnsupportedPlatform => "unsupported_platform",
+            UnknownPacingAccount => "unknown_pacing_account",
+            UnregisteredAccount => "unregistered_account",
+            CredentialHelperFailed => "credential_helper_failed",
+            CommandUnavailable => "command_unavailable",
+            HostNativeUnconfigured => "host_native_unconfigured",
+            SpawnFailure => "spawn_failure",
+            SettlementFailed => "settlement_failed",
+            Lost => "lost",
+            Unsettled => "unsettled",
+            Quarantined => "quarantined",
+        }
+    }
+}
+
+impl std::fmt::Display for StopCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A sealed stop. The handoff is decoded once, at settlement, and stored
+/// typed; nothing re-reads it from result text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "StopWire")]
+pub struct Stop {
+    cause: StopCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<Handoff>,
+    #[serde(flatten)]
+    extra: crate::ExtraFields,
+}
+
+#[derive(Deserialize)]
+struct StopWire {
+    cause: StopCause,
+    #[serde(default)]
+    handoff: Option<Handoff>,
+    #[serde(flatten)]
+    extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum StopError {
+    #[error("{0}")]
+    Handoff(&'static str),
+    #[error("handoff exceeds 12288 bytes")]
+    HandoffBytes,
+    #[error("a {0} stop needs a handoff with status {0}")]
+    Declared(StopCause),
+}
+
+impl Stop {
+    /// A declared cause (`stopped_early`, `blocked`) needs the handoff that
+    /// declared it. Any other cause may carry the writer's last handoff.
+    pub fn new(cause: StopCause, handoff: Option<Handoff>) -> Result<Self, StopError> {
+        Self::with_extra(cause, handoff, Default::default())
+    }
+
+    fn with_extra(
+        cause: StopCause,
+        handoff: Option<Handoff>,
+        extra: crate::ExtraFields,
+    ) -> Result<Self, StopError> {
+        if let Some(handoff) = &handoff {
+            handoff.validate().map_err(StopError::Handoff)?;
+            let bytes = serde_json::to_vec(handoff).map_err(|_| StopError::HandoffBytes)?;
+            if bytes.len() > HANDOFF_BYTES {
+                return Err(StopError::HandoffBytes);
+            }
+        }
+        let declared = handoff
+            .as_ref()
+            .and_then(|handoff| StopCause::declared(handoff.status));
+        if matches!(cause, StopCause::StoppedEarly | StopCause::Blocked) && declared != Some(cause)
+        {
+            return Err(StopError::Declared(cause));
+        }
+        Ok(Self {
+            cause,
+            handoff,
+            extra,
+        })
+    }
+
+    /// The stop a handoff declares, or none for a `done` handoff.
+    pub fn declared(handoff: Handoff) -> Option<Self> {
+        let cause = StopCause::declared(handoff.status)?;
+        Self::new(cause, Some(handoff)).ok()
+    }
+
+    pub fn cause(&self) -> StopCause {
+        self.cause
+    }
+
+    pub fn handoff(&self) -> Option<&Handoff> {
+        self.handoff.as_ref()
+    }
+
+    /// The writer's own one-line account, such as what blocks a `blocked`
+    /// stop, for `status` and `output`.
+    pub fn note(&self) -> Option<&str> {
+        self.handoff.as_ref().map(|handoff| handoff.note.as_str())
+    }
+
+    pub fn next_step(&self, on_stop: Option<NextStep>) -> NextStep {
+        self.cause.next_step(on_stop)
+    }
+}
+
+impl TryFrom<StopWire> for Stop {
+    type Error = StopError;
+
+    fn try_from(wire: StopWire) -> Result<Self, Self::Error> {
+        Self::with_extra(wire.cause, wire.handoff, wire.extra)
+    }
+}

@@ -52,6 +52,13 @@ impl Handoff {
             return Err("handoff exceeds 12288 bytes");
         }
         let handoff: Self = serde_json::from_slice(json).map_err(|_| "invalid handoff JSON")?;
+        handoff.validate()?;
+        Ok(handoff)
+    }
+
+    /// The declaration bounds, for a handoff decoded inside another record.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let handoff = self;
         let text_valid = |s: &str| !s.trim().is_empty() && s.len() <= NOTE_BYTES;
         if handoff.schema_version != 2
             || !text_valid(&handoff.note)
@@ -74,7 +81,7 @@ impl Handoff {
                 "handoff requires schema_version 2, a note of 1..4096 bytes and arrays of at most 64 non-empty strings of 1..4096 bytes",
             );
         }
-        Ok(handoff)
+        Ok(())
     }
 
     /// Only one complete fence at the end of the answer is a declaration.

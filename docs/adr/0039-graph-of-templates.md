@@ -152,3 +152,17 @@ until it is used up and then reaches the principal. `PanelResolution` gains
 the record does not deny unknown fields, so an older reader ignores them.
 Separately, outside the kernel, the CI check of skill-negative coverage reports
 gaps instead of failing. Part of #3078 (wave 1, #3135).
+
+## Amendment: one table decides what follows a stop
+
+What follows a stopped attempt belongs to the kernel, in one table:
+`STOP_TABLE` in `crates/records/src/stop.rs` owns the default next step
+(same route, new route or chair) of every stop cause, and the
+[run spec](../specs/run.md#what-follows-a-stop) mirrors it. A node's `on_stop`
+entry is the one override point, and the causes that already name who acts
+next (`blocked`, `input_required`, `cancelled`) are pinned to the chair. The
+runtime's one decision function applies route availability and the
+continuation budget after the table, and can only send a step to the chair. A
+change to a default is an edit to that table and its spec row, reviewed as a
+policy change. `blocked` is a stop cause carrying the writer's handoff note,
+not a plain failure (#3154). Part of #3078 (wave 2, slice W2-A).
