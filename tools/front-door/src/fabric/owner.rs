@@ -3489,40 +3489,38 @@ impl BoundGraphOwner<'_> {
                     }
                     _ => None,
                 };
-                let (result, result_warning) =
-                    if attempt.result.is_some() || outcome == Outcome::Succeeded {
-                        let captured = if remote {
-                            remote_graph_result(
-                                &mut owner,
-                                &target,
-                                node.required_verdict,
-                                self.budget,
-                                self.cancel,
-                            )
-                            .map_err(|_| provenant_run::RunError::NotFound)
-                        } else {
-                            store.stream_result(attempt.attempt_id, &call, node.required_verdict)
-                        };
-                        match captured {
-                            Ok(mut result) => {
-                                if remote && let Some(artifact) = &attempt.result {
-                                    // Output pages prove the redacted stream. Graph evidence
-                                    // still identifies the peer's sealed original artifact.
-                                    result.digest = artifact.digest.to_string();
-                                    // The peer's sealed settlement handoff, carried in its
-                                    // status; the output pages hold only text.
-                                    result.handoff = peer_handoff(
-                                        attempt.extra.get("graph_handoff"),
-                                        std::mem::replace(&mut result.handoff, Ok(None)),
-                                    );
-                                }
-                                (Some(Box::new(result)), None)
-                            }
-                            Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
-                        }
+                let (result, result_warning) = if attempt.result.is_some()
+                    || outcome == Outcome::Succeeded
+                {
+                    let captured = if remote {
+                        remote_graph_result(
+                            &mut owner,
+                            &target,
+                            node.required_verdict,
+                            self.budget,
+                            self.cancel,
+                        )
+                        .map_err(|_| provenant_run::RunError::NotFound)
                     } else {
-                        (None, None)
+                        store.stream_result(attempt.attempt_id, &call, node.required_verdict)
                     };
+                    match captured {
+                        Ok(mut result) => {
+                            if remote && let Some(artifact) = &attempt.result {
+                                // Output pages prove the redacted stream. Graph evidence
+                                // still identifies the peer's sealed original artifact.
+                                result.digest = artifact.digest.to_string();
+                                // The peer's sealed settlement handoff, carried in its
+                                // status; the output pages hold only text.
+                                result.handoff = peer_handoff(attempt.extra.get("graph_handoff"));
+                            }
+                            (Some(Box::new(result)), None)
+                        }
+                        Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
+                    }
+                } else {
+                    (None, None)
+                };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
                 // route fallback for authentication or quota failures.
@@ -4497,24 +4495,17 @@ mod journal_error_tests {
 /// The serving host verifies each artifact read; capture remains on the chair.
 /// A peer's handoff is untrusted at this boundary: validate it as any decoded
 /// handoff, then redact it, before a continuation prompt can carry it.
-/// An absent key means a peer that predates `graph_handoff`; only then is the
-/// handoff from that peer's own whole-answer text capture kept (also redacted).
-/// That is the old peer's result as it was, not a turn rule of this chair.
+/// An absent key or an explicit null means no handoff.
 fn peer_handoff(
     sealed: Option<&serde_json::Value>,
-    captured: Result<Option<provenant_records::handoff::Handoff>, &'static str>,
 ) -> Result<Option<provenant_records::handoff::Handoff>, &'static str> {
     let handoff = match sealed {
-        Some(serde_json::Value::Null) => return Ok(None),
+        None | Some(serde_json::Value::Null) => return Ok(None),
         Some(value) => {
             let bytes = serde_json::to_vec(value).map_err(|_| "peer handoff unreadable")?;
             provenant_records::handoff::Handoff::from_json(&bytes)
                 .map_err(|_| "peer handoff unreadable")?
         }
-        None => match captured? {
-            Some(handoff) => handoff,
-            None => return Ok(None),
-        },
     };
     provenant_run::sanitise_handoff(&handoff)
         .map(Some)
@@ -4611,20 +4602,20 @@ mod peer_handoff_tests {
                 "remaining":[],"decisions":[],"verify":[]})
         };
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        let clean = peer_handoff(Some(&sealed(&format!("key {token}"))), Ok(None));
+        let clean = peer_handoff(Some(&sealed(&format!("key {token}"))));
         let note = clean.unwrap().unwrap().note;
         assert!(!note.contains(token));
         let mut bad = sealed("x");
         bad["schema_version"] = 1.into();
-        assert!(peer_handoff(Some(&bad), Ok(None)).is_err());
-        assert!(peer_handoff(Some(&sealed(" ")), Ok(None)).is_err());
-        assert!(peer_handoff(Some(&sealed(&"n".repeat(5000))), Ok(None)).is_err());
-        let old = provenant_records::handoff::Handoff::from_json(
-            sealed(&format!("old {token}")).to_string().as_bytes(),
-        )
-        .unwrap();
-        let kept = peer_handoff(None, Ok(Some(old))).unwrap().unwrap();
-        assert!(!kept.note.contains(token));
+        assert!(peer_handoff(Some(&bad)).is_err());
+        assert!(peer_handoff(Some(&sealed(" "))).is_err());
+        assert!(peer_handoff(Some(&sealed(&"n".repeat(5000)))).is_err());
+        assert!(
+            peer_handoff(Some(&serde_json::Value::Null))
+                .unwrap()
+                .is_none()
+        );
+        assert!(peer_handoff(None).unwrap().is_none());
     }
 }
 

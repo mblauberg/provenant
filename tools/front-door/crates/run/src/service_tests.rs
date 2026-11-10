@@ -321,36 +321,6 @@ fn child_dispatch_replays_original_id_scheme() -> TestResult {
             .child_attempt_id_version,
         None
     );
-    // A pre-upgrade crash may reserve rows without publishing request.json.
-    let mut operation = legacy
-        .operation(&accepted.operation_id, &call)?
-        .ok_or("operation")?;
-    operation.state = OperationState::Prepared;
-    legacy.db.execute(
-        "UPDATE operations SET record=?1",
-        [crate::db::bytes(&operation)?],
-    )?;
-    std::fs::remove_file(
-        legacy
-            .context
-            .state_root
-            .as_path()
-            .join("runs")
-            .join(accepted.run_id.to_string())
-            .join("request.json"),
-    )?;
-    assert_eq!(
-        Service::new(&legacy)
-            .dispatch(proposal(), temp.path(), &call)?
-            .run_id,
-        accepted.run_id
-    );
-    assert_eq!(
-        legacy
-            .request(accepted.run_id, &call)?
-            .child_attempt_id_version,
-        None
-    );
     Ok(())
 }
 

@@ -2611,18 +2611,6 @@ impl RunStore {
             }],
             created_at: input.created_at,
         };
-        // Retain an interrupted legacy operation's scheme even if it crashed
-        // before publishing its request. Only the exact old digest qualifies.
-        if previous.is_none()
-            && let Some(operation) = operation
-            && operation.request_digest != prepared.request.digest()?
-        {
-            let mut legacy = prepared.request.clone();
-            legacy.child_attempt_id_version = None;
-            if legacy.digest()? == operation.request_digest {
-                prepared.request = legacy;
-            }
-        }
         if let Some(run) = crate::correlation::child_run_id(
             self.context.project_id,
             &prepared.request,
