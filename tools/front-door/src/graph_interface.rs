@@ -170,18 +170,32 @@ fn lane_lines(checkpoint: &Value) -> String {
             ids.len() - provenant_cli::limits::SUMMARY_ROWS
         );
     }
-    for node in checkpoint["nodes"]
+    let refused: Vec<String> = checkpoint["nodes"]
         .as_array()
         .map_or(&[][..], Vec::as_slice)
-    {
-        if node["advance_error_code"] == "preparation_refused"
-            && let Some(message) = node["advance_error"].as_str()
-        {
-            text += &format!(
-                "refused {}: {message}\n",
-                node["id"].as_str().unwrap_or_default()
+        .iter()
+        .filter(|node| node["advance_error_code"] == "preparation_refused")
+        .filter_map(|node| {
+            let message = node["advance_error"].as_str()?;
+            let line = format!(
+                "refused {}: {}",
+                node["id"].as_str().unwrap_or_default(),
+                message.split_whitespace().collect::<Vec<_>>().join(" ")
             );
-        }
+            Some(provenant_cli::bounded_text(
+                &line,
+                provenant_cli::limits::SUMMARY_ROW_BYTES,
+            ))
+        })
+        .collect();
+    for line in refused.iter().take(provenant_cli::limits::SUMMARY_ROWS) {
+        text += &format!("{line}\n");
+    }
+    if refused.len() > provenant_cli::limits::SUMMARY_ROWS {
+        text += &format!(
+            "{} more refused lanes in --json\n",
+            refused.len() - provenant_cli::limits::SUMMARY_ROWS
+        );
     }
     text
 }
@@ -933,6 +947,19 @@ mod tests {
              "advance_error":"refused. Refused: codex/gpt: allowance spent", "attempts":[]}
         ]});
         assert!(lane_lines(&refused).contains("allowance spent"));
+        let many: Vec<_> = (0..15)
+            .map(|n| {
+                json!({"id":format!("r{n}"), "advance_error_code":"preparation_refused",
+                "advance_error":"x".repeat(1000), "attempts":[]})
+            })
+            .collect();
+        let text = lane_lines(&json!({"graph_id":"g", "nodes":many}));
+        assert_eq!(text.lines().count(), 13, "{text}");
+        assert!(text.ends_with("3 more refused lanes in --json\n"));
+        assert!(
+            text.lines()
+                .all(|line| line.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES)
+        );
     }
 
     #[test]
