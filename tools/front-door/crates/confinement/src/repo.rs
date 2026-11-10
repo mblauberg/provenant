@@ -749,10 +749,12 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
-    // Other branches' tracking keys are ignored. A checked-out branch keeps
-    // its own; a detached HEAD keeps none. A missing or malformed HEAD keeps
-    // every branch's keys, so a HEAD race cannot hide a tracking change; the
-    // writer's own HEAD read reports the damage with its path.
+    // Other branches' tracking keys are ignored, including the `pushRemote`
+    // that writer delivery records beside `remote` and `merge` for its lane
+    // branch. A checked-out branch keeps its own; a detached HEAD keeps none.
+    // A missing or malformed HEAD keeps every branch's keys, so a HEAD race
+    // cannot hide a tracking change; the writer's own HEAD read reports the
+    // damage with its path.
     let line = head.strip_suffix(b"\n").unwrap_or_default();
     let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
     let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
@@ -775,8 +777,10 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         let ignored = key
             .strip_prefix(b"branch.")
             .and_then(|rest| {
+                // `git config --list` lowercases variable names.
                 rest.strip_suffix(b".remote")
                     .or_else(|| rest.strip_suffix(b".merge"))
+                    .or_else(|| rest.strip_suffix(b".pushremote"))
             })
             .is_some_and(|name| !keep_all && Some(name) != branch);
         if !ignored {
@@ -1541,6 +1545,30 @@ mod tests {
         git(&["config", "branch.third.merge", "refs/heads/main"]);
         assert!(partial_tree.repo().revalidate().is_ok());
         assert!(tree.repo().revalidate().is_ok());
+        // Writer delivery records a sibling lane's push remote too.
+        git(&["config", "branch.third.pushRemote", "origin"]);
+        assert!(partial_tree.repo().revalidate().is_ok());
+        assert!(tree.repo().revalidate().is_ok());
+        let delivered = VerifiedRepo::open(&root, |_| {
+            for (key, value) in [
+                ("remote", "origin"),
+                ("merge", "refs/heads/delivered"),
+                ("pushRemote", "origin"),
+            ] {
+                git(&[
+                    "config",
+                    "--local",
+                    &format!("branch.delivered.{key}"),
+                    value,
+                ]);
+            }
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
+        });
+        assert!(delivered.is_ok());
         let opened = VerifiedRepo::open(&root, |_| {
             git(&[
                 "worktree",
@@ -1573,6 +1601,14 @@ mod tests {
         assert!(tree.repo().revalidate().is_err());
         fs::write(&config_path, b"[broken\n").unwrap();
         assert!(tree.repo().revalidate().is_err());
+        // The checked-out branch's own push remote still matters.
+        let mut own_push = config.clone();
+        own_push.extend_from_slice(b"[branch \"first\"]\n pushRemote = elsewhere\n");
+        fs::write(&config_path, own_push).unwrap();
+        assert!(matches!(
+            tree.repo().revalidate(),
+            Err(RepoError::IdentityChanged)
+        ));
         fs::write(&config_path, &config).unwrap();
         let mut poisoned = config.clone();
         poisoned.extend_from_slice(b"[core]\n\thooksPath = /tmp/poison\n");
