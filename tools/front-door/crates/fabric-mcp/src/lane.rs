@@ -907,6 +907,7 @@ mod tests {
                             input_failure: Some(
                                 provenant_records::diagnostic::IoFact::InputUnreadable,
                             ),
+                            cause: None,
                         }
                         .into())
                     },
