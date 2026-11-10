@@ -408,6 +408,13 @@ mod tests {
         ports::{PullRequestInfo, PullRequestState, ReviewRecord},
     };
 
+    const H: &str = "1111111111111111111111111111111111111111";
+    const R: &str = "2222222222222222222222222222222222222222";
+    const B: &str = "3333333333333333333333333333333333333333";
+    const T: &str = "4444444444444444444444444444444444444444";
+    const OTHER: &str = "5555555555555555555555555555555555555555";
+    const X: &str = "6666666666666666666666666666666666666666";
+
     fn record(reference: &str, head: &str, base: &str) -> ReviewRecord {
         ReviewRecord {
             reference: reference.into(),
@@ -421,12 +428,12 @@ mod tests {
     /// and is now at `h`, one commit later, which changes `changed`.
     fn repo(changed: &[&str]) -> FakeRepo {
         let mut repo = FakeRepo::default();
-        for (commit, parent) in [("t", "b"), ("r", "b"), ("h", "r")] {
+        for (commit, parent) in [(T, B), (R, B), (H, R)] {
             repo.parents.insert(commit.into(), vec![parent.into()]);
         }
-        repo.trees.insert("h".into(), "tree-h".into());
+        repo.trees.insert(H.into(), format!("tree-{H}"));
         repo.paths.insert(
-            ("tree-r-b".into(), "tree-h".into()),
+            (format!("tree-{R}-{B}"), format!("tree-{H}")),
             changed.iter().map(|path| (*path).to_owned()).collect(),
         );
         repo
@@ -442,8 +449,8 @@ mod tests {
         let exempt = ReviewExempt::none();
         Approvals::new(ApprovalSource::Receipt, &reviews)
             .governed(tier, &exempt, accept)
-            .at(repo, "t")
-            .decide(&mut FakeForge::default(), 7, "h", "author")
+            .at(repo, T)
+            .decide(&mut FakeForge::default(), 7, H, "author")
             .unwrap()
     }
 
@@ -453,7 +460,7 @@ mod tests {
 
     #[test]
     fn a_change_to_tests_or_docs_after_review_keeps_the_approval_and_lists_its_paths() {
-        let reviewed = [record("d1", "r", "b")];
+        let reviewed = [record("d1", R, B)];
         let paths = ["docs/x.md", "src/tests/a.rs"];
         let Decision::Approved(approved) =
             decide(&mut repo(&paths), &reviewed, ApprovalTier::Carry, None)
@@ -480,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_production_change_after_review_needs_a_review_of_the_delta() {
-        let (full, delta) = (record("d1", "r", "b"), record("d2", "h", "r"));
+        let (full, delta) = (record("d1", R, B), record("d2", H, R));
         let mut repo = repo(&["src/a.rs"]);
         assert!(refused(&decide(
             &mut repo,
@@ -489,7 +496,7 @@ mod tests {
             None
         )));
         // A review of the new head against a head no review covers is not one.
-        let stray = record("d3", "h", "x");
+        let stray = record("d3", H, X);
         assert!(refused(&decide(
             &mut repo,
             &[full.clone(), stray],
@@ -507,7 +514,7 @@ mod tests {
 
     #[test]
     fn accept_delta_lands_the_change_and_records_the_reason_and_actor() {
-        let reviewed = [record("d1", "r", "b")];
+        let reviewed = [record("d1", R, B)];
         let mut repo = repo(&["src/a.rs"]);
         let Decision::Approved(approved) =
             decide(&mut repo, &reviewed, ApprovalTier::Carry, Some("typo"))
@@ -534,18 +541,18 @@ mod tests {
             merged_commit: None,
             stack: None,
         };
-        let full = record("d1", "r", "b");
-        for records in [vec![full.clone()], vec![full, record("d2", "h", "r")]] {
+        let full = record("d1", R, B);
+        for records in [vec![full.clone()], vec![full, record("d2", H, R)]] {
             let mut forge = FakeForge::default();
-            forge.pull_requests.insert(7, info(7, "h"));
-            forge.pull_requests.insert(8, info(8, "other"));
+            forge.pull_requests.insert(7, info(7, H));
+            forge.pull_requests.insert(8, info(8, OTHER));
             let mut repo = repo(&["src/a.rs"]);
             let alone = decide(&mut repo, &records, ApprovalTier::Carry, None);
             let reviews = FakeReviews::of(BTreeMap::from([(7, records)]));
             let exempt = ReviewExempt::none();
             let mut approver = Approvals::new(ApprovalSource::Receipt, &reviews)
                 .governed(ApprovalTier::Carry, &exempt, None)
-                .at(&mut repo, "t");
+                .at(&mut repo, T);
             let (selected, reasons) = select_batch_with_reasons(
                 &mut forge,
                 &mut approver,

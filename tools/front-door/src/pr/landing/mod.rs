@@ -315,6 +315,11 @@ fn single_approval(
     if info.state != ports::PullRequestState::Open {
         return Ok(());
     }
+    if let Some(expected) = &head
+        && expected != &info.head
+    {
+        return Ok(());
+    }
     let reviews = review_records(&mut *forge, effective, &resolved.roots.state, project)?;
     let exempt = review_exempt(resolved.roots.state.as_path(), project);
     let approvals = approval::Approvals::new(effective.approval, &reviews).governed(
