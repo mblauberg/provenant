@@ -110,6 +110,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.reason = Some("done".into());
     full.settlement = Some(LaneSettlement {
         reason: Some("done".into()),
+        github_requests: None,
     });
     full.title = Some("Review\nchanges".into());
     full.priority = Some(15);
