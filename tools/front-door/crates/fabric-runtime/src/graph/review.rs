@@ -261,7 +261,7 @@ pub(super) fn correct_verdict(
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
 ) -> Result<Option<GraphCheckpoint>, PatchError> {
-    if checkpoint.cancelled || checkpoint.pause_reason.is_some() {
+    if checkpoint.cancelled || checkpoint.pause.is_some() {
         return Ok(None);
     }
     let Some((index, node)) = plan.nodes.iter().enumerate().find(|(index, node)| {

@@ -1043,11 +1043,9 @@ pub struct GraphCheckpoint {
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
+    /// Why the graph waits for the chair, with the cause typed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_reason: Option<String>,
-    /// Stable cause of the pause, independent of its displayed explanation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_code: Option<String>,
+    pub pause: Option<provenant_records::pause::Pause>,
     /// Usage fields unavailable for settled attempts, including partial
     /// telemetry. Only the newest lines are kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1152,11 +1150,11 @@ pub enum NodeDecisionCause {
 }
 
 impl NodeDecisionCause {
-    pub(super) fn from_loop_code(code: &str) -> Option<Self> {
-        match code {
-            "loop_paused" => Some(Self::LoopPaused),
-            "loop_ask_closed" => Some(Self::LoopAskClosed),
-            "invalid_loop_decision" => Some(Self::InvalidLoopDecision),
+    pub(super) fn from_pause(cause: PauseCause) -> Option<Self> {
+        match cause {
+            PauseCause::LoopPaused => Some(Self::LoopPaused),
+            PauseCause::LoopAskClosed => Some(Self::LoopAskClosed),
+            PauseCause::InvalidLoopDecision => Some(Self::InvalidLoopDecision),
             _ => None,
         }
     }
@@ -1193,8 +1191,14 @@ pub struct NodeProgress {
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
+    /// The writer's unfinished handoff, kept for its continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<String>,
+    pub handoff: Option<provenant_records::handoff::Handoff>,
+    /// The decisions a review node made on its findings, each bound to the
+    /// head and base it reviewed. The reviewed base is required: a decision
+    /// without one is not stored, and its approval cannot carry over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<provenant_records::FindingDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1413,6 +1417,29 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
+    /// Pause the graph for the chair. The reason is cut to its bound.
+    pub fn set_pause(&mut self, cause: provenant_records::pause::PauseCause, reason: &str) {
+        let reason = bounded(reason, provenant_records::pause::PAUSE_REASON_BYTES);
+        let reason = if reason.trim().is_empty() {
+            "paused".into()
+        } else {
+            reason
+        };
+        self.pause = provenant_records::pause::Pause::new(cause, None, reason).ok();
+    }
+
+    pub fn pause_cause(&self) -> Option<provenant_records::pause::PauseCause> {
+        self.pause
+            .as_ref()
+            .map(provenant_records::pause::Pause::cause)
+    }
+
+    pub fn pause_reason(&self) -> Option<&str> {
+        self.pause
+            .as_ref()
+            .map(provenant_records::pause::Pause::reason)
+    }
+
     pub(super) fn deactivate_expansion_pauses(&mut self) {
         for node in &mut self.nodes {
             if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =

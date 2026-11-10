@@ -486,7 +486,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         // A withdrawn ask is replaced once its inbox request is closed.
         Some(position) if !checkpoint.asks[position].closed => return Ok(()),
         _ => {
-            if checkpoint.pause_reason.is_some() {
+            if checkpoint.pause.is_some() {
                 return Ok(());
             }
             let session = decide_session(spec, plan.decision_session.as_deref())
@@ -727,8 +727,10 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
     journal: &mut J,
     budget: &crate::config::GraphBudget,
 ) -> Result<bool, GraphError<R::Error, J::Error>> {
-    let (Some(session), Some(reason)) = (&plan.decision_session, checkpoint.pause_reason.clone())
-    else {
+    let (Some(session), Some(reason)) = (
+        &plan.decision_session,
+        checkpoint.pause_reason().map(str::to_owned),
+    ) else {
         return Ok(false);
     };
     if checkpoint.cancelled || loop_pause(checkpoint) {
@@ -783,8 +785,7 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
                 }
             }
             checkpoint.deactivate_expansion_pauses();
-            checkpoint.pause_reason = None;
-            checkpoint.pause_code = None;
+            checkpoint.pause = None;
             true
         }
         Err((code, reason)) => {
@@ -802,9 +803,8 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
 
 pub(super) fn loop_pause(checkpoint: &GraphCheckpoint) -> bool {
     checkpoint
-        .pause_code
-        .as_deref()
-        .and_then(NodeDecisionCause::from_loop_code)
+        .pause_cause()
+        .and_then(NodeDecisionCause::from_pause)
         .is_some()
 }
 
@@ -857,7 +857,7 @@ pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
                             < loop_rounds(checkpoint, ask.node.as_deref().unwrap_or_default())
                 }
                 AskKind::Decide | AskKind::Land => settled,
-                AskKind::Pause => checkpoint.pause_reason.is_none() || loop_pause(checkpoint),
+                AskKind::Pause => checkpoint.pause.is_none() || loop_pause(checkpoint),
             };
         if gone {
             checkpoint.asks[index].resolved = true;

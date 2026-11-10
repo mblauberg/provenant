@@ -15,6 +15,20 @@ fn worst(max: usize) -> String {
     bounded(&"\u{1}".repeat(max), max)
 }
 
+/// Quotes escape to two bytes each: the largest handoff the record admits.
+fn worst_handoff() -> provenant_records::handoff::Handoff {
+    provenant_records::handoff::Handoff {
+        schema_version: 2,
+        status: provenant_records::handoff::HandoffStatus::StoppedEarly,
+        note: "\"".repeat(provenant_records::handoff::NOTE_BYTES),
+        remaining: vec!["\"".repeat(1900)],
+        decisions: Vec::new(),
+        verify: Vec::new(),
+        spec_concerns: Vec::new(),
+        extra: Default::default(),
+    }
+}
+
 fn routes(count: usize) -> serde_json::Value {
     (0..count)
         .map(|index| json!({"adapter":"fixture", "model":format!("fixture/model-{index}")}))
@@ -248,7 +262,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
-                handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
+                handoff: plans::writer(node).then(worst_handoff),
+                decisions: Vec::new(),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
                 expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),
@@ -397,8 +412,14 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
         cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
-        pause_reason: Some(worst(PAUSE_REASON_BYTES)),
-        pause_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+        pause: Some(
+            provenant_records::pause::Pause::new(
+                PauseCause::Stop(provenant_records::StopCause::CredentialHelperFailed),
+                None,
+                worst(PAUSE_REASON_BYTES),
+            )
+            .unwrap(),
+        ),
         unknown_usage: vec![
             format!(
                 "node {longest} route {}: wall_time_seconds usage unknown",
@@ -655,8 +676,8 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_loop_decision")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidLoopDecision)
     );
     assert!(run.checkpoint.extensions.is_empty());
     assert_eq!(owner.calls.len(), 18);

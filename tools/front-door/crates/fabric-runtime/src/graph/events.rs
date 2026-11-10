@@ -387,7 +387,7 @@ pub(super) fn append_changes(
         events.push(effect);
     }
     let mut saved = event(GraphEventKind::Checkpoint, id, "save", current)?;
-    saved.details = Some(serde_json::json!({"pause_code": current.pause_code,
+    saved.details = Some(serde_json::json!({"pause_cause": current.pause_cause(),
         "cancelled":current.cancelled,"outcome":current.outcome()}));
     events.push(saved);
     append(directory, id, events)

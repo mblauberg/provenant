@@ -102,8 +102,14 @@ pub(super) fn checkpoint_bound(
         integration_pin: Some(String::new()),
         cancelled: true,
         cancel_reason: Some(String::new()),
-        pause_reason: Some(String::new()),
-        pause_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        pause: provenant_records::pause::Pause::new(
+            provenant_records::pause::PauseCause::Stop(
+                provenant_records::StopCause::CredentialHelperFailed,
+            ),
+            None,
+            "p",
+        )
+        .ok(),
         unknown_usage: Vec::new(),
         unknown_usage_omitted: usize::MAX,
         usage_events: Vec::new(),
@@ -230,7 +236,8 @@ fn node_bound(
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         review_base_pending: false,
         fragment: (plans::agent(node) && !admitted).then(String::new),
-        handoff: plans::writer(node).then(String::new),
+        handoff: None,
+        decisions: Vec::new(),
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
@@ -396,7 +403,7 @@ fn node_bound(
         bytes += 256;
     }
     if plans::writer(node) {
-        bytes += plans::STORED_HANDOFF_BYTES;
+        bytes += plans::STORED_HANDOFF_BYTES + 16; // the record and its key
     }
     if repair::may_report_items(node, plan) || repair::is_repair(node) {
         bytes += FINDINGS_BYTES + 32;

@@ -450,7 +450,7 @@ pub(super) fn apply_attempt_observation(
                         .and_then(|capture| capture.handoff.as_ref().ok())
                         .and_then(|handoff| handoff.as_ref())
                         .filter(|handoff| handoff.unfinished())
-                        .map(provenant_records::handoff::Handoff::fenced);
+                        .cloned();
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
@@ -561,8 +561,7 @@ pub(super) fn initial_checkpoint(
         cancelled: false,
         cancel_reason: None,
         integration_pin: None,
-        pause_reason: None,
-        pause_code: None,
+        pause: None,
         unknown_usage: Vec::new(),
         unknown_usage_omitted: 0,
         usage_events: Vec::new(),
@@ -591,6 +590,7 @@ pub(super) fn initial_checkpoint(
                     && node.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
+                decisions: Vec::new(),
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,
@@ -765,15 +765,12 @@ pub(super) fn admit_attempt(
     }
     checkpoint.nodes[node_index].extra.remove("slot_wait");
     update_usage_warnings(checkpoint);
-    if let Some(reason) = checkpoint
-        .pause_reason
-        .clone()
-        .or_else(|| budget_reason(checkpoint, effective_budget))
+    if checkpoint.pause.is_none()
+        && let Some(reason) = budget_reason(checkpoint, effective_budget)
     {
-        checkpoint.pause_reason = Some(bounded(&reason, PAUSE_REASON_BYTES));
-        checkpoint
-            .pause_code
-            .get_or_insert_with(|| "budget_exceeded".into());
+        checkpoint.set_pause(PauseCause::BudgetExceeded, &reason);
+    }
+    if checkpoint.pause.is_some() {
         return Admission::SaveAndWait;
     }
     if let Some(missing) = required_input_unavailable(node, plan, checkpoint, positions) {
@@ -1245,8 +1242,7 @@ pub(super) fn apply_resume(
         }
     }
     checkpoint.deactivate_expansion_pauses();
-    checkpoint.pause_reason = None;
-    checkpoint.pause_code = None;
+    checkpoint.pause = None;
     Ok(())
 }
 
@@ -1289,8 +1285,7 @@ pub(super) fn refresh_structure_pause(
         })
     {
         checkpoint.activate_expansion_pause(index);
-        checkpoint.pause_reason = Some(reason);
-        checkpoint.pause_code = Some("invalid_plan_expansion".into());
+        checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
     }
     let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
         None
@@ -1299,8 +1294,7 @@ pub(super) fn refresh_structure_pause(
     };
     if let Some(reason) = &structural_pause {
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
-        checkpoint.pause_code = Some("structural_limit".into());
+        checkpoint.set_pause(PauseCause::StructuralLimit, reason);
     }
 
     structural_pause
@@ -1394,10 +1388,9 @@ pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
             .nodes
             .iter()
             .all(|node| node.expansion_pause.is_none())
-        && checkpoint.pause_reason.take().is_some()
+        && checkpoint.pause.take().is_some()
     {
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_code = None;
         return true;
     }
     false
@@ -1417,7 +1410,7 @@ pub(super) fn record_delivery(checkpoint: &mut GraphCheckpoint, url: String) -> 
 
 pub(super) fn graph_run(checkpoint: GraphCheckpoint) -> GraphRun {
     let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
-    let status = if checkpoint.pause_reason.is_some() {
+    let status = if checkpoint.pause.is_some() {
         GraphStatus::Paused
     } else if all_settled && checkpoint.cancelled {
         GraphStatus::Cancelled

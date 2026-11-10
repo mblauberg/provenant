@@ -1257,8 +1257,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .count();
     if active_expansions > 1
         || (active_expansions == 1)
-            != (checkpoint.pause_code.as_deref() == Some("invalid_plan_expansion")
-                && checkpoint.pause_reason.is_some())
+            != (checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
@@ -1266,14 +1265,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         });
     }
     if let Some(cause) = checkpoint
-        .pause_code
-        .as_deref()
-        .and_then(NodeDecisionCause::from_loop_code)
-        && (checkpoint.pause_reason.is_none()
-            || !checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.loop_cause.as_ref() == Some(&cause)))
+        .pause_cause()
+        .and_then(NodeDecisionCause::from_pause)
+        && (!checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.loop_cause.as_ref() == Some(&cause)))
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),

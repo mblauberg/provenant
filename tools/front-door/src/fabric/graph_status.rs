@@ -56,9 +56,9 @@ pub(super) fn graph_snapshot(
         GraphStatus::Cancelled
     } else if !unfinished {
         // A crash can leave a pause behind after the final node was saved.
-        checkpoint.pause_reason = None;
+        checkpoint.pause = None;
         GraphStatus::Complete
-    } else if checkpoint.pause_reason.is_some() {
+    } else if checkpoint.pause.is_some() {
         GraphStatus::Paused
     } else {
         GraphStatus::Pending
