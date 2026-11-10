@@ -80,7 +80,7 @@ pub(crate) enum Collection<'a> {
     Acquire,
     /// The `provenant gc` sweep already holds the lock. `upstream` is the
     /// default-branch tip that sweep fetched; with no delivery receipt, the
-    /// lane must have landed there rather than only on its owner's base.
+    /// lane lands against it or falls back to the owner's base when upstream is None.
     Held {
         _lock: &'a provenant_os::fs::LockGuard,
         upstream: Option<provenant_core::GitOid>,
@@ -106,8 +106,9 @@ pub(crate) fn collect_owned_worktree(
 /// attempt and leaves a receipt that is not final until it succeeds. For each
 /// settled lane whose receipt is still deferred, retryable or mid-prune and
 /// whose worktree still exists, run the same owner-bound collection under the
-/// lock the sweep holds. That receipt is the only marker: nothing else is
-/// recorded. Returns the worktrees this removed.
+/// lock the sweep holds, landing against the fetched default branch or falling
+/// back to the owner's base when upstream is None. That receipt is the only
+/// marker: nothing else is recorded. Returns the worktrees this removed.
 pub(crate) fn collect_unsettled(
     roots: &provenant_core::Roots,
     home: &Path,

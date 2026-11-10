@@ -1202,8 +1202,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &facts,
             command.dry_run,
             |context, cancel| {
-                // A failed fetch cannot grant removal authority. Output pruning
-                // still has its independent terminal-state proof.
+                // When the fetch fails, there is no origin, or the sweep is a
+                // pressure sweep, upstream is None: the path-based pass below
+                // cannot grant removal authority, and settled lane collection
+                // falls back to the owner's base (the same rule settlement
+                // uses, granting no new authority). Output pruning still has
+                // its independent terminal-state proof.
                 let (upstream, upstream_error) = if command.pressure || command.dry_run {
                     (None, None)
                 } else {
@@ -1214,7 +1218,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 };
                 // Settled lanes whose settlement-time collection missed keep a
                 // receipt that is not final. Collect them through the same
-                // owner-bound proof before the path-based pass below.
+                // owner-bound proof before the path-based pass below, landing
+                // against the fetched default branch or falling back to the
+                // owner's base when upstream is None.
                 let collected = match collection.as_ref() {
                     Some(lock) if command.apply && !command.dry_run => {
                         crate::fabric::gc_cleanup::collect_unsettled(
@@ -1226,7 +1232,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                             upstream.as_ref().map(|(_, oid)| *oid),
                             workers,
                         )
-                        .unwrap_or_default()
+                        .unwrap_or_else(|error| {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                std::io::stderr().lock(),
+                                "warning: settled lane collection failed for {}: {error}",
+                                project.path.display()
+                            );
+                            Vec::new()
+                        })
                     }
                     _ => Vec::new(),
                 };

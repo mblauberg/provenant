@@ -1335,3 +1335,21 @@ pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
     }
     Ok(())
 }
+
+/// When the run store cannot be opened or listed during unsettled lane
+/// collection, the sweep warns on stderr and carries on with the path-based pass.
+pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
+    let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+    let rig = &fixture.rig;
+    // Corrupt the run database file so open_disk_read_only fails.
+    let run_db = rig.state.join("run.sqlite3");
+    fs::write(&run_db, b"corrupted sqlite database")?;
+    let output = command(rig, &["gc", "--apply", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(
+        stderr.contains("warning: settled lane collection failed for"),
+        "stderr must contain settled lane collection warning: {stderr}"
+    );
+    Ok(())
+}

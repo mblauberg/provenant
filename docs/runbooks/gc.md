@@ -145,10 +145,12 @@ custody stays busy for 120 seconds, the settlement receipt stays non-final
 (`cleanup_deferred` or `retryable`) and nothing else is recorded. The next
 applied full or pressure sweep, holding collection custody, runs the same
 owner-bound collection for every terminal lane whose receipt is not final and
-whose worktree still exists, with the fetched default branch as the landing
-target. That pass proves the owner attempt, continuation writer and exact HEAD,
-so it collects a lane landed by fast-forward that the path-based pass keeps at
-the integration tip or on its first-parent line, and writes the `pruned` receipt.
+whose worktree still exists, landing against the fetched default branch (falling
+back to the owner's base when the fetch fails, there is no origin, or the sweep
+is a pressure sweep, the same rule settlement uses). That pass proves the owner
+attempt, continuation writer and exact HEAD, so it collects a lane landed by
+fast-forward that the path-based pass keeps at the integration tip or on its
+first-parent line, and writes the `pruned` receipt.
 `land` retains its explicit cleanup.
 Kept files, live writers and reservations still prevent removal.
 
