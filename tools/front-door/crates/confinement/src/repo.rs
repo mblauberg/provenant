@@ -1128,7 +1128,7 @@ fn open_canonical_anchor(
 mod tests {
     use super::{
         GitRefName, GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData,
-        VerifiedRepo, verify_worktree,
+        SiblingTrackingKeys, VerifiedRepo, verify_worktree,
     };
     use std::fs;
 
