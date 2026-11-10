@@ -2901,14 +2901,19 @@ fn snapshot(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>>
     Ok(files)
 }
 
-fn git(directory: &Path, args: &[&str]) -> Result {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
-        .args(args)
-        .output()?;
-    assert!(output.status.success(), "{args:?}: {output:?}");
+fn git(rig: &TestRig, directory: &Path, args: &[&str]) -> Result {
+    let mut argv: Vec<std::ffi::OsString> = vec![
+        "-C".into(),
+        directory.into(),
+        "-c".into(),
+        "user.name=t".into(),
+        "-c".into(),
+        "user.email=t@example.com".into(),
+    ];
+    argv.extend(args.iter().map(std::ffi::OsString::from));
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let output = rig.execute_os(&git, &argv, None)?;
+    assert_eq!(code(&output), 0, "{args:?}: {output:?}");
     Ok(())
 }
 
@@ -2940,13 +2945,15 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         fs::write(&path, format!("format-1 {name}"))?;
     }
     // A lane worktree with a commit the main checkout does not have.
-    git(&rig.project, &["init", "-q", "-b", "main"])?;
+    git(&rig, &rig.project, &["init", "-q", "-b", "main"])?;
     git(
+        &rig,
         &rig.project,
         &["commit", "-q", "--allow-empty", "-m", "base"],
     )?;
     let lane = rig.root.join("lane");
     git(
+        &rig,
         &rig.project,
         &[
             "worktree",
@@ -2957,7 +2964,11 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
             lane.to_str().ok_or("lane")?,
         ],
     )?;
-    git(&lane, &["commit", "-q", "--allow-empty", "-m", "unlanded"])?;
+    git(
+        &rig,
+        &lane,
+        &["commit", "-q", "--allow-empty", "-m", "unlanded"],
+    )?;
 
     let install = |extra: &[&str]| {
         let mut args = vec![
@@ -3022,7 +3033,11 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         .collect::<io::Result<_>>()?;
     assert_eq!(kept_after, kept_before);
     assert!(lane.join(".git").exists());
-    git(&rig.project, &["rev-parse", "--verify", "lane/unlanded"])?;
+    git(
+        &rig,
+        &rig.project,
+        &["rev-parse", "--verify", "lane/unlanded"],
+    )?;
     // The receipt now names format 2, so the next install is not a break.
     assert_eq!(code(&install(&[])?), 0);
     Ok(())
