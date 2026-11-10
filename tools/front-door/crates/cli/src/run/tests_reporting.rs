@@ -483,7 +483,7 @@ fn default_listing_shows_every_active_lane_and_counts_omitted_settled() {
     let listed = summary
         .lines
         .iter()
-        .filter(|line| line.contains(" running"))
+        .filter(|line| line.split_whitespace().nth(1) == Some("running"))
         .count();
     assert_eq!(
         listed,

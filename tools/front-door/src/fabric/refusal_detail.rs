@@ -27,6 +27,9 @@ impl Factory {
                 continue;
             };
             let base = node["advance_error"].as_str().unwrap_or_default();
+            if base.contains(&detail) {
+                continue;
+            }
             let text = format!("{base} Refused: {detail}");
             node["advance_error"] = Value::String(text.chars().take(MAX_DETAIL_CHARS).collect());
         }
