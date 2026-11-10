@@ -775,7 +775,7 @@ origin. Cloud results do not replace exact-head required CI.
 A launch naming a model the account does not offer is refused during route
 preparation, before any provider process starts. The refusal names the model and
 lists the account's offered models. Offered models come from the account's
-`/usage` probe (cached with the identity probe), or the account's `models`
-setting; an account that reports none is not restricted. When a provider does
+`/usage` probe (cached with the identity probe); an account that reports none
+is not restricted. Only agy accounts are checked. When a provider does
 fail, `output` and `status` show the provider's whole error message (bounded),
 taken from the structured result before the last stderr line.
