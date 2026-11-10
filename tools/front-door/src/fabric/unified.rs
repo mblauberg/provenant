@@ -2491,8 +2491,8 @@ mod tests {
         assert_eq!(lane.graph, "g");
         assert_eq!(lane.node.as_deref(), Some("parent"));
         assert_eq!(lane.attempt.as_deref(), Some(format!("{g}/{a}").as_str()));
-        let checkpoint = FileJournal::read_status_checkpoint(&roots.state, project, "g")?
-            .ok_or("checkpoint")?;
+        let checkpoint =
+            FileJournal::read_status_checkpoint(&roots.state, project, "g")?.ok_or("checkpoint")?;
         assert_eq!(
             provenant_cli::inbox::live_steer_reference(
                 &checkpoint,
