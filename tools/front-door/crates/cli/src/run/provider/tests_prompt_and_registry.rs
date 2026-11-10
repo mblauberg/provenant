@@ -974,8 +974,8 @@ fn prepare_over_two_accounts(
     }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
-    // `ready` registers first and sorts first; the spent account must still
-    // be drawn first because only it has a fresh reading.
+    // `ready` registers first and sorts first. Pacing scores each spent account
+    // 0, so an unpinned lane draws an unspent account before any spent one.
     let mut config = String::from("schema_version=1\n");
     for label in ["ready", "spent-a", "spent-b"] {
         let directory = home.join(format!("opencode-{label}"));
@@ -1117,15 +1117,16 @@ fn prepare_over_two_accounts(
 }
 
 #[test]
-fn a_refused_first_account_hands_the_lane_to_the_next_account()
+fn an_exhausted_account_stands_by_while_an_unspent_one_remains()
 -> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("a_refused_first_account_hands_the_lane_to_the_next_account")? {
+    if rerun_in_clean_environment("an_exhausted_account_stands_by_while_an_unspent_one_remains")? {
         return Ok(());
     }
     let prepared =
         prepare_over_two_accounts(&["spent-a"], None)?.map_err(|error| format!("{error}"))?;
-    // Either remaining account is a valid next account; the router breaks the
-    // tie between two unprobed accounts, so the test does not pin which one.
+    // Pacing scores the spent account 0, so the walk never draws it while an
+    // unprobed account remains. Either unprobed account is a valid pick; the
+    // router breaks the tie between them, so the test does not pin which one.
     assert!(
         matches!(
             prepared.route.account_key.as_deref(),
@@ -1135,11 +1136,10 @@ fn a_refused_first_account_hands_the_lane_to_the_next_account()
         prepared.route.account_key
     );
     assert!(
-        prepared
+        !prepared
             .skipped_routes
             .iter()
-            .any(|skipped| skipped.detail.contains("account spent-a")
-                && skipped.detail.contains("allowance exhausted")),
+            .any(|skipped| skipped.detail.contains("account spent-a")),
         "{:?}",
         prepared.skipped_routes
     );
