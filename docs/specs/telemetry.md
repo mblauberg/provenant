@@ -1,13 +1,13 @@
 # Telemetry
 
-Owner: `crates/telemetry` (reducer, prices, trace, usage log)
+Owner: `crates/telemetry` (reducer, prices, trace, usage log, usage ledger)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/ingest/tests.rs`,
-`crates/telemetry/tests/telemetry_pipeline.rs`
+`crates/telemetry/src/ledger/tests.rs`, `crates/telemetry/tests/telemetry_pipeline.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
-prices) using the bundled price table, and exports a trace.
-There is no billing ledger or collector. Grammar is in the generated [CLI
+prices) using the bundled price table, and exports a trace. It keeps a usage
+ledger of terminal attempts; there is no billing ledger or collector. Grammar is in the generated [CLI
 reference](../reference/cli-all.md); quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
@@ -46,6 +46,37 @@ an empty attempt report and creates nothing; a corrupt one is an error.
 - Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
   `crates/telemetry/src/tests.rs::empty_reader_has_complete_zero_cost`
 - Owner: `crates/telemetry/src/`
+
+## The usage ledger outlives the run store
+
+Telemetry owns one append-only usage ledger: one row per terminal attempt, in
+daily segments under `<state>/usage-ledger/`, named by the attempt's UTC end
+date and kept with no age limit. A row holds the project, graph and node ids
+when known, the attempt id, the resolved provider, model, effort and account,
+the outcome, start and end, tokens by bucket, the API-equivalent cost priced at
+write time (absent when the price table could not be read), and the context
+band when the provider reports one per attempt. Format-1 run and task ids are
+kept only as opaque labels. The run store's settlement reaction appends the row,
+so a replayed or retried settlement adds nothing: the ledger holds at most one
+row per project and attempt.
+
+`provenant telemetry backfill` copies every project's terminal attempts from the
+run store into the ledger, priced from the bundled table, and reports how many
+it added and how many were already present. Run it once after installing 1.8.0;
+running it again adds nothing. The existing reports keep reading the run store.
+
+Every reader reports a ledger line it does not recognise, and any file in the
+ledger directory that is not a segment, by segment name and line number. None is
+skipped silently. Appending after a torn line starts the new row on its own line.
+- Why (default): run history is dropped at the format-2 cut-over and lane usage
+  cannot be regenerated, so it needs a home that is not the run store.
+- Test: `crates/telemetry/src/ledger/tests.rs::a_settled_attempt_appends_one_row_even_when_settlement_is_retried`;
+  `crates/telemetry/src/ledger/tests.rs::backfilled_cost_for_a_past_window_equals_the_run_store_report`;
+  `crates/telemetry/src/ledger/tests.rs::an_unrecognised_line_is_reported_by_segment_and_line`;
+  `crates/telemetry/src/ledger/tests.rs::the_ledger_survives_deleting_the_run_store`;
+  `tests/telemetry_pipeline_cli.rs::backfill_copies_each_attempt_once_and_outlives_the_run_store`
+- Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`,
+  `crates/cli/src/run/usage_ledger.rs`
 
 ## Bounded, honest totals
 
@@ -440,5 +471,5 @@ these fields.
 
 ## Not provided
 
-- A ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
+- A billing ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
 - A telemetry MCP tool or an `--account` selector on `telemetry stats`.

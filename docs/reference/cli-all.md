@@ -2362,6 +2362,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant telemetry backfill`
+
+```json
+{
+  "description": "Copy every terminal attempt in the run store into the usage ledger; run once after installing 1.8.0"
+}
+```
+
 ## `provenant telemetry experiments`
 
 ```json

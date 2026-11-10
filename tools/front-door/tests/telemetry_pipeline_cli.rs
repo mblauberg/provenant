@@ -197,3 +197,53 @@ fn stats_reports_route_access_effort_outcomes_and_nonrandom_comparison() -> Resu
     assert!(human.contains("time/success_ms=unknown"));
     Ok(())
 }
+
+#[test]
+fn backfill_copies_each_attempt_once_and_outlives_the_run_store() -> Result {
+    let rig = rig()?;
+    terminal_run::seed(&rig, "backfill-fixture", &[Value::Null, Value::Null])?;
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let totals = &report["data"]["totals"];
+    let backfill = |rig: &TestRig| -> Result<Value> {
+        let output = rig.command(&["telemetry", "backfill", "--json"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        Ok(serde_json::from_slice::<Value>(&output.stdout.bytes)?["data"].clone())
+    };
+    let first = backfill(&rig)?;
+    assert_eq!(first["added"], 2, "{first}");
+    assert_eq!(first["added"], totals["attempts"]);
+    let ledger = provenant_telemetry::ledger::read(&rig.state)?;
+    assert!(ledger.unrecognised.is_empty(), "{:?}", ledger.unrecognised);
+    let spend = provenant_telemetry::ledger::spend(&ledger.rows, None, None, None)?;
+    assert_eq!(serde_json::to_value(&spend.cost)?, totals["cost"]);
+    assert!(
+        ledger
+            .rows
+            .iter()
+            .all(|row| row.labels.run.is_some() && row.labels.task.is_some())
+    );
+    let second = backfill(&rig)?;
+    assert_eq!(
+        (&second["added"], &second["present"]),
+        (&json!(0), &json!(2))
+    );
+    // Deleting the run store leaves the ledger whole.
+    for name in ["run.sqlite3", "run.sqlite3-wal", "run.sqlite3-shm"] {
+        match std::fs::remove_file(rig.state.join(name)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+    }
+    let after = backfill(&rig)?;
+    assert_eq!(
+        (&after["attempts"], &after["ledger_rows"]),
+        (&json!(0), &json!(2))
+    );
+    assert_eq!(
+        provenant_telemetry::ledger::read(&rig.state)?.rows,
+        ledger.rows
+    );
+    Ok(())
+}

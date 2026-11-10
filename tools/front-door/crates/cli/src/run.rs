@@ -40,6 +40,7 @@ mod submit;
 mod targets;
 mod telemetry;
 mod telemetry_context;
+mod usage_ledger;
 mod wait;
 mod watch;
 mod worktree;
@@ -56,6 +57,7 @@ pub use resume::*;
 pub use status::*;
 pub use submit::*;
 pub use telemetry::*;
+pub use usage_ledger::backfill;
 pub use wait::*;
 pub use worktree::*;
 

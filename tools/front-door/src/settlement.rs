@@ -285,11 +285,42 @@ pub(crate) fn drain_run(
             save,
             graph,
             &mut |reaction| resolve(reaction, &roots),
+            &mut |reaction| record_usage(reaction, &store, &subject.checkout, &roots),
             &settings,
             &config.retention,
             &roots,
         )
     })
+}
+
+/// Append the attempt's row to the usage ledger beside its run store. The
+/// ledger keeps one row per attempt, so a replayed settlement adds nothing.
+/// Cost is priced from the installed price table; without one the row keeps
+/// its tokens and leaves the cost absent.
+fn record_usage(
+    reaction: &Reaction,
+    store: &provenant_run::RunStore,
+    checkout: &std::path::Path,
+    roots: &Roots,
+) -> Result<(), Error> {
+    use provenant_run::AttemptReader;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let fact = store.attempt(reaction.attempt, &call)?;
+    let assets = crate::roots::product_root().unwrap_or_else(|_| checkout.to_owned());
+    let prices = crate::fabric::load_graph_prices(&assets).ok();
+    let row = provenant_telemetry::ledger::row(
+        &fact,
+        Some(reaction.run),
+        provenant_telemetry::ledger::Source::Settlement,
+        prices.as_ref(),
+    )?;
+    provenant_telemetry::ledger::append(roots.state.as_path(), &[row], &clock, &cancel)?;
+    Ok(())
 }
 
 /// One attempt's reactions. They are independent: one failing, or the host
@@ -302,6 +333,7 @@ fn react(
     save: &mut provenant_run::reactions::Saver<'_>,
     graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
     resolve: &mut dyn FnMut(&mut Reaction) -> Result<(), Error>,
+    ledger: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
     settings: &provenant_fabric_runtime::config::Settlement,
     retention: &provenant_config::RetentionSettings,
     roots: &Roots,
@@ -349,6 +381,14 @@ fn react(
                 Err(error) => {
                     first.get_or_insert(error);
                 }
+            }
+        }
+    }
+    if !reaction.ledger_done {
+        match ledger(reaction) {
+            Ok(()) => reaction.ledger_done = true,
+            Err(error) => {
+                first.get_or_insert(error);
             }
         }
     }
@@ -506,6 +546,7 @@ mod tests {
             graph_done: false,
             notice_done: false,
             log_done: false,
+            ledger_done: false,
         }
     }
 
@@ -682,6 +723,10 @@ mod tests {
                 reaction.chair = Some(binding("session-1"));
                 reaction.session = Some("session-1".into());
                 reaction.resolved = true;
+                Ok(())
+            },
+            &mut |_| {
+                events.borrow_mut().push("ledger");
                 Ok(())
             },
             &provenant_fabric_runtime::config::Settlement::default(),

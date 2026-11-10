@@ -56,6 +56,17 @@ counts, usage, price-table billing and cost by model, with `cost_basis` set to
 null when its usage or price is incomplete. Model prices are matched exactly;
 dated aliases are not inferred.
 
+## Usage ledger backfill
+
+Settled attempts are recorded in the usage ledger under
+`<state>/usage-ledger/`, which outlives the run store. After installing 1.8.0,
+run `provenant telemetry backfill` once on each host to copy the attempts
+settled before the upgrade; a later release removes run history, and the
+ledger is then the only record of earlier lane usage. Running it again adds
+nothing. The command reports each ledger line it cannot read by segment and
+line number; such a line is kept, not repaired. The contract is in the
+[telemetry spec](../specs/telemetry.md#the-usage-ledger-outlives-the-run-store).
+
 ## Native session ingest
 
 `provenant telemetry ingest [--provider claude] [--since T]` records native
