@@ -29,9 +29,12 @@ pub struct Install {
     /// Plan the install without changing anything
     #[arg(long)]
     pub dry_run: bool,
-    /// Check state before a graph cutover (installer use only)
+    /// Check the state format break without installing (installer use only)
     #[arg(long, hide = true)]
     pub upgrade_preflight: bool,
+    /// Acknowledge deleting the dropped format-1 state; `--yes` does not
+    #[arg(long)]
+    pub reset_state: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -43,9 +46,12 @@ pub struct Uninstall {
 
 #[derive(Debug, clap::Args)]
 pub struct Upgrade {
-    /// Proceed after the upgrade preflight reports work to drain or port
+    /// Accept the pinned toolchain install; does not acknowledge a state reset
     #[arg(long)]
     pub yes: bool,
+    /// Acknowledge deleting the dropped format-1 state on every host
+    #[arg(long)]
+    pub reset_state: bool,
     /// Build this checkout instead of downloading the latest release
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub from_source: Option<PathBuf>,

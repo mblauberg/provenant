@@ -3984,8 +3984,6 @@ mod journal_error_tests {
             integration,
             review: graph_base.then(|| tip.parse()).transpose()?,
         };
-        // Real admission performs the upgrade preflight before binding a pending graph.
-        crate::install::cutover_pending_guard(&factory.context.roots.state)?;
         let mut journal = graph::FileJournal::open(
             &factory.context.roots.state,
             factory.context.identity.project,

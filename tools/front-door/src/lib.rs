@@ -40,6 +40,7 @@ mod release_smoke;
 mod roots;
 mod settlement;
 mod staging_gc;
+mod state_reset;
 mod status_wait;
 mod target_seed_build;
 mod usage;
@@ -1586,25 +1587,6 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             .busy_timeout()
     }) {
         provenant_sqlite::set_busy_timeout(timeout);
-    }
-    // Protocol servers frame their own admission refusals. Observation,
-    // settlement and cancellation must remain available to drain old work.
-    let needs_cutover_guard = matches!(
-        &parsed,
-        ParseOutcome::Invocation(inv)
-            if matches!(&inv.command, Command::Native(provenant_cli::Native::Start { .. }))
-    );
-    if needs_cutover_guard
-        && let Some(resolved) = &resolved
-        && let Err(error) = install::cutover_pending_guard(&resolved.roots.state)
-    {
-        return fail(
-            &verb,
-            Outcome::Refused,
-            "UPGRADE_DRAIN_REQUIRED",
-            &error,
-            globals,
-        );
     }
     let status_wait = match &parsed {
         ParseOutcome::Invocation(inv) => match &inv.command {
