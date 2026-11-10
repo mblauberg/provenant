@@ -710,8 +710,15 @@ impl RunStore {
                 ..
             }
         ) && let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
-            && let Some(raw) =
-                crate::artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
+            && let Some(raw) = match read {
+                RecordRead::Durable => {
+                    crate::artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
+                }
+                // A view never pays a durable flush per settled writer.
+                RecordRead::Observed => {
+                    crate::artifacts::read_sealed_observed(&attempt, "delivery.json", RECORD_LIMIT)?
+                }
+            }
         {
             let delivery: WriterDeliveryReceipt = crate::db::decode(&raw)?;
             if delivery.head.is_some() && delivery.head == record.head {

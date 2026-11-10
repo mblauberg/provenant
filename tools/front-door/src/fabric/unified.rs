@@ -678,6 +678,15 @@ pub(crate) fn unified_graph_command(
         } else {
             factory(globals, workers)?
         };
+        if !factory.context.in_lane
+            && let Some(missing) = triple_mismatch(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                selector,
+            )?
+        {
+            return Err(missing.into());
+        }
         let Some(mut target) = (if factory.context.in_lane {
             Some(GraphTarget {
                 graph: selector.to_owned(),
@@ -792,7 +801,11 @@ pub(crate) fn unified_graph_command(
         Err(error) => Some(crate::fail(
             name,
             provenant_records::Outcome::Error,
-            "graph_target",
+            if error.is::<TripleNotFound>() {
+                "not_found"
+            } else {
+                "graph_target"
+            },
             &error.to_string(),
             globals,
         )),
@@ -1646,6 +1659,61 @@ fn resolve_target(
     }
 }
 
+/// A `GRAPH/NODE/ATTEMPT` selector whose graph exists but whose node or attempt
+/// does not belong to it. Naming the part that failed to match replaces a scan
+/// of the whole lane history that could only end in a generic miss.
+#[derive(Debug)]
+pub(crate) struct TripleNotFound(pub(crate) String);
+
+impl std::fmt::Display for TripleNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "not found: {}", self.0)
+    }
+}
+
+impl std::error::Error for TripleNotFound {}
+
+/// `None` when the selector is not a triple under a known graph, so other
+/// selector forms keep their own resolution.
+fn triple_mismatch(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    selector: &str,
+) -> Result<Option<TripleNotFound>, FacadeError> {
+    let parts: Vec<_> = selector.split('/').collect();
+    let [graph, node_id, attempt_id] = parts[..] else {
+        return Ok(None);
+    };
+    if [graph, node_id, attempt_id].contains(&"") {
+        return Ok(None);
+    }
+    let ids = FileJournal::graph_ids(root, project).map_err(graph_journal_error)?;
+    if !ids.iter().any(|id| id == graph) {
+        return Ok(None);
+    }
+    let checkpoint = match FileJournal::read_status_checkpoint(root, project, graph) {
+        Ok(Some(checkpoint)) => checkpoint,
+        Ok(None) => return Ok(None),
+        Err(error) if error.is_unreadable() => return Ok(None),
+        Err(error) => return Err(graph_journal_error(error)),
+    };
+    let Some(node) = checkpoint.nodes.iter().find(|node| node.id == node_id) else {
+        return Ok(Some(TripleNotFound(format!(
+            "node {node_id} is not in graph {graph}"
+        ))));
+    };
+    let belongs = node.recorded_attempts().any(|attempt| {
+        attempt.attempt_ref.as_deref().is_some_and(|reference| {
+            reference == attempt_id || reference.rsplit('/').next() == Some(attempt_id)
+        })
+    });
+    Ok((!belongs).then(|| {
+        TripleNotFound(format!(
+            "attempt {attempt_id} is not an attempt of node {node_id} in graph {graph}"
+        ))
+    }))
+}
+
 pub(crate) fn read_status_rows(
     selector: &str,
     edge: &provenant_cli::run::Edge<'_>,
@@ -2389,6 +2457,27 @@ mod tests {
             Err(FacadeError::Conflict)
         ));
         assert!(resolve_target(&roots.state, project, "missing")?.is_none());
+        let g = "11111111111111111111111111111111";
+        let a = "22222222222222222222222222222222";
+        let mismatch = |selector: &str| triple_mismatch(&roots.state, project, selector);
+        assert!(mismatch(&format!("g/parent/{a}"))?.is_none());
+        assert!(mismatch(&format!("g/parent/{g}/{a}"))?.is_none());
+        assert!(mismatch(&format!("unknown/parent/{a}"))?.is_none());
+        let node = mismatch(&format!("g/other/{a}"))?.ok_or("node mismatch")?;
+        assert!(
+            node.to_string().starts_with("not found: attempt "),
+            "{node}"
+        );
+        let missing = mismatch(&format!("g/nothing/{a}"))?.ok_or("node missing")?;
+        assert_eq!(
+            missing.to_string(),
+            "not found: node nothing is not in graph g"
+        );
+        let attempt = mismatch(&format!("h/parent/{a}"))?.ok_or("attempt mismatch")?;
+        assert_eq!(
+            attempt.to_string(),
+            format!("not found: attempt {a} is not an attempt of node parent in graph h")
+        );
         Ok(())
     }
 }

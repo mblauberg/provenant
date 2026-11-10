@@ -254,6 +254,64 @@ fn unsafe_state_root_is_named_relative_to_itself() -> TestResult {
     Ok(())
 }
 #[test]
+fn lane_listings_do_not_flush_a_settled_attempts_delivery_receipt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let run = store.create(&input, &call)?;
+    crate::dispatch_tests::seal_exit(&store, &exit())?;
+    let settled = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    assert!(matches!(
+        settled.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let receipt = serde_json::json!({
+        "schema_version": 1,
+        "remote": "origin",
+        "branch": "lane",
+        "head": null,
+        "state": {"state": "no_new_commits"},
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "delivery.json",
+        &serde_json::to_vec(&receipt)?,
+        RECORD_LIMIT,
+    )?;
+
+    // Every settled writer in the history is read for a status or target
+    // lookup; a durable flush per row made those commands take minutes under
+    // disk load. Only mutation consumers need the flush.
+    crate::artifacts::sync_probe::reset();
+    let page = store.lanes(
+        &LaneQuery {
+            targets: Vec::new(),
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    assert_eq!(page.lanes.len(), 1);
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+    crate::artifacts::sync_probe::reset();
+    store.record(id, &call)?;
+    assert!(crate::artifacts::sync_probe::count() >= 1);
+    Ok(())
+}
+#[test]
 fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
