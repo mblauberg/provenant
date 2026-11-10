@@ -1082,7 +1082,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         roots,
         ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
-    let _collection = if command.dry_run {
+    let collection = if command.dry_run {
         None
     } else {
         Some(collection_lock(&roots)?)
@@ -1202,8 +1202,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &facts,
             command.dry_run,
             |context, cancel| {
-                // A failed fetch cannot grant removal authority. Output pruning
-                // still has its independent terminal-state proof.
+                // When the fetch fails, there is no origin, or the sweep is a
+                // pressure sweep, upstream is None: the path-based pass below
+                // cannot grant removal authority, and settled lane collection
+                // falls back to the owner's base (the same rule settlement
+                // uses, granting no new authority). Output pruning still has
+                // its independent terminal-state proof.
                 let (upstream, upstream_error) = if command.pressure || command.dry_run {
                     (None, None)
                 } else {
@@ -1212,6 +1216,40 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         Err(error) => (None, Some(error.to_string())),
                     }
                 };
+                // Settled lanes whose settlement-time collection missed keep a
+                // receipt that is not final. Collect them through the same
+                // owner-bound proof before the path-based pass below, landing
+                // against the fetched default branch or falling back to the
+                // owner's base when upstream is None.
+                let collected = match collection.as_ref() {
+                    Some(lock) if command.apply && !command.dry_run => {
+                        crate::fabric::gc_cleanup::collect_unsettled(
+                            &roots,
+                            &home,
+                            &project.path,
+                            project.binding.project_id(),
+                            lock,
+                            upstream.as_ref().map(|(_, oid)| *oid),
+                            workers,
+                        )
+                        .unwrap_or_else(|error| {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                std::io::stderr().lock(),
+                                "warning: settled lane collection failed for {}: {error}",
+                                project.path.display()
+                            );
+                            Vec::new()
+                        })
+                    }
+                    _ => Vec::new(),
+                };
+                let lanes: Vec<_> = project
+                    .lanes
+                    .iter()
+                    .filter(|lane| !collected.contains(&lane.path))
+                    .cloned()
+                    .collect();
                 // Fetch can take a while, so begin the single sweep snapshot
                 // only after it completes. A stale snapshot is refreshed by
                 // the callbacks below, which collect() invokes under the
@@ -1263,7 +1301,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     .map_err(|_| Error::Budget)?;
                 let mut report = worktrees::collect_lazy(
                     context,
-                    &project.lanes,
+                    &lanes,
                     &worktrees::WorktreeGcPolicy {
                         upstream: upstream.as_ref().map(|(_, oid)| *oid),
                         terminal: &terminal,
