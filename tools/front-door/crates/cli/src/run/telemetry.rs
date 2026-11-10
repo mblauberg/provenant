@@ -227,7 +227,7 @@ pub(super) fn stats_inner(
         &edge.roots.state,
         context.project_id,
     )?;
-    let partial = partial_signal_counts(&selected, store.as_ref(), &call)?;
+    let partial = partial_signal_counts(&selected, store.as_ref(), &call);
     let mut route_evidence = Vec::new();
     let mut requests = BTreeMap::new();
     for fact in &selected {
@@ -630,7 +630,11 @@ pub(super) fn stats_inner(
     }
     data["cache_read_share"] = cache_kpis;
     data["cache_read_share"]["overall"] = json!(total_share);
-    let plan_value = plan_value_rows(&report, &config.domains.accounts, edge)?;
+    let plan_value =
+        plan_value_rows(&report, &config.domains.accounts, edge).unwrap_or_else(|cause| {
+            data["plan_value_unavailable"] = json!(cause);
+            Vec::new()
+        });
     if !plan_value.is_empty() {
         human.push_str(&format!("plan value: {} accounts\n", plan_value.len()));
         for row in &plan_value {
@@ -675,17 +679,19 @@ pub(super) fn stats_inner(
     data["route_outcomes"] = json!(route_outcomes);
 
     // Every grouping reports partial finishes, not only graph groups.
-    if !partial.is_empty() {
-        human.push_str(&format!(
+    match &partial {
+        Ok(partial) if partial.is_empty() => {}
+        Ok(partial) => human.push_str(&format!(
             "partial signals: {}\n",
             partial
                 .iter()
                 .map(|(name, count)| format!("{name}={count}"))
                 .collect::<Vec<_>>()
                 .join(" ")
-        ));
+        )),
+        Err(cause) => human.push_str(&format!("partial signals: unavailable ({cause})\n")),
     }
-    data["partial_signals"] = json!(partial);
+    data["partial_signals"] = partial_signals_value(partial);
     data["unfinished_attempts_excluded"] = json!(unfinished);
     if let Some(pipeline) = pipeline {
         human.push_str(&format!(

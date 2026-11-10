@@ -72,7 +72,7 @@ pub enum Quota {
     ///
     /// Readings are kept by `quota tick` and refreshes, one per distinct
     /// reading, oldest first. `--since` and `--until` take seconds ago, a date
-    /// or an RFC3339 timestamp. With `--limit` the newest readings are kept.
+    /// or an RFC3339 timestamp. Without `--limit` the newest 50 readings are kept.
     History {
         /// Account label or key
         #[arg(long)]
@@ -84,7 +84,7 @@ pub enum Quota {
         #[arg(long, value_parser = crate::grammar::since)]
         until: Option<jiff::Timestamp>,
         /// Most readings to return
-        #[arg(long, default_value_t = 1000, catalog_u32_range = 1..=100_000)]
+        #[arg(long, default_value_t = 50, catalog_u32_range = 1..=100_000)]
         limit: u32,
     },
     /// Set menu bar display choices, then show quota

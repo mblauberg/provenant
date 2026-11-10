@@ -192,8 +192,7 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         let kind = ErrorKind::from(&error);
         let mut projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
-        if projection.detail.is_none() && projection.fact.is_none() && kind.category() == "refused"
-        {
+        if projection.detail.is_none() && projection.fact.is_none() {
             projection = projection.detail(provenant_confinement::redact::bounded_line(
                 &error.to_string(),
                 4096,
@@ -1341,7 +1340,7 @@ fn graph_quality_rows(
                     == Some(graph_id.as_str())
             })
             .collect();
-        let partial = partial_signal_counts(&in_graph, store, call)?;
+        let partial = partial_signals_value(partial_signal_counts(&in_graph, store, call));
         rows.push(json!({
             "graph_id": graph_id,
             "checkpoint": "read",
@@ -1362,16 +1361,32 @@ fn partial_signal_counts(
     facts: &[&provenant_records::AttemptFact],
     store: Option<&run::RunStore>,
     call: &run::Request<'_>,
-) -> Result<BTreeMap<String, u64>, Fail> {
+) -> Result<BTreeMap<String, u64>, String> {
     let mut partial = BTreeMap::new();
     if let Some(store) = store {
         for fact in facts {
-            for signal in store.record(fact.attempt_id, call)?.partial_signals {
+            let record = store
+                .record(fact.attempt_id, call)
+                .map_err(|error| unavailable_cause(&error))?;
+            for signal in record.partial_signals {
                 *partial.entry(signal.as_str().to_owned()).or_default() += 1;
             }
         }
     }
     Ok(partial)
+}
+
+/// The bounded cause of a source that could not be read.
+fn unavailable_cause(error: &dyn std::fmt::Display) -> String {
+    provenant_confinement::redact::bounded_line(&error.to_string(), 512)
+}
+
+/// Partial-signal counts, or a named unavailable field with its cause.
+fn partial_signals_value(counts: Result<BTreeMap<String, u64>, String>) -> Value {
+    match counts {
+        Ok(counts) => json!(counts),
+        Err(cause) => json!({"unavailable": cause}),
+    }
 }
 
 fn graph_quality_counts(
@@ -1435,7 +1450,7 @@ fn plan_value_rows(
     report: &provenant_telemetry::StatsReport,
     accounts: &provenant_providers::accounts::Settings,
     edge: &Edge<'_>,
-) -> Result<Vec<Value>, Fail> {
+) -> Result<Vec<Value>, String> {
     let until = report
         .window
         .until
@@ -1450,7 +1465,7 @@ fn plan_value_rows(
             account: None,
         },
     )
-    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    .map_err(|error| unavailable_cause(&error))?;
     let mut latest = BTreeMap::new();
     for record in history {
         latest.insert((record.provider.clone(), record.label.clone()), record);

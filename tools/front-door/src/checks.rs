@@ -61,8 +61,8 @@ enum Inspectable {
         page: provenant_cli::Page,
     },
     Release {
-        base: Option<provenant_core::GitOid>,
-        head: Option<provenant_core::GitOid>,
+        base: Option<String>,
+        head: Option<String>,
         page: provenant_cli::Page,
     },
 }
@@ -271,21 +271,25 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &page,
             )?)
         }),
-        Inspectable::Release { base, head, page } => {
-            let range = base.zip(head);
-            git_page(&project, |git| {
-                provenant_cli::check::release_page(
-                    git,
-                    range,
-                    (
-                        "release",
-                        range.map(|(a, b)| (a.to_string(), b.to_string())),
-                        selector,
-                    ),
-                    &page,
-                )
-            })
-        }
+        Inspectable::Release { base, head, page } => git_page(&project, |git| {
+            let range = match base.zip(head) {
+                Some((base, head)) => Some((
+                    provenant_cli::check::resolve_revision(git, &base)?,
+                    provenant_cli::check::resolve_revision(git, &head)?,
+                )),
+                None => None,
+            };
+            provenant_cli::check::release_page(
+                git,
+                range,
+                (
+                    "release",
+                    range.map(|(a, b)| (a.to_string(), b.to_string())),
+                    selector,
+                ),
+                &page,
+            )
+        }),
     }?;
     Ok(Inspection::Check(page))
 }

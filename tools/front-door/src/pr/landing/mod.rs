@@ -443,12 +443,6 @@ fn run_inner(
                 response.data["number"],
                 response.data["head"].as_str().unwrap_or("unknown")
             );
-            if response.data["cleanup_pending"] == true {
-                text.push_str("cleanup pending\n");
-                if let Some(error) = response.data["cleanup_error"].as_str() {
-                    text.push_str(&format!("cleanup: {error}\n"));
-                }
-            }
             if let Some(steps) = response.data["steps"].as_array() {
                 for step in steps {
                     text.push_str(&format!(
