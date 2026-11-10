@@ -57,6 +57,7 @@ fn app() -> Option<GithubAppConfig> {
         installation_id: None,
         private_key_path: None,
         keychain_account: Some("owner".into()),
+        keychain_path: Some("/fixture/provenant-app.keychain-db".into()),
     })
 }
 
@@ -388,6 +389,7 @@ fn an_owner_app_serves_its_repositories_and_a_project_app_overrides_it() {
         installation_id: None,
         private_key_path: None,
         keychain_account: Some("owner".into()),
+        keychain_path: Some("/fixture/provenant-app.keychain-db".into()),
     };
     let mut policy = provenant_config::GithubPolicy::default();
     policy.apps.insert("Acme".into(), app(1));
@@ -396,4 +398,41 @@ fn an_owner_app_serves_its_repositories_and_a_project_app_overrides_it() {
     assert_eq!(policy.app_for(None), None);
     policy.app = Some(app(2));
     assert_eq!(policy.app_for(Some("acme")).map(|a| a.app_id), Some(2));
+}
+
+#[test]
+fn api_flags_fail_closed_in_every_spelling() {
+    let denied: &[&[&str]] = &[
+        &["repos/o/r/pulls/1", "-XDELETE"],
+        &["repos/o/r/pulls/1", "-X=DELETE"],
+        &["repos/o/r/pulls/1", "--method=DELETE"],
+        &["repos/o/r/pulls/1/reviews", "-fevent=APPROVE"],
+        &["repos/o/r/pulls/1/reviews", "-Fevent=APPROVE"],
+        &["repos/o/r/pulls/1/reviews", "--field=event=APPROVE"],
+        &["repos/o/r/pulls/1", "--unknown-flag"],
+        &["repos/o/r/pulls/1", "-Z"],
+    ];
+    for args in denied {
+        assert!(!api_may_run(args), "{args:?}");
+    }
+    assert!(api_may_run(&["repos/o/r/pulls/1", "-XGET"]));
+    assert!(api_may_run(&[
+        "repos/o/r/pulls/1",
+        "--paginate",
+        "-HAccept:x"
+    ]));
+}
+
+#[test]
+fn login_keychain_is_never_a_key_store() {
+    assert!(!dedicated_keychain(Path::new(
+        "/Users/u/Library/Keychains/login.keychain-db"
+    )));
+    assert!(!dedicated_keychain(Path::new(
+        "/Users/u/Library/Keychains/app.keychain-db"
+    )));
+    assert!(!dedicated_keychain(Path::new("/x/login.keychain")));
+    assert!(dedicated_keychain(Path::new(
+        "/Users/u/.provenant/app.keychain-db"
+    )));
 }

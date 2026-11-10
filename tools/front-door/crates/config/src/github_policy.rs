@@ -20,6 +20,10 @@ pub struct GithubAppConfig {
     pub private_key_path: Option<PathBuf>,
     #[serde(default)]
     pub keychain_account: Option<String>,
+    /// A dedicated keychain file holding the key. Never the login keychain,
+    /// which Keychain-granted lanes can read.
+    #[serde(default)]
+    pub keychain_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -50,17 +54,27 @@ impl GithubPolicy {
         })
     }
 
-    /// Every configured private key file path, for sandbox exposure checks.
+    /// Every configured key file or dedicated keychain path, which no lane's
+    /// sandbox may read.
     pub fn key_paths(&self) -> impl Iterator<Item = &Path> {
-        self.app
-            .iter()
-            .chain(self.apps.values())
-            .filter_map(|app| app.private_key_path.as_deref())
+        self.app.iter().chain(self.apps.values()).flat_map(|app| {
+            [
+                app.private_key_path.as_deref(),
+                app.keychain_path.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+        })
     }
 
     /// Read the policy for the host-bound project. Only absence means empty.
     pub fn read(state: &StateRoot, project_id: ProjectId) -> Result<Self, ConfigError> {
-        let root = Directory::open_anchor(state.as_path())?;
+        Self::read_at(state.as_path(), project_id)
+    }
+
+    /// As `read`, for a caller that holds the state directory as a path.
+    pub fn read_at(state: &Path, project_id: ProjectId) -> Result<Self, ConfigError> {
+        let root = Directory::open_anchor(state)?;
         let projects = match root.open_verified_directory(OsStr::new("projects")) {
             Ok(dir) => dir,
             Err(e) if e.is_not_found() => return Ok(Self::default()),

@@ -211,6 +211,16 @@ const VALUE_FLAGS: [&str; 11] = [
     "--input",
 ];
 
+/// Flags of `gh api` that take no value and do not change the request.
+const SWITCH_FLAGS: [&str; 6] = [
+    "-i",
+    "--include",
+    "--paginate",
+    "--silent",
+    "--slurp",
+    "--verbose",
+];
+
 /// Exact-endpoint, exact-method matching. GraphQL is read-only: only an inline
 /// `query`, never a mutation, subscription or a body read from a file.
 fn api_may_run(args: &[&str]) -> bool {
@@ -220,15 +230,26 @@ fn api_may_run(args: &[&str]) -> bool {
     let mut body = false;
     let mut iter = args.iter().copied();
     while let Some(arg) = iter.next() {
-        let (flag, inline) = match arg.split_once('=') {
-            Some((flag, value)) if arg.starts_with("--") => (flag, Some(value)),
-            _ => (arg, None),
+        // Normalise every spelling to (flag, attached value): `--flag=value`,
+        // `-Xvalue`, `-X=value`, or the value in the next argument.
+        let (flag, inline) = if let Some(long) = arg.strip_prefix("--") {
+            match long.split_once('=') {
+                Some((name, value)) => (&arg[..2 + name.len()], Some(value)),
+                None => (arg, None),
+            }
+        } else if arg.len() > 2 && arg.starts_with('-') && arg.is_char_boundary(2) {
+            let value = &arg[2..];
+            (&arg[..2], Some(value.strip_prefix('=').unwrap_or(value)))
+        } else {
+            (arg, None)
         };
         match flag {
             "--input" => return false,
             "-X" | "--method" => {
-                let value = inline.or_else(|| iter.next());
-                method = value.map(str::to_ascii_uppercase);
+                let Some(value) = inline.or_else(|| iter.next()) else {
+                    return false;
+                };
+                method = Some(value.to_ascii_uppercase());
             }
             "-f" | "-F" | "--field" | "--raw-field" => {
                 body = true;
@@ -246,7 +267,9 @@ fn api_may_run(args: &[&str]) -> bool {
                     iter.next();
                 }
             }
-            flag if flag.starts_with('-') => {}
+            flag if SWITCH_FLAGS.contains(&flag) && inline.is_none() => {}
+            // An unrecognised flag could change the method or body.
+            flag if flag.starts_with('-') && flag != "-" => return false,
             _ => {
                 if endpoint.replace(arg.trim_start_matches('/')).is_some() {
                     return false;
@@ -340,6 +363,21 @@ fn gh_env(token: &str) -> Vec<(OsString, OsString)> {
     env
 }
 
+/// A keychain file other than the login keychain or anything under the user's
+/// `Library/Keychains` directory, where lane grants reach.
+pub(crate) fn dedicated_keychain(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    !name.starts_with("login.keychain")
+        && !path
+            .components()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0].as_os_str() == "Library" && pair[1].as_os_str() == "Keychains")
+}
+
 /// Real effects: Keychain or file, `openssl`, and `gh api`.
 pub(crate) struct SystemBackend {
     project: PathBuf,
@@ -391,6 +429,16 @@ impl Backend for SystemBackend {
             .keychain_account
             .as_deref()
             .ok_or("neither private_key_path nor keychain_account is configured")?;
+        // Only a dedicated keychain no lane is granted. The login keychain is
+        // readable from Keychain-granted lanes, so it is never a key store.
+        let keychain = config
+            .keychain_path
+            .as_deref()
+            .ok_or("keychain_account requires keychain_path (a dedicated keychain, not the login keychain)")?;
+        if !keychain.is_absolute() || !dedicated_keychain(keychain) {
+            return Err("keychain_path must be an absolute path to a dedicated keychain".into());
+        }
+        let keychain = keychain.to_string_lossy();
         let output = self
             .run(
                 &[
@@ -401,6 +449,7 @@ impl Backend for SystemBackend {
                     "-a",
                     account,
                     "-w",
+                    &keychain,
                 ],
                 None,
                 None,

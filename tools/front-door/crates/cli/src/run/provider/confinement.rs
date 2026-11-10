@@ -292,6 +292,15 @@ pub(super) fn confinement_request(
         })?;
     }
     let mut policy = host_writes.policy_for_launch(roots.state, mandatory);
+    // The GitHub App key is a credential only the host may read, whatever the
+    // lane's role or provider grants.
+    let github =
+        provenant_config::GithubPolicy::read_at(roots.state, project_id).map_err(|_| {
+            provenant_confinement::permissions::PermissionError::InvalidPath(roots.state.to_owned())
+        })?;
+    for key in github.key_paths() {
+        policy.deny_read_exact(key.to_owned());
+    }
     policy.resolve_optional_aliases(resolve_policy_path)?;
     let network = policy
         .optional()

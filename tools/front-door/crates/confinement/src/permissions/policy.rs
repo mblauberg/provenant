@@ -474,6 +474,13 @@ impl LanePolicy {
     pub fn optional(&self) -> &OptionalPolicy {
         &self.optional
     }
+    /// Host-owned read denial for a credential no lane may reach.
+    pub fn deny_read_exact(&mut self, path: PathBuf) {
+        self.optional.deny_read.push(PathGrant {
+            path,
+            scope: PathScope::Exact,
+        });
+    }
     /// Add resolved aliases without removing the public spelling. Denials only.
     pub fn resolve_optional_aliases(
         &mut self,

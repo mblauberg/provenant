@@ -364,12 +364,20 @@ installation, which gives them their own REST bucket instead of the user's
 1. Create a GitHub App with repository permissions Contents and Pull requests
    read and write, and Issues, Actions and Statuses read. Install it on the
    repository. Do not add it to any ruleset's bypass or reviewer lists.
-2. Store the private key outside every repository: in the macOS Keychain
-   (`security add-generic-password -s provenant-github-app -a ACCOUNT -w "$(cat key.pem)"`),
-   or as a file with mode 0600.
+2. Store the private key outside every repository, in one of two supported
+   places. Never use the login keychain: Keychain-granted lanes (agy by
+   default) can read it. Provenant denies reads of both paths below to every
+   lane's sandbox, whatever its role, so neither is reachable from a lane.
+   - A dedicated keychain no lane is granted:
+     `security create-keychain -p PASSWORD ~/.provenant/app.keychain-db`, then
+     `security add-generic-password -s provenant-github-app -a ACCOUNT -w "$(cat key.pem)" ~/.provenant/app.keychain-db`.
+     Keep it unlocked for the host session (`security unlock-keychain`), and do
+     not add it to the user keychain search list.
+   - A file with mode 0600.
 3. Add an `app` object to the project's `github.json` in the state directory:
-   `{"app": {"app_id": 123, "installation_id": 456, "keychain_account": "ACCOUNT"}}`
-   or `"private_key_path": "/absolute/path/key.pem"`. `installation_id` is
+   `{"app": {"app_id": 123, "installation_id": 456, "keychain_account": "ACCOUNT", "keychain_path": "/absolute/path/app.keychain-db"}}`
+   or `"private_key_path": "/absolute/path/key.pem"`. A `keychain_account`
+   without `keychain_path`, or a login keychain, is refused. `installation_id` is
    optional and is looked up when absent. To serve every repository under one
    owner, key the entry by owner instead: `{"apps": {"OWNER": {"app_id": 123, ...}}}`.
    An `app` entry in a project's own `github.json` overrides the owner's.
@@ -380,8 +388,8 @@ uses the user's `gh` login and warns once per process. The App identity only
 reads and merges, and only on exact endpoints (REST reads, the pull-request
 merge call, inline GraphQL queries); review verdicts, approvals, comments and
 every GraphQL mutation stay on the user's identity. Each token is limited to the
-one target repository. A lane never mints a token, and a lane whose sandbox
-could read the key file is refused at launch. Lanes keep the user's login. `lanes.github_request_budget`
+one target repository. A lane never mints a token, and every lane's sandbox
+denies reads of the key file and dedicated keychain. Lanes keep the user's login. `lanes.github_request_budget`
 (default 100, 0 off) stops a lane that makes more `gh` requests than that, and
 the lane's settlement records its `github_requests`.
 

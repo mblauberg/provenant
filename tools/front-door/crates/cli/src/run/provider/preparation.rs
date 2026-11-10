@@ -3146,27 +3146,6 @@ pub(super) fn prepare_candidates(
             }
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
-            // The App key is a credential only the host may read: a lane whose
-            // sandbox reaches it could mint tokens for itself.
-            let permissions = plan.permissions();
-            let exposed = policy.key_paths().any(|key| {
-                let key = super::PathGrant {
-                    path: key.to_owned(),
-                    scope: super::PathScope::Exact,
-                };
-                permissions
-                    .read_roots
-                    .iter()
-                    .chain(&permissions.write_roots)
-                    .any(|grant| grant.overlaps(&key))
-            });
-            if exposed {
-                reasons.push(setup_skip(
-                    &label,
-                    "the GitHub App private key path is readable from this lane's sandbox",
-                ));
-                continue;
-            }
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
             if let Err(error) = publishing {
                 let class = error.boundary_class();
