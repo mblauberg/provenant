@@ -280,7 +280,9 @@ if "$upgrade"; then
             ask "Type reset to delete the dropped state listed above" no
             [ "$answer" = reset ] && reset=true
         fi
-        "$reset" && preflight || die 2 'Upgrade stopped by preflight; rerun with --reset-state to acknowledge'
+        if ! "$reset" || ! preflight; then
+            die 2 'Upgrade stopped by preflight; rerun with --reset-state to acknowledge'
+        fi
     fi
 fi
 
