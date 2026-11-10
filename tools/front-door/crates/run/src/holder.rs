@@ -1039,6 +1039,19 @@ impl RunStore {
         Ok(())
     }
 
+    /// Settlement could not publish the lane's commits: leave the bound
+    /// worktree at the branch the host holds, and name where the work is.
+    fn unpublish_worktree(
+        &self,
+        attempt: &Directory,
+        writer: &crate::WriterRequest,
+        project: provenant_core::ProjectId,
+    ) -> String {
+        crate::prepare_writer_with_facts(writer, &self.writer_registry, project, &self.repo_facts)
+            .map(|launch| launch.unpublish(attempt))
+            .unwrap_or_else(|error| format!("worktree files not restored: {error}"))
+    }
+
     fn refuse_pending_import(
         &self,
         record: &AttemptRecord,
@@ -1053,8 +1066,17 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("pending import lacks writer"))?;
-        let reason = object_import_refused(attempt, Self::scope(record))?
-            .unwrap_or_else(|| reason.to_owned());
+        let reason = match object_import_refused(attempt, Self::scope(record))? {
+            Some(reason) => reason,
+            None => {
+                let note = self.unpublish_worktree(attempt, writer, record.project_id);
+                if note.is_empty() {
+                    reason.to_owned()
+                } else {
+                    format!("{reason}; {note}")
+                }
+            }
+        };
         seal_import_refusal(attempt, Self::scope(record), &writer.worktree, &reason)?;
         self.record_effect(
             record.attempt_id,
@@ -1799,11 +1821,21 @@ impl RunStore {
                             decoded.outcome = Outcome::Failed;
                             decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
                         }
+                        let restored = self.unpublish_worktree(attempt, writer, record.project_id);
+                        let restored = if restored.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {restored}")
+                        };
                         let reason = match decoded.reason.take() {
                             Some(reason) => {
-                                format!("{reason}; writer import remains unresolved: {error}")
+                                format!(
+                                    "{reason}; writer import remains unresolved: {error}{restored}"
+                                )
                             }
-                            None => format!("writer import remains unresolved: {error}"),
+                            None => {
+                                format!("writer import remains unresolved: {error}{restored}")
+                            }
                         };
                         decoded.reason = Some(reason.chars().take(4096).collect());
                         deferred.push((
@@ -1825,6 +1857,12 @@ impl RunStore {
                         writer.worktree.display(),
                         last_failure.as_deref().unwrap_or("settlement retry limit")
                     );
+                    let note = self.unpublish_worktree(attempt, writer, record.project_id);
+                    let reason = if note.is_empty() {
+                        reason
+                    } else {
+                        format!("{reason}; {note}")
+                    };
                     seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
                     decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
