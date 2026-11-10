@@ -728,6 +728,7 @@ pub(super) struct FallbackEvidence<'a> {
     pub unreadable: bool,
     pub review_limit_reached: bool,
     pub cause: Option<&'a provenant_records::RouteExclusionReason>,
+    pub skipped_accounts: &'a [provenant_records::SkippedAccount],
 }
 
 pub(super) fn settlement_fallback_decision(
@@ -742,6 +743,7 @@ pub(super) fn settlement_fallback_decision(
         unreadable: evidence_unreadable,
         review_limit_reached,
         cause: fallback_cause,
+        skipped_accounts,
     } = evidence;
     let route = node.routes.get(route_index);
 
@@ -769,10 +771,19 @@ pub(super) fn settlement_fallback_decision(
             let pool = route
                 .and_then(|r| r.alias.as_deref())
                 .map_or_else(String::new, |alias| format!(" for pool {alias}"));
+            // A refusal before launch names each account it passed over: a
+            // stale failure or a login is not a spent allowance.
             advance_error = Some(bounded(
-                &format!(
-                    "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
-                ),
+                &if !launched && !skipped_accounts.is_empty() {
+                    format!(
+                        "No account could take the route{pool}: {}; repair or refresh an account (`provenant quota tick`) or choose an eligible route.",
+                        provenant_records::SkippedAccount::describe(skipped_accounts)
+                    )
+                } else {
+                    format!(
+                        "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
+                    )
+                },
                 MAX_ADVANCE_ERROR_BYTES,
             ));
         }
@@ -1041,6 +1052,7 @@ mod tests {
                 unreadable: false,
                 review_limit_reached: false,
                 cause: None,
+                skipped_accounts: &[],
             },
         );
         assert_eq!(
@@ -1049,6 +1061,48 @@ mod tests {
                 code: Some("auth_required".into()),
                 message: Some("The lane requires authentication.".into())
             }
+        );
+        // A quota refusal before launch names every account it passed over
+        // with its own reason, instead of claiming the allowance is spent.
+        let skipped = [
+            provenant_records::SkippedAccount {
+                account: "agy-work".into(),
+                reason: provenant_records::RouteExclusionReason::ProviderRefused,
+            },
+            provenant_records::SkippedAccount {
+                account: "agy-second".into(),
+                reason: provenant_records::RouteExclusionReason::StaleAvailability,
+            },
+        ];
+        let named = settlement_fallback_decision(
+            &single,
+            0,
+            AttemptOutcome::UsageLimited,
+            false,
+            FallbackEvidence {
+                preparation: None,
+                unreadable: false,
+                review_limit_reached: false,
+                cause: None,
+                skipped_accounts: &skipped,
+            },
+        );
+        let SettlementFallback::Fail {
+            code,
+            message: Some(message),
+        } = &named
+        else {
+            panic!("expected a named refusal: {named:?}");
+        };
+        assert_eq!(code.as_deref(), Some("usage_limited"));
+        assert!(
+            message.contains("agy-work: the provider refused"),
+            "{message}"
+        );
+        assert!(message.contains("agy-second: "), "{message}");
+        assert!(
+            !message.contains("quota or rate limit reached"),
+            "{message}"
         );
         let SettlementFallback::Fail { code, message } = decision else {
             unreachable!()

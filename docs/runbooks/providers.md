@@ -342,6 +342,15 @@ create and sign in to the isolated keychain as described below. Launch errors
 name the same path and repair options; missing or symlinked keychains continue
 to fail closed.
 
+A repaired account does not wait out its failure backoff. Re-registering it, or
+running `provenant quota tick`, probes it again at once and replaces the
+`KEYCHAIN_UNAVAILABLE` reading; a menu bar refresh does the same once it sees
+the keychain file change. This is the rule for every adapter: any failed
+reading is re-probed by the owner's next tick, and only a provider rate limit
+keeps its retry window. When a launch is refused because no account of the
+route was ready, the error names each skipped account by its label with its
+own reason.
+
 Unregistered and registered agy behave differently at launch:
 
 - With no agy registration, agy runs on the user's login keychain as before.
@@ -391,8 +400,8 @@ default keychain:
    keychain with
    `security find-generic-password -s gemini -a antigravity ~/Library/Keychains/login.keychain-db`.
    The real login keychain is unchanged.
-6. `provenant accounts register --adapter agy --directory $D <label>`, then
-   `provenant quota`. Registration refuses a directory that has no regular
+6. `provenant accounts register --adapter agy --directory $D <label>`, which
+   also probes the account's quota, then `provenant quota`. Registration refuses a directory that has no regular
    `Library/Keychains/login.keychain-db` (a symlink does not count), so the
    second account can never be recorded under the first account's key.
 

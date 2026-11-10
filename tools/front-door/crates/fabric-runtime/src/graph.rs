@@ -348,6 +348,16 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
+    /// The accounts, by registered label, that an unlaunched attempt's route
+    /// passed over with each one's reason, when no account was ready.
+    fn preparation_skipped_accounts(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Vec<provenant_records::SkippedAccount>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     /// Host proof that a terminal quota refusal belongs to the same unpinned
     /// alias and has released custody. Partial writer work is retained for the
     /// successor; missing identity or custody evidence denies redraw.
@@ -2890,6 +2900,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     _ => None,
                 };
+                let skipped_accounts = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        launched: false,
+                        outcome: AttemptOutcome::UsageLimited,
+                        ..
+                    } => owner
+                        .preparation_skipped_accounts(&key, reference)
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
                 let quota_redraw = match &observation {
                     AttemptObservation::Terminal {
                         attempt_ref: Some(reference),
@@ -3021,6 +3042,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         fallback_evidence,
                         evidence_unreadable,
                         fallback_cause,
+                        skipped_accounts,
                         review_range,
                     },
                 )
