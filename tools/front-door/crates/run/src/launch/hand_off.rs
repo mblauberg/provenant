@@ -754,6 +754,7 @@ mod tests {
             worktree: temp.path().join("writer"),
         });
         let plan = PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -860,6 +861,7 @@ mod tests {
         let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
         assert!(record.requested_priority.is_none());
         let plan = || PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),

@@ -36,6 +36,7 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
     };
     store.start(initial.run_id, &refusal, &|_, _| unreachable!(), &call)?;
     let resumed = Resume {
+        extend: Vec::new(),
         prior: initial.attempts[0].attempt_id,
         expected_generation: 0,
         operation_id: "rejected-resume".parse()?,
@@ -116,6 +117,7 @@ fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResu
     };
     store.start(original.run_id, &fake, &|_, _| unreachable!(), &call)?;
     let resumed = Resume {
+        extend: Vec::new(),
         prior,
         expected_generation: 0,
         operation_id: provenant_core::OperationId::parse("resume-private")?,
@@ -181,6 +183,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let prior = run.attempts[0].attempt_id;
     let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
         Ok(Resume {
+            extend: Vec::new(),
             prior,
             expected_generation,
             operation_id: provenant_core::OperationId::parse(operation)
@@ -255,6 +258,7 @@ fn nested_continuation_uses_host_derived_ids() -> TestResult {
     store.create(&child, &call)?;
     store.refuse_queued(child.run_id, "completed", &call)?;
     let mut resume = Resume {
+        extend: Vec::new(),
         prior: child.attempts[0].attempt_id,
         expected_generation: 0,
         operation_id: provenant_core::OperationId::parse("nested-continuation")?,
@@ -301,6 +305,7 @@ fn nested_continuation_preflight_does_not_reuse_crashed_staging() -> TestResult 
     store.create(&child, &call)?;
     store.refuse_queued(child.run_id, "completed", &call)?;
     let resume = Resume {
+        extend: Vec::new(),
         prior: child.attempts[0].attempt_id,
         expected_generation: 0,
         operation_id: "crashed-continuation".parse()?,
@@ -348,6 +353,7 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
     store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
     let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
         Ok(Resume {
+            extend: Vec::new(),
             prior,
             expected_generation,
             operation_id: provenant_core::OperationId::parse(operation)

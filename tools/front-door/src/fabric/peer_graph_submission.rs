@@ -52,6 +52,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
     let store = owner.store(&cancel)?;
     let call = owner.call(&cancel);
     let upstream = provenant_run::Resume {
+extend: Vec::new(),
         prior: fixture.settled.attempt_id, expected_generation: 0,
         operation_id: "family-composition-writer".parse()?,
         run_id: RunId::from_bytes([71; 16]), attempt_id: AttemptId::from_bytes([72; 16]),

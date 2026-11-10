@@ -151,6 +151,21 @@ impl LaneLimits {
         .filter_map(|(name, limit)| limit.as_ref().map(|limit| (name, limit)))
     }
 
+    /// Raise the named limit (see [`Limit::extend`]). `None` when no limit
+    /// of that name is set or the name is unknown.
+    pub fn extend(&mut self, name: &str, value: u64) -> Option<Result<(), CeilingError>> {
+        let limit = match name {
+            "token_budget" => &mut self.token_budget,
+            "context_handoff" => &mut self.context_handoff,
+            "deadline_seconds" => &mut self.deadline_seconds,
+            "continuations" => &mut self.continuations,
+            "repair_cycles" => &mut self.repair_cycles,
+            _ => return None,
+        };
+        let current = limit.as_ref()?;
+        Some(current.extend(value).map(|raised| *limit = Some(raised)))
+    }
+
     /// The preamble block: one line per enforced limit, empty when none.
     pub fn preamble(&self) -> String {
         let mut text = String::new();

@@ -482,13 +482,6 @@ impl run::Providers for Registry<'_> {
             }
         }
     }
-    fn runtime_cap(&self, provider: &str) -> Option<u64> {
-        provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
-            .ok()?
-            .providers
-            .get(provider)?
-            .runtime_deadline_seconds
-    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)

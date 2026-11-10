@@ -168,6 +168,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         )?;
         if index == 2 {
             let resume = provenant_run::Resume {
+                extend: Vec::new(),
                 prior: attempt,
                 expected_generation: 0,
                 operation_id: OperationId::parse("contribution-repair")?,

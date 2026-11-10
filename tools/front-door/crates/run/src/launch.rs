@@ -99,6 +99,9 @@ pub struct PreparedLaunch {
     /// Canonical Git common directory verified by the host preparation edge.
     pub repository: Option<provenant_records::AbsolutePath>,
     pub confinement: Option<crate::LaunchConfinement>,
+    /// The lane's limits, resolved once at preparation. Admission records
+    /// them; launch, enforcement and the preamble read nothing else.
+    pub limits: provenant_records::LaneLimits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -680,11 +683,6 @@ pub trait Providers {
     /// Host cap for the encoded applied write-grant ledger.
     fn write_grant_limit(&self) -> WriteGrantLimit {
         WriteGrantLimit::default()
-    }
-    /// A host cap, in seconds, on the runtime deadline of lanes on `provider`.
-    /// The task's own timeout applies when it is shorter or there is no cap.
-    fn runtime_cap(&self, _provider: &str) -> Option<u64> {
-        None
     }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
@@ -1320,14 +1318,7 @@ impl RunStore {
                     continue;
                 }
             };
-            let provider = plan.route.provider.as_deref().unwrap_or_default();
-            let limits = crate::lane_limits(
-                task,
-                self.context.state_root.as_path(),
-                &record.project_id.to_string(),
-                provider,
-                providers.runtime_cap(provider),
-            );
+            let limits = plan.limits.clone();
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             let limit = providers.write_grant_limit().checked();
             plan.route
@@ -1715,6 +1706,7 @@ mod policy_reporting_tests {
             },
         })?;
         let prepared = PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: vec![],
             stdin: vec![],

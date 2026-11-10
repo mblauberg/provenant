@@ -631,6 +631,7 @@ mod tests {
         )?;
         for (fresh, n) in [(false, 20_u8), (true, 30)] {
             let next = Resume {
+                extend: Vec::new(),
                 prior,
                 expected_generation: 0,
                 operation_id: provenant_core::OperationId::parse(&format!("resume-{n}"))?,

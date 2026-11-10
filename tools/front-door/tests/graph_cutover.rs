@@ -462,6 +462,8 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                         row.as_object_mut().unwrap().remove("settlement_reason"),
                         Some(json!(settlement_reason))
                     );
+                    // The lane's limits record is new; the legacy output has none.
+                    row.as_object_mut().unwrap().remove("limits");
                     let mut before = old["reply"]["data"]["lanes"][0].clone();
                     drop_resolved_route(&mut before, &format!("{name} {id} {}", args[0]))?;
                     if args[0] == "lanes" {

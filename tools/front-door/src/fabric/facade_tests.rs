@@ -831,6 +831,7 @@ pub(crate) mod peer_tests {
                 &call,
             )?;
             let resume = provenant_run::Resume {
+extend: Vec::new(),
                 prior,
                 expected_generation: 0,
                 operation_id: operation.parse()?,

@@ -2876,6 +2876,7 @@ mod tests {
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
         let resume = Resume {
+            extend: Vec::new(),
             prior: input.attempts[0].attempt_id,
             expected_generation: 0,
             operation_id: OperationId::parse("continue-fixture")?,
@@ -2913,6 +2914,7 @@ mod tests {
         assert!(!attempt.join("provider-state").exists());
         assert_eq!(store.resume(&resume, &call)?.run_id, resume.run_id);
         let fresh = Resume {
+            extend: Vec::new(),
             operation_id: OperationId::parse("expired-fixture")?,
             ..resume
         };

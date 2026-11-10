@@ -49,11 +49,10 @@ impl RunStore {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let limit = old
-            .applied_route
+            .limits
             .as_ref()
-            .and_then(|route| route.extra.get("max_continuations"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+            .and_then(|limits| limits.continuations.as_ref())
+            .map_or(0, |limit| limit.value);
         // Graphs own fresh restarts and pool redraws. Only an explicit model
         // policy selecting session resume delegates continuation to the run
         // owner. Previously sealed decisions still replay unchanged above.
@@ -271,15 +270,20 @@ mod tests {
                 let id = input.attempts[0].attempt_id;
                 let mut old = store.record(id, &call)?;
                 let mut applied = route();
-                applied
-                    .extra
-                    .insert("max_continuations".into(), limit.into());
                 if let Some(resume) = resume {
                     applied
                         .extra
                         .insert("resume_continuations".into(), resume.into());
                 }
                 old.applied_route = Some(applied);
+                old.limits = Some(provenant_records::LaneLimits {
+                    continuations: Some(provenant_records::Limit::new(
+                        limit,
+                        provenant_records::LimitSource::Host,
+                        provenant_records::LimitStrength::Default,
+                    )),
+                    ..Default::default()
+                });
                 old.extra
                     .insert("automatic_continuations".into(), used.into());
                 let attempt = store.attempt_dir(old.run_id, id, false)?;

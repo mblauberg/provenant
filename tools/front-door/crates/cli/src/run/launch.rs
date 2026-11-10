@@ -309,9 +309,6 @@ impl run::Providers for PreparedProvider<'_> {
     fn write_grant_limit(&self) -> run::WriteGrantLimit {
         self.fallback.write_grant_limit()
     }
-    fn runtime_cap(&self, provider: &str) -> Option<u64> {
-        self.fallback.runtime_cap(provider)
-    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }

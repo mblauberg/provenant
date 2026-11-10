@@ -3357,14 +3357,22 @@ mod writer_recovery_tests {
             run.request.tasks[0].writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
             let id = run.attempts[0].attempt_id;
-            let mut applied = route();
-            applied.extra.insert("max_continuations".into(), 2.into());
-            store.mark_starting(
+            let limits = provenant_records::LaneLimits {
+                continuations: Some(provenant_records::Limit::new(
+                    2,
+                    provenant_records::LimitSource::Host,
+                    provenant_records::LimitStrength::Default,
+                )),
+                ..Default::default()
+            };
+            store.mark_starting_with_priority(
                 &store.record(id, &call)?,
-                &applied,
+                &route(),
                 &[],
                 &Default::default(),
                 None,
+                None,
+                &limits,
                 &call,
             )?;
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;

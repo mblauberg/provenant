@@ -21,6 +21,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     store.start(original.run_id, &fake, &|_, _| unreachable!(), &call)?;
     let prior = original.attempts[0].attempt_id;
     let mut resume = Resume {
+        extend: Vec::new(),
         prior,
         expected_generation: 0,
         operation_id: "fresh-resume".parse()?,

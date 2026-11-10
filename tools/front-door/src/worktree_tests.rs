@@ -840,6 +840,7 @@ impl provenant_run::Providers for WriterProvider {
         };
         let route = fixture_route();
         Ok(provenant_run::PreparedLaunch {
+            limits: Default::default(),
             skipped_routes: Vec::new(),
             argv,
             environment: Vec::new(),
