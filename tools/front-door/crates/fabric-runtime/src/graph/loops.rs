@@ -665,6 +665,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                     && n.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
+                blocked: false,
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,

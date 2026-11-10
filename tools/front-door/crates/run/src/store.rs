@@ -70,6 +70,9 @@ pub struct PreparedRun {
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
     pub terminal_cause: Option<TerminalCause>,
+    /// The typed stop sealed with this attempt: its cause and the handoff,
+    /// decoded once at settlement.
+    pub stop: Option<provenant_records::Stop>,
     /// A bounded sentence Provenant composed from fixed text and typed values,
     /// such as a retry decision. It is never provider output.
     pub terminal_note: Option<String>,
@@ -1196,6 +1199,11 @@ impl RunStore {
             };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
+            stop: terminal_cause.and_then(|cause| {
+                provenant_records::Stop::sealed(Some(cause), None)
+                    .ok()
+                    .flatten()
+            }),
             terminal_cause,
             terminal_note,
             outcome,
@@ -1369,6 +1377,13 @@ impl RunStore {
                 "terminal_cause".into(),
                 serde_json::to_value(cause)
                     .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
+            );
+        }
+        if let Some(stop) = &publication.stop {
+            terminal_extra.insert(
+                "stop".into(),
+                serde_json::to_value(stop)
+                    .map_err(|_| RunError::Validation("stop could not be encoded"))?,
             );
         }
         if let Some(note) = publication.terminal_note.as_deref() {

@@ -58,7 +58,6 @@ pub enum StopCause {
     IdentityUnobserved,
 
     // The host refused before the provider started.
-    PreparationRefused,
     SourceViewRefused,
     RouteRefused,
     AccessPolicyRefused,
@@ -168,7 +167,6 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(AdapterUnavailable, NEW),
         rule(PermissionDenied, CHAIR),
         rule(IdentityUnobserved, CHAIR),
-        rule(PreparationRefused, CHAIR),
         rule(SourceViewRefused, CHAIR),
         rule(RouteRefused, CHAIR),
         rule(AccessPolicyRefused, CHAIR),
@@ -194,6 +192,98 @@ pub const STOP_TABLE: &[StopRule] = {
 };
 
 impl StopCause {
+    /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
+    /// compile there, and the assertion below keeps this list in step.
+    pub const ALL: [StopCause; 39] = {
+        use StopCause::*;
+        [
+            StoppedEarly,
+            Blocked,
+            HandoffMissing,
+            EmptyResult,
+            Uncommitted,
+            InputRequired,
+            ContextHandoff,
+            TokenBudget,
+            Deadline,
+            Cancelled,
+            ProviderStop,
+            ProcessCrash,
+            AuthRequired,
+            UsageLimited,
+            ModelUnavailable,
+            AdapterUnavailable,
+            PermissionDenied,
+            IdentityUnobserved,
+            SourceViewRefused,
+            RouteRefused,
+            AccessPolicyRefused,
+            DiskFloor,
+            DiskUnobserved,
+            PromptUnreadable,
+            WriteGrantsRefused,
+            WorktreeBusy,
+            LaunchHandoffRefused,
+            RetainedWriterImport,
+            UnsupportedPlatform,
+            UnknownPacingAccount,
+            UnregisteredAccount,
+            CredentialHelperFailed,
+            CommandUnavailable,
+            HostNativeUnconfigured,
+            SpawnFailure,
+            SettlementFailed,
+            Lost,
+            Unsettled,
+            Quarantined,
+        ]
+    };
+
+    const fn ordinal(self) -> usize {
+        use StopCause::*;
+        match self {
+            StoppedEarly => 0,
+            Blocked => 1,
+            HandoffMissing => 2,
+            EmptyResult => 3,
+            Uncommitted => 4,
+            InputRequired => 5,
+            ContextHandoff => 6,
+            TokenBudget => 7,
+            Deadline => 8,
+            Cancelled => 9,
+            ProviderStop => 10,
+            ProcessCrash => 11,
+            AuthRequired => 12,
+            UsageLimited => 13,
+            ModelUnavailable => 14,
+            AdapterUnavailable => 15,
+            PermissionDenied => 16,
+            IdentityUnobserved => 17,
+            SourceViewRefused => 18,
+            RouteRefused => 19,
+            AccessPolicyRefused => 20,
+            DiskFloor => 21,
+            DiskUnobserved => 22,
+            PromptUnreadable => 23,
+            WriteGrantsRefused => 24,
+            WorktreeBusy => 25,
+            LaunchHandoffRefused => 26,
+            RetainedWriterImport => 27,
+            UnsupportedPlatform => 28,
+            UnknownPacingAccount => 29,
+            UnregisteredAccount => 30,
+            CredentialHelperFailed => 31,
+            CommandUnavailable => 32,
+            HostNativeUnconfigured => 33,
+            SpawnFailure => 34,
+            SettlementFailed => 35,
+            Lost => 36,
+            Unsettled => 37,
+            Quarantined => 38,
+        }
+    }
+
     /// This cause's row. A cause without a row goes to the chair; the table
     /// test makes that unreachable.
     pub fn rule(self) -> StopRule {
@@ -252,7 +342,6 @@ impl StopCause {
             AdapterUnavailable => "adapter_unavailable",
             PermissionDenied => "permission_denied",
             IdentityUnobserved => "identity_unobserved",
-            PreparationRefused => "preparation_refused",
             SourceViewRefused => "source_view_refused",
             RouteRefused => "route_refused",
             AccessPolicyRefused => "access_policy_refused",
@@ -274,6 +363,53 @@ impl StopCause {
             Lost => "lost",
             Unsettled => "unsettled",
             Quarantined => "quarantined",
+        }
+    }
+}
+
+const _: () = {
+    let mut i = 0;
+    while i < StopCause::ALL.len() {
+        assert!(StopCause::ALL[i].ordinal() == i);
+        i += 1;
+    }
+};
+
+/// The stop cause of a terminal cause. Exhaustive, so a new terminal cause
+/// must name its stop cause. A host refusal without a more specific cause has
+/// no entry: preparation names the cause that refused.
+impl From<crate::run::TerminalCause> for StopCause {
+    fn from(cause: crate::run::TerminalCause) -> Self {
+        use crate::run::TerminalCause as T;
+        match cause {
+            T::SourceViewRefused => Self::SourceViewRefused,
+            T::AccountLoginRequired => Self::AuthRequired,
+            T::RouteResolutionRefused => Self::RouteRefused,
+            T::AccessPolicyRefused => Self::AccessPolicyRefused,
+            T::DiskFloor => Self::DiskFloor,
+            T::DiskObservationUnavailable => Self::DiskUnobserved,
+            T::StoredPromptUnreadable => Self::PromptUnreadable,
+            T::WriteGrantsRefused => Self::WriteGrantsRefused,
+            T::WorktreeBusy => Self::WorktreeBusy,
+            T::HandoffRefused => Self::LaunchHandoffRefused,
+            T::RetainedWriterImport => Self::RetainedWriterImport,
+            T::UnsupportedPlatform => Self::UnsupportedPlatform,
+            T::UnknownPacingAccount => Self::UnknownPacingAccount,
+            T::UnregisteredAccount => Self::UnregisteredAccount,
+            T::DeliveryPrepareCredentialHelper => Self::CredentialHelperFailed,
+            T::SpawnFailure => Self::SpawnFailure,
+            T::ProcessCrash => Self::ProcessCrash,
+            T::TokenBudget => Self::TokenBudget,
+            T::SettlementFailure => Self::SettlementFailed,
+            T::ProviderEarlyStop => Self::ProviderStop,
+            T::FreePoolQuota => Self::UsageLimited,
+            T::CommandUnavailable => Self::CommandUnavailable,
+            T::HostNativeUnconfigured => Self::HostNativeUnconfigured,
+            T::IdentityUnobserved => Self::IdentityUnobserved,
+            T::StoppedNoWork => Self::StoppedEarly,
+            T::EmptyWriterResult => Self::EmptyResult,
+            T::ContextHandoff => Self::ContextHandoff,
+            T::Blocked => Self::Blocked,
         }
     }
 }
@@ -348,10 +484,26 @@ impl Stop {
         })
     }
 
-    /// The stop a handoff declares, or none for a `done` handoff.
-    pub fn declared(handoff: Handoff) -> Option<Self> {
-        let cause = StopCause::declared(handoff.status)?;
-        Self::new(cause, Some(handoff)).ok()
+    /// The stop a handoff declares: none for a `done` handoff, an error for
+    /// one that cannot be sealed.
+    pub fn declared(handoff: Handoff) -> Result<Option<Self>, StopError> {
+        let Some(cause) = StopCause::declared(handoff.status) else {
+            return Ok(None);
+        };
+        Self::new(cause, Some(handoff)).map(Some)
+    }
+
+    /// The stop settlement seals: the recorded terminal cause if any, else the
+    /// cause the handoff declares, else none (a finished attempt).
+    pub fn sealed(
+        cause: Option<crate::run::TerminalCause>,
+        handoff: Option<Handoff>,
+    ) -> Result<Option<Self>, StopError> {
+        match (cause, handoff) {
+            (Some(cause), handoff) => Self::new(cause.into(), handoff).map(Some),
+            (None, Some(handoff)) => Self::declared(handoff),
+            (None, None) => Ok(None),
+        }
     }
 
     pub fn cause(&self) -> StopCause {

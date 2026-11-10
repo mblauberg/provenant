@@ -1828,7 +1828,7 @@ mod alias_tests {
         let text = String::from_utf8_lossy(b"Report.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"spec_concerns\":[{\"criterion\":\"Keep old format\",\"claim\":\"Format is retired\",\"evidence\":\"Approved scope removes reader\",\"proposed_change\":\"Use current format\",\"status\":\"as_written\"}]}\n```\n").into_owned();
         capture.push(text.as_bytes());
         let mut captured = capture.finish();
-        captured.handoff = provenant_records::handoff::Handoff::from_result(&text);
+        captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
         let outputs = make_outputs(Some(&captured), None, None, None, None);
         let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest","asks":[],
@@ -1856,7 +1856,7 @@ mod alias_tests {
         let text = format!("```handoff\n{full_handoff}\n```\n");
         capture.push(text.as_bytes());
         let mut captured = capture.finish();
-        captured.handoff = provenant_records::handoff::Handoff::from_result(&text);
+        captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
         assert_eq!(
             captured
                 .handoff
@@ -1910,7 +1910,7 @@ mod alias_tests {
         let text = format!("```handoff\n{no_concerns}\n```\n");
         capture.push(text.as_bytes());
         let mut captured = capture.finish();
-        captured.handoff = provenant_records::handoff::Handoff::from_result(&text);
+        captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
         let outputs = make_outputs(Some(&captured), None, None, None, None);
         assert_eq!(outputs.remaining.as_ref().unwrap(), &vec!["r".repeat(4090)]);
         assert!(!outputs.extra.contains_key("spec_concerns"));

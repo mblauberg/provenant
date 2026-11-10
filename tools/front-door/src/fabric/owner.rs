@@ -3552,11 +3552,7 @@ impl BoundGraphOwner<'_> {
                             failure == provenant_records::run::PreparationFailure::AdapterUnavailable
                         })
                         && let Some(cause) = preparation_cause
-                        && !matches!(
-                            cause,
-                            provenant_records::run::TerminalCause::PreparationRefused
-                                | provenant_records::run::TerminalCause::CommandUnavailable
-                        )
+                        && cause != provenant_records::run::TerminalCause::CommandUnavailable
                     {
                         // The fallback classification describes route policy,
                         // not the cause (for example an unregistered account).
@@ -3603,9 +3599,8 @@ impl BoundGraphOwner<'_> {
                             }
                             Outcome::TimedOut => AttemptOutcome::OtherFailure,
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
-                            Outcome::Rejected if !launched => AttemptOutcome::PreparationRefused(
-                                preparation_cause.unwrap_or(provenant_records::run::TerminalCause::PreparationRefused),
-                            ),
+                            Outcome::Rejected if !launched => preparation_cause
+                                .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
                             Outcome::ReviewRequired if matches!(
                                 &attempt.state,
                                 AttemptState::Terminal { extra, .. }

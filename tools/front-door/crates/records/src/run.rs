@@ -851,7 +851,6 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
-    PreparationRefused,
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
     AccountLoginRequired,
@@ -884,13 +883,14 @@ pub enum TerminalCause {
     /// The host stopped a writer at its context handoff threshold so a fresh
     /// attempt continues from its handoff on the same worktree.
     ContextHandoff,
+    /// A writer's handoff says `blocked`; the stop carries its note.
+    Blocked,
 }
 
 impl TerminalCause {
     /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::PreparationRefused => "preparation refused; provenant output ID",
             Self::SourceViewRefused => "source view refused; provenant output ID",
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
@@ -920,6 +920,7 @@ impl TerminalCause {
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
+            Self::Blocked => "blocked; provenant output ID",
         }
     }
 
@@ -928,9 +929,6 @@ impl TerminalCause {
         match self {
             Self::AccountLoginRequired => {
                 crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
-            }
-            Self::PreparationRefused => {
-                "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
             }
             Self::SourceViewRefused => {
                 "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
@@ -1005,6 +1003,9 @@ impl TerminalCause {
             }
             Self::ContextHandoff => {
                 "the host stopped the writer at lanes.context_handoff_tokens; a fresh attempt continues from its handoff on the same worktree"
+            }
+            Self::Blocked => {
+                "the writer declared itself blocked: an owner decision, a missing capability or an external change prevents progress; its handoff note says what"
             }
         }
     }

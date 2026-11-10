@@ -583,9 +583,12 @@ impl provenant_run::Providers for Indexed {
                 ..Default::default()
             },
             repository: Some(self.0.clone()),
-            observed_head: Some(
-                provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| e.to_string())?,
-            ),
+            observed_head: Some(provenant_core::GitOid::parse(&"a".repeat(40)).map_err(|e| {
+                provenant_run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    e.to_string(),
+                )
+            })?),
         })
     }
     fn decode(

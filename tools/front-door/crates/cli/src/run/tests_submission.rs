@@ -360,7 +360,10 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             resume: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
-            Err("fixture continuation refused; run provenant run".into())
+            Err(run::PrepareRefusal::new(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                "fixture continuation refused; run provenant run",
+            ))
         }
         fn decode(
             &self,

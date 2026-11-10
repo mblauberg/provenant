@@ -446,8 +446,7 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
             provenant_records::run::TerminalCause::DiskObservationUnavailable
         }
     };
-    let mut refusal = run::PrepareRefusal::from(String::from(error));
-    refusal.terminal_cause = Some(cause);
+    let mut refusal = run::PrepareRefusal::new(cause, String::from(error));
     refusal.resource = resource;
     refusal
 }
