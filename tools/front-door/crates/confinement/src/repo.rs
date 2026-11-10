@@ -749,10 +749,12 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
-    // Other branches' tracking keys are ignored. A checked-out branch keeps
-    // its own; a detached HEAD keeps none. A missing or malformed HEAD keeps
-    // every branch's keys, so a HEAD race cannot hide a tracking change; the
-    // writer's own HEAD read reports the damage with its path.
+    // Other branches' configuration keys (`branch.<subsection>.<variable>`)
+    // are ignored. A checked-out branch keeps its own; a detached HEAD keeps
+    // none. A missing or malformed HEAD keeps every branch's keys, so a HEAD
+    // race cannot hide a tracking change; the writer's own HEAD read reports the
+    // damage with its path. Two-part keys with no subsection (like
+    // `branch.autosetupmerge`) are always kept.
     let line = head.strip_suffix(b"\n").unwrap_or_default();
     let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
     let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
@@ -775,10 +777,10 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         let ignored = key
             .strip_prefix(b"branch.")
             .and_then(|rest| {
-                rest.strip_suffix(b".remote")
-                    .or_else(|| rest.strip_suffix(b".merge"))
+                let dot = rest.iter().rposition(|&b| b == b'.')?;
+                Some(&rest[..dot])
             })
-            .is_some_and(|name| !keep_all && Some(name) != branch);
+            .is_some_and(|subsection| !keep_all && Some(subsection) != branch);
         if !ignored {
             digest.update((entry.len() as u64).to_be_bytes());
             digest.update(entry);
@@ -1541,6 +1543,35 @@ mod tests {
         git(&["config", "branch.third.merge", "refs/heads/main"]);
         assert!(partial_tree.repo().revalidate().is_ok());
         assert!(tree.repo().revalidate().is_ok());
+        // Writer delivery records a sibling lane's push remote too.
+        git(&["config", "branch.third.pushRemote", "origin"]);
+        assert!(partial_tree.repo().revalidate().is_ok());
+        assert!(tree.repo().revalidate().is_ok());
+        // Any variable recorded for a sibling branch leaves the digest unchanged.
+        git(&["config", "branch.third.rebase", "true"]);
+        assert!(partial_tree.repo().revalidate().is_ok());
+        assert!(tree.repo().revalidate().is_ok());
+        let delivered = VerifiedRepo::open(&root, |_| {
+            for (key, value) in [
+                ("remote", "origin"),
+                ("merge", "refs/heads/delivered"),
+                ("pushRemote", "origin"),
+                ("rebase", "true"),
+            ] {
+                git(&[
+                    "config",
+                    "--local",
+                    &format!("branch.delivered.{key}"),
+                    value,
+                ]);
+            }
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
+        });
+        assert!(delivered.is_ok());
         let opened = VerifiedRepo::open(&root, |_| {
             git(&[
                 "worktree",
@@ -1559,6 +1590,16 @@ mod tests {
             ))
         });
         assert!(opened.is_ok());
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "dotted.branch",
+            temp.path().join("dotted").to_str().unwrap(),
+            "HEAD",
+        ]);
+        let dotted_tree = verify_worktree(&repo, temp.path().join("dotted")).unwrap();
         let config_path = root.join(".git/config");
         let config = fs::read(&config_path).unwrap();
         // Git decodes quoted subsection names before the comparison.
@@ -1573,6 +1614,50 @@ mod tests {
         assert!(tree.repo().revalidate().is_err());
         fs::write(&config_path, b"[broken\n").unwrap();
         assert!(tree.repo().revalidate().is_err());
+        // A two-part branch key with no subsection still invalidates the digest.
+        let mut auto_setup = config.clone();
+        auto_setup.extend_from_slice(b"[branch]\n autosetupmerge = always\n");
+        fs::write(&config_path, auto_setup).unwrap();
+        assert!(matches!(
+            tree.repo().revalidate(),
+            Err(RepoError::IdentityChanged)
+        ));
+        fs::write(&config_path, &config).unwrap();
+        // The checked-out branch's own rebase still matters.
+        let mut own_rebase = config.clone();
+        own_rebase.extend_from_slice(b"[branch \"first\"]\n rebase = true\n");
+        fs::write(&config_path, own_rebase).unwrap();
+        assert!(matches!(
+            tree.repo().revalidate(),
+            Err(RepoError::IdentityChanged)
+        ));
+        fs::write(&config_path, &config).unwrap();
+        // The checked-out branch's own push remote still matters.
+        let mut own_push = config.clone();
+        own_push.extend_from_slice(b"[branch \"first\"]\n pushRemote = elsewhere\n");
+        fs::write(&config_path, own_push).unwrap();
+        assert!(matches!(
+            tree.repo().revalidate(),
+            Err(RepoError::IdentityChanged)
+        ));
+        fs::write(&config_path, &config).unwrap();
+        // A dotted branch name matches its own keys and ignores sibling keys.
+        let mut dotted = config.clone();
+        dotted.extend_from_slice(b"[branch \"dotted.branch\"]\n rebase = true\n");
+        fs::write(&config_path, &dotted).unwrap();
+        assert!(tree.repo().revalidate().is_ok());
+        assert!(matches!(
+            dotted_tree.repo().revalidate(),
+            Err(RepoError::IdentityChanged)
+        ));
+        fs::write(&config_path, &config).unwrap();
+        let mut dotted_siblings = config.clone();
+        dotted_siblings.extend_from_slice(
+            b"[branch \"dotted.branch.extra\"]\n rebase = true\n[branch \"dotted\"]\n rebase = true\n",
+        );
+        fs::write(&config_path, dotted_siblings).unwrap();
+        assert!(dotted_tree.repo().revalidate().is_ok());
+        assert!(tree.repo().revalidate().is_ok());
         fs::write(&config_path, &config).unwrap();
         let mut poisoned = config.clone();
         poisoned.extend_from_slice(b"[core]\n\thooksPath = /tmp/poison\n");
