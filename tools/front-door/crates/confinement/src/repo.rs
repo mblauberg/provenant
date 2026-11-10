@@ -55,6 +55,28 @@ pub enum RepoError {
 }
 
 impl RepoError {
+    /// The error's fixed text, for a variant whose text names no path, value
+    /// or source error. Edges may disclose it as the cause of a failure.
+    pub fn safe_cause(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::InvalidPath => "repository path must be absolute and contain no parent traversal",
+            Self::InvalidRoot => "repository root is not a private owner-controlled directory",
+            Self::InvalidGitMarker => "repository has no valid .git directory or gitfile",
+            Self::InvalidRegistration => "Git private directory is not registered to this worktree",
+            Self::InvalidGitDirectory => "Git common or private directory is unsafe",
+            Self::AlternateObjects => {
+                "alternate Git object stores are not accepted for protected history"
+            }
+            Self::IdentityChanged => "verified repository path or Git metadata changed",
+            Self::MetadataTooLarge => "Git metadata file exceeds its bound",
+            Self::Unprobed => "repository has not passed its open-time Git probes",
+            Self::ForeignProject { .. }
+            | Self::ConfigNormalisationExecution(_)
+            | Self::ConfigNormalisation(_)
+            | Self::Fs(_) => return None,
+        })
+    }
+
     pub(crate) fn variant(&self) -> &'static str {
         match self {
             Self::InvalidPath => "InvalidPath",
@@ -526,10 +548,7 @@ impl VerifiedRepo {
             Some(head) => head.to_vec(),
             // A missing or malformed HEAD is reported by the caller's own HEAD
             // read with its path; here it only means no branch is checked out.
-            None => read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
+            None => self.config_head(),
         };
         Ok(ConfigDigest {
             config_head: head.clone(),
@@ -537,6 +556,15 @@ impl VerifiedRepo {
             included: self.included_digest(files, head_sensitive)?,
             common_config: common_config_digest(&self.common, &head)?,
         })
+    }
+
+    /// The private `HEAD` bytes that decide which branch's config keys apply.
+    /// Empty when the file is missing or unreadable, which keeps every key.
+    pub(crate) fn config_head(&self) -> Vec<u8> {
+        read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// Digest of included config files, for a probe that has just read them.
@@ -744,21 +772,49 @@ fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
     Ok(digest.finalize().into())
 }
 
+/// Other branches' tracking keys (`branch.<name>.remote` and `.merge`) in
+/// the common config. Sibling writers set them for their own lanes while this
+/// checkout is open, so they cannot change what this checkout's Git reads.
+/// A checked-out branch keeps its own keys; a detached HEAD keeps none. A
+/// missing or malformed HEAD keeps every branch's keys, so a HEAD race cannot
+/// hide a tracking change; the writer's own HEAD read reports the damage with
+/// its path.
+pub(crate) struct SiblingTrackingKeys<'a> {
+    branch: Option<&'a [u8]>,
+    keep_all: bool,
+}
+
+impl<'a> SiblingTrackingKeys<'a> {
+    /// `head` is the raw bytes of the checkout's private `HEAD` file.
+    pub(crate) fn for_head(head: &'a [u8]) -> Self {
+        let line = head.strip_suffix(b"\n").unwrap_or_default();
+        let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
+        let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
+            std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
+        });
+        Self {
+            branch,
+            keep_all: branch.is_none() && !detached,
+        }
+    }
+
+    /// Whether `key`, as Git lists it, is another branch's tracking key.
+    pub(crate) fn matches(&self, key: &[u8]) -> bool {
+        key.strip_prefix(b"branch.")
+            .and_then(|rest| {
+                rest.strip_suffix(b".remote")
+                    .or_else(|| rest.strip_suffix(b".merge"))
+            })
+            .is_some_and(|name| !self.keep_all && Some(name) != self.branch)
+    }
+}
+
 // Git parses the bounded snapshot; included files have their own digest.
 fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 32]>, RepoError> {
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
-    // Other branches' tracking keys are ignored. A checked-out branch keeps
-    // its own; a detached HEAD keeps none. A missing or malformed HEAD keeps
-    // every branch's keys, so a HEAD race cannot hide a tracking change; the
-    // writer's own HEAD read reports the damage with its path.
-    let line = head.strip_suffix(b"\n").unwrap_or_default();
-    let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
-    let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
-        std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
-    });
-    let keep_all = branch.is_none() && !detached;
+    let ignored = SiblingTrackingKeys::for_head(head);
     let git = provenant_os::git::git_executable()
         .ok_or(RepoError::ConfigNormalisation("Git executable unavailable"))?;
     let normalised = COMMON_CONFIG_NORMALISATION
@@ -772,14 +828,7 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
             .split(|byte| *byte == b'\n')
             .next()
             .unwrap_or_default();
-        let ignored = key
-            .strip_prefix(b"branch.")
-            .and_then(|rest| {
-                rest.strip_suffix(b".remote")
-                    .or_else(|| rest.strip_suffix(b".merge"))
-            })
-            .is_some_and(|name| !keep_all && Some(name) != branch);
-        if !ignored {
+        if !ignored.matches(key) {
             digest.update((entry.len() as u64).to_be_bytes());
             digest.update(entry);
         }
@@ -1138,6 +1187,20 @@ mod tests {
         (".lock", false),
         ("a/..", false),
     ];
+
+    #[test]
+    fn sibling_tracking_keys_follow_the_checked_out_head() {
+        let branch = SiblingTrackingKeys::for_head(b"ref: refs/heads/main\n");
+        assert!(branch.matches(b"branch.lane.remote"));
+        assert!(branch.matches(b"branch.lane.merge"));
+        assert!(!branch.matches(b"branch.main.remote"));
+        assert!(!branch.matches(b"remote.origin.url"));
+        let detached = format!("{}\n", "a".repeat(40));
+        assert!(SiblingTrackingKeys::for_head(detached.as_bytes()).matches(b"branch.main.merge"));
+        let malformed = SiblingTrackingKeys::for_head(b"garbage\n");
+        assert!(!malformed.matches(b"branch.lane.remote"));
+        assert!(!SiblingTrackingKeys::for_head(b"").matches(b"branch.lane.remote"));
+    }
 
     #[test]
     fn branch_names_follow_git_ref_format() {

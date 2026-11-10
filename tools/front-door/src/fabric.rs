@@ -67,6 +67,7 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
@@ -952,6 +953,7 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
             delivery_stage,
             resource,
             input_failure,
+            cause,
         } => {
             let prefix = format!("{scope}: ");
             let operation = if operation.starts_with(&prefix) {
@@ -966,6 +968,7 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
                 delivery_stage,
                 resource,
                 input_failure,
+                cause,
             }
         }
         other => other,

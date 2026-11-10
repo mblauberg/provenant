@@ -149,6 +149,7 @@ fn process_limit_launch_projection_keeps_io_and_resource_reason() {
             },
         )),
         input_failure: None,
+        cause: None,
     };
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -182,6 +183,7 @@ fn unreadable_launch_input_keeps_io_code_and_safe_reason() {
         delivery_stage: None,
         resource: None,
         input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
+        cause: None,
     };
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -238,6 +240,7 @@ fn launch_projection_omits_untrusted_error_sources() {
                     delivery_stage: None,
                     resource: None,
                     input_failure: None,
+                    cause: None,
                     operation,
                     path: Some("/private/host".into()),
                 },
@@ -415,6 +418,7 @@ fn writer_binding_failure_persists_only_the_safe_projection() {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
         }),
         ..Default::default()
     };

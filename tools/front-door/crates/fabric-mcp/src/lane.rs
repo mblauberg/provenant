@@ -99,6 +99,7 @@ fn relay_cause(error: &FacadeError) -> FacadeError {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
         },
         FacadeError::HostDeliveryStage { stage } => FacadeError::Io {
             operation: "host delivery".into(),
@@ -107,6 +108,7 @@ fn relay_cause(error: &FacadeError) -> FacadeError {
             delivery_stage: Some(*stage),
             resource: None,
             input_failure: None,
+            cause: None,
         },
         _ => error.clone(),
     }
