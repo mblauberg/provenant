@@ -32,40 +32,13 @@ pub fn concurrency(
     })
 }
 
-/// The wall-clock allowance of one lane: the task's timeout, tightened by the
-/// provider's host cap.
-pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
-    cap.map_or(task.provider_timeout_seconds, |cap| {
-        cap.min(task.provider_timeout_seconds)
-    })
-}
-
-/// The token budget of one lane: a writer's, resolved from host configuration
-/// with the project, and 0 (none) for any other lane. Each fresh read keeps a
-/// setting changed between lanes in effect for the next one.
-pub fn token_budget(
-    task: &TaskRequest,
-    state_root: &std::path::Path,
-    project: &str,
-) -> provenant_confinement::run_config::TokenBudget {
-    use provenant_confinement::run_config::{RunConfig, TokenBudget, TokenBudgetSource};
-    if task.writer.is_none() {
-        return TokenBudget {
-            tokens: 0,
-            source: TokenBudgetSource::Default,
-        };
-    }
-    RunConfig::read(state_root)
-        .unwrap_or_default()
-        .writer_token_budget_for(project, None)
-}
-
-pub fn capture_plan(
-    task: &TaskRequest,
-    runtime_seconds: u64,
-    token_budget: u64,
-    provider: &str,
-) -> CapturePlan {
+pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) -> CapturePlan {
+    let enforced = |limit: &Option<provenant_records::Limit>| {
+        limit
+            .as_ref()
+            .filter(|limit| limit.enforced())
+            .map_or(0, |limit| limit.value)
+    };
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
         {
@@ -75,7 +48,7 @@ pub fn capture_plan(
         } else {
             CapturePlan::default().stdout
         },
-        wall_ms: runtime_seconds.saturating_mul(1000),
+        wall_ms: enforced(&limits.deadline_seconds).saturating_mul(1000),
         // Minimal supervision (the `light` preset) marks silence at the
         // longest interval the registry allows; it still never kills for it.
         silence_ms: if task
@@ -92,21 +65,11 @@ pub fn capture_plan(
                 .unwrap_or(1800)
                 .saturating_mul(1000)
         },
-        token_budget: if crate::token_budget::enforces(provider) {
-            token_budget
-        } else {
-            0
-        },
+        token_budget: enforced(&limits.token_budget),
         // Writers only: a fresh attempt continues a writer's retained
         // worktree from its handoff. 0 or unset is off; a provider that
         // reports no per-call context figure is never stopped for it.
-        context_handoff: if task.writer.is_some() {
-            task.profile
-                .knob_u64("lanes.context_handoff_tokens")
-                .unwrap_or(0)
-        } else {
-            0
-        },
+        context_handoff: enforced(&limits.context_handoff),
         slot_wait_ms: task
             .profile
             .knob_u64("lanes.slot_wait_seconds")
@@ -533,7 +496,7 @@ impl RunStore {
         plan: &PreparedLaunch,
         grants: &admission::AppliedWriteGrants,
         priority: u8,
-        runtime: u64,
+        limits: &provenant_records::LaneLimits,
         call: &Request<'_>,
         output: &mut impl std::io::Write,
     ) -> Result<AttemptRecord> {
@@ -550,7 +513,7 @@ impl RunStore {
             grants,
             plan.observed_head,
             Some(priority),
-            runtime,
+            limits,
             call,
         )?;
         if let Some(policy) = plan
@@ -1357,9 +1320,13 @@ impl RunStore {
                     continue;
                 }
             };
-            let runtime = runtime_seconds(
+            let provider = plan.route.provider.as_deref().unwrap_or_default();
+            let limits = crate::lane_limits(
                 task,
-                providers.runtime_cap(plan.route.provider.as_deref().unwrap_or_default()),
+                self.context.state_root.as_path(),
+                &record.project_id.to_string(),
+                provider,
+                providers.runtime_cap(provider),
             );
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             let limit = providers.write_grant_limit().checked();
@@ -1424,7 +1391,7 @@ impl RunStore {
                 &plan,
                 &write_grants,
                 priority,
-                runtime,
+                &limits,
                 call,
                 &mut std::io::stderr().lock(),
             ) {
@@ -1441,7 +1408,7 @@ impl RunStore {
                     context,
                     acquire_writer,
                     &record,
-                    runtime,
+                    &limits,
                     call,
                 ) {
                     Ok(()) => Started::Launched(id),
@@ -1771,13 +1738,28 @@ mod policy_reporting_tests {
         };
         let grants = applied_write_grants(&prepared, WriteGrantLimit::default())?;
         let mut output = Vec::new();
-        let claimed =
-            store.claim_launch(&expected, &prepared, &grants, 0, 60, &call, &mut output)?;
+        let claimed = store.claim_launch(
+            &expected,
+            &prepared,
+            &grants,
+            0,
+            &Default::default(),
+            &call,
+            &mut output,
+        )?;
         assert!(matches!(claimed.state, AttemptState::Starting { .. }));
         // Another launcher can have prepared from the same queued record.
         // The compare-and-swap must refuse its stale claim before reporting.
         assert!(matches!(
-            store.claim_launch(&expected, &prepared, &grants, 0, 60, &call, &mut output),
+            store.claim_launch(
+                &expected,
+                &prepared,
+                &grants,
+                0,
+                &Default::default(),
+                &call,
+                &mut output
+            ),
             Err(RunError::Conflict)
         ));
         assert_eq!(

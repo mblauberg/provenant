@@ -1600,15 +1600,11 @@ impl RunStore {
         if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::TokenBudget)
         {
             decoded.terminal_cause = Some(TerminalCause::TokenBudget);
-            let budget = crate::launch::token_budget(
-                task,
-                self.context.state_root.as_path(),
-                &record.project_id.to_string(),
-            );
+            let budget = record.limits.as_ref().and_then(|l| l.token_budget.as_ref());
             let limit = format!(
                 "token budget reached: provider stopped after passing {} tokens (source: {})",
-                budget.tokens,
-                budget.source.as_str()
+                budget.map_or(0, |budget| budget.value),
+                budget.map_or("unrecorded", |budget| budget.source.as_str())
             );
             decoded.reason = Some(match decoded.reason.take() {
                 Some(detail) if detail != "provider output is partial" => {
@@ -1617,33 +1613,20 @@ impl RunStore {
                 _ => limit,
             });
         }
-        let budget = crate::launch::token_budget(
-            task,
-            self.context.state_root.as_path(),
-            &record.project_id.to_string(),
-        );
-        if task.writer.is_some() && budget.tokens > 0 {
-            let provider = record
-                .applied_route
-                .as_ref()
-                .and_then(|r| r.provider.as_deref())
-                .or_else(|| {
-                    record
-                        .observed_route
-                        .as_ref()
-                        .and_then(|r| r.provider.as_deref())
-                });
-            if let Some(p) = provider
-                && !crate::token_budget::enforces(p)
-            {
-                let note = format!(
-                    "token budget is not enforced for provider {p}: usage is not reported while it runs"
-                );
-                decoded.reason = Some(match decoded.reason.take() {
-                    Some(existing) => format!("{existing}; {note}"),
-                    None => note,
-                });
-            }
+        if let Some(budget) = record
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.token_budget.as_ref())
+            .filter(|budget| !budget.enforced())
+        {
+            let note = format!(
+                "token budget of {} is not enforced: usage is not reported while the provider runs",
+                budget.value
+            );
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(existing) => format!("{existing}; {note}"),
+                None => note,
+            });
         }
         if let Some(bytes) = read_sealed(attempt, "budget-warning.json", RECORD_LIMIT)? {
             let warning: serde_json::Value = crate::db::decode(&bytes)?;

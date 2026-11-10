@@ -5,6 +5,7 @@ use crate::permissions::{
 };
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
+use provenant_records::{Limit, LimitSource, LimitStrength};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -225,24 +226,20 @@ impl RunConfig {
             .or(self.admission_seconds)
     }
 
-    /// The writer token budget for `project`, with where it came from. A
-    /// per-run override wins over the project, then the host setting, then
-    /// the default.
-    pub fn writer_token_budget_for(&self, project: &str, per_run: Option<u64>) -> TokenBudget {
-        let (tokens, source) = if let Some(tokens) = per_run {
-            (tokens, TokenBudgetSource::Run)
-        } else if let Some(tokens) = self
-            .projects
-            .get(project)
-            .and_then(|settings| settings.writer_token_budget)
-        {
-            (tokens, TokenBudgetSource::Project)
-        } else if let Some(tokens) = self.writer_token_budget {
-            (tokens, TokenBudgetSource::Host)
-        } else {
-            (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
-        };
-        TokenBudget { tokens, source }
+    /// The writer token budget for `project`, 0 meaning none: the project
+    /// setting, then the host setting, then the default.
+    pub fn writer_token_budget_for(&self, project: &str) -> Limit {
+        let layers = [
+            Some((LimitSource::Default, DEFAULT_WRITER_TOKEN_BUDGET)),
+            self.writer_token_budget
+                .map(|tokens| (LimitSource::Host, tokens)),
+            self.projects
+                .get(project)
+                .and_then(|settings| settings.writer_token_budget)
+                .map(|tokens| (LimitSource::Project, tokens)),
+        ];
+        Limit::resolve(layers.into_iter().flatten(), LimitStrength::Default)
+            .unwrap_or_else(|| Limit::new(0, LimitSource::Default, LimitStrength::Default))
     }
 
     /// The review-exempt paths that apply to `project`: its own list when it
@@ -266,32 +263,6 @@ impl RunConfig {
             |_| ReviewExempt::none(),
             |config| config.review_exempt(project),
         )
-    }
-}
-/// A resolved writer token budget. `tokens` of 0 means no budget.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct TokenBudget {
-    pub tokens: u64,
-    pub source: TokenBudgetSource,
-}
-/// Where a writer token budget was set, for `--explain` and receipts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TokenBudgetSource {
-    Run,
-    Project,
-    Host,
-    Default,
-}
-impl TokenBudgetSource {
-    /// The name shown in `--explain` and receipts.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Run => "run",
-            Self::Project => "project",
-            Self::Host => "host",
-            Self::Default => "default",
-        }
     }
 }
 fn valid_writer_write(path: &Path) -> bool {
@@ -565,19 +536,16 @@ mod tests {
     }
     #[test]
     fn a_host_setting_equal_to_the_default_still_reports_host() {
-        let unset = RunConfig::default().writer_token_budget_for("p", None);
+        let unset = RunConfig::default().writer_token_budget_for("p");
         assert_eq!(
-            (unset.tokens, unset.source),
-            (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
+            (unset.value, unset.source),
+            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Default)
         );
         let host: RunConfig = toml_edit::de::from_str("writer_token_budget = 500000\n").unwrap();
-        let budget = host.writer_token_budget_for("p", None);
-        assert_eq!(
-            (budget.tokens, budget.source),
-            (500_000, TokenBudgetSource::Host)
-        );
+        let budget = host.writer_token_budget_for("p");
+        assert_eq!((budget.value, budget.source), (500_000, LimitSource::Host));
         let off: RunConfig = toml_edit::de::from_str("writer_token_budget = 0\n").unwrap();
-        assert_eq!(off.writer_token_budget_for("p", None).tokens, 0);
+        assert_eq!(off.writer_token_budget_for("p").value, 0);
     }
     #[test]
     fn accepts_absolute_directories() {

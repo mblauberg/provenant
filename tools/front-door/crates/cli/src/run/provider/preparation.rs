@@ -2797,10 +2797,21 @@ pub(super) fn prepare_candidates(
         };
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
+        let limits = run::lane_limits(
+            task,
+            state_root,
+            &project_id.to_string(),
+            adapter.id(),
+            config
+                .providers
+                .get(adapter.id())
+                .and_then(|provider| provider.runtime_deadline_seconds),
+        );
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
                 &model_policy.guidance(),
+                &limits,
                 writer.is_some(),
                 writable_handoff.then_some(handoff.as_path())
             )

@@ -1614,10 +1614,17 @@ does not satisfy its dependants. Each record keeps fields it does not know, so
 a newer writer's additions survive a rewrite; a `WorkKey` and a `NextStep`
 ignore them, because their identity is their known fields.
 
-Lane and graph limits are `Limit` records: a value, its `source` (`default`,
-`host`, `project`, `template` or `launch`) and its `strength` (`enforced`: the
-host stops or refuses at the value; `advisory`: the host reports it and does
-not act). The lane preamble states only enforced limits. A review finding's
+A lane's limits are one `LaneLimits` record of `Limit`s, resolved when the
+attempt is admitted to launch (token budget, context handoff threshold, deadline;
+`crates/run/src/limits.rs`). A `Limit` is a value, its `source` and its
+`strength`. The source is the nearest setting: `launch`, then `template`, then
+`project`, then `host`, then `default`. The strength is `default` (the host stops
+or refuses at the value, and `retry --extend` may raise it), `ceiling` (the same,
+and nothing raises it, like a provider's host runtime cap) or `advisory` (the host
+reports the value and does not act, like a token budget for a provider that
+reports no live usage). The enforcement, the lane preamble's limits block and the
+`limits` of `status --json` all read that one record, so the preamble states only
+what the host enforces. A review finding's
 `FindingDecision` records its disposition (`act`, `decline` or `replace`), a
 reason, and the reviewed head and base, so a review binds to the change
 rather than the head commit (#3132). A graph `Pause` records a typed cause
@@ -1628,9 +1635,12 @@ rather than the head commit (#3132). A graph `Pause` records a typed cause
   signals and a handoff re-parsed from result text; one sealed record leaves
   one place to read it.
 - Test: `crates/records/src/format2_tests.rs::each_record_round_trips_and_keeps_an_unknown_field`;
+  `crates/records/src/limit.rs::tests::the_nearest_source_wins_and_a_ceiling_cannot_be_raised`;
+  `crates/run/src/limits.rs::tests::each_limit_reports_the_winning_source`;
+  `crates/run/src/limits.rs::tests::the_preamble_and_the_capture_plan_read_the_same_numbers`;
   `crates/records/src/format2_tests.rs::a_declared_stop_needs_the_handoff_that_declared_it`
 - Owner: `crates/records/src/stop.rs`, `crates/records/src/work_key.rs`,
-  `crates/records/src/limit.rs`, `crates/records/src/finding_decision.rs`,
+  `crates/records/src/limit.rs`, `crates/run/src/limits.rs`, `crates/records/src/finding_decision.rs`,
   `crates/records/src/pause.rs`
 
 ## What follows a stop

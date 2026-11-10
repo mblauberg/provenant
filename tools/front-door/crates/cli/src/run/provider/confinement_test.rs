@@ -148,7 +148,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
                 provenant_confinement::permissions::snapshot::render(permissions, &profile, &home)?;
             let handoff = private_state.join("handoff.json");
             let writable = handoff_writable(permissions);
-            let brief = run::lane_preamble("policy", false, writable.then_some(handoff.as_path()));
+            let brief = run::lane_preamble("policy", &Default::default(), false, writable.then_some(handoff.as_path()));
             assert!(brief.contains("Progress handoff JSON"));
             assert!(rendered.contains(&format!("(allow file-write* (subpath \"{}\"))", private_state.display())));
             let state_deny = rendered.lines().find(|line| line.starts_with("(deny file-write* (require-all") && line.contains(state.to_str().unwrap())).ok_or("state write denial")?;
@@ -156,7 +156,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
             let mut absent = permissions.clone();
             absent.private_state = None;
             assert!(!handoff_writable(&absent));
-            assert!(!run::lane_preamble("policy", false, handoff_writable(&absent).then_some(handoff.as_path())).contains("Progress handoff JSON"));
+            assert!(!run::lane_preamble("policy", &Default::default(), false, handoff_writable(&absent).then_some(handoff.as_path())).contains("Progress handoff JSON"));
 
             if kind == "commit" {
                 let state_read = rendered

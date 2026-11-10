@@ -515,7 +515,7 @@ mod reboot_tests {
                 &Default::default(),
                 None,
                 None,
-                cap,
+                &crate::limits::deadline_only(cap),
                 &call,
             )?;
             let claimed = store.claim(id, &clock, &call)?.ok_or("not admitted")?;

@@ -158,7 +158,7 @@ impl RunStore {
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
         record: &AttemptRecord,
-        runtime_seconds: u64,
+        limits: &provenant_records::LaneLimits,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
         // Each failure names its phase, so the refusal says what was not ready.
@@ -420,17 +420,7 @@ impl RunStore {
                     .ok_or_else(|| local("lane priority", &"missing"))
             ),
         };
-        let capture = capture_plan(
-            task,
-            runtime_seconds,
-            crate::launch::token_budget(
-                task,
-                self.context.state_root.as_path(),
-                &record.project_id.to_string(),
-            )
-            .tokens,
-            provider,
-        );
+        let capture = capture_plan(task, limits);
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
@@ -782,7 +772,7 @@ mod tests {
             &|_, _| Ok(Vec::new()),
             &|_, _, _| panic!("must not acquire custody"),
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         assert!(
@@ -898,7 +888,7 @@ mod tests {
             &|_, _| Ok(Vec::new()),
             &acquire,
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         match result {
@@ -941,7 +931,7 @@ mod tests {
             &|_, _| Ok(Vec::new()),
             &|_, _, _| Err(custody::CustodyError::ReservationRetained("fixture".into())),
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         match result {
@@ -981,7 +971,7 @@ mod tests {
                 Ok(lease)
             },
             &record,
-            60,
+            &crate::limits::deadline_only(60),
             &call,
         );
         match result {

@@ -287,6 +287,7 @@
           ]
         },
         "last_output_at": {},
+        "limits": {},
         "next_offset": {
           "minimum": 0,
           "type": "integer"
@@ -1446,6 +1447,7 @@
           ]
         },
         "last_output_at": {},
+        "limits": {},
         "observed_route": {},
         "overdue": {
           "anyOf": [
