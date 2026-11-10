@@ -297,12 +297,7 @@ fn report_account_sync(
         }
     }
 }
-/// Registration is saved before this runs. Install the managed hooks, skills,
-/// MCP entry and shared settings into the new account directory, so it matches the
-/// others without a further command. A failure leaves the registration in place.
-/// Replace the registered account's quota reading with a fresh probe, so a
-/// repaired account (for example a newly created isolated keychain) is
-/// routable at once. A failed probe is reported; the registration stands.
+/// Replace the registered account's quota reading with a fresh probe and report the result.
 fn probe_registered_account(
     edge: &provenant_cli::run::Edge<'_>,
     data: &provenant_providers::accounts::Settings,
@@ -367,6 +362,9 @@ fn probe_registered_account(
         (None, Ok(_)) => {}
     }
 }
+/// Registration is saved before this runs. Install the managed hooks, skills,
+/// MCP entry and shared settings into the new account directory, so it matches the
+/// others without a further command. A failure leaves the registration in place.
 fn sync_registered_account(
     globals: &provenant_cli::Globals,
     reply: &mut provenant_cli::run::Reply,
