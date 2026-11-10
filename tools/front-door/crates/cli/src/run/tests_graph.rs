@@ -246,7 +246,7 @@ fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::err
 }
 #[test]
 fn stats_summary_reports_cost_coverage() {
-    use provenant_telemetry::{CostTotal, Money, Totals};
+    use provenant_telemetry::{CostTotal, Totals};
     let mut totals = Totals {
         attempts: 3,
         usage: Default::default(),
