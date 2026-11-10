@@ -19,7 +19,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                 return Err(PrepareRefusal {
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                     resource: None,
-                    terminal_cause: Some(TerminalCause::DiskFloor),
+                    terminal_cause: TerminalCause::DiskFloor,
                     terminal_note: Some("99 bytes available; gc.free_floor is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                     skipped_routes: Vec::new(),
@@ -35,15 +35,16 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
-            let mut refusal = PrepareRefusal::from("PROVIDER_SECRET_SENTINEL");
-            refusal.terminal_cause = None;
+            let mut refusal = PrepareRefusal::new(
+                TerminalCause::RouteResolutionRefused,
+                "PROVIDER_SECRET_SENTINEL",
+            );
             if self.source_overlap {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal.terminal_note =
                     Some("product assets overlap the live graph source checkout".into());
             }
             if self.typed {
-                refusal.terminal_cause = Some(TerminalCause::RouteResolutionRefused);
                 refusal.terminal_note =
                     Some("route resolver classification: unsupported_effort".into());
             }
@@ -107,10 +108,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         assert_eq!(state, "rejected");
         let cause = if disk {
             TerminalCause::DiskFloor
-        } else if typed {
-            TerminalCause::RouteResolutionRefused
         } else {
-            TerminalCause::PreparationRefused
+            TerminalCause::RouteResolutionRefused
         };
         let AttemptState::Terminal { extra, .. } = &record.state else {
             return Err("not terminal".into());
@@ -128,7 +127,6 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         assert!(!label.contains("99 bytes available"), "{label}");
         let reason = reason.ok_or("missing structured reason")?;
         assert!(reason.starts_with(cause.detail()), "{reason}");
-        assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         if disk {
             assert!(reason.contains("gc.free_floor"), "{reason}");
             assert!(reason.contains("99 bytes available"), "{reason}");
@@ -146,7 +144,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             assert!(reason.contains("unsupported_effort"), "{reason}");
             assert!(reason.contains("provenant route resolve"), "{reason}");
         } else {
-            assert!(reason.contains("before retrying"), "{reason}");
+            // With no fixed note, the refusal's own message is sealed.
+            assert!(reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         }
     }
     Ok(())

@@ -672,7 +672,6 @@
                   },
                   "terminal_cause": {
                     "enum": [
-                      "preparation_refused",
                       "source_view_refused",
                       "account_login_required",
                       "route_resolution_refused",
@@ -698,7 +697,8 @@
                       "host_native_unconfigured",
                       "identity_unobserved",
                       "stopped_no_work",
-                      "context_handoff"
+                      "context_handoff",
+                      "blocked"
                     ],
                     "type": "string"
                   },

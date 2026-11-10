@@ -1118,6 +1118,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
+                        stop: None,
                         terminal_cause: None,
                         terminal_note: None,
                         outcome: run::Outcome::Unsettled,

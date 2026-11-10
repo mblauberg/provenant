@@ -728,10 +728,10 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 ProviderProfileSpec, WorktreeWriteAuthority,
             };
             let writer = crate::prepare_writer(&self.writer, &self.state, self.project)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let authority =
                 WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, &self.home)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let grant = |path: std::path::PathBuf| PathGrant {
                 path,
                 scope: PathScope::Subtree,
@@ -758,7 +758,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                         nested_confinement: false,
                     },
                 })
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let mut prepared = crate::dispatch_tests::Ready.prepare(task, prompt, paths, resume)?;
             prepared.confinement = Some(crate::LaunchConfinement {
                 plan,

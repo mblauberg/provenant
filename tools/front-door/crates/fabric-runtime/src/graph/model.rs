@@ -1194,9 +1194,12 @@ pub struct NodeProgress {
     /// The writer's unfinished handoff, kept for its continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<provenant_records::handoff::Handoff>,
+    /// The stopped writer's handoff says `blocked`, read once at settlement.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub blocked: bool,
     /// The decisions a review node made on its findings, each bound to the
-    /// head and base it reviewed. The reviewed base is required: a decision
-    /// without one is not stored, and its approval cannot carry over.
+    /// head and base it reviewed. A decision without a base carries no
+    /// approval over, but is stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<provenant_records::FindingDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

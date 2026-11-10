@@ -219,14 +219,33 @@ pub struct PrepareRefusal {
     pub boundary_class: provenant_records::diagnostic::BoundaryClass,
     /// A configurable resource threshold that refused this launch, if known.
     pub resource: Option<provenant_records::diagnostic::ResourceFact>,
-    pub terminal_cause: Option<TerminalCause>,
+    /// The specific cause. There is no generic refusal.
+    pub terminal_cause: TerminalCause,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
     pub message: String,
     pub skipped_routes: Vec<SkippedRoute>,
     pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
 }
+/// A refusal for test fixtures that do not care about its cause.
+#[cfg(test)]
+pub(crate) fn fixture_refusal(message: impl Into<String>) -> PrepareRefusal {
+    PrepareRefusal::new(TerminalCause::HandoffRefused, message)
+}
+
 impl PrepareRefusal {
+    pub fn new(cause: TerminalCause, message: impl Into<String>) -> Self {
+        Self {
+            boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+            resource: None,
+            terminal_cause: cause,
+            terminal_note: None,
+            message: message.into(),
+            skipped_routes: Vec::new(),
+            fallback_outcome: None,
+        }
+    }
+
     fn kind(&self) -> RefusalKind {
         if let Some(route) = self.skipped_routes.iter().find(|route| {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
@@ -257,30 +276,11 @@ impl PrepareRefusal {
                 .all(|route| route.kind == SkipKind::AuthRequired)
     }
 }
-impl From<String> for PrepareRefusal {
-    fn from(message: String) -> Self {
-        Self {
-            boundary_class: provenant_records::diagnostic::BoundaryClass::None,
-            resource: None,
-            message,
-            terminal_cause: Some(TerminalCause::PreparationRefused),
-            terminal_note: None,
-            skipped_routes: Vec::new(),
-            fallback_outcome: None,
-        }
-    }
-}
-impl From<&str> for PrepareRefusal {
-    fn from(message: &str) -> Self {
-        message.to_owned().into()
-    }
-}
-
 #[cfg(test)]
 #[test]
 fn preparation_refusal_retains_its_typed_boundary() {
     use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
-    let mut refusal = PrepareRefusal::from("opaque source");
+    let mut refusal = PrepareRefusal::new(TerminalCause::RouteResolutionRefused, "opaque source");
     assert_eq!(refusal.kind().boundary_class(), BoundaryClass::None);
     refusal.boundary_class = BoundaryClass::Credentials;
     assert_eq!(refusal.kind().boundary_class(), BoundaryClass::Credentials);
@@ -434,7 +434,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         detail: "opaque source".into(),
     };
     skipped.set_guard_facts(None, Some(fact)).unwrap();
-    let mut refusal = PrepareRefusal::from("opaque source");
+    let mut refusal = PrepareRefusal::new(TerminalCause::RouteResolutionRefused, "opaque source");
     refusal.skipped_routes.push(skipped);
     let kind = refusal.kind();
     assert!(matches!(kind, RefusalKind::PacingReserveResource(value) if value == fact));
@@ -644,22 +644,14 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .map_err(|error| match error.terminal_cause {
-                Some(cause) => RunError::ContinuationRefused { cause },
-                None => RunError::Input {
-                    kind: ErrorKind::ContinuationUnsupported,
-                    message: error.to_string(),
-                },
+            .map_err(|error| RunError::ContinuationRefused {
+                cause: error.terminal_cause,
             })
             .and_then(|()| {
                 providers
                     .prepare(task, &prompt, &paths, None)
-                    .map_err(|error| match error.terminal_cause {
-                        Some(cause) => RunError::ContinuationRefused { cause },
-                        None => RunError::Input {
-                            kind: ErrorKind::ContinuationUnsupported,
-                            message: error.to_string(),
-                        },
+                    .map_err(|error| RunError::ContinuationRefused {
+                        cause: error.terminal_cause,
                     })
             })
             .and_then(|mut plan| {
@@ -1304,27 +1296,27 @@ impl RunStore {
                     } else {
                         Outcome::Rejected
                     };
-                    let terminal_cause =
-                        refusal
-                            .terminal_cause
-                            .or(Some(if outcome == Outcome::AuthRequired {
-                                TerminalCause::AccountLoginRequired
-                            } else {
-                                TerminalCause::PreparationRefused
-                            }));
+                    let terminal_cause = Some(refusal.terminal_cause);
                     let terminal_note = match (kind.terminal_note(), refusal.terminal_note) {
                         (Some(guidance), Some(note)) if guidance != note => {
                             Some(format!("{note}; {guidance}"))
                         }
                         (Some(note), _) | (_, Some(note)) => Some(note),
-                        (None, None) => refusal.skipped_routes.first().map(|route| {
-                            let diagnostic = route.diagnostic();
-                            format!(
-                                "first candidate: {}; {}",
-                                diagnostic.detail.unwrap_or_default(),
-                                diagnostic.next.unwrap_or_default()
-                            )
-                        }),
+                        (None, None) => match refusal.skipped_routes.first() {
+                            Some(route) => {
+                                let diagnostic = route.diagnostic();
+                                Some(format!(
+                                    "first candidate: {}; {}",
+                                    diagnostic.detail.unwrap_or_default(),
+                                    diagnostic.next.unwrap_or_default()
+                                ))
+                            }
+                            // The refusal's own message, redacted and bounded.
+                            None => Some(provenant_confinement::redact::bounded_line(
+                                &refusal.message,
+                                240,
+                            )),
+                        },
                     };
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
@@ -1811,7 +1803,10 @@ mod resource_status_tests {
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
-            let mut refusal = PrepareRefusal::from("DEPENDENCY_OUTPUT_SECRET");
+            let mut refusal = PrepareRefusal::new(
+                TerminalCause::RouteResolutionRefused,
+                "DEPENDENCY_OUTPUT_SECRET",
+            );
             refusal.resource = Some(ResourceFact::DependencyPreparation { configured: true });
             Err(refusal)
         }

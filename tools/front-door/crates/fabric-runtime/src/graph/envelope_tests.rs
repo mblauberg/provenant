@@ -263,6 +263,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(worst_handoff),
+                blocked: true,
                 decisions: Vec::new(),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),

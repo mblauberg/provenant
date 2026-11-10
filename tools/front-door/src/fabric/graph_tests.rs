@@ -649,7 +649,7 @@ mod graph_writer_admission_tests {
             let Some(FacadeError::DispatchRefused { reason, .. }) = first else { return Err("first call must refuse".into()) };
             assert!(!reason.contains("HOST_DISK_ERROR_SENTINEL"), "{reason}");
             assert!(matches!(replay, Some(FacadeError::DispatchRefused { .. })));
-            let ordinary = sealed(provenant_records::run::TerminalCause::PreparationRefused)?;
+            let ordinary = sealed(provenant_records::run::TerminalCause::RouteResolutionRefused)?;
             assert!(launch_refusal(&started, std::slice::from_ref(&ordinary)).is_none());
             assert!(launch_refusal(&[], &[ordinary]).is_none());
         }
@@ -3004,6 +3004,7 @@ mod provisioned_writer_submission_tests {
             provider: Some("fixture".into()), model: Some("fixture/model".into()), ..Default::default()
         };
         store.publish_terminal(record.attempt_id, record.revision, &provenant_run::TerminalPublication {
+ stop: None,
             terminal_cause: None, terminal_note: None,
             outcome: if quota { provenant_records::run::Outcome::QuotaLimited } else { provenant_records::run::Outcome::Succeeded },
             started_at: Some(started), finished_at: finished, provider_ms: Some(1000),

@@ -228,6 +228,7 @@ fn settled_attempt(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
+            stop: None,
             terminal_cause: None,
             terminal_note: None,
             outcome: if success {

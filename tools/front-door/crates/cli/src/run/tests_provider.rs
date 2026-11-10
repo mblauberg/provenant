@@ -465,7 +465,7 @@ fn agy_repeated_answer_is_captured_once() {
         capture.push(decoded.result.as_bytes());
         let captured = capture.finish();
         assert!(
-            provenant_records::handoff::Handoff::from_result(&decoded.result)
+            provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
                 .unwrap()
                 .is_some()
         );
@@ -482,7 +482,7 @@ fn agy_repeated_answer_is_captured_once() {
     ] {
         let decoded = decode("", &response);
         assert_eq!(decoded.result, response);
-        assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+        assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
     }
 }
 #[test]
@@ -542,7 +542,7 @@ fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
         decoded.result,
         format!("{handoff}\nThe wait was redundant.")
     );
-    assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+    assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
     assert_eq!(decoded.handoff().unwrap().unwrap().note, "finished");
     // A tool run after the declaration leaves the lane without one.
     let decoded = decode(&[&notification, &tool_use]);
@@ -706,7 +706,7 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
     let mut capture = provenant_records::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(decoded.result.as_bytes());
     let captured = capture.finish();
-    let declared = provenant_records::handoff::Handoff::from_result(&decoded.result)
+    let declared = provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
         .expect("handoff parses")
         .expect("handoff found");
     assert_eq!(declared.note, "n");

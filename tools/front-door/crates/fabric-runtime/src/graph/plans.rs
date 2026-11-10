@@ -1725,6 +1725,7 @@ fn continuation(
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     handoff: &provenant_records::handoff::Handoff,
+    blocked: bool,
     limits: &crate::config::GraphLimits,
 ) -> Result<Expansion, String> {
     if continuation_count(checkpoint) >= limits.continuations {
@@ -1733,7 +1734,7 @@ fn continuation(
             limits.continuations
         ));
     }
-    if no_work::handoff_requires_chair(handoff) {
+    if blocked {
         return Err(
             "writer needs an owner decision, capability or external change; inspect its handoff"
                 .into(),
@@ -1998,10 +1999,15 @@ pub(super) fn settle(
         let handoff = capture
             .map(handoff)
             .unwrap_or_else(|| Ok(checkpoint.nodes[index].handoff.clone()));
+        let blocked = capture.map_or(checkpoint.nodes[index].blocked, |capture| {
+            matches!(&capture.handoff, Ok(Some(handoff))
+                if handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
+        });
         match handoff {
             Ok(Some(note)) => {
                 checkpoint.nodes[index].handoff = Some(note.clone());
-                continuation(node, document, checkpoint, &note, limits).inspect_err(|_| {
+                checkpoint.nodes[index].blocked = blocked;
+                continuation(node, document, checkpoint, &note, blocked, limits).inspect_err(|_| {
                     safe_reason = PlanFailureFact::InvalidContinuation;
                 })
             }

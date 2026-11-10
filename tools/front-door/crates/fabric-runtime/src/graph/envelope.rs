@@ -237,6 +237,7 @@ fn node_bound(
         review_base_pending: false,
         fragment: (plans::agent(node) && !admitted).then(String::new),
         handoff: None,
+        blocked: false,
         decisions: Vec::new(),
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {

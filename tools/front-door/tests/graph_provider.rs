@@ -2645,6 +2645,7 @@ fn persisted_attempt_with(
             attempt_id,
             running.revision,
             &provenant_run::TerminalPublication {
+                stop: None,
                 terminal_cause: None,
                 terminal_note: None,
                 outcome: provenant_run::Outcome::Succeeded,
