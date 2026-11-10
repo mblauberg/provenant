@@ -669,7 +669,7 @@ mod tests {
                 world.requests.push((path.into(), etag.map(str::to_owned)));
                 world.delay
             });
-            std::thread::sleep(delay);
+            self.sleep(delay);
             self.with(|world| {
                 let mut headers = BTreeMap::new();
                 let now = world.now_ms / 1000;

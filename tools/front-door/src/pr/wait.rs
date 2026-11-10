@@ -125,19 +125,6 @@ fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State
     }
     State::Passed
 }
-/// The land wait's verdict on `checks` with no named requirement.
-#[cfg(test)]
-#[allow(dead_code)] // The worktree driver includes this module without libtest.
-pub(super) fn verdict(checks: &[Check], now: jiff::Timestamp) -> &'static str {
-    match state(checks, &[], now) {
-        State::Passed => "passed",
-        State::Pending | State::Settling => "pending",
-        State::Failed => "failed",
-        State::Unavailable => "unavailable",
-        State::Conflict => "conflict",
-        State::NotScheduled => "not scheduled",
-    }
-}
 /// Time still to wait after the newest check activity, or `None` once the
 /// repository has been quiet for `SETTLE`. A check with no time is just now.
 fn settle_remaining(checks: &[Check], now: jiff::Timestamp) -> Option<Duration> {
@@ -566,6 +553,19 @@ fn checks_with(
     }
 }
 
+/// The land wait's verdict on `checks` with no named requirement.
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
+pub(super) fn verdict(checks: &[Check], now: jiff::Timestamp) -> &'static str {
+    match state(checks, &[], now) {
+        State::Passed => "passed",
+        State::Pending | State::Settling => "pending",
+        State::Failed => "failed",
+        State::Unavailable => "unavailable",
+        State::Conflict => "conflict",
+        State::NotScheduled => "not scheduled",
+    }
+}
 #[cfg(test)]
 #[allow(dead_code, unused_imports)] // Also compiled, unrun, by the harness-less worktrees driver.
 mod tests {
