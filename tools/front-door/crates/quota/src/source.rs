@@ -116,6 +116,8 @@ pub struct QuotaDetails {
     pub reset_credits: Option<u64>,
     pub reset_expiries_unix_seconds: Vec<i64>,
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 impl QuotaDetails {
     pub fn calibration_active(&self, pool: &str, now: i64) -> bool {

@@ -257,6 +257,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 });
             }
             if is_error || subtype != "success" {
+                if let Some(result) = result.filter(|message| !message.is_empty()) {
+                    events.push(E::Text(result));
+                }
                 events.push(E::Error);
             } else {
                 if let Some(result) = result {

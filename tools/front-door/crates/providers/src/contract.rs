@@ -128,6 +128,37 @@ pub struct AvailabilityRecord {
     pub expires_unix_seconds: i64,
 }
 
+/// Match a requested model against a list of offered models reported by an account.
+/// Empty offered models means no restriction is known.
+pub fn model_matches_offered(requested: &str, offered_models: &[String]) -> bool {
+    if offered_models.is_empty() {
+        return true;
+    }
+    offered_models
+        .iter()
+        .any(|offered| model_matches_single(requested, offered))
+}
+
+fn model_matches_single(requested: &str, offered: &str) -> bool {
+    fn tokens(name: &str) -> Vec<String> {
+        name.strip_prefix("agy/")
+            .unwrap_or(name)
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+    let (req, off) = (tokens(requested), tokens(offered));
+    if req.is_empty() || off.is_empty() {
+        return false;
+    }
+    // Whole tokens only: "mini" never matches inside "gemini". An offered
+    // display name ("Gemini Flash") matches a technical id that contains all of
+    // its tokens ("gemini-3.8-flash").
+    off.iter().all(|t| req.contains(t)) || req.iter().all(|t| off.contains(t))
+}
+
 pub struct Prompt {
     text: String,
     file: Option<std::path::PathBuf>,
@@ -389,4 +420,29 @@ pub trait Adapter: Sync {
         &self,
         provenance: &RouteProvenance<'_>,
     ) -> Result<VerifiedLineage, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_matches_offered() {
+        let flash_only = vec!["Gemini Flash".to_string()];
+        assert!(!model_matches_offered("gemini-3.8-pro", &flash_only));
+        assert!(!model_matches_offered("agy/gemini-3.8-pro", &flash_only));
+        assert!(model_matches_offered("gemini-3.8-flash", &flash_only));
+        assert!(model_matches_offered("agy/gemini-3.8-flash", &flash_only));
+
+        let both = vec!["Gemini Flash".to_string(), "Gemini Pro".to_string()];
+        assert!(model_matches_offered("gemini-3.8-pro", &both));
+        assert!(model_matches_offered("gemini-3.8-flash", &both));
+
+        let empty: Vec<String> = Vec::new();
+        assert!(model_matches_offered("gemini-3.8-pro", &empty));
+
+        let technical = vec!["gemini-2.5-flash".to_string()];
+        assert!(!model_matches_offered("gemini-3.8-pro", &technical));
+        assert!(model_matches_offered("agy/Gemini-2.5-Flash", &technical));
+    }
 }

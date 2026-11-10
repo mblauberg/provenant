@@ -122,7 +122,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             if let Some(error) = data["provider_error"].as_str() {
                 lines.push(format!(
                     "provider error: {}",
-                    crate::bounded_text(error, 160)
+                    crate::bounded_text(error, PROVIDER_ERROR_BYTES)
                 ));
             }
             if let Some(path) = structured_path_text(&data["result_path"]) {
@@ -873,6 +873,20 @@ pub(super) fn provider_error_line(
     call: &run::Request<'_>,
 ) -> Option<String> {
     const TAIL_BYTES: u64 = 8192;
+    // A structured provider error (the result's own message) outranks the
+    // last stderr line, which may be only the tail of a longer explanation.
+    if let Ok(chunk) = session.service().output(
+        id,
+        run::ArtifactPart::Result,
+        run::ByteRange {
+            offset: 0,
+            max_bytes: PROVIDER_ERROR_BYTES as u64,
+        },
+        call,
+    ) && let Some(message) = provider_error_from_result(&chunk.bytes)
+    {
+        return Some(message);
+    }
     let length = session
         .service()
         .output(
@@ -899,6 +913,27 @@ pub(super) fn provider_error_line(
         )
         .ok()?;
     provider_error_from_stderr(&tail.bytes)
+}
+
+const PROVIDER_ERROR_BYTES: usize = 1024;
+
+/// The provider's whole error message from a failed attempt's result, with its
+/// lines joined and the text redacted and bounded.
+fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let joined = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if joined.is_empty() {
+        return None;
+    }
+    let redacted = provenant_confinement::redact::known_shapes(joined.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
 }
 
 /// Select a cause from captured stderr without promoting known Codex skill
@@ -1206,7 +1241,8 @@ pub fn attempt_provider(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_planner_fallback, fallback_reason_for_graph, output_summary, provider_error_from_stderr,
+        add_planner_fallback, fallback_reason_for_graph, output_summary,
+        provider_error_from_result, provider_error_from_stderr,
     };
     use serde_json::json;
 
@@ -1275,6 +1311,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(fallback_reason_for_graph(&checkpoint), None);
+    }
+
+    #[test]
+    fn provider_error_from_result_keeps_the_whole_multiline_message() {
+        let message = provider_error_from_result(
+            b"Model not recognized: gemini-3.8-pro\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
+        )
+        .unwrap();
+        assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
+        assert!(message.ends_with("GPT-OSS 120B (Medium)"));
+        assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 
     #[test]

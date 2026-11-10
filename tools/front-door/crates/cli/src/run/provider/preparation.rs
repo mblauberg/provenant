@@ -1260,6 +1260,27 @@ fn stale_observation_index(
     })
 }
 
+/// The models a route's account reports when the requested model is not among
+/// them. Accounts that report no models place no restriction.
+fn unoffered_model(
+    availability: &[provenant_providers::AvailabilityRecord],
+    route: &ResolvedRoute,
+    now: i64,
+) -> Option<Vec<String>> {
+    let key = route.account_key.as_deref()?;
+    if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
+        return None;
+    }
+    let record = availability.iter().find(|record| {
+        record.adapter == route.adapter
+            && record.account_key.as_deref() == Some(key)
+            && record.expires_unix_seconds > now
+            && !record.observed_models.is_empty()
+    })?;
+    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models))
+        .then(|| record.observed_models.clone())
+}
+
 fn retry_stale_selected(
     availability: &mut [provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
@@ -1318,6 +1339,46 @@ fn same_selected_ready(route: &ResolvedRoute, next: ResolvedRoute) -> Option<Res
 mod stale_readiness_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn model_outside_the_accounts_offered_list_is_refused_with_that_list() {
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "adapter":"agy", "model":"gemini-3.8-pro", "effort":null,
+            "catalogue_revision":"revision", "account_key":"account", "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))
+        .unwrap();
+        let record = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "agy".into(),
+            executable: "/bin/agy".into(),
+            version: "1".into(),
+            last_update: None,
+            fixture_ref: "installed/agy/version".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some("account".into()),
+            observed_models: vec!["Gemini Flash".into(), "GPT-OSS 120B (Medium)".into()],
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 400,
+        };
+        assert_eq!(
+            unoffered_model(std::slice::from_ref(&record), &route, 20),
+            Some(record.observed_models.clone())
+        );
+        let mut flash = route.clone();
+        flash.model = "gemini-3.8-flash".into();
+        assert_eq!(
+            unoffered_model(std::slice::from_ref(&record), &flash, 20),
+            None
+        );
+        let unknown = provenant_providers::AvailabilityRecord {
+            observed_models: vec![],
+            ..record
+        };
+        assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+    }
 
     #[test]
     fn stale_selected_account_is_reprobed_once_without_changing_route() {
@@ -2393,6 +2454,22 @@ pub(super) fn prepare_candidates(
                 provenant_records::diagnostic::BoundaryClass::Authority,
             );
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
+            continue;
+        }
+        if let Some(offered) = unoffered_model(&availability, &route, clock.unix_seconds()) {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
+            reasons.push(skip(
+                &label,
+                SkipKind::Refused,
+                format!(
+                    "model `{}` is not offered by this account; offered models: {}",
+                    route.model,
+                    offered.join(", ")
+                ),
+            ));
             continue;
         }
         let Some(registration) = provider_registry

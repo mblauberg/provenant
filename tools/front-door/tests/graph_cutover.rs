@@ -409,12 +409,32 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                     old["exit"],
                     "exit code: {name} {new_args:?}"
                 );
-                let new: Value = normalise(serde_json::from_slice(&output.stdout.bytes)?);
+                let mut new: Value = normalise(serde_json::from_slice(&output.stdout.bytes)?);
                 assert_eq!(new["status"], old["reply"]["status"]);
                 assert_eq!(new["error"], old["reply"]["error"]);
                 if args[0] == "output" {
                     let mut before = old["reply"]["data"].clone();
                     drop_resolved_route(&mut before, &format!("{name} {id} output"))?;
+                    // A failed attempt's output reports the provider error from its
+                    // structured result (#3143). The pre-cut capture predates that
+                    // field: successful outputs omit it and failed ones carry null.
+                    // It is checked on its own rather than compared.
+                    let pre_cut_error = before.as_object_mut().unwrap().remove("provider_error");
+                    assert!(
+                        matches!(pre_cut_error, None | Some(Value::Null)),
+                        "pre-cut output carries no provider error: {name} {id}"
+                    );
+                    let reported = new["data"]
+                        .as_object_mut()
+                        .and_then(|data| data.remove("provider_error"))
+                        .unwrap_or(Value::Null);
+                    let expected = match outcomes[index] {
+                        provenant_run::Outcome::Failed => {
+                            json!(format!("Synthetic {name} attempt {index}"))
+                        }
+                        _ => Value::Null,
+                    };
+                    assert_eq!(reported, expected, "provider error: {name} {id}");
                     assert_eq!(new["data"], before, "output fields: {name} {id}");
                 } else {
                     let mut row = new["data"]["rows"]
