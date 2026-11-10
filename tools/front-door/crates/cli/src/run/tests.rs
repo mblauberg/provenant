@@ -1070,7 +1070,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     "worktrees/{}/abandon-fixture",
                     session.context.project_id
                 ));
-                std::fs::create_dir_all(&slot_path)?;
+                provenant_os::fixture::private_state_dir(&slot_path)?;
                 let lease = provenant_supervisor::fixture::acquire_writer(
                     Directory::open_anchor(&slot_path)?,
                     scope,

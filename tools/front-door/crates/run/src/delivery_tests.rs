@@ -260,11 +260,14 @@ impl PrepareFixture {
 
         let state = self.root.join("state");
         let attempt_path = self.root.join("attempt");
-        std::fs::create_dir(&state)?;
-        std::fs::create_dir(&attempt_path)?;
-        for path in [&state, &attempt_path, &self.root.join("home")] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        // A lane fixture may already have built the attempt and its scratch tree.
+        for path in [&state, &attempt_path] {
+            provenant_os::fixture::private_state_dir(path)?;
         }
+        std::fs::set_permissions(
+            self.root.join("home"),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
         let attempt = Directory::open_anchor(&attempt_path)?;
         let utility = UtilityRuntime::new(
             provenant_os::git::git_executable().ok_or("git executable")?,
@@ -590,7 +593,7 @@ fn lane_with_committed_merge() -> std::result::Result<
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let attempt_path = fixture.root.join("attempt");
     let scratch = attempt_path.join("tmp/candidate-0");
-    std::fs::create_dir_all(&scratch)?;
+    provenant_os::fixture::private_state_dir(&scratch)?;
     // The utility runtime refuses a home that group or others can reach.
     std::fs::set_permissions(
         fixture.root.join("home"),

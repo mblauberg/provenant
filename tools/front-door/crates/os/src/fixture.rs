@@ -9,10 +9,14 @@ pub use fixture_git::{
 
 /// Create a fixture state root with the private permissions required by stores.
 ///
-/// Set permissions explicitly so fixtures are independent of the process umask.
+/// Missing parents are created private too, and the leaf is set explicitly, so
+/// fixtures are independent of the process umask.
 pub fn private_state_dir(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(path)?;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
