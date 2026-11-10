@@ -552,6 +552,8 @@ pub struct LaneRuntime<'a> {
     pub depth: u64,
     pub attempt: AttemptId,
     pub assets: &'a Path,
+    /// `fabric.mcp_server`: launch the lane with the Fabric MCP server.
+    pub fabric_mcp: bool,
 }
 
 impl LaneRuntime<'_> {
@@ -603,6 +605,7 @@ impl LaneRuntime<'_> {
         image_rules: &[String],
     ) -> Result<Vec<SetupStep>, ProviderError> {
         let mcp = match self.mcp(Harness::Claude) {
+            _ if !self.fabric_mcp => serde_json::json!({"mcpServers": {}}),
             Ok(entry) => serde_json::json!({"mcpServers": {"fabric": entry}}),
             Err(error) => {
                 use std::io::Write;
@@ -638,6 +641,9 @@ impl LaneRuntime<'_> {
     }
 
     pub(crate) fn codex(&self, argv: &mut Vec<OsString>) -> Result<(), ProviderError> {
+        if !self.fabric_mcp {
+            return Ok(());
+        }
         let mcp = match self.mcp(Harness::Codex) {
             Ok(entry) => entry,
             Err(error) => {
@@ -2514,6 +2520,7 @@ mod tests {
             depth: 1,
             attempt: AttemptId::from_bytes([1; 16]),
             assets: Path::new("/fixture/assets"),
+            fabric_mcp: true,
         };
         assert!(matches!(
             lane.mcp(Harness::Codex),
@@ -2543,6 +2550,38 @@ mod tests {
     }
 
     #[test]
+    fn lanes_launch_without_the_fabric_server_unless_opted_in() -> Result<(), ProviderError> {
+        for fabric_mcp in [false, true] {
+            let lane = LaneRuntime {
+                executable: Path::new("/fixture/provenant"),
+                git: Path::new("/fixture/git"),
+                state: Path::new("/fixture/state"),
+                home: Path::new("/fixture/home"),
+                depth: 1,
+                attempt: AttemptId::from_bytes([1; 16]),
+                assets: Path::new("/fixture/assets"),
+                fabric_mcp,
+            };
+            let mut codex = Vec::new();
+            lane.codex(&mut codex)?;
+            assert_eq!(!codex.is_empty(), fabric_mcp);
+            let mut claude = Vec::new();
+            let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, None, &[])?;
+            let servers = setup.iter().find_map(|step| match step {
+                SetupStep::WriteFile { bytes, .. } => serde_json::from_slice::<Value>(bytes)
+                    .ok()
+                    .and_then(|document| document.get("mcpServers").cloned()),
+                _ => None,
+            });
+            assert_eq!(
+                servers.ok_or(ProviderError::Malformed)?.get("fabric").is_some(),
+                fabric_mcp
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn lane_mcp_entries_have_attempt_unique_agent_labels() -> Result<(), ProviderError> {
         for harness in [Harness::Claude, Harness::Codex] {
             for byte in [1, 2] {
@@ -2554,6 +2593,7 @@ mod tests {
                     depth: 1,
                     attempt: AttemptId::from_bytes([byte; 16]),
                     assets: Path::new("/fixture/assets"),
+                    fabric_mcp: true,
                 };
                 assert_eq!(
                     lane.mcp(harness)?["env"]["PROVENANT_AGENT_LABEL"],

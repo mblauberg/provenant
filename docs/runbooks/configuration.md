@@ -27,6 +27,16 @@ refused and names the current one. History redacts secret-looking values.
 Host tables outside `[knobs]`, such as `[domains.fabric.lanes]` and `[gc]`,
 are edited by hand.
 
+## Fabric MCP server
+
+`fabric.mcp_server` is off by default. A default install writes no `fabric`
+MCP entry, and lanes launch without the server; every tool has a
+`provenant` CLI command. A client without a shell turns it on with
+`provenant config set fabric.mcp_server true`, then runs `provenant upgrade`
+(or `install`) to write the entry. Turning it off and reinstalling removes the
+entry the installer owns, if it is unchanged; edited or foreign entries stay.
+Already-running sessions keep the servers they started with.
+
 ## Precedence and stamps
 
 The file needs `schema_version = 1`; a missing file selects defaults. A knob in

@@ -46,7 +46,9 @@ impl Fixture {
         // environment mutation or access to real config/state.
         inputs.environment_state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&Resolver).unwrap();
-        let targets = Targets::new(roots, &home, &[Harness::Codex]);
+        let mut targets = Targets::new(roots, &home, &[Harness::Codex]);
+        // Most fixtures exercise the opted-in registration.
+        targets.fabric_mcp = true;
         Self {
             _tmp: tmp,
             base,
@@ -4333,4 +4335,71 @@ fn shared_instruction_adopts_foreign_link_and_resolves_parent() {
         &mut Reporter::default(),
     )
     .unwrap();
+}
+
+fn apply(f: &Fixture) {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn default_install_writes_no_fabric_entry_and_creates_no_config() {
+    let mut f = Fixture::new();
+    f.targets.fabric_mcp = false;
+    apply(&f);
+    assert!(!f.home.join(".codex/config.toml").exists());
+    assert!(f.link().is_symlink());
+}
+
+#[test]
+fn opting_out_removes_an_unchanged_owned_entry_and_keeps_foreign_ones() {
+    let mut f = Fixture::new();
+    let config = f.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "# mine\n[mcp_servers.other]\ncommand = 'keep'\n").unwrap();
+    apply(&f);
+    let on = fs::read_to_string(&config).unwrap();
+    assert!(on.contains("[mcp_servers.fabric]"));
+    f.targets.fabric_mcp = false;
+    apply(&f);
+    let off = fs::read_to_string(&config).unwrap();
+    assert!(!off.contains("mcp_servers.fabric"), "{off}");
+    assert!(off.contains("# mine"));
+    assert!(off.contains("[mcp_servers.other]"));
+    assert!(f.plan().actions().is_empty());
+    // Turning it back on restores the entry.
+    f.targets.fabric_mcp = true;
+    apply(&f);
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("[mcp_servers.fabric]")
+    );
+}
+
+#[test]
+fn opting_out_keeps_an_edited_owned_entry() {
+    let mut f = Fixture::new();
+    apply(&f);
+    let config = f.home.join(".codex/config.toml");
+    let edited = fs::read_to_string(&config)
+        .unwrap()
+        .replacen(
+            "[mcp_servers.fabric]",
+            "[mcp_servers.fabric]\nstartup_timeout_sec = 5",
+            1,
+        );
+    assert!(edited.contains("startup_timeout_sec"), "{edited}");
+    fs::write(&config, &edited).unwrap();
+    f.targets.fabric_mcp = false;
+    apply(&f);
+    assert_eq!(fs::read_to_string(&config).unwrap(), edited);
 }

@@ -170,6 +170,9 @@ pub struct Targets {
     pub adopt_existing: bool,
     pub hooks: bool,
     pub remove_hooks: bool,
+    /// `fabric.mcp_server`: write the Fabric MCP entry. Off removes an
+    /// unchanged owned one.
+    pub fabric_mcp: bool,
     /// Rendered per-user LaunchAgent, supplied only by the process edge.
     pub peer_agent: Option<Vec<u8>>,
     /// Rendered host tick scheduler, supplied only by the process edge: the
@@ -251,6 +254,7 @@ impl Targets {
             adopt_existing: false,
             hooks: false,
             remove_hooks: false,
+            fabric_mcp: false,
             peer_agent: None,
             tick_agent: None,
             tick_service: None,

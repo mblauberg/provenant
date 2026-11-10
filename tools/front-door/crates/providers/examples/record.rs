@@ -1245,6 +1245,7 @@ fn main() -> Result<()> {
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes(nonce),
                 assets: &args.assets,
+                fabric_mcp: true,
             },
         })?;
         if let Some(policy) = plan.policy_mut()
