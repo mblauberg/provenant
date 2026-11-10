@@ -27,7 +27,8 @@ pub struct FindingDecision {
     disposition: FindingDisposition,
     reason: String,
     reviewed_head: GitOid,
-    reviewed_base: GitOid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reviewed_base: Option<GitOid>,
     #[serde(flatten)]
     extra: crate::ExtraFields,
 }
@@ -38,7 +39,8 @@ struct FindingDecisionWire {
     disposition: FindingDisposition,
     reason: String,
     reviewed_head: GitOid,
-    reviewed_base: GitOid,
+    #[serde(default)]
+    reviewed_base: Option<GitOid>,
     #[serde(flatten)]
     extra: crate::ExtraFields,
 }
@@ -57,7 +59,7 @@ impl FindingDecision {
         disposition: FindingDisposition,
         reason: impl Into<String>,
         reviewed_head: GitOid,
-        reviewed_base: GitOid,
+        reviewed_base: Option<GitOid>,
     ) -> Result<Self, FindingDecisionError> {
         FindingDecisionWire {
             finding: finding.into(),
@@ -86,7 +88,7 @@ impl FindingDecision {
         self.reviewed_head
     }
 
-    pub fn reviewed_base(&self) -> GitOid {
+    pub fn reviewed_base(&self) -> Option<GitOid> {
         self.reviewed_base
     }
 }

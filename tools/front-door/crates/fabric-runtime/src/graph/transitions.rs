@@ -2,6 +2,7 @@
 //! transition and saves before admitting the next effect. This module deliberately
 //! takes neither an `AttemptOwner` nor a `GraphJournal`.
 use super::*;
+use provenant_core::GitOid;
 
 /// Apply an accepted, nonterminal attempt observation without I/O.
 pub(super) fn apply_pending_observation(
@@ -278,7 +279,7 @@ pub(super) fn apply_attempt_observation(
                     && template::review_node(node)
                     && attempt.attempt_ref.is_some()
                 {
-                    match review_range {
+                    match &review_range {
                         ReviewRange::NoBase => {
                             outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
                             outputs
@@ -461,6 +462,79 @@ pub(super) fn apply_attempt_observation(
                 match outcome {
                     AttemptOutcome::Succeeded => {
                         progress.state = NodeState::Succeeded;
+                        if node.access == AccessMode::ReadOnly && template::review_node(node) {
+                            let head_oid = match &review_range {
+                                ReviewRange::Resolved { head, .. } => GitOid::parse(head).ok(),
+                                _ => None,
+                            }
+                            .or_else(|| {
+                                progress
+                                    .source_commit
+                                    .as_deref()
+                                    .and_then(|h| GitOid::parse(h).ok())
+                            });
+                            if let Some(head) = head_oid {
+                                let base_oid = match &review_range {
+                                    ReviewRange::Resolved { base, .. } => GitOid::parse(base).ok(),
+                                    _ => None,
+                                }
+                                .or_else(|| {
+                                    progress
+                                        .review_base
+                                        .as_deref()
+                                        .or(checkpoint.bound_review_base.as_deref())
+                                        .or_else(|| {
+                                            node.extra
+                                                .get("review_base")
+                                                .and_then(serde_json::Value::as_str)
+                                        })
+                                        .and_then(|b| GitOid::parse(b).ok())
+                                });
+                                let findings = progress
+                                    .outputs
+                                    .as_ref()
+                                    .map(|o| o.findings.as_slice())
+                                    .unwrap_or_default();
+                                if findings.is_empty() {
+                                    if let Ok(decision) = provenant_records::FindingDecision::new(
+                                        &node.id,
+                                        provenant_records::FindingDisposition::Act,
+                                        format!("review {} settled", node.id),
+                                        head,
+                                        base_oid,
+                                    ) {
+                                        progress.decisions = vec![decision];
+                                    }
+                                } else {
+                                    progress.decisions = findings
+                                        .iter()
+                                        .filter_map(|finding| {
+                                            let disposition = match finding.disposition.as_deref() {
+                                                Some("decline") => {
+                                                    provenant_records::FindingDisposition::Decline
+                                                }
+                                                Some("replace") => {
+                                                    provenant_records::FindingDisposition::Replace
+                                                }
+                                                _ => provenant_records::FindingDisposition::Act,
+                                            };
+                                            let reason = finding
+                                                .reason
+                                                .as_deref()
+                                                .unwrap_or("finding decision");
+                                            provenant_records::FindingDecision::new(
+                                                &finding.id,
+                                                disposition,
+                                                reason,
+                                                head,
+                                                base_oid,
+                                            )
+                                            .ok()
+                                        })
+                                        .collect();
+                                }
+                            }
+                        }
                         false
                     }
                     AttemptOutcome::AuthRequired

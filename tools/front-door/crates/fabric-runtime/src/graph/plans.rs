@@ -291,6 +291,11 @@ const BLOCK_BYTES: usize = 12 * 1024;
 pub(super) const STORED_BLOCK_BYTES: usize = 2 * BLOCK_BYTES;
 /// A stopped-early handoff is stored whole, as the typed record.
 pub(super) const STORED_HANDOFF_BYTES: usize = provenant_records::handoff::HANDOFF_BYTES;
+/// Review decisions stored on review nodes, counted in the checkpoint size bound.
+pub(super) const STORED_DECISION_BYTES: usize =
+    provenant_records::finding_decision::FINDING_ID_BYTES
+        + provenant_records::finding_decision::DECISION_REASON_BYTES
+        + 256;
 
 fn block<'a>(
     capture: &'a crate::result_capture::CapturedResult,

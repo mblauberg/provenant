@@ -345,10 +345,30 @@ fn reviewed_head(
     {
         return None;
     }
-    if let Some(commit) = &checkpoint.nodes[index].source_commit {
-        return Some(commit.clone());
+    let progress = &checkpoint.nodes[index];
+    let head = progress
+        .source_commit
+        .clone()
+        .or_else(|| chain_head(plan, checkpoint, positions, reviewer, writer))?;
+    let base = progress
+        .review_base
+        .as_deref()
+        .or(checkpoint.bound_review_base.as_deref())
+        .or_else(|| {
+            node.extra
+                .get("review_base")
+                .and_then(serde_json::Value::as_str)
+        });
+    for decision in &progress.decisions {
+        let decision_base = decision.reviewed_base()?;
+        if base.is_none_or(|b| provenant_core::GitOid::parse(b).ok() != Some(decision_base)) {
+            return None;
+        }
+        if provenant_core::GitOid::parse(&head).ok() != Some(decision.reviewed_head()) {
+            return None;
+        }
     }
-    chain_head(plan, checkpoint, positions, reviewer, writer)
+    Some(head)
 }
 
 /// The newest head of `writer`'s chain among `node`'s upstream nodes, which a
@@ -409,7 +429,7 @@ pub(super) fn chain_attempts(
 /// Landing needs a gate that passed and whose every input reviewed `head`; a
 /// failed gate whose `on_fail` reaches the land is not acceptance. A gate
 /// replaced with a condition accepting rejection is not approval either.
-fn acceptance_error(
+pub(super) fn acceptance_error(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,

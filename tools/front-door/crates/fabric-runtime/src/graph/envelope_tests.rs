@@ -29,6 +29,17 @@ fn worst_handoff() -> provenant_records::handoff::Handoff {
     }
 }
 
+fn worst_decision() -> provenant_records::FindingDecision {
+    provenant_records::FindingDecision::new(
+        "\"".repeat(provenant_records::finding_decision::FINDING_ID_BYTES / 2),
+        provenant_records::FindingDisposition::Replace,
+        "\"".repeat(provenant_records::finding_decision::DECISION_REASON_BYTES / 2),
+        provenant_core::GitOid::parse(&"1".repeat(64)).unwrap(),
+        Some(provenant_core::GitOid::parse(&"2".repeat(64)).unwrap()),
+    )
+    .unwrap()
+}
+
 fn routes(count: usize) -> serde_json::Value {
     (0..count)
         .map(|index| json!({"adapter":"fixture", "model":format!("fixture/model-{index}")}))
@@ -264,7 +275,11 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(worst_handoff),
                 blocked: true,
-                decisions: Vec::new(),
+                decisions: if template::review_node(node) {
+                    vec![worst_decision()]
+                } else {
+                    Vec::new()
+                },
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
                 expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),

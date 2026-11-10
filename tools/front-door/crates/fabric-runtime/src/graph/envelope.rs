@@ -406,6 +406,9 @@ fn node_bound(
     if plans::writer(node) {
         bytes += plans::STORED_HANDOFF_BYTES + 16; // the record and its key
     }
+    if template::review_node(node) {
+        bytes += plans::STORED_DECISION_BYTES + 16;
+    }
     if repair::may_report_items(node, plan) || repair::is_repair(node) {
         bytes += FINDINGS_BYTES + 32;
     }

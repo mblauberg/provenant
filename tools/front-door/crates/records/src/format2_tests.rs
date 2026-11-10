@@ -129,8 +129,8 @@ fn records_refuse_values_outside_their_bounds() {
     assert!(Pause::new(PauseCause::LoopPaused, None, "").is_err());
     assert!(Pause::new(PauseCause::LoopPaused, Some("a b".into()), "Paused.").is_err());
     let oid = GitOid::parse(&"a".repeat(40)).unwrap();
-    assert!(FindingDecision::new("", FindingDisposition::Act, "Fix.", oid, oid).is_err());
-    assert!(FindingDecision::new("f1", FindingDisposition::Act, "", oid, oid).is_err());
+    assert!(FindingDecision::new("", FindingDisposition::Act, "Fix.", oid, Some(oid)).is_err());
+    assert!(FindingDecision::new("f1", FindingDisposition::Act, "", oid, Some(oid)).is_err());
 }
 
 /// Encode canonically, decode, and compare; then add an unknown field and
@@ -191,7 +191,18 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
             FindingDisposition::Replace,
             "Replace the guard with one owner.",
             head,
-            base,
+            Some(base),
+        )
+        .unwrap(),
+        true,
+    );
+    round_trip(
+        &FindingDecision::new(
+            "lens-1/F4",
+            FindingDisposition::Act,
+            "No base recorded.",
+            head,
+            None,
         )
         .unwrap(),
         true,
