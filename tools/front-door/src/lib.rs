@@ -297,6 +297,71 @@ fn report_account_sync(
         }
     }
 }
+/// Replace the registered account's quota reading with a fresh probe and report the result.
+fn probe_registered_account(
+    edge: &provenant_cli::run::Edge<'_>,
+    data: &provenant_providers::accounts::Settings,
+    adapter: &str,
+    label: &str,
+    reply: &mut provenant_cli::run::Reply,
+) {
+    let Some(entry) = data
+        .entries
+        .values()
+        .find(|entry| entry.adapter == adapter && entry.label == label)
+    else {
+        return;
+    };
+    let account = provenant_quota::AccountScope {
+        adapter: entry.adapter.clone(),
+        account_key: entry.key.clone(),
+        label: entry.label.clone(),
+    };
+    if !provenant_providers::REGISTRY
+        .iter()
+        .any(|r| r.quota_source.is_some() && r.adapter.id() == account.adapter)
+    {
+        return;
+    }
+    let result = provenant_providers::quota_live::LiveQuota::new(edge.roots, edge.home, data)
+        .map_err(|error| error.to_string())
+        .and_then(|effects| {
+            provenant_cli::quota::probe_registered(
+                edge.roots,
+                provenant_providers::REGISTRY,
+                &effects,
+                &account,
+            )
+        });
+    let row = result.as_ref().ok().and_then(|report| {
+        report.accounts.iter().find(|row| {
+            row.account.adapter == account.adapter && row.account.account_key == account.account_key
+        })
+    });
+    match (row, &result) {
+        (Some(row), _) => {
+            let status = serde_json::to_value(row.status).unwrap_or_default();
+            let error = row.error.and_then(|error| serde_json::to_value(error).ok());
+            reply.human.push_str(&format!(
+                "quota probed: {} {}{}\n",
+                account.label,
+                status.as_str().unwrap_or("unknown"),
+                error
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(String::new, |error| format!(" (refresh failed: {error})")),
+            ));
+            reply.result.data["quota"] = serde_json::json!({"status": status, "error": error});
+        }
+        (None, Err(error)) => {
+            reply.human.push_str(&format!(
+                "quota not probed: {error}; run `provenant quota tick`\n"
+            ));
+            reply.result.data["quota"] = serde_json::json!({"skipped": error});
+        }
+        (None, Ok(_)) => {}
+    }
+}
 /// Registration is saved before this runs. Install the managed hooks, skills,
 /// MCP entry and shared settings into the new account directory, so it matches the
 /// others without a further command. A failure leaves the registration in place.
@@ -706,8 +771,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                             ),
                         };
                         match command {
-                            provenant_cli::accounts::Accounts::Register { .. } => {
+                            provenant_cli::accounts::Accounts::Register {
+                                ref adapter,
+                                ref label,
+                                ..
+                            } => {
                                 sync_registered_account(globals, &mut reply);
+                                probe_registered_account(edge, &data, adapter, label, &mut reply);
                             }
                             provenant_cli::accounts::Accounts::List => {
                                 report_account_sync(globals, &data, &mut reply);
@@ -1216,12 +1286,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     provenant_cli::run::stats_by_pr(cmd, edge, merged)
                 })
             } else {
-                let workspace = if stats_dispatch(&cmd) == StatsDispatch::Directory {
-                    Workspace::Directory
-                } else {
-                    Workspace::Project
-                };
-                run_edge_workspace(&inv.leaf, globals, workspace, |edge| {
+                run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
                     provenant_cli::run::stats(cmd, edge)
                 })
             }
@@ -1265,7 +1330,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 outcomes: true,
                 suggest: false,
                 pipeline: cmd.pipeline,
-                claude_subagents: None,
                 usage: false,
                 since: None,
                 until: None,
@@ -1464,7 +1528,6 @@ mod telemetry_stats_dispatch_tests {
 enum StatsDispatch {
     Usage,
     MergedPullRequests,
-    Directory,
     Project,
 }
 
@@ -1473,8 +1536,6 @@ fn stats_dispatch(command: &provenant_cli::Stats) -> StatsDispatch {
         StatsDispatch::Usage
     } else if command.by == Some(provenant_cli::StatsBy::Pr) {
         StatsDispatch::MergedPullRequests
-    } else if command.claude_subagents.is_some() {
-        StatsDispatch::Directory
     } else {
         StatsDispatch::Project
     }

@@ -2187,14 +2187,13 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--outcomes` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "description": "Include offline post-merge outcomes and stratified ranking", "name": "outcomes", "values": ["true", "false"]}` |
-| `--suggest` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "description": "Include advisory expiring suggestions from offline pipeline evidence", "name": "suggest", "values": ["true", "false"]}` |
+| `--outcomes` | `{"conflicts": ["usage", "by"], "defaults": ["false"], "description": "Include offline post-merge outcomes and stratified ranking", "name": "outcomes", "values": ["true", "false"]}` |
+| `--suggest` | `{"conflicts": ["usage", "by"], "defaults": ["false"], "description": "Include advisory expiring suggestions from offline pipeline evidence", "name": "suggest", "values": ["true", "false"]}` |
 | `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
 | `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
 | `--outcome-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
 | `--min-samples` | `{"bounds": [1, 100000], "defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
 | `--expiry-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
-| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "description": "Report native Claude subagents from one session's subagents directory instead of supervised attempts", "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "description": "Count local CLI verbs and MCP tools, including unused installed units", "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"description": "Count from this date or timestamp, or a span such as 1d ago", "name": "since"}` |
 | `--until` | `{"description": "Count up to this date or timestamp", "name": "until"}` |

@@ -1,62 +1,7 @@
 mod support;
 use serde_json::Value;
 use std::fs;
-use support::{Result, TestRig, code};
-
-#[test]
-fn native_stats_runs_without_a_project_or_store_and_sanitises_output() -> Result {
-    let rig = TestRig::new()?;
-    fs::create_dir_all(rig.project.join("config"))?;
-    fs::write(
-        rig.project.join("config/telemetry-prices.toml"),
-        include_str!("../../../config/telemetry-prices.toml"),
-    )?;
-    let directory = rig.home.join(".claude/projects/project/session/subagents");
-    fs::create_dir_all(&directory)?;
-    fs::write(
-        directory.join("agent-one.jsonl"),
-        concat!(
-            "{\"type\":\"assistant\",\"message\":{\"id\":\"one\",\"model\":\"evil\\nforged\",\"usage\":{\"input_tokens\":1}}}\n",
-            "{\"type\":\"assistant\""
-        ),
-    )?;
-    fs::write(directory.join("notes.jsonl"), "not a subagent transcript\n")?;
-    let path = directory.to_str().ok_or("path")?;
-    let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "stdout: {} stderr: {}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let human = String::from_utf8(output.stdout.bytes)?;
-    assert!(!human.contains("\nforged"));
-    assert!(human.contains("1 incomplete"));
-    assert!(!human.contains("0 attempts"));
-    let output = rig.command(&["telemetry", "stats", "--claude-subagents", path, "--json"])?;
-    assert_eq!(code(&output), 0);
-    let json: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        json["data"]["native_claude_subagents"]["skipped_incomplete_lines"],
-        1
-    );
-    assert!(json["data"].get("totals").is_none());
-    #[cfg(unix)]
-    {
-        let non_regular = directory.join("agent-x.jsonl");
-        std::os::unix::fs::symlink("agent-one.jsonl", &non_regular)?;
-        let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
-        assert_eq!(code(&output), 2, "symlink transcript must be refused");
-        fs::remove_file(&non_regular)?;
-        fs::create_dir(&non_regular)?;
-        let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
-        assert_eq!(code(&output), 2, "directory transcript must be refused");
-    }
-    let output = rig.command(&["telemetry", "stats", "--claude-subagents", "/missing"])?;
-    assert_eq!(code(&output), 2);
-    Ok(())
-}
+use support::{Result, TestRig, code, register_account};
 
 #[test]
 fn prices_refresh_proposes_a_deterministic_diff_and_never_edits_the_sheet() -> Result {
@@ -232,7 +177,7 @@ fn prices_refresh_flags_missing_models_and_rejects_unrelated_documents() -> Resu
 }
 
 #[test]
-fn stats_surfaces_a_stale_price_sheet_on_the_native_path() -> Result {
+fn stats_surfaces_a_stale_price_sheet() -> Result {
     let (rig, sheet) = refresh_rig()?;
     fs::write(
         rig.project.join("config/telemetry-prices.toml"),
@@ -241,16 +186,98 @@ fn stats_surfaces_a_stale_price_sheet_on_the_native_path() -> Result {
             "reviewed_at = \"2020-01-01\"",
         ),
     )?;
-    let directory = rig.home.join(".claude/projects/project/session/subagents");
-    fs::create_dir_all(&directory)?;
-    fs::write(directory.join("agent-one.jsonl"), "")?;
-    let path = directory.to_str().ok_or("path")?;
-    let output = rig.command(&["telemetry", "stats", "--claude-subagents", path])?;
+    let output = rig.command(&["telemetry", "stats"])?;
     assert_eq!(code(&output), 0);
     assert!(String::from_utf8(output.stdout.bytes)?.contains("price sheet reviewed"));
-    let output = rig.command(&["telemetry", "stats", "--claude-subagents", path, "--json"])?;
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
     let json: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(json["data"]["price_freshness"]["stale"], true);
     assert_eq!(json["data"]["price_freshness"]["reviewed_at"], "2020-01-01");
+    Ok(())
+}
+
+fn message(id: &str, output: u64) -> String {
+    use provenant_core::Clock;
+    let timestamp = provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .map(|t| t.as_timestamp().to_string())
+        .unwrap_or_default();
+    format!(
+        "{{\"type\":\"assistant\",\"timestamp\":\"{timestamp}\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-opus-5-5\",\"content\":\"PRIVATE PROMPT\",\"usage\":{{\"input_tokens\":5,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":11,\"output_tokens\":{output}}}}}}}\n"
+    )
+}
+
+#[test]
+fn stats_default_output_omits_attempt_rows_and_leaves_other_sections_unchanged() -> Result {
+    let (rig, _) = refresh_rig()?;
+    let config = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &config)?;
+    let directory = config.join("projects/-fixture");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("chair-session.jsonl"), message("chair", 1))?;
+    let subagents = directory.join("chair-session/subagents");
+    fs::create_dir_all(&subagents)?;
+    fs::write(subagents.join("agent-a.jsonl"), message("linked", 45))?;
+    fs::write(subagents.join("agent-b.jsonl"), message("unlinked", 30))?;
+    let start = rig.command(&[
+        "native",
+        "start",
+        "--id",
+        "tool-1",
+        "--session",
+        "chair-session",
+        "--alias",
+        "reviewer",
+        "--model",
+        "claude-opus-5-5",
+        "--effort",
+        "high",
+        "--json",
+    ])?;
+    assert_eq!(code(&start), 0, "{start:?}");
+    let end = rig.command(&[
+        "native",
+        "end",
+        "--id",
+        "tool-1",
+        "--session",
+        "chair-session",
+        "--agent",
+        "a",
+        "--settlement",
+        "succeeded",
+        "--json",
+    ])?;
+    assert_eq!(code(&end), 0, "{end:?}");
+
+    let default_output = rig.command(&["telemetry", "stats"])?;
+    assert_eq!(code(&default_output), 0);
+    let default_text = String::from_utf8(default_output.stdout.bytes)?;
+
+    let detail_output = rig.command(&["telemetry", "stats", "--detail"])?;
+    assert_eq!(code(&detail_output), 0);
+    let detail_text = String::from_utf8(detail_output.stdout.bytes)?;
+
+    let header = "native sub-agent usage (host; may overlap chair usage):\n";
+    assert!(default_text.contains(header));
+    assert!(detail_text.contains(header));
+
+    // The other sections preceding the native section are identical.
+    let default_prefix = default_text.split(header).next().unwrap();
+    let detail_prefix = detail_text.split(header).next().unwrap();
+    assert_eq!(default_prefix, detail_prefix);
+
+    // Default output omits per-attempt rows and gives the count summary line.
+    assert!(default_text.contains("1 attempts; per-attempt rows with --detail or --json"));
+    assert!(!default_text.contains("reviewer claude-opus-5-5:"));
+
+    // Detail output includes per-attempt rows and omits the count summary line.
+    assert!(detail_text.contains("reviewer claude-opus-5-5: input=23 output=45"));
+    assert!(!detail_text.contains("1 attempts; per-attempt rows with --detail or --json"));
+
+    // Both retain unlinked sub-agent usage.
+    assert!(default_text.contains("unlinked claude-opus-5-5: 1 messages, input=23 output=30"));
+    assert!(detail_text.contains("unlinked claude-opus-5-5: 1 messages, input=23 output=30"));
+
     Ok(())
 }
