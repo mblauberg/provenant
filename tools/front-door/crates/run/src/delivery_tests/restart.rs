@@ -319,6 +319,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     reaction.graph_done = true;
                     reaction.notice_done = true;
                     reaction.log_done = true;
+                    reaction.ledger_done = true;
                     Ok(())
                 };
                 store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
