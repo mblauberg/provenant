@@ -1592,3 +1592,118 @@ Graph writer retries seal `context.writer_predecessor` in their launch request.
 After acquiring writer custody, launch rechecks that predecessor's terminal
 state, released custody, graph and node identity, source pins and ownership.
 This check does not create a run-policy `retry_of` relationship.
+
+## A stop is sealed once
+
+Target behaviour for the format-2 cut-over (#3078); no caller reads these
+records yet. Work has one identity, the `WorkKey`: project, graph, node and
+one-based attempt number, written `GRAPH/NODE#N`. A plain lane is a one-node
+graph. An attempt that ends without finishing its brief seals one `Stop` at
+settlement: a typed `cause` and the writer's `handoff`, decoded once by
+`Handoff::from_turns` and stored typed, so no reader parses result text again.
+A finished attempt seals no stop. A cause is one fact. Facts about the
+worktree, such as whether it holds a new commit, sit beside the stop, so a
+writer that stopped early with no commit is a `stopped_early` stop, not a
+separate cause.
+
+A `stopped_early` or `blocked` stop needs the handoff that declared it, and a
+`done` handoff declares no stop. `blocked` is a stop cause, not a plain
+failure (#3154): the stop carries its handoff, and `status` and `output` show
+the handoff note as the one-line reason it is blocked. A blocked node still
+does not satisfy its dependants. Each record keeps fields it does not know, so
+a newer writer's additions survive a rewrite; a `WorkKey` and a `NextStep`
+ignore them, because their identity is their known fields.
+
+Lane and graph limits are `Limit` records: a value, its `source` (`default`,
+`host`, `project`, `template` or `launch`) and its `strength` (`enforced`: the
+host stops or refuses at the value; `advisory`: the host reports it and does
+not act). The lane preamble states only enforced limits. A review finding's
+`FindingDecision` records its disposition (`act`, `decline` or `replace`), a
+reason, and the reviewed head and base, so a review binds to the change
+rather than the head commit (#3132). A graph `Pause` records a typed cause
+(`stop` with its stop cause, `continuation_budget`, `invalid_plan_expansion`,
+`invalid_loop_decision`, `loop_ask_closed`, `loop_paused` or
+`structural_limit`), the node that paused it and one bounded sentence.
+- Why: a stop was spread over a terminal cause, an attempt outcome, partial
+  signals and a handoff re-parsed from result text; one sealed record leaves
+  one place to read it.
+- Test: `crates/records/src/format2_tests.rs::each_record_round_trips_and_keeps_an_unknown_field`;
+  `crates/records/src/format2_tests.rs::a_declared_stop_needs_the_handoff_that_declared_it`
+- Owner: `crates/records/src/stop.rs`, `crates/records/src/work_key.rs`,
+  `crates/records/src/limit.rs`, `crates/records/src/finding_decision.rs`,
+  `crates/records/src/pause.rs`
+
+## What follows a stop
+
+Target behaviour for the format-2 cut-over (#3078). One table,
+`crates/records/src/stop.rs#STOP_TABLE`, gives every stop cause exactly one
+default next step: `same_route`, `new_route` or `chair`. A same-route step
+carries its continuation, `resume` (the stopped provider session continues)
+or `fresh` (a new session on the same worktree, briefed with the handoff). A
+session never crosses routes, so `new_route` is always fresh: another declared
+route, or a redraw of an alias pool without the routes that stopped.
+
+The override point is the node's `on_stop` entry for a cause in the graph
+document, applied by `StopCause::next_step`. A pinned cause ignores it. The
+runtime's one decision function then applies route availability and the
+continuation budget, which can only turn a step into `chair`: a `new_route`
+with no other route, or any step once `limits.continuations` is spent, pauses
+the graph for the chair with the stop's cause. The defaults keep today's
+behaviour: a writer that stops early, or at its context threshold, restarts
+fresh on another route once; a route that could not start falls back to
+another; everything else returns to the chair.
+
+| Cause | Default | Pinned |
+| --- | --- | --- |
+| `stopped_early` | `new_route` | no |
+| `blocked` | `chair` | yes |
+| `handoff_missing` | `chair` | no |
+| `empty_result` | `chair` | no |
+| `uncommitted` | `chair` | no |
+| `input_required` | `chair` | yes |
+| `context_handoff` | `new_route` | no |
+| `token_budget` | `chair` | no |
+| `deadline` | `chair` | no |
+| `cancelled` | `chair` | yes |
+| `provider_stop` | `chair` | no |
+| `process_crash` | `chair` | no |
+| `auth_required` | `new_route` | no |
+| `usage_limited` | `new_route` | no |
+| `model_unavailable` | `new_route` | no |
+| `adapter_unavailable` | `new_route` | no |
+| `permission_denied` | `chair` | no |
+| `identity_unobserved` | `chair` | no |
+| `preparation_refused` | `chair` | no |
+| `source_view_refused` | `chair` | no |
+| `route_refused` | `chair` | no |
+| `access_policy_refused` | `chair` | no |
+| `disk_floor` | `chair` | no |
+| `disk_unobserved` | `chair` | no |
+| `prompt_unreadable` | `chair` | no |
+| `write_grants_refused` | `chair` | no |
+| `worktree_busy` | `chair` | no |
+| `launch_handoff_refused` | `chair` | no |
+| `retained_writer_import` | `chair` | no |
+| `unsupported_platform` | `chair` | no |
+| `unknown_pacing_account` | `chair` | no |
+| `unregistered_account` | `chair` | no |
+| `credential_helper_failed` | `chair` | no |
+| `command_unavailable` | `chair` | no |
+| `host_native_unconfigured` | `chair` | no |
+| `spawn_failure` | `chair` | no |
+| `settlement_failed` | `chair` | no |
+| `lost` | `chair` | no |
+| `unsettled` | `chair` | no |
+| `quarantined` | `chair` | no |
+
+`blocked`, `input_required` and `cancelled` are pinned because each already
+names the person who acts next: the owner who decides, the owner who answers
+or the person who cancelled.
+- Why: what followed a stop was decided in four places (the run-level
+  automatic continuation, the graph's stopped-writer restart, next-attempt
+  fallback and plan continuations); one table with one override point makes a
+  policy change one edit.
+- Test: `crates/records/src/format2_tests.rs::every_stop_cause_has_exactly_one_default`;
+  `crates/records/src/format2_tests.rs::the_spec_table_matches_the_stop_table`;
+  `crates/records/src/format2_tests.rs::an_override_moves_only_an_unpinned_cause`
+- Owner: `crates/records/src/stop.rs`

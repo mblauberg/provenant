@@ -66,6 +66,20 @@ pub use resolved_route::{
 
 pub mod result_capture;
 pub mod run;
+
+// Format-2 records (#3078). Callers adopt them in later slices.
+pub mod finding_decision;
+pub mod limit;
+pub mod pause;
+pub mod stop;
+pub mod work_key;
+pub use finding_decision::{FindingDecision, FindingDisposition};
+pub use limit::{Limit, LimitSource, LimitStrength};
+pub use pause::{Pause, PauseCause};
+pub use stop::{Continuation, NextStep, STOP_TABLE, Stop, StopCause, StopRule};
+pub use work_key::WorkKey;
+#[cfg(test)]
+mod format2_tests;
 pub use run::UserSkillsMode;
 
 /// Fields from newer writers, retained in canonical record bytes.
