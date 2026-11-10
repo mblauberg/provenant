@@ -178,6 +178,9 @@ pub enum Subject {
         repository: RepoId,
         number: u64,
         head: GitOid,
+        /// The commit the review read `head` against; for a stack member, the
+        /// head of the branch below. A later head is covered only through it.
+        base: GitOid,
     },
     Document {
         #[serde(flatten)]
@@ -696,6 +699,7 @@ mod tests {
                 repository: RepoId::from_bytes([3; 16]),
                 number: 1,
                 head: GitOid::Sha1([4; 20]),
+                base: GitOid::Sha1([5; 20]),
             },
             vec![Author::Agent {
                 extra: Default::default(),
@@ -835,6 +839,7 @@ mod tests {
             repository: RepoId::from_bytes([3; 16]),
             number: 1,
             head: GitOid::Sha256([9; 32]),
+            base: GitOid::Sha256([8; 32]),
         };
         let changed = candidate
             .clone()

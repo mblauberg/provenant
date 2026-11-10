@@ -122,6 +122,43 @@ pub struct SaveContext<'a> {
     /// Complete changed paths, including both sides of renames, from the edge.
     pub changed_paths: &'a [String],
 }
+/// Every readable receipt in `project` whose subject is pull request `number`.
+/// A receipt that cannot be decoded is skipped: it can approve nothing.
+pub fn pull_request_receipts(
+    root: &StateRoot,
+    project: ProjectId,
+    number: u64,
+) -> Result<Vec<DeliveryReceipt>, StoreError> {
+    let deliveries = match persistence::collection(root, project, "deliveries") {
+        Ok(deliveries) => deliveries,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut receipts = Vec::new();
+    for name in deliveries.entries()? {
+        let Some(delivery) = name?
+            .to_str()
+            .and_then(|name| DeliveryId::parse(name).ok())
+        else {
+            continue;
+        };
+        let receipt = match ReceiptStore::new(root.clone(), project, delivery).read() {
+            Ok(Some(receipt)) => receipt,
+            Ok(None)
+            | Err(
+                StoreError::Malformed(_)
+                | StoreError::Version
+                | StoreError::Limit
+                | StoreError::Identity,
+            ) => continue,
+            Err(error) => return Err(error),
+        };
+        if matches!(receipt.subject(), Subject::Pr { number: pr, .. } if *pr == number) {
+            receipts.push(receipt);
+        }
+    }
+    Ok(receipts)
+}
 pub struct ReceiptStore {
     root: StateRoot,
     project: ProjectId,

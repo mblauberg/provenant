@@ -62,6 +62,7 @@ pub enum LandingError {
     },
 }
 pub mod adapters;
+pub mod approval;
 pub mod budget;
 pub mod candidate;
 pub mod driver;
@@ -402,6 +403,13 @@ fn run_inner(
     let (mut forge, mut repo, mut runner, mut alarms) =
         adapters::connect(&resolved.project, globals, workers, tracking)?;
     let target = forge.target_branch()?;
+    let reviews = adapters::DeliveryReviews::new(
+        resolved.roots.state.clone(),
+        project
+            .as_deref()
+            .map(provenant_core::ProjectId::parse)
+            .transpose()?,
+    );
     let result = driver::run(
         &mut *forge,
         &mut *repo,
@@ -415,6 +423,7 @@ fn run_inner(
             gate: &definition,
             shadow: options.shadow,
             state: resolved.roots.state.as_path(),
+            approvals: approval::Approvals::new(effective.approval, &reviews),
         },
     );
     let (mut report, failure) = match result {

@@ -196,8 +196,12 @@ for the same lens without reducing the count. Counted reviewers at
 `substantial` and above meet or exceed the highest author tier. Unknown
 provenance leaves coverage incomplete. Evidence decides claims, not votes.
 
-A verdict covers the diff it read. A later commit needs review of its delta,
-including repairs and conflict resolutions; a clean base merge needs only CI.
+A verdict covers the diff it read, from the base it recorded to the head it
+judged. A later head keeps the verdict only when Git proves it carries that
+delta unchanged: a merge-in from the target, or a rebase whose tree equals the
+reviewed head merged onto the new base. That needs only CI. Any other later
+commit needs review of its delta, including repairs and conflict resolutions;
+a verdict with no recorded base covers only its own head.
 Landing gates stay exact-head: a head that moved after review needs a review of the delta (or a full
 re-plan when risk or scope expanded), and candidate CI covers the landing head.
 

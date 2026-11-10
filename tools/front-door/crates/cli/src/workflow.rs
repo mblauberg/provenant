@@ -768,7 +768,8 @@ fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error
         _ => unreachable_read(),
     }
 }
-/// Obtain the PR's actual base and verify its head before reading local objects.
+/// Verify the PR head, then read the delta the review covered: from the
+/// recorded base to the head.
 fn subject_changed_paths(
     cwd: &Path,
     subject: &Subject,
@@ -777,7 +778,10 @@ fn subject_changed_paths(
     use provenant_confinement::{UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::{ffi::OsString, time::Duration};
-    let Subject::Pr { number, head, .. } = subject else {
+    let Subject::Pr {
+        number, head, base, ..
+    } = subject
+    else {
         return Ok(Vec::new());
     };
     let executor = SystemExecutor::new(1).map_err(|e| invalid(e.to_string()))?;
@@ -787,7 +791,7 @@ fn subject_changed_paths(
         "view",
         &number.to_string(),
         "--json",
-        "baseRefOid,headRefOid",
+        "headRefOid",
     ]
     .iter()
     .map(OsString::from)
@@ -810,7 +814,6 @@ fn subject_changed_paths(
     if oid("headRefOid")? != *head {
         return Err(invalid("PR head differs from receipt subject"));
     }
-    let base = oid("baseRefOid")?;
     let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
     let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
     let budget =
@@ -818,7 +821,7 @@ fn subject_changed_paths(
     let repo = runtime
         .open_read_repo(&executor, cwd, budget, cancel)
         .map_err(|e| invalid(e.to_string()))?;
-    diff_paths(base, *head, &mut |operation| {
+    diff_paths(*base, *head, &mut |operation| {
         let out = run_read_utility(&executor, operation, &repo, &runtime, budget, cancel)
             .map_err(|e| invalid(e.to_string()))?;
         if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {

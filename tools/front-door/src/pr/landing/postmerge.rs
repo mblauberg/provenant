@@ -1,5 +1,6 @@
 use super::{
     LandingError,
+    approval::Approvals,
     model::*,
     ports::{AlarmSink, Forge, GateRunner, Repo},
 };
@@ -161,6 +162,7 @@ fn add_cost(receipt: &mut LandingReceipt, cost: CostEstimate) {
 pub fn follow(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     gate: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     receipt: &mut LandingReceipt,
@@ -169,6 +171,7 @@ pub fn follow(
     follow_with(
         forge,
         repo,
+        approvals,
         gate,
         alarms,
         receipt,
@@ -180,6 +183,7 @@ pub fn follow(
 fn follow_with(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     gate: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     receipt: &mut LandingReceipt,
@@ -195,10 +199,11 @@ fn follow_with(
         .map_err(|e| LandingError::Failed(format!("policy settings: {e}")))?;
     let post = settings.post_merge;
 
-    // Approvals must still stand at the approved head after publication.
+    // Approvals must still stand at the approved head after publication,
+    // proved against the target the candidate was built on.
     for pr in receipt.pull_requests.clone() {
-        let standing = forge
-            .approvals(pr.number, &pr.head)?
+        let standing = approvals
+            .standing(forge, repo, pr.number, &pr.head, &receipt.base)?
             .iter()
             .any(|approval| approval.reference == pr.approval);
         if !standing {
@@ -497,6 +502,7 @@ mod tests {
         follow(
             &mut rig.forge,
             &mut rig.repo,
+            Approvals::forge(),
             &mut rig.gate,
             &mut rig.alarms,
             &mut rig.receipt,
@@ -644,6 +650,7 @@ mod tests {
         follow_with(
             &mut r.forge,
             &mut r.repo,
+            Approvals::forge(),
             &mut r.gate,
             &mut r.alarms,
             &mut r.receipt,
@@ -669,6 +676,7 @@ mod tests {
         follow_with(
             &mut r.forge,
             &mut r.repo,
+            Approvals::forge(),
             &mut r.gate,
             &mut r.alarms,
             &mut r.receipt,
@@ -691,6 +699,7 @@ mod tests {
         follow_with(
             &mut r.forge,
             &mut r.repo,
+            Approvals::forge(),
             &mut r.gate,
             &mut r.alarms,
             &mut r.receipt,
@@ -747,6 +756,7 @@ mod tests {
         follow_with(
             &mut r.forge,
             &mut r.repo,
+            Approvals::forge(),
             &mut r.gate,
             &mut r.alarms,
             &mut r.receipt,
@@ -787,6 +797,7 @@ mod tests {
         follow_with(
             &mut r.forge,
             &mut r.repo,
+            Approvals::forge(),
             &mut r.gate,
             &mut r.alarms,
             &mut r.receipt,

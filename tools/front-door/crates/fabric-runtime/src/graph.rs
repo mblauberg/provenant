@@ -531,6 +531,17 @@ pub trait AttemptOwner {
         crate::config::GraphLand::default().choose(None, tier)
     }
 
+    /// Prove whether a review of `reviewed` covers the land `head` that moved
+    /// after it, against the fetched land target. `None` means this host
+    /// cannot prove carry-over, so only the reviewed head itself may land.
+    fn review_coverage(
+        &mut self,
+        _reviewed: provenant_core::review_cover::Reviewed<'_>,
+        _head: &str,
+    ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {
+        Ok(None)
+    }
+
     /// Merge an authorised land node's pull request through the repository's
     /// own workflow, pinned to `request.head`. Idempotent: a PR already merged
     /// at that head reports `Merged`. A host without one refuses.

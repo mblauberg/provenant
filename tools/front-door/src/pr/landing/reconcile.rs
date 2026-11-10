@@ -1,5 +1,6 @@
 use super::{
     LandingError,
+    approval::Approvals,
     model::*,
     ports::{AlarmSink, Forge, GateRunner, PullRequestState, Repo},
     postmerge, publish, receipt,
@@ -19,8 +20,15 @@ pub(crate) fn now_seconds() -> Option<u64> {
 
 // A closed PR must never be published by a retry. A merged REST prefix may
 // remain part of the attempt, but a fast-forward retry requires all PRs open.
-fn valid_for_retry(forge: &mut dyn Forge, attempt: &PendingAttempt) -> bool {
-    publish::revalidate(forge, &attempt.candidate).is_ok_and(|excluded| excluded.is_empty())
+fn valid_for_retry(
+    forge: &mut dyn Forge,
+    repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
+    attempt: &PendingAttempt,
+) -> bool {
+    let candidate = &attempt.candidate;
+    publish::revalidate(forge, &mut approvals.at(repo, &candidate.base), candidate)
+        .is_ok_and(|excluded| excluded.is_empty())
         && attempt.candidate.steps.iter().all(|step| {
             forge
                 .pull_request(step.pr.number)
@@ -89,6 +97,7 @@ pub fn settle(
 pub fn finish_settled(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     runner: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     state: &std::path::Path,
@@ -156,7 +165,7 @@ pub fn finish_settled(
         for alarm in &settled.record.alarms {
             alarms.post(alarm)?;
         }
-        let followed = postmerge::follow(forge, repo, runner, alarms, &mut settled.record);
+        let followed = postmerge::follow(forge, repo, approvals, runner, alarms, &mut settled.record);
         if followed.is_ok() {
             settled.follow_pending = false;
         }
@@ -259,6 +268,7 @@ pub fn finish_settled(
 fn finish_recovery(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     runner: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     state: &std::path::Path,
@@ -273,7 +283,7 @@ fn finish_recovery(
             .record
             .clone(),
     );
-    let result = finish_settled(forge, repo, runner, alarms, state, attempt);
+    let result = finish_settled(forge, repo, approvals, runner, alarms, state, attempt);
     *recovered
         .last_mut()
         .ok_or_else(|| LandingError::Failed("missing recovered receipt".into()))? = attempt
@@ -303,6 +313,7 @@ fn local_cleanup_only(settled: &SettledAttempt) -> bool {
 pub fn recover_pending(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     runner: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     state: &std::path::Path,
@@ -315,6 +326,7 @@ pub fn recover_pending(
     recover_pending_with(
         forge,
         repo,
+        approvals,
         runner,
         alarms,
         state,
@@ -333,6 +345,7 @@ pub fn recover_pending(
 pub(crate) fn recover_pending_with(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     runner: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     state: &std::path::Path,
@@ -361,7 +374,7 @@ pub(crate) fn recover_pending_with(
                     s.refusal.clone()
                 }
             });
-            finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
+            finish_recovery(forge, repo, approvals, runner, alarms, state, &mut attempt, recovered)?;
             if let Some(reason) = refusal {
                 return Err(LandingError::Refused(reason));
             }
@@ -406,7 +419,7 @@ pub(crate) fn recover_pending_with(
         .map_err(|_| unknown())?;
         let settings = attempt.policy.settings().map_err(|_| unknown())?;
         let mut settled = false;
-        let can_retry = !shadow && valid_for_retry(forge, &attempt);
+        let can_retry = !shadow && valid_for_retry(forge, repo, approvals, &attempt);
         if !shadow && !can_retry {
             #[allow(
                 clippy::disallowed_methods,
@@ -453,7 +466,7 @@ pub(crate) fn recover_pending_with(
                     record,
                     Some("publication retry refused".into()),
                 )?;
-                finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
+                finish_recovery(forge, repo, approvals, runner, alarms, state, &mut attempt, recovered)?;
                 return Err(LandingError::Refused("publication retry refused".into()));
             }
             if retry.is_err() {
@@ -541,7 +554,7 @@ pub(crate) fn recover_pending_with(
                                 }
                                 continue;
                             }
-                            let retry = if valid_for_retry(forge, &attempt) {
+                            let retry = if valid_for_retry(forge, repo, approvals, &attempt) {
                                 publish::merge_member(
                                     forge,
                                     step.pr.number,
@@ -639,7 +652,7 @@ pub(crate) fn recover_pending_with(
             record,
             refused.then(|| "publication retry refused".into()),
         )?;
-        finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
+        finish_recovery(forge, repo, approvals, runner, alarms, state, &mut attempt, recovered)?;
         if refused {
             return Err(LandingError::Refused("publication retry refused".into()));
         }

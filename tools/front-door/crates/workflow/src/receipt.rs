@@ -130,6 +130,7 @@ mod tests {
                 repository: provenant_core::RepoId::from_bytes([3; 16]),
                 number: 42,
                 head: GitOid::Sha256([4; 32]),
+                base: GitOid::Sha256([5; 32]),
             },
             authors: vec![Author::User {
                 extra: Default::default(),
@@ -164,6 +165,7 @@ mod tests {
                 repository: provenant_core::RepoId::from_bytes([3; 16]),
                 number: u64::MAX,
                 head,
+                base: head,
             };
             let receipt = new(
                 input,

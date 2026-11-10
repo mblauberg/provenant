@@ -63,3 +63,20 @@ SHAs; merge commits preserve them. Other methods require the receipt mapping.
 The candidate gate adds an integration build, but it checks the combination
 intended for publication. Ordered REST publication must verify the resulting
 tree because the forge creates the merge commits.
+
+## Addendum: review receipts as approval
+
+`land.approval = "receipt"` lets an accepted Provenant delivery receipt stand in
+place of an approving forge review, through one approval port beside the
+forge's. The receipt's pull request subject records the reviewed head `H` and
+base `B`; for a stack member `B` is the head of the branch below. A head `H'`
+keeps the review when `H' == H`, or when, with `B'` the merge base of `H'` and
+the fetched target, `B` is an ancestor of `B'`, `B'` is an ancestor of the
+target and `tree(H')` equals `merge_tree(H, B')`. Selection, revalidation
+before and during publication, recovery and the post-merge approval recheck all
+apply this proof against the target they already read; a head that fails it is
+excluded and never merged. A receipt without a base covers only its own head.
+The graph land node applies the same rule to the head its verdict gate reviewed.
+Pinned heads, markers, recovery, the tree comparison and forge-required checks
+are unchanged. The second condition holds by construction of `B'`; it stays so
+the rule reads the same wherever `B'` comes from.

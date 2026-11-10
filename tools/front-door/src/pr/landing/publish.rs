@@ -1,5 +1,6 @@
 use super::{
     LandingError,
+    approval::{Approvals, Approver},
     model::*,
     ports::{Forge, Repo},
 };
@@ -77,9 +78,10 @@ pub fn decide_candidate(
 /// Return PRs whose pinned head or approval changed immediately before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     candidate: &Candidate,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    Ok(revalidate_with_reasons(forge, candidate)?
+    Ok(revalidate_with_reasons(forge, approver, candidate)?
         .into_iter()
         .map(|(pr, _)| pr)
         .collect())
@@ -87,6 +89,7 @@ pub fn revalidate(
 
 pub fn revalidate_with_reasons(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     candidate: &Candidate,
 ) -> Result<Vec<(EligiblePr, String)>, LandingError> {
     let mut excluded = Vec::new();
@@ -97,8 +100,8 @@ pub fn revalidate_with_reasons(
             Some("base branch changed")
         } else if head != pr.head {
             Some("head changed")
-        } else if !forge
-            .approvals(pr.number, &pr.head)?
+        } else if !approver
+            .approvals(forge, pr.number, &pr.head)?
             .iter()
             .any(|approval| approval.reference == pr.approval)
         {
@@ -168,9 +171,14 @@ pub fn fast_forward(
     })
 }
 /// Merge in order at pinned heads and record an alarm if the final tree differs from the gated tree.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ordered publication needs its boundaries"
+)]
 pub fn rest_ordered(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
+    approvals: Approvals<'_>,
     target: &str,
     candidate: &Candidate,
     method: MergeMethod,
@@ -189,6 +197,7 @@ pub fn rest_ordered(
         }
         if !revalidate(
             forge,
+            &mut approvals.at(repo, &candidate.base),
             &Candidate {
                 steps: vec![step.clone()],
                 ..candidate.clone()
@@ -379,7 +388,7 @@ mod tests {
         forge.heads.insert(2, "head-2".into());
         let c = candidate();
         assert_eq!(
-            revalidate(&mut forge, &c)?,
+            revalidate(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &c)?,
             vec![c.steps[0].pr.clone(), c.steps[1].pr.clone()]
         );
         forge.heads.insert(1, "head-1".into());
@@ -392,13 +401,13 @@ mod tests {
                 }],
             );
         }
-        assert!(revalidate(&mut forge, &c)?.is_empty());
+        assert!(revalidate(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &c)?.is_empty());
         forge
             .pull_requests
             .get_mut(&1)
             .expect("fixture")
             .base_branch = "other".into();
-        assert_eq!(revalidate(&mut forge, &c)?, vec![c.steps[0].pr.clone()]);
+        assert_eq!(revalidate(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &c)?, vec![c.steps[0].pr.clone()]);
         Ok(())
     }
     #[test]
@@ -447,6 +456,7 @@ mod tests {
             rest_ordered(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
@@ -487,6 +497,7 @@ mod tests {
             rest_ordered(
                 &mut forge,
                 &mut repo,
+                Approvals::forge(),
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
@@ -511,6 +522,7 @@ mod tests {
         let result = rest_ordered(
             &mut forge,
             &mut repo,
+            Approvals::forge(),
             "main",
             &candidate(),
             MergeMethod::Squash,

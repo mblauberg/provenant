@@ -35,6 +35,20 @@ pub struct Approval {
     pub reference: String,
     pub reviewer: String,
 }
+/// A Provenant review record for a pull request: the head `H` it reviewed and
+/// the base `B` it read `H` against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewRecord {
+    pub reference: String,
+    pub reviewer: String,
+    pub head: String,
+    pub base: String,
+}
+/// Accepted Provenant review records, read when `land.approval = "receipt"`.
+/// This is the approval port beside [`Forge::approvals`].
+pub trait ReviewRecords {
+    fn reviews(&self, number: u64) -> Result<Vec<ReviewRecord>, LandingError>;
+}
 pub trait Forge {
     fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
@@ -133,6 +147,8 @@ pub trait Repo {
     fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError>;
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
+    /// The merge base of two commits, or `None` when they share no history.
+    fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError>;
 }
 pub trait GateRunner {
     fn set_project_path(&mut self, _path: &std::path::Path) {}

@@ -289,6 +289,19 @@ needs `post_merge.bisect` to name a culprit. Unknown cost never refuses;
 `budget.cap_micros` refuses only priced spend. For a migration from a bespoke lander, see
 [landing migration](landing-migration.md).
 
+`approval` names what stands as a pull request's approval. `forge`, the
+default, needs an approving forge review at the head. `receipt` takes an
+accepted delivery receipt for the pull request instead; this repository's
+reviews are such receipts, so its host sets
+`domains.pr.land.projects.<project>.approval = "receipt"`. Save the receipt
+before landing, with a `pr` subject naming the reviewed `head` and the `base`
+the review read it against; for a stacked pull request the base is the head of
+the branch below. The lander proves each head against the fetched target: the
+reviewed head itself, a merge-in from the target, or a rebase with an unchanged
+delta keeps the review; any other change, or a receipt without the head's
+history, excludes the pull request until a new receipt covers it. Forge rules
+and required checks still apply.
+
 Every PR gets an outcome receipt under the project state's
 `landing/receipts/`: landed, red, conflicted, excluded or pending-unknown, with
 each unmet check named. Batch errors distinguish `LAND_CONTENTION`,
@@ -357,9 +370,10 @@ A major bump, a new dependency or any other change takes at least one
 
 ### After merge
 
-1. For a software delivery, sync the primary checkout. After the merge commit's
-   `ci-status` on `main` succeeds, record the accepted receipt with
-   `provenant workflow receipt save`. Never fabricate user approval.
+1. For a software delivery, sync the primary checkout. Unless the receipt
+   already stood as the landing approval, record the accepted receipt with
+   `provenant workflow receipt save` after the merge commit's `ci-status` on
+   `main` succeeds. Never fabricate user approval.
 2. Confirm the issue closed, or close it with its terminal reason, and confirm
    Status is `Done`.
 3. Prune the merged branch's artefacts as the last step of the merge.

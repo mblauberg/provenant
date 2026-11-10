@@ -6,6 +6,10 @@ use std::convert::Infallible;
 
 const WRITE_HEAD: &str = "1111111111111111111111111111111111111111";
 const REPAIR_HEAD: &str = "2222222222222222222222222222222222222222";
+/// The commit the review read the writer's head against.
+const REVIEW_BASE: &str = "3333333333333333333333333333333333333333";
+/// The fetched land target, one commit past `REVIEW_BASE`.
+const TARGET: &str = "4444444444444444444444444444444444444444";
 
 #[derive(Default)]
 struct Journal(Option<GraphCheckpoint>);
@@ -58,6 +62,8 @@ struct Owner {
     repair_prompts: Vec<String>,
     repair_families: std::collections::BTreeMap<String, String>,
     repair_alternative: bool,
+    /// The repository history that proves review carry-over against `TARGET`.
+    history: Option<provenant_core::review_cover::history::History>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -105,6 +111,26 @@ impl AttemptOwner for Owner {
     }
     fn actor(&self) -> String {
         "fixture".into()
+    }
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        let base = self.history.as_ref().map(|_| REVIEW_BASE.parse().unwrap());
+        (base, None)
+    }
+    fn review_coverage(
+        &mut self,
+        reviewed: provenant_core::review_cover::Reviewed<'_>,
+        head: &str,
+    ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {
+        Ok(self.history.as_mut().map(|history| {
+            let Ok(coverage) =
+                provenant_core::review_cover::coverage(history, reviewed, head, TARGET);
+            coverage
+        }))
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         if self.no_wall_clock {
@@ -1048,6 +1074,53 @@ fn ci_output_never_substitutes_for_review() {
         land.advance_error_code.as_deref(),
         Some("land_review_required")
     );
+}
+
+#[test]
+fn a_carried_over_head_lands_and_a_changed_delta_does_not() {
+    // write H1, review H1 against the bound REVIEW_BASE, PASS, then the continuation
+    // brings in the target (H2), CI, land H2.
+    let graph = json!([
+        {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+         "prompt":"write it", "route":{"alias":"senior"}},
+        {"id":"review", "access":"read_only", "prompt":"review", "depends_on":["write"],
+         "route":{"alias":"senior"}},
+        {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review"],
+         "inputs":[{"node":"review", "outputs":["verdict"]}],
+         "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+        {"id":"repair", "access":"worktree_write", "worktree":"/wt/feature", "continues":"write",
+         "prompt":"bring in main", "depends_on":["accepted"], "route":{"alias":"senior"}},
+        {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["repair"],
+         "condition":{"type":"ci", "target":"feature/x"}},
+        {"id":"land", "kind":"land", "access":"read_only", "depends_on":["ci"],
+         "land":{"node":"write", "tier":"routine"}}
+    ]);
+    let document: GraphDocument =
+        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":graph}))
+            .unwrap();
+    for (extra, lands) in [(&[][..], true), (&["one-more-line"][..], false)] {
+        let mut history = provenant_core::review_cover::history::History::default();
+        history.commit(REVIEW_BASE, &[], &["base"]);
+        history.commit(TARGET, &[REVIEW_BASE], &["main-change"]);
+        history.commit(WRITE_HEAD, &[REVIEW_BASE], &["feature"]);
+        history.commit(REPAIR_HEAD, &[WRITE_HEAD, TARGET], extra);
+        let mut owner = owner();
+        owner.history = Some(history);
+        let checkpoint = run(&document, &mut owner, &mut Journal::default());
+        let land = node(&checkpoint, "land");
+        if lands {
+            assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+            assert_eq!(owner.lands.len(), 1);
+            assert_eq!(owner.lands[0].1, REPAIR_HEAD);
+        } else {
+            assert!(owner.lands.is_empty(), "{:?}", owner.lands);
+            assert_eq!(land.state, NodeState::Failed);
+            assert_eq!(
+                land.advance_error_code.as_deref(),
+                Some("land_review_required")
+            );
+        }
+    }
 }
 
 #[test]

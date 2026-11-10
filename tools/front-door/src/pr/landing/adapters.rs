@@ -4,7 +4,7 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
-        StackMember, StackMembership,
+        ReviewRecord, ReviewRecords, StackMember, StackMembership,
     },
 };
 use crate::pr::{
@@ -1064,6 +1064,19 @@ impl Repo for GitRepo<'_> {
             ))),
         }
     }
+    fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError> {
+        self.ensure(left)?;
+        self.ensure(right)?;
+        let (code, out, error) =
+            self.exit(&["merge-base", object_id(left)?, object_id(right)?])?;
+        match code {
+            0 => object_id(out.trim()).map(|base| Some(base.to_owned())),
+            1 => Ok(None),
+            _ => Err(LandingError::Failed(format!(
+                "git merge-base failed: {error}"
+            ))),
+        }
+    }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.ensure(commit)?;
         let canonical = object_id(commit)?.to_ascii_lowercase();
@@ -1074,6 +1087,48 @@ impl Repo for GitRepo<'_> {
             .commit_tree(&self.project, commit)
             .map_err(failed)?
             .to_string())
+    }
+}
+
+// ----- ReviewRecords -----------------------------------------------------
+
+/// Accepted delivery receipts in the project's workflow state. A receipt is
+/// accepted only once its review coverage passes, so its reviewers are
+/// independent of the authors. Each names the head its review read and the
+/// base it read that head against.
+pub struct DeliveryReviews {
+    root: provenant_core::StateRoot,
+    project: Option<provenant_core::ProjectId>,
+}
+impl DeliveryReviews {
+    pub fn new(root: provenant_core::StateRoot, project: Option<provenant_core::ProjectId>) -> Self {
+        Self { root, project }
+    }
+}
+impl ReviewRecords for DeliveryReviews {
+    fn reviews(&self, number: u64) -> Result<Vec<ReviewRecord>, LandingError> {
+        use provenant_records::workflow::{DecisionStatus, Subject};
+        let project = self.project.ok_or_else(|| {
+            LandingError::Failed("receipt approval needs a registered project".into())
+        })?;
+        let receipts =
+            provenant_workflow::store::pull_request_receipts(&self.root, project, number)
+                .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
+        Ok(receipts
+            .iter()
+            .filter(|receipt| receipt.decision().status() == DecisionStatus::Accepted)
+            .filter_map(|receipt| {
+                let Subject::Pr { head, base, .. } = receipt.subject() else {
+                    return None;
+                };
+                Some(ReviewRecord {
+                    reference: format!("delivery {} at {head}", receipt.delivery_id()),
+                    reviewer: receipt.decision().actor_id()?.to_string(),
+                    head: head.to_string(),
+                    base: base.to_string(),
+                })
+            })
+            .collect())
     }
 }
 
@@ -1706,6 +1761,7 @@ esac
                     gate: &definition,
                     shadow: false,
                     state: &project,
+                    approvals: super::super::approval::Approvals::forge(),
                 },
             )
             .unwrap();

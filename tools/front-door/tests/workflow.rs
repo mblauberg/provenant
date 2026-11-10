@@ -43,7 +43,7 @@ fn pr_receipt_request() -> Value {
     let mut value = receipt_request("none", json!({"status": "pending"}));
     value["subject"] = json!({
         "kind": "pr", "repository": "02".repeat(16), "number": 12,
-        "head": "ab".repeat(20)
+        "head": "ab".repeat(20), "base": "ba".repeat(20)
     });
     value
 }
@@ -57,10 +57,9 @@ fn record_gh_calls(rig: &mut TestRig) -> Result {
     std::fs::write(
         &gh,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"headRefOid\":\"{}\",\"baseRefOid\":\"{}\"}}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"headRefOid\":\"{}\"}}'\n",
             rig.root.join("gh-called").display(),
             "cd".repeat(20),
-            "ef".repeat(20)
         ),
     )?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;

@@ -197,6 +197,14 @@ impl Forge for FakeForge {
         Ok(9000 + number)
     }
 }
+/// Accepted Provenant review records by pull request.
+#[derive(Default)]
+pub struct FakeReviews(pub BTreeMap<u64, Vec<ReviewRecord>>);
+impl ReviewRecords for FakeReviews {
+    fn reviews(&self, number: u64) -> Result<Vec<ReviewRecord>, LandingError> {
+        Ok(self.0.get(&number).cloned().unwrap_or_default())
+    }
+}
 #[derive(Default)]
 pub struct FakeRepo {
     pub target: String,
@@ -344,6 +352,19 @@ impl Repo for FakeRepo {
             .get(commit)
             .cloned()
             .ok_or_else(|| LandingError::Failed("missing tree".into()))
+    }
+    fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError> {
+        let mut pending = vec![left.to_owned()];
+        let mut seen = BTreeSet::new();
+        while let Some(commit) = pending.pop() {
+            if self.is_ancestor(&commit, right)? {
+                return Ok(Some(commit));
+            }
+            if seen.insert(commit.clone()) {
+                pending.extend(self.parents.get(&commit).cloned().unwrap_or_default());
+            }
+        }
+        Ok(None)
     }
 }
 #[derive(Default)]
