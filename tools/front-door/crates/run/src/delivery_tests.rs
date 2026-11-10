@@ -689,6 +689,112 @@ fn committed_merge_leaves_the_bound_worktree_clean_at_the_lane_tip()
     Ok(())
 }
 
+/// A lane which merged the default branch, pushed its branch and then ended
+/// (as a `blocked` handoff does: settlement runs the same way whatever the
+/// handoff says) leaves the files, index and HEAD at the pushed commit.
+#[test]
+fn pushed_lane_leaves_the_bound_worktree_clean_at_the_pushed_commit()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let theirs_tip = {
+        let output = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(k, v)| (k, v)))
+            .current_dir(&fixture.writer.project)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)?.trim().to_owned()
+    };
+    let pushed = std::cell::RefCell::new(String::new());
+    fixture.terminal(|| {
+        std::fs::write(fixture.writer.worktree.join("ours.txt"), "ours\n")?;
+        private_git(&fixture, &scratch, &git, &["add", "ours.txt"])?;
+        private_git(&fixture, &scratch, &git, &["commit", "-qm", "ours"])?;
+        private_git(
+            &fixture,
+            &scratch,
+            &git,
+            &["merge", "--no-edit", &theirs_tip],
+        )?;
+        private_git(
+            &fixture,
+            &scratch,
+            &git,
+            &["push", "-q", "origin", "HEAD:refs/heads/lane"],
+        )?;
+        *pushed.borrow_mut() = private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?;
+        Ok(())
+    })?;
+    let pushed = pushed.into_inner();
+    assert_eq!(
+        worktree_git(&fixture, &git, &["status", "--porcelain"])?,
+        ""
+    );
+    assert_eq!(
+        worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?,
+        pushed
+    );
+    assert_eq!(
+        worktree_git(&fixture, &git, &["rev-parse", "refs/heads/lane"])?,
+        pushed
+    );
+    assert_eq!(
+        worktree_git(&fixture, &git, &["ls-remote", "origin", "refs/heads/lane"])?
+            .split_whitespace()
+            .next(),
+        Some(pushed.as_str())
+    );
+    Ok(())
+}
+
+/// When the lane's commits cannot be published, the bound worktree is back at
+/// the commit the host holds, clean, and the settlement note names the lane's
+/// commit and branch.
+#[test]
+fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let wt = &fixture.writer.worktree;
+    let base = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
+    std::fs::write(wt.join("ours.txt"), "ours\n")?;
+    private_git(&fixture, &scratch, &git, &["add", "ours.txt"])?;
+    private_git(&fixture, &scratch, &git, &["commit", "-qm", "ours"])?;
+    let tip = private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?;
+    assert_ne!(tip, base);
+    // The files carry the lane's commit while the host still holds the base.
+    assert_eq!(
+        worktree_git(&fixture, &git, &["status", "--porcelain"])?,
+        "?? ours.txt"
+    );
+    let utility = provenant_confinement::UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let executor = SystemExecutor::new(1)?;
+    let repo = utility.open_repo(
+        &executor,
+        &fixture.writer.project,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        &CancelToken::new(),
+    )?;
+    let launch = writer::WriterLaunch {
+        worktree: provenant_confinement::verify_worktree(&repo, wt)?,
+        branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
+        base: GitOid::parse(&base)?,
+        custody: None,
+        facts: Default::default(),
+        review_exempt: Default::default(),
+    };
+    let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
+    assert!(note.contains(&tip), "{note}");
+    assert!(note.contains("refs/heads/lane"), "{note}");
+    assert_eq!(
+        worktree_git(&fixture, &git, &["status", "--porcelain"])?,
+        ""
+    );
+    assert_eq!(worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?, base);
+    assert!(!wt.join("ours.txt").exists());
+    Ok(())
+}
+
 /// When the lane's commits cannot be published, its files move back, except
 /// any file someone else changed, and they move forward again on publication.
 #[test]

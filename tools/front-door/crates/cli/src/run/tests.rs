@@ -1205,11 +1205,16 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         &call,
                     )?;
                     let record = session.store.record(id, &call)?;
-                    // Settlement appends where the lane's work is to the blocker.
+                    // Settlement appends the work-location note to the blocker. This
+                    // fixture's private Git holds no refs, so the note says the files
+                    // were not restored, and why.
                     assert!(
                         matches!(record.settlement_receipts.unwrap().git_import,
                         run::EffectDisposition::Failed { retryable: false, ref reason }
-                        if reason.starts_with(blocker)),
+                        if reason.strip_prefix(blocker).is_some_and(|note| {
+                            note.strip_prefix("; worktree files not restored: ")
+                                .is_some_and(|why| !why.is_empty())
+                        })),
                         "{found:?}"
                     );
                     for command in ["status", "output"] {
