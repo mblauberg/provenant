@@ -61,6 +61,7 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
             {
                 "id": "write",
                 "access": "worktree_write",
+                "worktree": "lane",
                 "delivery": "pr",
                 "prompt": "write",
                 "route": {"alias": "senior"}
