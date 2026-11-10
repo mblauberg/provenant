@@ -1164,16 +1164,13 @@ pub enum StatsBy {
 #[derive(Debug, Args)]
 pub struct Stats {
     /// Include offline post-merge outcomes and stratified ranking
-    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    #[arg(long, conflicts_with_all = ["usage", "by"])]
     pub outcomes: bool,
     /// Include advisory expiring suggestions from offline pipeline evidence
-    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    #[arg(long, conflicts_with_all = ["usage", "by"])]
     pub suggest: bool,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
-    /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
-    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id", "by"])]
-    pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,

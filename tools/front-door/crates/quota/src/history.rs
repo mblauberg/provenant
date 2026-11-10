@@ -44,8 +44,6 @@ pub struct HistoryRecord {
     pub status: QuotaStatus,
     /// Plan as detected or registered for the account; null when unknown.
     pub plan: Option<String>,
-    /// Tier as reported by the provider response; null when it reports none.
-    pub tier: Option<String>,
     pub windows: Vec<QuotaWindow>,
     pub credit_balance: Option<String>,
     pub reset_credits: Option<u64>,
@@ -65,7 +63,6 @@ impl HistoryRecord {
             provider: snapshot.account.adapter.clone(),
             status: snapshot.status,
             plan: details.and_then(|d| d.plan.clone()),
-            tier: details.and_then(|d| d.tier.clone()),
             windows: snapshot.windows.clone(),
             credit_balance: details.and_then(|d| d.credit_balance.clone()),
             reset_credits: details.and_then(|d| d.reset_credits),
@@ -78,7 +75,6 @@ impl HistoryRecord {
     /// an identical reading seen again is not new evidence.
     pub fn same_reading(&self, other: &Self) -> bool {
         self.plan == other.plan
-            && self.tier == other.tier
             && self.windows == other.windows
             && self.credit_balance == other.credit_balance
             && self.reset_credits == other.reset_credits
@@ -247,6 +243,17 @@ mod tests {
         assert_eq!(decoded[0].markers.len(), 1);
         value["schema_version"] = serde_json::json!(2);
         assert!(decode_lines(&serde_json::to_vec(&value).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn history_ignores_a_stored_tier() {
+        let reading =
+            HistoryRecord::from_snapshot(&snapshot(1, None, vec![window("5h", 1, None)])).unwrap();
+        let mut value = serde_json::to_value(&reading).unwrap();
+        assert!(value.get("tier").is_none());
+        value["tier"] = serde_json::json!("max");
+        let decoded = decode_lines(&serde_json::to_vec(&value).unwrap());
+        assert_eq!(decoded, vec![reading]);
     }
 
     fn window(pool: &str, used: u64, reset: Option<i64>) -> QuotaWindow {

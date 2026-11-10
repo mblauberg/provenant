@@ -1046,7 +1046,7 @@ fn refresh_auth_metadata(
                     accounts.len() == 1 && accounts[0].account_key == next.account.account_key
                 })
         });
-        if next.last_error.is_some_and(ProbeFailure::needs_login)
+        if next.last_error.is_some_and(ProbeFailure::repairable)
             || next
                 .snapshot
                 .as_ref()
@@ -1371,6 +1371,87 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
         now,
     );
     Ok(report.accounts)
+}
+/// A registration is a credential event for its account: the recorded reading,
+/// failed or not, is replaced by a fresh probe now rather than after its
+/// backoff. Other due accounts of the adapter are refreshed by the same tick.
+pub fn probe_registered(
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    effects: &dyn QuotaEffects,
+    account: &AccountScope,
+) -> Result<QuotaReport, String> {
+    probe_account(roots, registry, effects, account).map_err(|error| error.to_string())
+}
+fn probe_account(
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    effects: &dyn QuotaEffects,
+    account: &AccountScope,
+) -> Result<QuotaReport, EdgeError> {
+    if !registry
+        .iter()
+        .any(|r| r.quota_source.is_some() && r.adapter.id() == account.adapter)
+    {
+        return Err(EdgeError::Adapter);
+    }
+    {
+        let root = private(roots.state.as_path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
+        let _lock = dir.lock(
+            OsStr::new("quota.lock"),
+            LockMode::Exclusive,
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        let mut records = read_records(&dir)?;
+        let current = records
+            .iter()
+            .find(|record| {
+                record.account.adapter == account.adapter
+                    && record.account.account_key == account.account_key
+            })
+            .cloned();
+        let mut next = current
+            .clone()
+            .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+        if !next.auth_retry_pending {
+            // Consumed by reserve, exactly as a credential change is.
+            next.auth_retry_pending = true;
+            next.revision = next
+                .revision
+                .checked_add(1)
+                .ok_or(QuotaError::NumberOutOfRange)?;
+            write_intent(
+                &dir,
+                roots.state.as_path(),
+                &UpdateIntent {
+                    account: next.account.clone(),
+                    expected: current,
+                    replacement: Some(next),
+                    readiness_probe_result: None,
+                    login_probe_expiry: None,
+                },
+                &mut records,
+            )?;
+        }
+    }
+    execute(
+        &Quota::Tick {
+            adapter: Filter {
+                adapter: Some(account.adapter.clone()),
+            },
+            trigger: Trigger::Manual,
+            power: Power::Ac,
+        },
+        roots,
+        registry,
+        effects,
+    )
 }
 pub(crate) fn execute(
     command: &Quota,
@@ -3869,6 +3950,88 @@ mod tests {
         };
         write_intent(&dir, state, &drop, &mut records)?;
         assert!(!state.join("readiness/key").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn registration_replaces_a_failed_reading_with_a_fresh_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Effects {
+            failure: Option<ProbeFailure>,
+        }
+        impl QuotaEffects for Effects {
+            fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+                Ok(vec![AccountScope {
+                    adapter: "codex".into(),
+                    account_key: "key".into(),
+                    label: "fixture".into(),
+                }])
+            }
+            fn capture(
+                &self,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                if let Some(failure) = self.failure {
+                    return Err(failure);
+                }
+                Ok(ProbeCapture {
+                    stdout: include_bytes!(
+                        "../../providers/src/quota/fixtures/codex-app-server.json"
+                    )
+                    .to_vec(),
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                })
+            }
+        }
+        let account = AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "fixture".into(),
+        };
+        // A rate limit keeps its window on a manual tick, and a repaired
+        // keychain is the issue's case; registration re-probes both.
+        for failure in [
+            ProbeFailure::IsolatedKeychainUnavailable,
+            ProbeFailure::RateLimited,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
+            inputs.state_dir = Some(temp.path().join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let tick = Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("codex".into()),
+                },
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            };
+            let failed = execute(
+                &tick,
+                &roots,
+                provenant_providers::REGISTRY,
+                &Effects {
+                    failure: Some(failure),
+                },
+            )?;
+            assert_eq!(failed.accounts[0].error, Some(failure));
+            let registered = probe_registered(
+                &roots,
+                provenant_providers::REGISTRY,
+                &Effects { failure: None },
+                &account,
+            )?;
+            let row = &registered.accounts[0];
+            assert_eq!(row.error, None, "{failure:?}");
+            assert_ne!(row.status, QuotaStatus::KeychainUnavailable);
+            assert!(row.snapshot.is_some());
+            assert!(!read_cache(&roots)?[0].auth_retry_pending);
+        }
         Ok(())
     }
 

@@ -118,29 +118,15 @@ regex or alias. Cost is an estimate, not a bill.
   `crates/telemetry/src/tests.rs::price_validation_refuses_unsupported_units_duplicates_and_unverified_zero`
 - Owner: `crates/telemetry/src/`, `../../config/telemetry-prices.toml`
 
-## Native Claude Code sub-agents
+## Price sheet refresh
 
-An explicit `--claude-subagents PATH` report reads usage metadata from one
-Claude session's `subagents` directory and groups usage and estimated cost by
-model. Message bodies are not used. Message IDs are deduplicated. These records
-are a standalone report, independent of the project and run store, and the
-option cannot be combined with attempt filters or `--usage`. The report must
-count and skip an incomplete, unterminated final JSON record while rejecting
-malformed interior records. Native model costs use the same money object as
-other telemetry costs and identify the reviewed price table. Pricing uses
-exact model identities, including dated snapshots present in the table;
-unknown or incomplete prices remain unknown.
 - Price sheet: `telemetry prices refresh` proposes a diff from OpenRouter and
   LiteLLM and never applies it; a cross-source discrepancy above
   `discrepancy_threshold_bps` is reported, not resolved. Test:
   `crates/telemetry/src/refresh.rs::tests::converts_per_token_to_exact_microdollars_per_million`;
   `tests/telemetry_native.rs::prices_refresh_proposes_a_deterministic_diff_and_never_edits_the_sheet`;
   `crates/telemetry/src/tests.rs::review_older_than_the_configured_age_is_stale`
-- Why (default): native sub-agent usage should be visible without counting it as a
-  Provenant attempt or collecting conversation content.
-- Test: `crates/telemetry/src/native.rs::tests::imports_metadata_once_per_message_and_prices_exact_model`;
-  `tests/telemetry_native.rs::native_stats_runs_without_a_project_or_store_and_sanitises_output`
-- Owner: `crates/telemetry/src/`
+- Owner: `crates/telemetry/src/refresh.rs`
 
 ## Cache-read share is a first-class figure
 
@@ -437,18 +423,6 @@ Whole-patch-read measurement has no read-event source and is unmeasured.
   `tests/telemetry_pipeline_cli.rs`
 - Owner: `crates/telemetry/src/outcome.rs`, `crates/telemetry/src/suggest.rs`,
   `crates/cli/src/run.rs`
-
-## Token-per-merged-PR study
-
-`provenant_telemetry::study` reduces recorded attempts, chair sessions and
-merged-PR attribution into two cohorts. The [study method](../telemetry/token-per-pr-study.md)
-owns attribution and verdict interpretation; `crates/telemetry/src/study.rs`
-owns the thresholds.
-
-- Why: #2315 asks whether the cut-over lowers tokens per merged PR, without new
-  counters or synthetic runs.
-- Test: `crates/telemetry/src/study/tests.rs`
-- Owner: `crates/telemetry/src/study.rs`
 
 ## Demand counters are lossy and private
 

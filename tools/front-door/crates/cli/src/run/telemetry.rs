@@ -139,47 +139,6 @@ pub(super) fn stats_inner(
 ) -> Result<(Value, String), Fail> {
     use run::AttemptReader;
     let prices = price_table(edge.assets)?;
-    if let Some(path) = command.claude_subagents.as_deref() {
-        let native =
-            provenant_telemetry::claude_subagents(path, &prices).map_err(|error| match error {
-                provenant_telemetry::NativeError::Input(message) => {
-                    Fail::new(Status::Invalid, ErrorKind::Invalid, message)
-                }
-                provenant_telemetry::NativeError::Io(message) => {
-                    Fail::new(Status::Error, ErrorKind::Io, message)
-                }
-            })?;
-        let mut human = format!("{} native Claude subagents\n", native.agents);
-        if native.skipped_incomplete_lines > 0 {
-            human.push_str(&format!(
-                "{} incomplete final lines skipped\n",
-                native.skipped_incomplete_lines
-            ));
-        }
-        for row in &native.models {
-            let cost = row.cost_usd.as_ref().map_or_else(
-                || "unknown".to_owned(),
-                |cost| format!("est. API-equivalent ${}", cost.usd),
-            );
-            let billing = match row.price_table_billing {
-                Some(provenant_telemetry::BillingKind::Subscription) => {
-                    " (price-table subscription model)"
-                }
-                _ => "",
-            };
-            human.push_str(&format!(
-                "  {}: {} agents, {} messages, cost {}{}\n",
-                plain_text(&row.model, usize::MAX),
-                row.agents,
-                row.messages,
-                cost,
-                billing
-            ));
-        }
-        let mut data = json!({ "native_claude_subagents": native });
-        attach_freshness(&prices, &mut data, &mut human)?;
-        return Ok((data, human));
-    }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
             .transpose()
@@ -572,7 +531,13 @@ pub(super) fn stats_inner(
                 let native = provenant_telemetry::native_attempts::report(attempts, &rows);
                 if !native.attempts.is_empty() || !native.unlinked.is_empty() {
                     human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
-                    for item in &native.attempts {
+                    if !command.detail {
+                        human.push_str(&format!(
+                            "  {} attempts; per-attempt rows with --detail or --json\n",
+                            native.attempts.len()
+                        ));
+                    }
+                    for item in native.attempts.iter().filter(|_| command.detail) {
                         if item.models.is_empty() {
                             human.push_str(&format!(
                                 "  {} {}: no linked messages\n",

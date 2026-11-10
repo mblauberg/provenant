@@ -188,6 +188,43 @@ pub struct RouteExclusion {
     pub model: String,
     pub reason: RouteExclusionReason,
 }
+/// Extra-field key for the accounts a route passed over when none was ready.
+pub const SKIPPED_ACCOUNTS: &str = "skipped_accounts";
+
+/// One account a route passed over, and why. Routing names the account by its
+/// opaque key; preparation replaces the key with the registered label before
+/// the reason reaches any message, so no sign-in identity is ever shown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedAccount {
+    pub account: String,
+    pub reason: RouteExclusionReason,
+}
+
+impl SkippedAccount {
+    /// The typed list under [`SKIPPED_ACCOUNTS`], empty when absent or malformed.
+    pub fn read(extra: &crate::ExtraFields) -> Vec<Self> {
+        extra
+            .get(SKIPPED_ACCOUNTS)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// `label: cause` for each account, for refusal messages.
+    pub fn describe(accounts: &[Self]) -> String {
+        accounts
+            .iter()
+            .map(|skipped| {
+                format!(
+                    "{}: {}",
+                    crate::diagnostic::safe_text(&skipped.account),
+                    skipped.reason.diagnostic_parts().0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteExclusionReason {

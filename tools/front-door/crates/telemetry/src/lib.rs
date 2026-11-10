@@ -10,7 +10,6 @@ pub mod experiments;
 pub mod ingest;
 pub mod ledger;
 pub mod mileage;
-mod native;
 pub mod native_attempts;
 pub mod outcome;
 mod prices;
@@ -18,12 +17,10 @@ mod reducer;
 pub mod refresh;
 pub mod route_outcomes;
 pub mod signals;
-pub mod study;
 pub mod suggest;
 mod trace;
 pub mod usage;
 pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};
-pub use native::{NativeError, NativeInput, NativeModel, NativeReport, claude_subagents};
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, Freshness, PriceError,
     PriceIdentity, PriceTable, Rates, validate_prices,

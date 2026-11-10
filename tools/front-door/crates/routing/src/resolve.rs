@@ -1534,9 +1534,29 @@ fn candidate(
         None => availability_reason(None, context),
     };
     let account = availability.and_then(|a| a.account_key.clone());
+    // No account was ready: keep each one's own reason, so a refusal can say
+    // which accounts were passed over and why, not only the first one's.
+    let skipped: Vec<_> = evaluated
+        .iter()
+        .filter_map(|(a, reason, _)| {
+            Some(provenant_records::SkippedAccount {
+                account: a.account_key.clone()?,
+                reason: reason.clone()?,
+            })
+        })
+        .collect();
     let readiness = match (reason, availability) {
         (Some(reason), _) => RouteReadiness::Unavailable {
-            extra: Default::default(),
+            extra: if skipped.is_empty() {
+                Default::default()
+            } else {
+                [(
+                    provenant_records::SKIPPED_ACCOUNTS.into(),
+                    serde_json::json!(skipped),
+                )]
+                .into_iter()
+                .collect()
+            },
             reason,
         },
         (None, Some(a)) => RouteReadiness::Ready {
