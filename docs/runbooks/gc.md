@@ -135,21 +135,23 @@ removal, capped at five seconds. Applied full and pressure sweeps share
 Manual `gc --pressure` prints a notice when the project is transient or no
 eligible data is in scope; JSON exposes the reason as `notice`.
 
-Fabric settlement atomically publishes a completion request under a non-blocking
-per-request lock. It records `cleanup_deferred = true` when it holds the lock;
-otherwise the lock holder owns the receipt. A queue failure records a retryable
-retained receipt with a warning. The host
-tick dispatches a detached worker to collect its worktree, declared output and
+Fabric settlement records a retained receipt with `cleanup_deferred = true`, then
+spawns one detached worker to collect the lane's worktree, declared output and
 Cargo caches. Settlement fetches no refs and walks no payload trees. The worker retains
 all ownership, continuation, terminal-state, live-writer, landing-proof and
-expected-tip lease checks. Durable requests under `<state>/gc/completions/`
-contain both intent and retry state. A worker claims the whole record by rename
-to a `.claim` filename and holds an OS lock while processing it. A dead worker's
-claim remains retryable; a requeue publishes fresh pending intent even when the
-earlier claim has exhausted its budget. Exhaustion moves the whole record to
-`gc/completion-exhausted` in one rename. Each host tick retries independently of the daily
-GC deadline and `gc.schedule`. A busy worker waits up to 120 seconds for collection
-custody before leaving its request for retry. `land` retains its explicit cleanup.
+expected-tip lease checks, and replaces the receipt with its outcome. Completion
+cleanup keeps no queue. When the spawn fails, the worker dies or collection
+custody stays busy for 120 seconds, the settlement receipt stays non-final
+(`cleanup_deferred` or `retryable`) and nothing else is recorded. The next
+applied full or pressure sweep, holding collection custody, runs the same
+owner-bound collection for every terminal lane whose receipt is not final and
+whose worktree still exists, landing against the fetched default branch (falling
+back to the owner's base when the fetch fails, there is no origin, or the sweep
+is a pressure sweep, the same rule settlement uses). That pass proves the owner
+attempt, continuation writer and exact HEAD, so it collects a lane landed by
+fast-forward that the path-based pass keeps at the integration tip or on its
+first-parent line, and writes the `pruned` receipt.
+`land` retains its explicit cleanup.
 Kept files, live writers and reservations still prevent removal.
 
 `gc --dry-run` uses the existing run-size ledger and shared bounded filesystem

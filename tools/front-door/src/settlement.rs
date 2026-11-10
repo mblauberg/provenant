@@ -1,12 +1,13 @@
 //! What happens once a lane has settled, beyond its own outcome: graphs
-//! advance, the chair that dispatched it is notified, and its session log
-//! gains an entry.
+//! advance, the chair that dispatched it is notified, its session log gains
+//! an entry, and the usage ledger gains the attempt's row.
 //!
 //! The run store owns the obligation. The row that says a settlement owes
 //! these reactions is written in the transaction that commits the terminal
 //! record, with its payload frozen there. A drain replays that payload at
-//! least once, from the normal seam and from crash recovery alike; the notice
-//! and the log are idempotent by attempt, so the effect is exactly once.
+//! least once, from the normal seam and from crash recovery alike; the notice,
+//! the log and the ledger row are idempotent by attempt, so the effect is
+//! exactly once.
 use provenant_core::{ActorId, CancelToken, MessageId, OperationId, ProjectId, Roots, RunId};
 use provenant_fabric_store::{HostStore, Message, MessageKind, Request, Store};
 use provenant_os::clock::SystemClock;
@@ -263,6 +264,16 @@ pub(crate) fn drain_run(
     subject: &Subject,
     graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
 ) -> Result<(), Error> {
+    let assets = crate::roots::product_root().unwrap_or_else(|_| subject.checkout.clone());
+    drain_run_with_prices(subject, &assets, graph)
+}
+
+/// `drain_run` with the directory holding `config/telemetry-prices.toml`.
+fn drain_run_with_prices(
+    subject: &Subject,
+    assets: &std::path::Path,
+    graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
+) -> Result<(), Error> {
     let roots = subject.roots()?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -283,13 +294,54 @@ pub(crate) fn drain_run(
         react(
             reaction,
             save,
-            graph,
-            &mut |reaction| resolve(reaction, &roots),
+            Effects {
+                graph: &mut *graph,
+                resolve: &mut |reaction| resolve(reaction, &roots),
+                ledger: &mut |reaction| record_usage(reaction, &store, assets, &roots),
+            },
             &settings,
             &config.retention,
             &roots,
         )
     })
+}
+
+/// Append the attempt's row to the usage ledger beside its run store. The
+/// ledger keeps one row per attempt, so a replayed settlement adds nothing.
+/// Cost is priced from the installed price table. A row is never written
+/// unpriced: when the table cannot be read the step fails and the reaction
+/// stays pending, so a later drain writes the priced row.
+fn record_usage(
+    reaction: &Reaction,
+    store: &provenant_run::RunStore,
+    assets: &std::path::Path,
+    roots: &Roots,
+) -> Result<(), Error> {
+    use provenant_run::AttemptReader;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let fact = store.attempt(reaction.attempt, &call)?;
+    let prices = crate::fabric::load_graph_prices(assets)?;
+    let row = provenant_telemetry::ledger::row(
+        &fact,
+        Some(reaction.run),
+        provenant_telemetry::ledger::Source::Settlement,
+        Some(&prices),
+    )?;
+    provenant_telemetry::ledger::append(roots.state.as_path(), &[row], &clock, &cancel)?;
+    Ok(())
+}
+
+/// The effects a reaction drives that need more than the frozen row: the
+/// graph advance, the chair lookup and the usage ledger append.
+struct Effects<'a> {
+    graph: &'a mut dyn FnMut(&Reaction) -> Result<(), Error>,
+    resolve: &'a mut dyn FnMut(&mut Reaction) -> Result<(), Error>,
+    ledger: &'a mut dyn FnMut(&Reaction) -> Result<(), Error>,
 }
 
 /// One attempt's reactions. They are independent: one failing, or the host
@@ -300,15 +352,14 @@ pub(crate) fn drain_run(
 fn react(
     reaction: &mut Reaction,
     save: &mut provenant_run::reactions::Saver<'_>,
-    graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
-    resolve: &mut dyn FnMut(&mut Reaction) -> Result<(), Error>,
+    effects: Effects<'_>,
     settings: &provenant_fabric_runtime::config::Settlement,
     retention: &provenant_config::RetentionSettings,
     roots: &Roots,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
     if !reaction.resolved {
-        let outcome = resolve(reaction).and_then(|()| save(reaction));
+        let outcome = (effects.resolve)(reaction).and_then(|()| save(reaction));
         if let Err(error) = outcome {
             reaction.resolved = false;
             reaction.chair = None;
@@ -317,7 +368,7 @@ fn react(
         }
     }
     if reaction.graph && !reaction.graph_done {
-        match graph(reaction) {
+        match (effects.graph)(reaction) {
             Ok(()) => {
                 reaction.graph_done = true;
                 if let Err(error) = save(reaction) {
@@ -349,6 +400,14 @@ fn react(
                 Err(error) => {
                     first.get_or_insert(error);
                 }
+            }
+        }
+    }
+    if !reaction.ledger_done {
+        match (effects.ledger)(reaction) {
+            Ok(()) => reaction.ledger_done = true,
+            Err(error) => {
+                first.get_or_insert(error);
             }
         }
     }
@@ -506,6 +565,7 @@ mod tests {
             graph_done: false,
             notice_done: false,
             log_done: false,
+            ledger_done: false,
         }
     }
 
@@ -666,23 +726,29 @@ mod tests {
                 }
                 Ok(())
             },
-            &mut |_| {
-                events.borrow_mut().push("graph");
-                if graph_fails {
-                    Err("graph".into())
-                } else {
+            Effects {
+                graph: &mut |_| {
+                    events.borrow_mut().push("graph");
+                    if graph_fails {
+                        Err("graph".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                resolve: &mut |reaction| {
+                    events.borrow_mut().push("resolve");
+                    if resolve_fails {
+                        return Err("host store busy".into());
+                    }
+                    reaction.chair = Some(binding("session-1"));
+                    reaction.session = Some("session-1".into());
+                    reaction.resolved = true;
                     Ok(())
-                }
-            },
-            &mut |reaction| {
-                events.borrow_mut().push("resolve");
-                if resolve_fails {
-                    return Err("host store busy".into());
-                }
-                reaction.chair = Some(binding("session-1"));
-                reaction.session = Some("session-1".into());
-                reaction.resolved = true;
-                Ok(())
+                },
+                ledger: &mut |_| {
+                    events.borrow_mut().push("ledger");
+                    Ok(())
+                },
             },
             &provenant_fabric_runtime::config::Settlement::default(),
             &provenant_config::RetentionSettings::default(),
@@ -756,6 +822,128 @@ mod tests {
             max_entries: settings.chair_log_entries,
             max_bytes: settings.chair_log_bytes,
         }
+    }
+
+    #[test]
+    fn settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{AttemptId, RootInputs, TaskId, WallTime};
+        use provenant_records::CanonicalV1;
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let (home, checkout) = (base.join("home"), base.join("release"));
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(checkout.join("config"))?;
+        let mut inputs = RootInputs::new(home.clone(), checkout.clone());
+        inputs.state_dir = Some(base.join("state"));
+        provenant_os::fixture::private_state_dir(&base.join("state"))?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let (project, actor) = (ProjectId::from_bytes([1; 16]), ActorId::from_bytes([2; 16]));
+        let context = provenant_run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: project,
+            actor_id: actor,
+            read_prompts: false,
+        };
+        let (clock, cancel) = (SystemClock::new(), CancelToken::new());
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        let (run, attempt, task) = (
+            RunId::from_bytes([3; 16]),
+            AttemptId::from_bytes([4; 16]),
+            TaskId::from_bytes([5; 16]),
+        );
+        store.create(
+            &provenant_run::PreparedRun {
+                run_id: run,
+                operation_id: OperationId::parse("ledger-settlement")?,
+                created_at: WallTime::from_micros(100)?,
+                attempts: vec![provenant_run::NewAttempt {
+                    attempt_id: attempt,
+                    task_id: task,
+                    prompt: String::new(),
+                }],
+                request: serde_json::from_value(serde_json::json!({
+                    "schema_version":1, "concurrency":1, "parent":null, "tasks":[{
+                        "task_id": task, "prompt_digest": CanonicalV1::file_digest(b""),
+                        "route": {"kind":"model","provider":"codex","model":"codex/fixture"},
+                        "authority_digest": provenant_core::Digest::from_bytes([0;32]),
+                        "provider_timeout_seconds":20, "delivery_id":null }]
+                }))?,
+            },
+            &call,
+        )?;
+        store.withdraw(
+            attempt,
+            provenant_run::AttemptState::Queued {
+                extra: Default::default(),
+            },
+            provenant_run::Outcome::Cancelled,
+            "fixture",
+            WallTime::from_micros(200)?,
+            &call,
+        )?;
+        let subject = Subject {
+            home,
+            checkout: checkout.clone(),
+            state_root: roots.state.as_path().to_owned(),
+            project,
+            actor,
+            run,
+        };
+        let rows =
+            || -> Result<Vec<provenant_telemetry::ledger::Row>, Box<dyn std::error::Error>> {
+                Ok(provenant_telemetry::ledger::read(roots.state.as_path())?.rows)
+            };
+        // No price table: the ledger step fails and the reaction stays owed.
+        assert!(drain_run_with_prices(&subject, &checkout, &mut |_| Ok(())).is_err());
+        assert!(rows()?.is_empty());
+        assert!(
+            !store
+                .reaction(attempt, &call)?
+                .ok_or("reaction")?
+                .ledger_done
+        );
+        assert_eq!(store.pending_reactions(run, &call)?, [attempt]);
+        // With the table installed, a later drain writes the priced row.
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../config/telemetry-prices.toml"
+            ),
+            checkout.join("config/telemetry-prices.toml"),
+        )?;
+        drain_run_with_prices(&subject, &checkout, &mut |_| Ok(()))?;
+        let first = rows()?;
+        assert_eq!(first.len(), 1);
+        let cost = first[0].cost.as_ref().ok_or("priced")?;
+        assert_eq!(
+            (cost.picodollars, cost.prices.as_str()),
+            (0, "reviewed-2026-10-27")
+        );
+        assert!(
+            store
+                .reaction(attempt, &call)?
+                .ok_or("reaction")?
+                .ledger_done
+        );
+        // A crash between the append and the save replays to the same row.
+        let mut replay = store.reaction(attempt, &call)?.ok_or("reaction")?;
+        replay.ledger_done = false;
+        store.save_reaction(&replay, &call)?;
+        assert_eq!(store.pending_reactions(run, &call)?, [attempt]);
+        drain_run_with_prices(&subject, &checkout, &mut |_| Ok(()))?;
+        assert_eq!(rows()?, first);
+        assert!(
+            store
+                .reaction(attempt, &call)?
+                .ok_or("reaction")?
+                .ledger_done
+        );
+        Ok(())
     }
 
     fn now() -> i64 {

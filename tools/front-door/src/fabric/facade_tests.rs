@@ -542,12 +542,12 @@ pub(crate) mod peer_tests {
         include!("peer_graph_tests.rs");
     }
 
-    struct SettlementFixture {
-        rig: crate::worktree_tests::support::TestRig,
-        roots: provenant_core::Roots,
-        store: RunStore,
-        settled: provenant_run::HolderContext,
-        worktree: PathBuf,
+    pub(crate) struct SettlementFixture {
+        pub(crate) rig: crate::worktree_tests::support::TestRig,
+        pub(crate) roots: provenant_core::Roots,
+        pub(crate) store: RunStore,
+        pub(crate) settled: provenant_run::HolderContext,
+        pub(crate) worktree: PathBuf,
     }
 
     fn publish_success(
@@ -676,8 +676,13 @@ pub(crate) mod peer_tests {
     }
 
     impl SettlementFixture {
-        fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
+        pub(crate) fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
             Self::resumed_as("settlement-resume")
+        }
+
+        /// A settled lane whose head is one commit past its base.
+        pub(crate) fn resumed_with_lane_commit() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::build("settlement-resume", None, true)
         }
 
         fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -685,6 +690,10 @@ pub(crate) mod peer_tests {
         }
 
         fn settled_fixture(operation: &str, graph_id: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::build(operation, graph_id, false)
+        }
+
+        fn build(operation: &str, graph_id: Option<&str>, lane_commit: bool) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -808,9 +817,19 @@ pub(crate) mod peer_tests {
                     Ok(())
                 },
             )?;
+            let head = if lane_commit {
+                let lane = info.path.to_str().ok_or("lane path")?;
+                let output =
+                    rig.execute(&git, &["-C", lane, "commit", "--allow-empty", "-qm", "lane work"], None)?;
+                assert_eq!(crate::worktree_tests::support::code(&output), 0);
+                let output = rig.execute(&git, &["-C", lane, "rev-parse", "HEAD"], None)?;
+                String::from_utf8(output.stdout.bytes)?.trim().parse::<provenant_core::GitOid>()?
+            } else {
+                info.head
+            };
             if graph_id.is_some() {
                 let record = store.record(prior, &call)?;
-                publish_success(&rig, &store, &record, info.head, &call)?;
+                publish_success(&rig, &store, &record, head, &call)?;
                 let settled = provenant_run::HolderContext {
                     schema_version: 1,
                     roots: provenant_run::RootSeed { home: rig.home.clone(), checkout: rig.project.clone(), state_root: rig.state.clone() },
@@ -841,7 +860,7 @@ pub(crate) mod peer_tests {
             };
             store.resume_fresh(&resume, "fixture", &call)?;
             let record = store.record(resume.attempt_id, &call)?;
-            publish_success(&rig, &store, &record, info.head, &call)?;
+            publish_success(&rig, &store, &record, head, &call)?;
             let settled = provenant_run::HolderContext {
                 schema_version: 1,
                 roots: provenant_run::RootSeed {

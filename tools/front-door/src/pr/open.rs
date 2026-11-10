@@ -58,7 +58,6 @@ fn default_branch(project: &Path) -> Result<String> {
     let bytes = successful(super::execute(
         project,
         &["gh", "repo", "view", "--json", "defaultBranchRef"],
-        false,
     )?)?;
     Ok(serde_json::from_slice::<Repository>(&bytes)?.branch.name)
 }
