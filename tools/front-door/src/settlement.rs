@@ -284,9 +284,11 @@ pub(crate) fn drain_run(
         react(
             reaction,
             save,
-            graph,
-            &mut |reaction| resolve(reaction, &roots),
-            &mut |reaction| record_usage(reaction, &store, &subject.checkout, &roots),
+            Effects {
+                graph: &mut *graph,
+                resolve: &mut |reaction| resolve(reaction, &roots),
+                ledger: &mut |reaction| record_usage(reaction, &store, &subject.checkout, &roots),
+            },
             &settings,
             &config.retention,
             &roots,
@@ -324,6 +326,14 @@ fn record_usage(
     Ok(())
 }
 
+/// The effects a reaction drives that need more than the frozen row: the
+/// graph advance, the chair lookup and the usage ledger append.
+struct Effects<'a> {
+    graph: &'a mut dyn FnMut(&Reaction) -> Result<(), Error>,
+    resolve: &'a mut dyn FnMut(&mut Reaction) -> Result<(), Error>,
+    ledger: &'a mut dyn FnMut(&Reaction) -> Result<(), Error>,
+}
+
 /// One attempt's reactions. They are independent: one failing, or the host
 /// store being busy, leaves it pending without stopping the others, and the
 /// first failure in time order is reported. The destination is persisted
@@ -332,16 +342,14 @@ fn record_usage(
 fn react(
     reaction: &mut Reaction,
     save: &mut provenant_run::reactions::Saver<'_>,
-    graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
-    resolve: &mut dyn FnMut(&mut Reaction) -> Result<(), Error>,
-    ledger: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
+    effects: Effects<'_>,
     settings: &provenant_fabric_runtime::config::Settlement,
     retention: &provenant_config::RetentionSettings,
     roots: &Roots,
 ) -> Result<(), Error> {
     let mut first: Option<Error> = None;
     if !reaction.resolved {
-        let outcome = resolve(reaction).and_then(|()| save(reaction));
+        let outcome = (effects.resolve)(reaction).and_then(|()| save(reaction));
         if let Err(error) = outcome {
             reaction.resolved = false;
             reaction.chair = None;
@@ -350,7 +358,7 @@ fn react(
         }
     }
     if reaction.graph && !reaction.graph_done {
-        match graph(reaction) {
+        match (effects.graph)(reaction) {
             Ok(()) => {
                 reaction.graph_done = true;
                 if let Err(error) = save(reaction) {
@@ -386,7 +394,7 @@ fn react(
         }
     }
     if !reaction.ledger_done {
-        match ledger(reaction) {
+        match (effects.ledger)(reaction) {
             Ok(()) => reaction.ledger_done = true,
             Err(error) => {
                 first.get_or_insert(error);
@@ -708,27 +716,29 @@ mod tests {
                 }
                 Ok(())
             },
-            &mut |_| {
-                events.borrow_mut().push("graph");
-                if graph_fails {
-                    Err("graph".into())
-                } else {
+            Effects {
+                graph: &mut |_| {
+                    events.borrow_mut().push("graph");
+                    if graph_fails {
+                        Err("graph".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                resolve: &mut |reaction| {
+                    events.borrow_mut().push("resolve");
+                    if resolve_fails {
+                        return Err("host store busy".into());
+                    }
+                    reaction.chair = Some(binding("session-1"));
+                    reaction.session = Some("session-1".into());
+                    reaction.resolved = true;
                     Ok(())
-                }
-            },
-            &mut |reaction| {
-                events.borrow_mut().push("resolve");
-                if resolve_fails {
-                    return Err("host store busy".into());
-                }
-                reaction.chair = Some(binding("session-1"));
-                reaction.session = Some("session-1".into());
-                reaction.resolved = true;
-                Ok(())
-            },
-            &mut |_| {
-                events.borrow_mut().push("ledger");
-                Ok(())
+                },
+                ledger: &mut |_| {
+                    events.borrow_mut().push("ledger");
+                    Ok(())
+                },
             },
             &provenant_fabric_runtime::config::Settlement::default(),
             &provenant_config::RetentionSettings::default(),
