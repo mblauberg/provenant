@@ -1623,6 +1623,31 @@ fn resolve_target(
             attempt: None,
         }));
     }
+    if let [graph, node_id, attempt_id] = selector.split('/').collect::<Vec<_>>()[..]
+        && ids.iter().any(|id| id == graph)
+    {
+        let checkpoint = match FileJournal::read_status_checkpoint(root, project, graph) {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return Ok(None),
+            Err(error) if error.is_unreadable() => return Ok(None),
+            Err(error) => return Err(graph_journal_error(error)),
+        };
+        return Ok(checkpoint
+            .nodes
+            .iter()
+            .filter(|node| node.id == node_id)
+            .find_map(|node| {
+                node.recorded_attempts().find_map(|attempt| {
+                    let reference = attempt.attempt_ref.as_ref()?;
+                    (reference == attempt_id || reference.rsplit('/').next() == Some(attempt_id))
+                        .then(|| GraphTarget {
+                            graph: graph.to_owned(),
+                            node: Some(node.id.clone()),
+                            attempt: Some(reference.clone()),
+                        })
+                })
+            }));
+    }
     let mut matches = Vec::new();
     for graph in ids {
         let checkpoint = match FileJournal::read_status_checkpoint(root, project, &graph) {
@@ -2459,6 +2484,25 @@ mod tests {
         assert!(resolve_target(&roots.state, project, "missing")?.is_none());
         let g = "11111111111111111111111111111111";
         let a = "22222222222222222222222222222222";
+        // A full lane ID resolves through the graph checkpoint to that one attempt,
+        // for status, output and steer alike.
+        let lane = resolve_target(&roots.state, project, &format!("g/parent/{a}"))?
+            .ok_or("lane id must resolve")?;
+        assert_eq!(lane.graph, "g");
+        assert_eq!(lane.node.as_deref(), Some("parent"));
+        assert_eq!(lane.attempt.as_deref(), Some(format!("{g}/{a}").as_str()));
+        let checkpoint = FileJournal::read_status_checkpoint(&roots.state, project, "g")?
+            .ok_or("checkpoint")?;
+        assert_eq!(
+            provenant_cli::inbox::live_steer_reference(
+                &checkpoint,
+                lane.node.as_deref(),
+                lane.attempt.as_deref()
+            ),
+            Ok(format!("{g}/{a}").as_str())
+        );
+        assert!(resolve_target(&roots.state, project, &format!("g/other/{a}"))?.is_none());
+        assert!(resolve_target(&roots.state, project, &format!("h/parent/{a}"))?.is_none());
         let mismatch = |selector: &str| triple_mismatch(&roots.state, project, selector);
         assert!(mismatch(&format!("g/parent/{a}"))?.is_none());
         assert!(mismatch(&format!("g/parent/{g}/{a}"))?.is_none());

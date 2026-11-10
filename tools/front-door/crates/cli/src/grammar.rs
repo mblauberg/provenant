@@ -646,7 +646,7 @@ impl FromStr for Target {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let parts: Vec<_> = text.split('/').collect();
         // Graph and node names are resolved by the graph owner before lane IDs.
-        if parts.len() <= 2
+        if parts.len() <= 3
             && parts.iter().all(|part| {
                 !part.is_empty()
                     && part.len() <= 200
@@ -1504,6 +1504,12 @@ mod target_tests {
         assert!(!bare.is_qualified_pair());
         assert!(format!("{run}/").parse::<Attempt>().is_err());
         assert!(format!("/{attempt}").parse::<Attempt>().is_err());
+        // A graph lane ID names its graph and node, which need not be hexadecimal.
+        let lane: Attempt = format!("g/parent--child/{attempt}").parse().unwrap();
+        assert_eq!(
+            lane.0.selection.as_deref(),
+            Some(format!("g/parent--child/{attempt}").as_str())
+        );
         for invalid in [
             "",
             &format!("{run}//{attempt}"),
