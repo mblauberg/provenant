@@ -1,13 +1,13 @@
 # Telemetry
 
-Owner: `crates/telemetry` (reducer, prices, trace, usage log)
+Owner: `crates/telemetry` (reducer, prices, trace, usage log, usage ledger)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/ingest/tests.rs`,
-`crates/telemetry/tests/telemetry_pipeline.rs`
+`crates/telemetry/src/ledger/tests.rs`, `crates/telemetry/tests/telemetry_pipeline.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
-prices) using the bundled price table, and exports a trace.
-There is no billing ledger or collector. Grammar is in the generated [CLI
+prices) using the bundled price table, and exports a trace. It keeps a usage
+ledger of terminal attempts; there is no billing ledger or collector. Grammar is in the generated [CLI
 reference](../reference/cli-all.md); quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
@@ -20,9 +20,9 @@ routes do not fill missing resolved values.
 
 Every `telemetry stats` report also includes `route_outcomes`, grouped by
 resolved route, access mode, effort and pool assignment. Each row gives sample
-size, complete successes, success rate with a Wilson interval, API-equivalent
-cost per success and provider milliseconds per success. The last two divide
-all measured attempt cost or time, including failures, by complete successes.
+size, complete successes, success rate with a Wilson interval and provider
+milliseconds per success, which divides all measured attempt time, including
+failures, by complete successes. Rows carry no cost; `telemetry cost` reports it.
 A successful settlement with a partial-completion signal is not a complete
 success. Missing measurements and ratios with no successes remain unknown.
 Only an original weighted pool draw is marked `hash_assigned_pool`; exact
@@ -30,8 +30,8 @@ routes, preference overrides and conditional redraws are observational. A draw
 whose receipt lists a graph or flag exclusion in `considered_exclusions`, such
 as a graph restart excluding its predecessors' models, depends on the earlier
 attempt and is observational too; standing configuration exclusions are not.
-- Test: `crates/telemetry/src/tests.rs::route_outcomes_report_success_cost_time_access_effort_and_assignment`;
-  `crates/telemetry/src/tests.rs::route_outcomes_zero_success_and_unknown_cost_remain_unknown`;
+- Test: `crates/telemetry/src/tests.rs::route_outcomes_report_success_time_access_effort_and_assignment`;
+  `crates/telemetry/src/tests.rs::route_outcomes_zero_success_and_unknown_time_remain_unknown`;
   `crates/telemetry/src/tests.rs::pool_preferences_and_fallbacks_are_not_hash_comparisons`;
   `tests/telemetry_pipeline_cli.rs::stats_reports_route_access_effort_outcomes_and_nonrandom_comparison`
 - Owner: `crates/telemetry/src/route_outcomes.rs`, `crates/cli/src/run/telemetry.rs`
@@ -46,6 +46,44 @@ an empty attempt report and creates nothing; a corrupt one is an error.
 - Test: `tests/workspace_policy.rs::internal_edges_obey_the_layering_table`;
   `crates/telemetry/src/tests.rs::empty_reader_has_complete_zero_cost`
 - Owner: `crates/telemetry/src/`
+
+## The usage ledger outlives the run store
+
+Telemetry owns one append-only usage ledger: one row per terminal attempt, in
+daily segments under `<state>/usage-ledger/`, named by the attempt's UTC end
+date and kept with no age limit. A row holds the project, graph and node ids
+when known, the attempt id, the resolved provider, model, effort and account,
+the outcome, start and end, tokens by bucket, the API-equivalent cost priced at
+write time (absent when the price table could not be read), and the context
+band when the provider reports one per attempt. Format-1 run and task ids are
+kept only as opaque labels. The run store's settlement reaction appends the row,
+so a replayed or retried settlement adds nothing: the ledger holds at most one
+row per project and attempt.
+
+`provenant telemetry backfill` copies every project's terminal attempts from the
+run store into the ledger, priced from the bundled table, and reports how many
+it added and how many were already present. Run it once after installing 1.8.0;
+running it again adds nothing. The existing reports keep reading the run store.
+
+The ledger sits at the state root of the store being settled: the host root for
+lane children, which submit through the host relay. Settlement never writes an
+unpriced row: if the price table cannot be read, the ledger step fails and the
+reaction stays pending, so a later drain writes the priced row.
+
+Settlement appends without reporting a line it does not recognise; the line stays
+on disk. `telemetry backfill` and the report readers list every such line, and
+any file in the ledger directory that is not a segment, by segment name and line
+number. None is skipped silently. Appending after a torn line starts the new row on its own line.
+- Why (default): run history is dropped at the format-2 cut-over and lane usage
+  cannot be regenerated, so it needs a home that is not the run store.
+- Test: `crates/telemetry/src/ledger/tests.rs::a_settled_attempt_appends_one_row_even_when_settlement_is_retried`;
+  `crates/telemetry/src/ledger/tests.rs::backfilled_cost_for_a_past_window_equals_the_run_store_report`;
+  `crates/telemetry/src/ledger/tests.rs::an_unrecognised_line_is_reported_by_segment_and_line`;
+  `crates/telemetry/src/ledger/tests.rs::the_ledger_survives_deleting_the_run_store`;
+  `src/settlement.rs::tests::settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending`;
+  `tests/telemetry_pipeline_cli.rs::backfill_copies_each_attempt_once_and_outlives_the_run_store`
+- Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`,
+  `crates/cli/src/run/usage_ledger.rs`
 
 ## Bounded, honest totals
 
@@ -198,9 +236,9 @@ run identity; request proposals and provider session identifiers cannot supply
 that join. Graph and node labels come from existing work context. Each field
 reports known and unknown coverage. Missing historical context is never filled
 from the reporting host's current release or instructions.
-Each attempt context row includes that exact attempt's usage and API-equivalent
-cost from the existing reducer beside its chair and graph binding. These are
-individually rounded breakdowns; use report totals for aggregate cost.
+Each attempt context row includes that exact attempt's usage from the existing
+reducer beside its chair and graph binding; it carries no cost (`telemetry cost`
+reports it).
 
 Native reply rows retain structural event enums separately from inferred
 trigger labels. Narrow status questions and recognised notification/error
@@ -228,11 +266,12 @@ offline pipeline. Prompt text is not parsed into a guessed acceptance count.
 
 An accepted outcome is one distinct delivery ID with a recorded accepted
 workflow receipt among selected attempts. Provider success alone is not
-acceptance. Cost per accepted outcome divides the complete API-equivalent cost
-of selected attempts linked to those accepted deliveries by that count, as an
-exact rational number of microdollars. Missing cost or a zero denominator stays
-unknown. This excludes unattributed chair cost and attempts outside the selected
-window; receipt decisions and graph checkpoints are labelled latest snapshots.
+acceptance. `stats` reports only that denominator. `telemetry value` reports cost
+per accepted outcome for this project's attempts since `--since`: the complete
+API-equivalent cost of ledger rows linked to those deliveries, divided by the
+count, as microdollars. Missing cost, an unrecorded linked attempt or a zero
+denominator stays unknown. Unattributed chair cost and attempts outside the
+window are excluded; receipt decisions and graph checkpoints are labelled latest snapshots.
 
 These are observational comparisons. Missing joint coverage or simultaneous
 changes prevent separating a release effect from harness experiments, task
@@ -253,7 +292,7 @@ collection or parallel identity store is introduced.
 - Owner: `crates/telemetry/src/context.rs`, `crates/telemetry/src/signals.rs`,
   `crates/run/src/telemetry_context.rs`, `crates/cli/src/run/telemetry_context.rs`
 
-## Mileage and effective rates
+## Mileage
 
 `provenant telemetry mileage [--account] [--window] [--model] [--since] [--json]`
 joins the quota history to ingested usage priced by the reviewed table. Mileage
@@ -272,15 +311,6 @@ the same plan and tier. It is `flagged` only for a fall of at least 20% with at
 least ten priced segments on both sides; otherwise it is `inconclusive`. A
 `plan.change` run boundary reports the capacity change around the upgrade.
 
-Effective rates apply the plan's discount factor `price / capacity` to the
-average API rate per bucket for the potential rate at full use, and divide the
-plan price by tokens actually used for the realised rate. The period is the
-report window: the monthly plan price is prorated to it, and one window's
-capacity is expanded to the number of full windows in the period. Both carry
-the window's latest used percentage (`latest_used_basis_points`, the value at
-its latest reading, not averaged over the period), `n` and priced token
-coverage. Every effective report says token use is a lower bound and realised
-rates are upper bounds, because ingest coverage of the account is not checked.
 `--model` narrows only the tokens: quota deltas cover every model, so mileage
 under a model filter is understated.
 Fitted non-negative weights for `delta used = sum w_b x tokens_b` are reported
@@ -293,10 +323,40 @@ microdollars, rounded once.
   `crates/telemetry/src/mileage.rs::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
   `crates/telemetry/src/mileage.rs::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
   `crates/telemetry/src/mileage.rs::reset_time_jitter_under_a_minute_stays_in_one_window`;
-  `crates/telemetry/src/mileage.rs::full_price_coverage_still_reports_the_bound_note`;
   `crates/cli/src/mileage.rs::tests::an_interval_takes_each_row_once_in_its_half_open_bounds`;
-  `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_capacity_and_effective_rates`
+  `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_and_capacity`
 - Owner: `crates/telemetry/src/mileage.rs`, `crates/cli/src/mileage.rs`
+
+## Plan value and cost read the usage ledger
+
+`provenant telemetry cost [TARGET] [--by route|account|model|graph|node] [--since]`
+and `provenant telemetry value [--account] [--window] [--since]` are the only
+producers of cost, plan value and cost per accepted outcome. Both read the usage
+ledger and price nothing: a row carries the cost settled with its attempt.
+`stats`, `mileage` and `quota usage` report no cost. `TARGET` takes the target form of the other lane
+commands (attempt, task or run ID or prefix, or a graph or `graph/node` name);
+rows backfilled from format 1 are selected by their opaque labels. One
+attempt's report is a few lines, so a lane may call it.
+
+A figure that is not known is absent, never zero. An attempt the price table
+could not fully price counts as `unpriced` and makes the cost a lower bound
+(`complete: false`); when no attempt priced anything the cost is null. An
+attempt with no account is reported as `unattributed`, as a group under
+`--by account` and as its own line in `value`, never added to another account.
+`value` gives one row per account that has both a quota reading and a
+configured plan: the plan price in force, the reading's quota windows, the
+API-equivalent usage since `--since` (default 30 days) and the coverage of that
+usage (attempts, priced and unpriced). It is a comparison, not a bill. `value` also reports `accepted_outcomes`:
+this project's cost per accepted outcome, described under accepted outcomes.
+A ledger line this build cannot read is named in the reply, not skipped.
+- Why (default): cost had three producers that disagreed on what was missing;
+  one reader of one ledger cannot.
+- Test: `crates/telemetry/src/ledger/report.rs::tests`;
+  `tests/telemetry_value_cost.rs::cost_for_one_attempt_is_small_and_works_inside_a_lane`;
+  `tests/telemetry_value_cost.rs::cost_reports_unpriced_and_unattributed_attempts_without_zero_filling`;
+  `tests/telemetry_value_cost.rs::value_has_a_row_per_account_with_readings_and_states_coverage`
+- Owner: `crates/telemetry/src/ledger/report.rs`, `crates/cli/src/telemetry_value.rs`,
+  `crates/cli/src/telemetry_args.rs`
 
 ## Trace export
 
@@ -346,29 +406,31 @@ supply these strata where present; absent values stay `unknown`. Both strata
 must be known for a comparison to be sufficient; unknown strata are reported
 as insufficient with a reason. Escapes are attributed per PR, so every node
 arm in that PR is charged with the PR outcome. This change
-adds no context capture. Nodes combine selected attempts' costs, including
+adds no context capture. A node combines its selected attempts, including
 retries. A node attributes to a model only when every selected attempt names
 the same model; mixed or missing identities stay `unknown` for model ranking.
 Only leaf source findings enter the
 confirmed and false-positive counts: graph-local IDs join `accepted` and
 `rejected` verifier dispositions, deduplicated across verifier copies.
 Conflicting, deferred or absent dispositions, ambiguous source IDs and missing
-checkpoints remain unmeasured. Verifier copies contribute their costs and no
-extra findings.
+checkpoints remain unmeasured. Verifier copies contribute no extra findings.
 
-Arms show confirmed findings per API-equivalent dollar, false-positive rate,
-and the fraction of distinct mature attributed merges with any escaped signal.
-Only mature merges enter an attributed ranking cohort. The default minimum is
-20 distinct graphs and mature merges per arm (`--min-samples`). Unknown costs,
-missing dispositions or CI input and smaller arms are `insufficient`.
+Arms show confirmed findings per deduplicated node (`confirmed_per_node`),
+false-positive rate, and the fraction of distinct mature attributed merges with
+any escaped signal. A node is one graph and node pair, however many attempts it
+retried. `stats` reports no cost, so the ranking uses none. Only mature merges
+enter an attributed ranking cohort. The default minimum is 20 distinct graphs
+and mature merges per arm (`--min-samples`). Missing dispositions or CI input
+and smaller arms are `insufficient`.
 Without CI input, escaped-rate values and intervals are null; its retained
 numerator counts only the observed Git signals.
-Rates have 95% Wilson intervals. The confirmed-per-dollar interval scales the
-Wilson confirmed share by observed dispositions per dollar, conditional on
-observed costs; it does not model cost variability or finding correlation.
-Raw finding volume never determines preference. Advice requires separated
-confirmed-per-dollar intervals and no higher observed false-positive or
-escaped-defect rates in the same stratum.
+Rates have 95% Wilson intervals. The confirmed-per-node interval scales the
+Wilson confirmed share by observed dispositions per node; it does not model
+finding correlation.
+Finding volume alone never determines preference. Advice requires separated
+confirmed-per-node intervals and no higher observed false-positive or
+escaped-defect rates in the same stratum, so yield gained through more false
+positives or escapes cannot win.
 
 A suggestion includes both sample counts, intervals, references to its full
 arm evidence and an RFC3339 expiry, default 14 days (`--expiry-days`). Reports
@@ -414,5 +476,5 @@ these fields.
 
 ## Not provided
 
-- A ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
+- A billing ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
 - A telemetry MCP tool or an `--account` selector on `telemetry stats`.

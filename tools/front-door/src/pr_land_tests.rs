@@ -873,7 +873,11 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = call
         .replace("api --include ", "api ")
-        .replace(" -H X-GitHub-Api-Version:2026-03-10", "");
+        .replace(" -H X-GitHub-Api-Version:2026-03-10", "")
+        .replace(
+            "api -H Accept:application/vnd.github+json -H X-GitHub-Api-Version:2022-11-28 ",
+            "api ",
+        );
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","permissions":{"push":true}}"#)?;
@@ -992,23 +996,26 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" | "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
         }
+        // The CI observer reads through `gh api --include`, page by page.
         value
-            if (value.starts_with("api --paginate --slurp repos/owner/repo/commits/") || value.starts_with("api --paginate --slurp repos/{owner}/{repo}/commits/"))
-                && value.ends_with("/statuses?per_page=100") =>
+            if value.starts_with("api repos/owner/repo/commits/")
+                && value.ends_with("/statuses?per_page=100&page=1") =>
         {
-            io::stdout().write_all(b"[[]]")?;
+            io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n[]")?;
         }
         value
-            if (value.starts_with("api --paginate --slurp repos/owner/repo/commits/") || value.starts_with("api --paginate --slurp repos/{owner}/{repo}/commits/"))
-                && value.ends_with("/check-runs?per_page=100&filter=latest") =>
+            if value.starts_with("api repos/owner/repo/commits/")
+                && value.ends_with("/check-runs?per_page=100&filter=latest&page=1") =>
         {
             if dir.join("checks-fail").exists() {
+                io::stdout().write_all(b"HTTP/2.0 404 Not Found\r\n\r\n{}")?;
                 return Ok(1);
             }
             let commit = value.split("/commits/").nth(1).and_then(|part| part.split('/').next()).ok_or("check commit")?;
-            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":[{
+            io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"total_count":2,"check_runs":[{
                 "name":"build","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
-            }, {"name":"ci-status","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"}]}]))?)?;
+            }, {"name":"ci-status","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"}]}))?)?;
         }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if dir.join("checks-fail").exists() {

@@ -646,7 +646,7 @@ impl FromStr for Target {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let parts: Vec<_> = text.split('/').collect();
         // Graph and node names are resolved by the graph owner before lane IDs.
-        if parts.len() <= 2
+        if parts.len() <= 3
             && parts.iter().all(|part| {
                 !part.is_empty()
                     && part.len() <= 200
@@ -1046,7 +1046,7 @@ pub enum NativeSettlement {
 
 #[derive(Debug, Subcommand)]
 pub enum Telemetry {
-    /// Summarise local attempts, usage and cost
+    /// Summarise local attempts and usage
     Stats(Stats),
     /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
     Trace(Trace),
@@ -1057,8 +1057,14 @@ pub enum Telemetry {
     },
     /// Record native chair and sub-agent token usage per account
     Ingest(Ingest),
-    /// Report quota mileage and effective token rates from quota history and ingested usage
+    /// Report quota mileage from quota history and ingested usage
     Mileage(Mileage),
+    /// Compare each account's API-equivalent lane usage with its plan price and quota readings
+    Value(crate::telemetry_args::TelemetryValue),
+    /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
+    Cost(crate::telemetry_args::TelemetryCost),
+    /// Copy every terminal attempt in the run store into the usage ledger; run once after installing 1.8.0
+    Backfill,
     /// Compare experiment arms using offline pipeline outcomes
     #[command(subcommand)]
     Experiments(Experiments),
@@ -1504,6 +1510,12 @@ mod target_tests {
         assert!(!bare.is_qualified_pair());
         assert!(format!("{run}/").parse::<Attempt>().is_err());
         assert!(format!("/{attempt}").parse::<Attempt>().is_err());
+        // A graph lane ID names its graph and node, which need not be hexadecimal.
+        let lane: Attempt = format!("g/parent--child/{attempt}").parse().unwrap();
+        assert_eq!(
+            lane.0.selection.as_deref(),
+            Some(format!("g/parent--child/{attempt}").as_str())
+        );
         for invalid in [
             "",
             &format!("{run}//{attempt}"),

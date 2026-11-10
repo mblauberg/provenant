@@ -2682,6 +2682,19 @@ impl crate::RunStore {
         receipt: &serde_json::Value,
         call: &crate::Request<'_>,
     ) -> Result<()> {
+        self.record_worktree_settlement_if(id, receipt, |_| true, call)
+            .map(|_| ())
+    }
+    /// Write `receipt` only when `admit` accepts the prior receipt, read under
+    /// the same lock as the write. A `pruned` receipt is never replaced.
+    /// Returns whether the receipt was written.
+    pub fn record_worktree_settlement_if(
+        &self,
+        id: provenant_core::AttemptId,
+        receipt: &serde_json::Value,
+        admit: impl FnOnce(Option<&serde_json::Value>) -> bool,
+        call: &crate::Request<'_>,
+    ) -> Result<bool> {
         let record = self.record(id, call)?;
         let attempt = self.attempt_dir(record.run_id, id, false)?;
         let _lock = attempt.lock(
@@ -2691,15 +2704,19 @@ impl crate::RunStore {
             call.cancel,
             call.clock,
         )?;
-        match attempt.read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT) {
-            Ok(raw) => {
-                let prior: serde_json::Value = crate::db::decode(&raw)?;
-                if prior["state"] == "pruned" {
-                    return Ok(());
-                }
-            }
-            Err(error) if error.is_not_found() => {}
+        let prior: Option<serde_json::Value> = match attempt
+            .read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT)
+        {
+            Ok(raw) => Some(crate::db::decode(&raw)?),
+            Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error.into()),
+        };
+        if prior
+            .as_ref()
+            .is_some_and(|prior| prior["state"] == "pruned")
+            || !admit(prior.as_ref())
+        {
+            return Ok(false);
         }
         attempt
             .atomic_write(
@@ -2709,7 +2726,8 @@ impl crate::RunStore {
                 provenant_os::fs::PublishMode::Replace,
             )?
             .require_durable()
-            .map_err(RunError::from)
+            .map_err(RunError::from)?;
+        Ok(true)
     }
     /// Explicit host pickup of a settled writer. Its immutable terminal record
     /// stays intact; the keyed sealed receipt records this later delivery.

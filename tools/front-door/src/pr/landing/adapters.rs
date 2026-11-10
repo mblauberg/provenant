@@ -4,11 +4,16 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
-        StackMember, StackMembership,
+        ReviewRecord, ReviewRecords, Reviews, StackMember, StackMembership,
     },
 };
 use crate::pr::{
-    RestPull, TimedOut, execute_with, git::Git, git::plain_ref, merge_with, rest_pull, wait,
+    RestPull, TimedOut, execute_with,
+    git::Git,
+    git::plain_ref,
+    merge_with,
+    observer::{Check, ObserveError, Observer},
+    rest_pull, wait,
 };
 use provenant_cli::domains::MergeMethod;
 use provenant_os::exec::Termination;
@@ -29,16 +34,17 @@ pub type Adapters<'a> = (
 /// Construct the real forge, repository, gate and alarm adapters for a project.
 pub(super) fn connect<'a>(
     project: &Path,
+    state: &Path,
     globals: &provenant_cli::Globals,
     workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
     tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
 ) -> Result<Adapters<'a>, LandingError> {
     Ok((
-        Box::new(GhForge::new(project)),
+        Box::new(GhForge::new(project, state)),
         Box::new(GitRepo::with_follow_up(
             project, globals, workers, tracking,
         )?),
-        Box::new(CheckGate::new(project)),
+        Box::new(CheckGate::new(project, state)),
         Box::new(ChairAlarms::new(project)),
     ))
 }
@@ -114,18 +120,50 @@ fn reconcile_revert_creation(
     }
 }
 
+/// The gate's reading of observed checks, and their folded result. A neutral
+/// conclusion is distinct from a skip; anything not passed, pending or
+/// skipped has failed.
+pub(crate) fn gate_checks(runs: Vec<Check>) -> (Vec<CheckEvidence>, GateResult) {
+    let checks: Vec<_> = runs
+        .into_iter()
+        .map(|run| CheckEvidence {
+            name: run.name,
+            issuer: run.app_slug,
+            result: match run.bucket.as_str() {
+                "pass" => GateResult::Passed,
+                "pending" => GateResult::Pending,
+                "skipping" if run.conclusion.as_deref() == Some("neutral") => GateResult::Neutral,
+                "skipping" => GateResult::Skipped,
+                _ => GateResult::Failed,
+            },
+        })
+        .collect();
+    let result = fold_results(checks.iter().map(|check| check.result.clone()));
+    (checks, result)
+}
+
 // ----- Forge -------------------------------------------------------------
 
 /// GitHub through the `gh` REST edge, with the shared pacing and rate-limit retry.
 pub struct GhForge {
     project: PathBuf,
+    /// The state root holding the shared CI observer cache.
+    state: PathBuf,
+    /// `owner/name`, read once.
+    repository: Option<String>,
+    /// How old a shared CI answer may be: zero for a gate decision, the
+    /// observer's poll for a post-merge waiter.
+    max_age: Duration,
     budget: Duration,
     deadline: Option<std::time::Instant>,
 }
 impl GhForge {
-    pub fn new(project: &Path) -> Self {
+    pub fn new(project: &Path, state: &Path) -> Self {
         Self {
             project: project.to_owned(),
+            state: state.to_owned(),
+            repository: None,
+            max_age: Duration::ZERO,
             budget: Duration::from_secs(120),
             deadline: None,
         }
@@ -445,7 +483,6 @@ impl Forge for GhForge {
         self.project = path.to_owned();
     }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
-        use sha2::{Digest, Sha256};
         let repository = self.json("repos/{owner}/{repo}")?;
         let url = repository["html_url"]
             .as_str()
@@ -458,15 +495,13 @@ impl Forge for GhForge {
             .nth(2)
             .filter(|host| !host.is_empty())
             .ok_or_else(|| LandingError::Failed("repository has invalid canonical URL".into()))?;
-        let identity = format!(
-            "{}/{}",
-            host.to_ascii_lowercase(),
-            name.to_ascii_lowercase()
-        );
-        Ok(Sha256::digest(identity.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect())
+        // Its first 16 bytes are the repository ID a receipt subject records.
+        Ok(
+            provenant_records::workflow::forge_repository_digest(host, name)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
     }
 
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
@@ -512,44 +547,34 @@ impl Forge for GhForge {
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
-        let head = commit
-            .parse()
-            .map_err(|_| LandingError::Failed("invalid commit id".into()))?;
-        let runs = wait::commit_checks("repos/{owner}/{repo}", head, &|args| {
-            self.reader().read(args)
-        })
-        .map_err(|error| {
-            if error
-                .downcast_ref::<wait::Failure>()
-                .is_some_and(|failure| failure.code == "RATE_LIMITED")
-            {
-                LandingError::RateLimited(error.to_string())
-            } else {
-                LandingError::CiUnavailable(error.to_string())
+        let repository = match &self.repository {
+            Some(repository) => repository.clone(),
+            None => {
+                let name = self.json("repos/{owner}/{repo}")?["full_name"]
+                    .as_str()
+                    .ok_or_else(|| LandingError::Failed("repository has no canonical name".into()))?
+                    .to_owned();
+                self.repository = Some(name.clone());
+                name
             }
-        })?;
+        };
+        #[allow(clippy::disallowed_methods, reason = "forge read budget")]
+        let budget = self
+            .reader()
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        let runs = Observer::open(&self.state, &self.project, &repository, budget)
+            .and_then(|mut observer| observer.checks(commit, self.max_age, budget))
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::CiUnavailable(error.to_string()),
+            })?;
         let tree =
             self.json(&format!("repos/{{owner}}/{{repo}}/git/commits/{commit}"))?["tree"]["sha"]
                 .as_str()
                 .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
                 .to_owned();
-        let checks = runs
-            .into_iter()
-            .map(|run| CheckEvidence {
-                name: run.name,
-                issuer: run.app_slug,
-                result: match run.bucket.as_str() {
-                    "pass" => GateResult::Passed,
-                    "pending" => GateResult::Pending,
-                    "skipping" if run.conclusion.as_deref() == Some("neutral") => {
-                        GateResult::Neutral
-                    }
-                    "skipping" => GateResult::Skipped,
-                    _ => GateResult::Failed,
-                },
-            })
-            .collect::<Vec<_>>();
-        let result = fold_results(checks.iter().map(|check| check.result.clone()));
+        let (checks, result) = gate_checks(runs);
         Ok(vec![GateEvidence {
             commit: commit.to_owned(),
             tree,
@@ -569,8 +594,10 @@ impl Forge for GhForge {
         timeout: Duration,
     ) -> Result<Vec<GateEvidence>, LandingError> {
         self.deadline = Some(std::time::Instant::now() + timeout);
+        self.max_age = crate::pr::observer::POLL;
         let result = self.checks(commit);
         self.deadline = None;
+        self.max_age = Duration::ZERO;
         result
     }
     fn merge(
@@ -1064,6 +1091,18 @@ impl Repo for GitRepo<'_> {
             ))),
         }
     }
+    fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError> {
+        self.ensure(left)?;
+        self.ensure(right)?;
+        let (code, out, error) = self.exit(&["merge-base", object_id(left)?, object_id(right)?])?;
+        match code {
+            0 => object_id(out.trim()).map(|base| Some(base.to_owned())),
+            1 => Ok(None),
+            _ => Err(LandingError::Failed(format!(
+                "git merge-base failed: {error}"
+            ))),
+        }
+    }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.ensure(commit)?;
         let canonical = object_id(commit)?.to_ascii_lowercase();
@@ -1077,6 +1116,67 @@ impl Repo for GitRepo<'_> {
     }
 }
 
+// ----- ReviewRecords -----------------------------------------------------
+
+/// Accepted delivery receipts in the project's workflow state for pull
+/// requests of the forge repository. A receipt is accepted only once its
+/// review coverage passes, so its reviewers are independent of the authors.
+/// Each names the head its review read and the base it read that head
+/// against, both recorded by the edge from the forge.
+pub struct DeliveryReviews {
+    root: provenant_core::StateRoot,
+    scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
+}
+impl DeliveryReviews {
+    pub fn new(
+        root: provenant_core::StateRoot,
+        scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
+    ) -> Self {
+        Self { root, scope }
+    }
+}
+impl ReviewRecords for DeliveryReviews {
+    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+        use provenant_records::workflow::{DecisionStatus, Subject};
+        let (project, repository) = self
+            .scope
+            .clone()
+            .map_err(|error| LandingError::Failed(format!("receipt approval: {error}")))?;
+        let found = provenant_workflow::store::pull_request_receipts(
+            &self.root, project, repository, number,
+        )
+        .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
+        Ok(Reviews {
+            records: found
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.decision().status() == DecisionStatus::Accepted)
+                .filter_map(|receipt| {
+                    let Subject::Pr { head, base, .. } = receipt.subject() else {
+                        return None;
+                    };
+                    Some(ReviewRecord {
+                        reference: format!("delivery {} at {head}", receipt.delivery_id()),
+                        reviewer: receipt.decision().actor_id()?.to_string(),
+                        head: head.to_string(),
+                        base: base.to_string(),
+                    })
+                })
+                .collect(),
+            unusable: found.retired.iter().map(ToString::to_string).collect(),
+        })
+    }
+}
+
+/// The subject repository ID of the forge repository a lander drives.
+pub fn repository_id(forge: &mut dyn Forge) -> Result<provenant_core::RepoId, LandingError> {
+    let identity = forge.repository_identity()?;
+    identity
+        .get(..32)
+        .and_then(|prefix| provenant_core::RepoId::parse(prefix).ok())
+        .ok_or_else(|| LandingError::Failed("repository identity is not a digest".into()))
+}
+
 // ----- GateRunner --------------------------------------------------------
 
 /// Observes forge check runs on the exact candidate, or runs the command plan.
@@ -1085,10 +1185,10 @@ pub struct CheckGate {
     forge: GhForge,
 }
 impl CheckGate {
-    pub fn new(project: &Path) -> Self {
+    pub fn new(project: &Path, state: &Path) -> Self {
         Self {
             project: project.to_owned(),
-            forge: GhForge::new(project),
+            forge: GhForge::new(project, state),
         }
     }
 }
@@ -1344,7 +1444,7 @@ mod tests {
         const HEAD: &str = "54ada5f7a8573a53c2b69947e5c41a7e7530999a";
         if let Some(path) = std::env::var_os(MARKER) {
             let project = PathBuf::from(path);
-            let mut forge = GhForge::new(&project);
+            let mut forge = GhForge::new(&project, &project);
             assert_eq!(
                 forge.merge_stack(7, HEAD, MergeMethod::Merge).unwrap(),
                 "f9c664e1f37e3afb6e899701acc85805db124757"
@@ -1557,7 +1657,7 @@ esac
                 &project,
                 &["remote", "add", "origin", "git@github.com:Owner/Repo.git"],
             );
-            let mut forge = GhForge::new(&project);
+            let mut forge = GhForge::new(&project, &project);
             let ssh = forge.repository_identity().unwrap();
             const HEAD: &str = "1111111111111111111111111111111111111111";
             assert_eq!(forge.pull_request(7).unwrap().head, HEAD);
@@ -1611,8 +1711,8 @@ esac
 echo "$*" >> calls
 case "$*" in
   *"--method PUT"*) echo '{"merged":true,"sha":"1111111111111111111111111111111111111111"}' ;;
-  *"check-runs?"*) echo '[{"total_count":0,"check_runs":[]}]' ;;
-  *"statuses?"*) echo '[[]]' ;;
+  *"check-runs?"*) printf 'HTTP/2.0 200 OK\r\nETag: "runs"\r\n\r\n{"total_count":0,"check_runs":[]}' ;;
+  *"statuses?"*) printf 'HTTP/2.0 200 OK\r\nETag: "statuses"\r\n\r\n[]' ;;
   *"git/commits/"*) echo '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
   *"pulls/7/reviews"*) echo '[[]]' ;;
   *"pulls/7"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"Owner/Repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"Owner/Repo"}},"mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"fixture"}' ;;
@@ -1665,7 +1765,7 @@ esac
         const HEAD: &str = "1111111111111111111111111111111111111111";
         if let Some(path) = std::env::var_os(MARKER) {
             let project = PathBuf::from(path);
-            let mut forge = GhForge::new(&project);
+            let mut forge = GhForge::new(&project, &project);
             let mut repo = FakeRepo {
                 target: "a".repeat(40),
                 valid_commit_ids: true,
@@ -1706,6 +1806,7 @@ esac
                     gate: &definition,
                     shadow: false,
                     state: &project,
+                    approvals: super::super::approval::Approvals::forge(),
                 },
             )
             .unwrap();

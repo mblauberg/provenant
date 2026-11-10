@@ -476,6 +476,8 @@ jobs:
             --out "$RUNNER_TEMP/release"
           mkdir -p "$RUNNER_TEMP/home"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/state" config set fabric.mcp_server true
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
             --harness codex --bin-dir "$RUNNER_TEMP/bin"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \

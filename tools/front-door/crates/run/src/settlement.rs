@@ -998,6 +998,7 @@ mod tests {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
+            reaction.ledger_done = true;
             Ok(())
         })?;
         let registry = temp.path().join("broken-registry");
@@ -1040,6 +1041,7 @@ mod tests {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
+            reaction.ledger_done = true;
             Ok(())
         })?;
         assert!(store.pending_reactions(run.run_id, &call)?.is_empty());
@@ -1217,6 +1219,7 @@ mod tests {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
+            reaction.ledger_done = true;
             Ok(())
         })?;
         store.set_temporary_retained(id, true, &call)?;

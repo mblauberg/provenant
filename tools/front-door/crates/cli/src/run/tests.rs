@@ -839,6 +839,7 @@ fn reconcile_lists_reservation_issues_from_a_selected_project()
                     reaction.graph_done = true;
                     reaction.notice_done = true;
                     reaction.log_done = true;
+                    reaction.ledger_done = true;
                     Ok(())
                 })?;
             let baseline = selected
@@ -1292,6 +1293,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             receipt.graph_done = true;
                             receipt.notice_done = true;
                             receipt.log_done = true;
+                            receipt.ledger_done = true;
                             Ok(())
                         },
                     )?;

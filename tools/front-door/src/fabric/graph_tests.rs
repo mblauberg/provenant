@@ -1361,6 +1361,7 @@ mod result_tests {
             delivery_stage: None,
             resource: None,
             input_failure: Some(IoFact::InputUnreadable),
+            cause: None,
         }
         .diagnostic();
         let mut run = graph_status_fixture();

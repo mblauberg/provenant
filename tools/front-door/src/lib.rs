@@ -1303,9 +1303,24 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }),
         Command::Telemetry(provenant_cli::Telemetry::Ingest(cmd)) => usage::ingest(&cmd, globals),
         Command::Native(cmd) => usage::native(cmd, globals),
+        Command::Telemetry(provenant_cli::Telemetry::Backfill) => {
+            run_edge_workspace(&inv.leaf, globals, Workspace::Directory, |edge| {
+                provenant_cli::run::backfill(edge)
+            })
+        }
         Command::Telemetry(provenant_cli::Telemetry::Mileage(cmd)) => {
             run_edge(&inv.leaf, globals, |edge| {
                 provenant_cli::mileage::run(cmd, edge)
+            })
+        }
+        Command::Telemetry(provenant_cli::Telemetry::Value(cmd)) => {
+            run_edge(&inv.leaf, globals, |edge| {
+                provenant_cli::telemetry_value::value(cmd, edge)
+            })
+        }
+        Command::Telemetry(provenant_cli::Telemetry::Cost(cmd)) => {
+            run_edge(&inv.leaf, globals, |edge| {
+                provenant_cli::telemetry_value::cost(cmd, edge)
             })
         }
         Command::Steer(args) => {

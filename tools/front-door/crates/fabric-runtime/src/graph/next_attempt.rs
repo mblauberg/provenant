@@ -1194,6 +1194,7 @@ mod tests {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "read file".into(),
                 path: None,
             },
