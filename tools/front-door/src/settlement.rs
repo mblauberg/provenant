@@ -836,7 +836,7 @@ mod tests {
         std::fs::create_dir_all(checkout.join("config"))?;
         let mut inputs = RootInputs::new(home.clone(), checkout.clone());
         inputs.state_dir = Some(base.join("state"));
-        std::fs::create_dir_all(base.join("state"))?;
+        provenant_os::fixture::private_state_dir(&base.join("state"))?;
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let (project, actor) = (ProjectId::from_bytes([1; 16]), ActorId::from_bytes([2; 16]));
         let context = provenant_run::ExecutionContext {
