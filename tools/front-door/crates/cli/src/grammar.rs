@@ -1059,6 +1059,8 @@ pub enum Telemetry {
     Ingest(Ingest),
     /// Report quota mileage and effective token rates from quota history and ingested usage
     Mileage(Mileage),
+    /// Copy every terminal attempt in the run store into the usage ledger; run once after installing 1.8.0
+    Backfill,
     /// Compare experiment arms using offline pipeline outcomes
     #[command(subcommand)]
     Experiments(Experiments),

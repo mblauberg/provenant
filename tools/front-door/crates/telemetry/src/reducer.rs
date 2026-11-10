@@ -500,13 +500,13 @@ where
 }
 
 /// What a usage record costs at the price table's rates.
-struct Priced {
-    numerator: u128,
+pub(crate) struct Priced {
+    pub(crate) numerator: u128,
     /// A positive category lacks its exact price.
     missing_price: bool,
     /// The cost is a lower bound: a count or a price is unknown.
-    missing_cost: bool,
-    subscription: bool,
+    pub(crate) missing_cost: bool,
+    pub(crate) subscription: bool,
     /// Per category, in `Categories` order, whether the count is absent.
     absent: [bool; 5],
 }
@@ -515,7 +515,7 @@ struct Priced {
 ///
 /// Reasoning tokens use the output rate and every provider counts them inside
 /// its output total, so an absent reasoning count leaves the cost exact.
-fn priced(
+pub(crate) fn priced(
     usage: &Usage,
     provider: Option<&str>,
     model: Option<&str>,

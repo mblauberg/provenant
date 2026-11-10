@@ -42,6 +42,17 @@ For a wave digest, review `provenant inbox --state open` and then run
 lists open requests across kinds; select the decision requests for the chair
 summary. Both results are local reads, and PR rows include only merged PRs.
 
+## Usage ledger backfill
+
+Settled attempts are recorded in the usage ledger under
+`<state>/usage-ledger/`, which outlives the run store. After installing 1.8.0,
+run `provenant telemetry backfill` once on each host to copy the attempts
+settled before the upgrade; a later release removes run history, and the
+ledger is then the only record of earlier lane usage. Running it again adds
+nothing. The command reports each ledger line it cannot read by segment and
+line number; such a line is kept, not repaired. The contract is in the
+[telemetry spec](../specs/telemetry.md#the-usage-ledger-outlives-the-run-store).
+
 ## Native session ingest
 
 `provenant telemetry ingest [--provider claude] [--since T]` records native

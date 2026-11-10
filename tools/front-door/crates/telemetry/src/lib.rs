@@ -8,6 +8,7 @@ mod claude;
 pub mod context;
 pub mod experiments;
 pub mod ingest;
+pub mod ledger;
 pub mod mileage;
 pub mod native_attempts;
 pub mod outcome;
