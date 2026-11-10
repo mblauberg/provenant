@@ -65,15 +65,22 @@ run store into the ledger, priced from the bundled table, and reports how many
 it added and how many were already present. Run it once after installing 1.8.0;
 running it again adds nothing. The existing reports keep reading the run store.
 
-Every reader reports a ledger line it does not recognise, and any file in the
-ledger directory that is not a segment, by segment name and line number. None is
-skipped silently. Appending after a torn line starts the new row on its own line.
+The ledger sits at the state root of the store being settled: the host root for
+lane children, which submit through the host relay. Settlement never writes an
+unpriced row: if the price table cannot be read, the ledger step fails and the
+reaction stays pending, so a later drain writes the priced row.
+
+Settlement appends without reporting a line it does not recognise; the line stays
+on disk. `telemetry backfill` and the report readers list every such line, and
+any file in the ledger directory that is not a segment, by segment name and line
+number. None is skipped silently. Appending after a torn line starts the new row on its own line.
 - Why (default): run history is dropped at the format-2 cut-over and lane usage
   cannot be regenerated, so it needs a home that is not the run store.
 - Test: `crates/telemetry/src/ledger/tests.rs::a_settled_attempt_appends_one_row_even_when_settlement_is_retried`;
   `crates/telemetry/src/ledger/tests.rs::backfilled_cost_for_a_past_window_equals_the_run_store_report`;
   `crates/telemetry/src/ledger/tests.rs::an_unrecognised_line_is_reported_by_segment_and_line`;
   `crates/telemetry/src/ledger/tests.rs::the_ledger_survives_deleting_the_run_store`;
+  `src/settlement.rs::tests::settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending`;
   `tests/telemetry_pipeline_cli.rs::backfill_copies_each_attempt_once_and_outlives_the_run_store`
 - Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`,
   `crates/cli/src/run/usage_ledger.rs`

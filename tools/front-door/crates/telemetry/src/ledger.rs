@@ -239,7 +239,7 @@ pub fn append(
     }
     let root = Directory::open_anchor(state)?;
     match root.mkdir(OsStr::new(DIRECTORY), 0o700) {
-        Ok(()) => {}
+        Ok(()) => root.sync()?,
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
@@ -254,7 +254,9 @@ pub fn append(
         segments.entry(row.segment()).or_default().push(row);
     }
     for (segment, rows) in segments {
-        let bytes = read_segment(&directory, &segment)?.unwrap_or_default();
+        let existing = read_segment(&directory, &segment)?;
+        let created = existing.is_none();
+        let bytes = existing.unwrap_or_default();
         let mut held = BTreeSet::new();
         for line in lines(&segment, &bytes) {
             match line {
@@ -284,6 +286,9 @@ pub fn append(
             let mut file = directory.open_append(OsStr::new(&segment))?;
             file.write_all(&out)?;
             file.sync()?;
+            if created {
+                directory.sync()?;
+            }
             appended.added += added;
         }
     }
