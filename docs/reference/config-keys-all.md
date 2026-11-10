@@ -207,7 +207,7 @@ Set these in `[gc]` in the host configuration. Omit a key for its default.
 | `free_floor` | 10% of the state volume, at least 50 GiB | Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first (whole B, K, M, G, T or KiB to TiB; a plain number means GiB). |
 | `lane_cargo_cache_max` | 32G | Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody (same syntax as free_floor). |
 | `alert_below` | free_floor | Free space below which an applied collection emits one gc.low_disk note per dip (same syntax as free_floor). |
-| `projects.{project}.regenerable` | ["target"] with a root Cargo.toml, otherwise [] | Git-ignored directory names collected at any depth in the project's linked worktrees (directory names; not .git, .worktrees, absolute or parent paths). |
+| `projects.{project}.regenerable` | ["target"] with a root Cargo.toml, otherwise [] | Git-ignored directory names collected at any depth in the project's linked worktrees; `.provenant/scratch` is collected in addition without a declaration (directory names; not .git, .worktrees, absolute or parent paths). |
 | `projects.{project}.keep` | [] | Paths, their descendants and any matching directory containing them that collection preserves (worktree-relative paths). |
 | `projects.{project}.foreign_worktrees` | keep | merged-clean removes clean, merged linked worktrees with no known writer after a complete free census (keep or merged-clean). |
 

@@ -337,7 +337,9 @@ fn collect_impl(
             retain(&mut report.worktrees, &branch, RetainReason::Dirty);
             continue;
         }
-        if !policy.regenerable.is_empty() {
+        // Lane scratch is pruned without a declaration, so a lane with only
+        // ignored scratch still needs the walk even when nothing is configured.
+        if !policy.regenerable.is_empty() || matches!(lane.dirty, WorktreeCondition::Ignored) {
             let mut prune = || -> Result<(), WorktreeError> {
                 // Writer custody alone excludes other mutators of this tree.
                 let locked = lock_worktree(context, entry, cancel, policy.dry_run)?;
@@ -909,10 +911,11 @@ fn walk_output(
             if contains_repository(&child)? {
                 return Ok(false);
             }
-            if policy
+            if (policy
                 .regenerable
                 .iter()
                 .any(|configured| name == OsStr::new(configured))
+                || is_default_regenerable(&path))
                 && !protected.ancestors.contains(&path)
                 && path
                     .ancestors()
@@ -954,6 +957,13 @@ fn walk_output(
         }
     }
     Ok(())
+}
+
+/// Provenant's own lane scratch is regenerable without a project declaration.
+/// The walker still prunes it only when Git reports it ignored, and only with
+/// the same writer custody and census proof as declared output.
+fn is_default_regenerable(path: &Path) -> bool {
+    path == Path::new(crate::scratch::PROJECT_SCRATCH)
 }
 
 /// A .git file or directory marks a protected repository boundary.
