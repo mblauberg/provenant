@@ -1301,7 +1301,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--hooks` | `{"description": "Enable hooks, or remove unchanged owned hooks (omission keeps ownership)", "name": "hooks", "values": ["on", "off"]}` |
 | `--adopt-existing` | `{"defaults": ["false"], "description": "Adopt matching existing files instead of refusing", "name": "adopt_existing", "values": ["true", "false"]}` |
 | `--dry-run` | `{"defaults": ["false"], "description": "Plan the install without changing anything", "name": "dry_run", "values": ["true", "false"]}` |
-| `--upgrade-preflight` | `{"defaults": ["false"], "description": "Check state before a graph cutover (installer use only)", "name": "upgrade_preflight", "values": ["true", "false"]}` |
+| `--upgrade-preflight` | `{"defaults": ["false"], "description": "Check the state format break without installing (installer use only)", "name": "upgrade_preflight", "values": ["true", "false"]}` |
+| `--reset-state` | `{"defaults": ["false"], "description": "Acknowledge deleting the dropped format-1 state; &#96;--yes&#96; does not", "name": "reset_state", "values": ["true", "false"]}` |
 
 ```json
 {
@@ -1315,7 +1316,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "hooks",
         "adopt_existing",
         "dry_run",
-        "upgrade_preflight"
+        "upgrade_preflight",
+        "reset_state"
       ],
       "multiple": true,
       "name": "Install",
@@ -1329,7 +1331,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--yes` | `{"defaults": ["false"], "description": "Proceed after the upgrade preflight reports work to drain or port", "name": "yes", "values": ["true", "false"]}` |
+| `--yes` | `{"defaults": ["false"], "description": "Accept the pinned toolchain install; does not acknowledge a state reset", "name": "yes", "values": ["true", "false"]}` |
+| `--reset-state` | `{"defaults": ["false"], "description": "Acknowledge deleting the dropped format-1 state on every host", "name": "reset_state", "values": ["true", "false"]}` |
 | `--from-source` | `{"description": "Build this checkout instead of downloading the latest release", "name": "from_source"}` |
 | `--hosts` | `{"defaults": ["all"], "description": "Upgrade this host and every registered Fabric peer", "name": "hosts", "values": ["all"]}` |
 
@@ -1340,6 +1343,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
     {
       "arguments": [
         "yes",
+        "reset_state",
         "from_source",
         "hosts"
       ],
