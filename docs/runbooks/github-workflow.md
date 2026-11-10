@@ -248,9 +248,12 @@ hotfix and takes its normal review.
 [`ci.yml`](../../.github/workflows/ci.yml) succeeds only when every job it needs
 succeeded or was path-skipped. "CI is green" means exactly that context. The
 `Protect main` ruleset does not require heads to be up to date with `main`, so
-overlapping single-PR landings need a serial train: merge one, update the next,
-rerun exact-head checks. For status-check rollup
-traps, see [shell pitfalls](shell-pitfalls.md#shell-pitfalls).
+land each pull request on its own green head. Do not merge `main` into a branch
+to land it; update a branch only to resolve a conflict. Each update costs a CI
+run and moves the reviewed head. Batch landing (`provenant land A B`) tests the
+combination when several pull requests overlap. A combined break that shows on
+`main` is fixed forward as a hotfix. For status-check rollup traps, see
+[shell pitfalls](shell-pitfalls.md#shell-pitfalls).
 
 The user review or merge gate applies only when an agent is stuck: split
 verdicts it cannot settle with primary evidence, or a decision outside its
