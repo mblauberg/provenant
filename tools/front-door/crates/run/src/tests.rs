@@ -2719,70 +2719,81 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_version_ten_without_spacing() -> TestResult {
+fn host_stores_match_their_schema_and_refuse_other_versions_unchanged() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
+    // tempfile uses the umask default, which can leave group or other access;
+    // the stores refuse that for their host directory. Canonical like `context`.
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+    let canonical = std::fs::canonicalize(temp.path())?;
+    let host = canonical.as_path();
     let clock = clock();
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context, &call)?;
-    let version: i64 =
-        store
-            .db
-            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-                r.get(0)
-            })?;
-    assert_eq!(version, 10);
-    let spacing: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(spacing, 0);
+    let admission = crate::ledger::open(host, &call)?;
+    let work = crate::correlation::WorkIndex::open(host, &call)?;
+    let contributions = crate::pr_contribution::Contributions::open(host, &call)?;
+    let stores = [
+        ("admission.sqlite3", crate::ledger::SCHEMA, admission),
+        ("work-index.sqlite3", crate::correlation::SCHEMA, work.0),
+        (
+            "pr-contributions.sqlite3",
+            crate::pr_contribution::SCHEMA,
+            contributions.0,
+        ),
+    ];
+    for (name, schema, db) in stores {
+        assert!(provenant_sqlite::schema_matches(&db, schema)?, "{name}");
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        drop(db);
+        let path = host.join(name);
+        for version in [schema.version - 1, schema.version + 1] {
+            let db = provenant_sqlite::open_connection(&path, false)?;
+            db.pragma_update(None, "user_version", version)?;
+            db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            drop(db);
+            let before = std::fs::read(&path)?;
+            let refused = match name {
+                "admission.sqlite3" => crate::ledger::open(host, &call).map(drop),
+                "work-index.sqlite3" => crate::correlation::WorkIndex::open(host, &call).map(drop),
+                _ => crate::pr_contribution::Contributions::open(host, &call).map(drop),
+            };
+            assert!(
+                matches!(refused, Err(RunError::Version(found)) if found == version),
+                "{name} {version}"
+            );
+            assert_eq!(std::fs::read(&path)?, before, "{name} {version}");
+        }
+    }
     Ok(())
 }
 
 #[test]
-fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
+fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
-    // Shape the store exactly as version 7 left it.
-    RunStore::open(&context, &call)?
-        .db
-        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     let store = RunStore::open(&context, &call)?;
-    let version: i64 =
-        store
-            .db
-            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-                r.get(0)
-            })?;
-    assert_eq!(version, 10);
-    let operation = OperationId::parse("admit-after-upgrade")?;
-    assert!(store.admission_window(&operation, &call)?.is_none());
-    let deadline = WallTime::from_micros(1_000_000)?;
-    store.save_admission_window(
-        &operation,
-        crate::AdmissionWindow {
-            deadline,
-            wake_at: None,
-        },
-        &call,
-    )?;
-    assert!(store.admission_window(&operation, &call)?.is_some());
-    let backups = std::fs::read_dir(temp.path().join("state"))?
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("run.sqlite3.bak-")
-        })
-        .count();
-    assert_eq!(backups, 1, "the upgrade keeps one pre-migration copy");
+    assert!(provenant_sqlite::schema_matches(
+        &store.db,
+        crate::db::SCHEMA
+    )?);
+    drop(store);
+    let path = context.state_root.as_path().join("run.sqlite3");
+    for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
+        let db = provenant_sqlite::open_connection(&path, false)?;
+        db.pragma_update(None, "user_version", version)?;
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        drop(db);
+        let before = std::fs::read(&path)?;
+        assert!(matches!(
+            RunStore::open(&context, &call),
+            Err(RunError::Version(found)) if found == version
+        ));
+        assert_eq!(std::fs::read(&path)?, before, "version {version}");
+    }
     Ok(())
 }
 
@@ -2809,89 +2820,6 @@ fn a_store_failure_omits_source_text_at_every_destination() {
         assert!(!wire.contains("/private/host"));
         assert!(!wire.chars().any(char::is_control));
     }
-}
-
-#[test]
-fn the_store_refuses_a_version_newer_than_ten() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    RunStore::open(&context, &call)?
-        .db
-        .execute_batch("PRAGMA user_version=11;")?;
-    assert!(matches!(
-        RunStore::open(&context, &call),
-        Err(RunError::Version(11))
-    ));
-    let state = context.state_root.as_path();
-    let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
-        .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-            r.get(0)
-        })?;
-    assert_eq!(version, 11, "a refused store stays as it was");
-    assert!(
-        !std::fs::read_dir(state)?
-            .filter_map(std::result::Result::ok)
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("run.sqlite3.bak-")),
-        "a refused store takes no backup"
-    );
-    Ok(())
-}
-
-#[test]
-fn version_five_lets_one_run_continue_several_targets() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let input = input();
-    let store = RunStore::open(&context, &call)?;
-    store.create(&input, &call)?;
-    let first = input.attempts[0].attempt_id.to_string();
-    let run = input.run_id.to_string();
-    // Shape the table as version 4 left it, with one row to carry over.
-    store.db.execute_batch(&format!(
-        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
-    ))?;
-    drop(store);
-    let store = RunStore::open(&context, &call)?;
-    let kept: String = store.db.query_row(
-        "SELECT run FROM continuations WHERE target=?1",
-        [&first],
-        |r| r.get(0),
-    )?;
-    assert_eq!(kept, run);
-    // A second attempt in the same run can now be continued as well.
-    let mut second = store.record(input.attempts[0].attempt_id, &call)?;
-    second.attempt_id = AttemptId::from_bytes([42; 16]);
-    second.attempt_number = 2;
-    store.db.execute(
-        "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
-        rusqlite::params![
-            second.attempt_id.to_string(),
-            run,
-            second.project_id.to_string(),
-            second.task_id.to_string(),
-            crate::db::bytes(&second)?
-        ],
-    )?;
-    store.db.execute(
-        "INSERT INTO continuations(target,run) VALUES (?1,?2)",
-        rusqlite::params![second.attempt_id.to_string(), run],
-    )?;
-    let rows: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM continuations WHERE run=?1",
-        [&run],
-        |r| r.get(0),
-    )?;
-    assert_eq!(rows, 2);
-    Ok(())
 }
 
 #[test]
@@ -3008,40 +2936,6 @@ fn work_context_bounds_are_enforced() -> TestResult {
         ..Default::default()
     });
     store.create(&request, &call)?;
-    Ok(())
-}
-
-#[test]
-fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context, &call)?;
-    store
-        .db
-        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
-    drop(store);
-
-    let store = RunStore::open(&context, &call)?;
-    let version: i64 = store
-        .db
-        .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 10);
-    let backup = context.state_root.as_path().join(format!(
-        "run.sqlite3.bak-{}",
-        call.clock.wall_now()?.as_micros()
-    ));
-    let backup = provenant_sqlite::open_connection(&backup, true)?;
-    let version: i64 = backup.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 7);
-    let tables: i64 = backup.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name='admission_windows'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(tables, 0);
     Ok(())
 }
 
@@ -3474,134 +3368,5 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     assert!(store.reaction(id, &call)?.is_some());
     store.gc_temporary(&directory, 7, 5, now, false, &call)?;
     assert!(store.reaction(id, &call)?.is_none());
-    Ok(())
-}
-
-#[test]
-fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
-    for version in [1, 2, 5] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let input = input();
-        let store = RunStore::open(&context, &call)?;
-        store.create(&input, &call)?;
-        store.db.execute_batch(
-            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions;",
-        )?;
-        if version < 5 {
-            store.db.execute_batch("DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;")?;
-        }
-        if version == 1 {
-            store.db.execute_batch("DROP TABLE cancellations;")?;
-        }
-        store.db.pragma_update(None, "user_version", version)?;
-        drop(store);
-        let upgraded = RunStore::open(&context, &call)?;
-        let backup = context.state_root.as_path().join(format!(
-            "run.sqlite3.bak-{}",
-            call.clock.wall_now()?.as_micros()
-        ));
-        let backup = provenant_sqlite::open_connection(&backup, true)?;
-        assert_eq!(
-            backup.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
-            version
-        );
-        assert_eq!(
-            backup.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))?,
-            1
-        );
-        upgraded.record(input.attempts[0].attempt_id, &call)?;
-        if version == 1 {
-            let op = OperationId::parse("stop")?;
-            upgraded.bind_cancel(&op, "attempt", &call)?;
-            assert!(matches!(
-                upgraded.bind_cancel(&op, "other", &call),
-                Err(RunError::OperationConflict)
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn ledger_capacity_upgrades_preserve_terminal_attempt_references() -> TestResult {
-    for version in [8, 9] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let input = input();
-        let id = input.attempts[0].attempt_id;
-        let store = RunStore::open(&context, &call)?;
-        store.create(&input, &call)?;
-        store.withdraw(
-            id,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Rejected,
-            "fixture rejection",
-            WallTime::from_micros(200)?,
-            &call,
-        )?;
-        let before = store.record(id, &call)?;
-        let event_count: i64 = store.db.query_row(
-            "SELECT count(*) FROM events WHERE attempt=?1",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        assert!(event_count > 0);
-        if version == 9 {
-            // Exercise the real former SQL cap, not just its version marker.
-            store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
-            store.db.execute_batch(include_str!("schema_v9.sql"))?;
-            store.db.execute_batch("PRAGMA foreign_keys=ON;")?;
-        }
-        store.db.pragma_update(None, "user_version", version)?;
-        drop(store);
-        let upgraded = RunStore::open(&context, &call)?;
-        assert_eq!(upgraded.record(id, &call)?, before);
-        assert_eq!(
-            upgraded.db.query_row(
-                "SELECT count(*) FROM events WHERE attempt=?1",
-                [id.to_string()],
-                |row| row.get::<_, i64>(0)
-            )?,
-            event_count
-        );
-        assert_eq!(
-            upgraded
-                .db
-                .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
-            1
-        );
-        assert_eq!(
-            upgraded
-                .db
-                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-            0
-        );
-        assert!(
-            upgraded
-                .db
-                .execute(
-                    "UPDATE attempts SET record=record WHERE id=?1",
-                    [id.to_string()]
-                )
-                .is_err()
-        );
-        assert!(
-            upgraded
-                .db
-                .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])
-                .is_err()
-        );
-    }
     Ok(())
 }

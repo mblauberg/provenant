@@ -62,14 +62,14 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
 /// Schema 2 is a superset, so callers may retain an authored version 2 even
 /// when the minimum is 1.
 pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
-    if document_requires_schema_v2(document) {
+    if document_requires_review_fields(document) {
         2
     } else {
         1
     }
 }
 
-pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
+pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
     document.review_base.is_some() || nodes_have_v2(&document.nodes)
 }
 

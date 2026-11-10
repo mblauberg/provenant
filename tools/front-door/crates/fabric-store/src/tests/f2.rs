@@ -1153,7 +1153,7 @@ fn acquire_prunes_only_bounded_released_unreferenced_rows_and_keeps_counters() {
 }
 
 #[test]
-fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_held_rows() {
+fn pruning_retains_referenced_and_held_rows() {
     let mut f = Fixture::new();
     let store = f.open();
     let input = landing(3);
@@ -1175,13 +1175,9 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
         .unwrap();
     let mut input = work(&f, 3);
     let work_fence = store.acquire_claim(&input, &f.request()).unwrap();
-    let before = database_records(&store);
-    downgrade_to_six(&store, "");
-    store.db.execute_batch("DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE claim_counters; DROP INDEX claim_path_lookup; DROP INDEX released_claims; PRAGMA user_version=3;").unwrap();
     drop(guard);
     drop(store);
     let store = f.open();
-    assert_eq!(database_records(&store), before);
     store
         .verify_claim(project(), &work_fence, &f.request())
         .unwrap();

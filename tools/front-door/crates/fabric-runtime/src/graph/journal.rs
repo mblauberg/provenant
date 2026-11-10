@@ -1152,7 +1152,7 @@ fn decode_verified_checkpoint(
         }
     }
     let document = &stored.execution.document;
-    let has_v2 = document_requires_schema_v2(document)
+    let has_v2 = document_requires_review_fields(document)
         || stored.execution.review_base.is_some()
         || stored
             .checkpoint

@@ -20,77 +20,18 @@ use std::{
 };
 
 const FILE: &str = "admission.sqlite3";
-/// Each lease carries the lane class. Version 1 had no class: every lease read
-/// as a writer's.
-const LEASES: &str = "
-CREATE TABLE leases (
- attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
- class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only')),
- boot TEXT NOT NULL, guardian TEXT NOT NULL, owner_id TEXT NOT NULL,
- yielded INTEGER NOT NULL DEFAULT 0 CHECK(yielded IN (0,1))
-) STRICT;
-CREATE INDEX lease_projects ON leases(project);
-";
-/// Each class's last start is a reading of the host's monotonic clock since
-/// boot, kept with the boot it was read in: wall time is never recorded, so no
-/// clock step can move it. Version 1 kept one global wall-time row, which no
-/// boot can vouch for, so an upgrade carries it across as a start under the
-/// current boot as a start of now, holding each class one full spacing.
-const SPACING: &str = "
-CREATE TABLE spacing (
- class TEXT PRIMARY KEY CHECK(class IN ('writer','read_only')),
- boot TEXT NOT NULL,
- last_start INTEGER NOT NULL CHECK(last_start>=0)
-) STRICT;
-";
+/// Each lease carries the lane class. Each class's last start is a reading of
+/// the host's monotonic clock since boot, kept with the boot it was read in:
+/// wall time is never recorded, so no clock step can move it.
+pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
+    sql: include_str!("admission_schema.sql"),
+    version: 6,
+};
 
-/// Open, creating or upgrading if needed, the ledger under the trusted host
-/// state root. Each upgrade runs in one immediate transaction, schema version
-/// last, so a crash leaves the old ledger whole or the new one.
+/// Open, creating if needed, the ledger under the trusted host state root.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     let (_, db, _initialisation) = open_database(host, FILE, request)?;
-    if version(&db)? < 6 || !timed_spacing(&db)? {
-        immediate(&db, request, |tx| {
-            let current_version = version(tx)?;
-            match current_version {
-                0 => {
-                    tx.execute_batch(LEASES)?;
-                    tx.execute_batch(SPACING)?;
-                }
-                1 => {
-                    let carried = carried_starts(tx, request)?;
-                    tx.execute_batch(
-                        "ALTER TABLE leases ADD COLUMN class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only'));
-                         DROP TABLE spacing;",
-                    )?;
-                    tx.execute_batch(SPACING)?;
-                    for (class, boot, start) in carried {
-                        tx.execute(
-                            "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3)",
-                            params![class.as_str(), boot, sql_int(start)?],
-                        )?;
-                    }
-                }
-                // A version 2 ledger written before spacing carried its boot
-                // held wall milliseconds.
-                _ if !timed_spacing(tx)? => {
-                    tx.execute_batch("DROP TABLE spacing;")?;
-                    tx.execute_batch(SPACING)?;
-                }
-                _ => {}
-            }
-            if current_version > 0 && current_version < 5 {
-                // Old lease schemas were never installed; retain only spacing history.
-                tx.execute_batch("DROP TABLE leases;")?;
-                tx.execute_batch(LEASES)?;
-            }
-            if current_version == 5 {
-                tx.execute_batch("ALTER TABLE leases ADD COLUMN yielded INTEGER NOT NULL DEFAULT 0 CHECK(yielded IN (0,1));")?;
-            }
-            tx.execute_batch("PRAGMA user_version=6;")?;
-            Ok(())
-        })?;
-    }
+    provenant_sqlite::ensure_schema(&db, SCHEMA)?;
     Ok(db)
 }
 /// Run `action` while holding the ledger's write lock. Every claim takes that
@@ -109,36 +50,6 @@ pub(crate) fn while_admission_held<T>(
     tx.rollback()?;
     Ok(value)
 }
-/// Each class's version 1 start as a start under the current boot. Version 1
-/// kept one wall-time start for every class, which no boot can vouch for and
-/// which a wall clock step can move. The wall clock is not read: any version 1
-/// row, of any recorded age, is carried as a start of now, so each class is
-/// held one full spacing from the upgrade. A ledger with no row holds nothing.
-/// The boot is read once, inside the upgrade transaction, and an unreadable
-/// host clock refuses the upgrade rather than drop the start.
-fn carried_starts(tx: &Connection, request: &Request<'_>) -> Result<Vec<(LaneClass, String, u64)>> {
-    let recorded: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM spacing)", [], |r| r.get(0))?;
-    let now = HostInstant::read(request.clock)?;
-    if !recorded {
-        return Ok(Vec::new());
-    }
-    Ok([LaneClass::Writer, LaneClass::ReadOnly]
-        .into_iter()
-        .map(|class| (class, now.boot.clone(), now.micros))
-        .collect())
-}
-/// Whether the spacing table records starts against a boot.
-fn timed_spacing(db: &Connection) -> Result<bool> {
-    Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('spacing') WHERE name='boot')",
-        [],
-        |r| r.get(0),
-    )?)
-}
-fn version(db: &Connection) -> Result<i64> {
-    Ok(provenant_sqlite::read_version(db, 6)? as i64)
-}
-
 /// Native and owner-store observations prepared before either admission
 /// database takes its write transaction. Existing leases retain their identity.
 pub(crate) struct LeaseOwner {
@@ -578,7 +489,7 @@ mod tests {
         assert_eq!(defaults.host_source, SettingSource::ShippedDefault);
         assert_eq!(defaults.project_source, SettingSource::ShippedDefault);
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(LEASES).unwrap();
+        db.execute_batch(SCHEMA.sql).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
         for index in 0..PROJECT_ACTIVE {
             db.execute(
@@ -727,7 +638,7 @@ mod tests {
             let original = Connection::open(&path).unwrap();
             original.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('live');").unwrap();
             let db = Connection::open_in_memory().unwrap();
-            db.execute_batch(LEASES).unwrap();
+            db.execute_batch(SCHEMA.sql).unwrap();
             let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
             let boot = clock.boot_identity().unwrap();
             let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {
@@ -796,7 +707,7 @@ mod tests {
         let owner = Connection::open(&path).unwrap();
         owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('old'), ('live');").unwrap();
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(LEASES).unwrap();
+        db.execute_batch(SCHEMA.sql).unwrap();
         let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
         let boot = clock.boot_identity().unwrap();
         let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {

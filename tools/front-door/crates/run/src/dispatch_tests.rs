@@ -1489,33 +1489,6 @@ impl Providers for RefusesAfterAlias {
     }
 }
 
-fn old_ledger(store: &RunStore, schema: &str) -> TestResult {
-    use std::os::unix::fs::PermissionsExt;
-    let file = store.writer_registry.join("admission.sqlite3");
-    std::fs::create_dir_all(&store.writer_registry)?;
-    let old = rusqlite::Connection::open(&file)?;
-    old.execute_batch(schema)?;
-    drop(old);
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-const VERSION_1_LEDGER: &str = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-     CREATE INDEX lease_projects ON leases(project);
-     CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;";
-
-fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult {
-    let started = host.wall_now()?.as_micros() / 1000 - ago_ms;
-    old_ledger(
-        store,
-        &format!(
-            "{VERSION_1_LEDGER}
-             INSERT INTO spacing(id,last_start) VALUES (1,{started});
-             PRAGMA user_version=1;"
-        ),
-    )
-}
-
 #[test]
 fn read_only_disk_floor_warning_is_emitted_once_by_admit() -> TestResult {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};

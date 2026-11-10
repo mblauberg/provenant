@@ -695,20 +695,14 @@ impl RunStore {
             return Err(RunError::Validation("attempt run association"));
         }
         validate_attempt(&record)?;
-        let version: i64 = self
+        let receipt: Option<(i64, Vec<u8>)> = self
             .db
-            .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let receipt: Option<(i64, Vec<u8>)> = if version >= 7 {
-            self.db
-                .query_row(
-                    "SELECT generation,record FROM settlement_receipts WHERE attempt=?1",
-                    [id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?
-        } else {
-            None
-        };
+            .query_row(
+                "SELECT generation,record FROM settlement_receipts WHERE attempt=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         drop(snapshot);
         if let Some((generation, raw)) = receipt {
             if generation != sql_int(record.generation)?
@@ -716,7 +710,7 @@ impl RunStore {
             {
                 return Err(RunError::Conflict);
             }
-            record.settlement_receipts = Some(crate::db::decode_unversioned(&raw)?);
+            record.settlement_receipts = Some(crate::db::decode_column(&raw)?);
         }
         if matches!(
             record.state,

@@ -9,53 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
 const FILE: &str = "pr-contributions.sqlite3";
-const MIGRATIONS: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS links (
-                    attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
-                    weight INTEGER, PRIMARY KEY(attempt, repository, number)
-                ) STRICT;
-                CREATE INDEX IF NOT EXISTS links_pr ON links(repository, number, attempt);
-                CREATE TABLE IF NOT EXISTS allocations (attempt TEXT PRIMARY KEY) STRICT;
-                PRAGMA user_version=1;",
-    "CREATE TABLE IF NOT EXISTS branch_attempts (
-                        attempt TEXT PRIMARY KEY, project TEXT NOT NULL,
-                        branch TEXT NOT NULL, role TEXT NOT NULL, model TEXT, account TEXT
-                    ) STRICT;
-                    CREATE INDEX IF NOT EXISTS branch_attempts_branch ON branch_attempts(project, branch);
-                    CREATE TABLE IF NOT EXISTS branch_prs (
-                        project TEXT NOT NULL, branch TEXT NOT NULL,
-                        repository TEXT NOT NULL, number INTEGER NOT NULL, head TEXT NOT NULL,
-                        PRIMARY KEY(project, branch, repository, number)
-                    ) STRICT;
-                    PRAGMA user_version=2;",
-    "ALTER TABLE branch_attempts ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
-                    ALTER TABLE branch_attempts ADD COLUMN run TEXT;
-                    ALTER TABLE branch_attempts ADD COLUMN queued_at INTEGER;
-                    ALTER TABLE branch_attempts ADD COLUMN outcome TEXT;
-                    ALTER TABLE branch_attempts ADD COLUMN finished_at INTEGER;
-                    ALTER TABLE branch_prs RENAME TO branch_prs_v2;
-                    CREATE TABLE branch_prs (
-                        project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
-                        number INTEGER NOT NULL, head TEXT NOT NULL,
-                        generation INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY(project,branch,repository,number,generation)
-                    ) STRICT;
-                    INSERT INTO branch_prs(project,branch,repository,number,head,generation)
-                        SELECT project,branch,repository,number,head,0 FROM branch_prs_v2;
-                    DROP TABLE branch_prs_v2;
-                    CREATE TABLE branch_generations (
-                        project TEXT NOT NULL, branch TEXT NOT NULL, generation INTEGER NOT NULL,
-                        PRIMARY KEY(project,branch)
-                    ) STRICT;
-                    CREATE TABLE truncations (attempt TEXT PRIMARY KEY) STRICT;
-                    UPDATE branch_attempts SET role='read_only' WHERE role='review';
-                    PRAGMA user_version=3;",
-    "CREATE TABLE reassignments (
-                        attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
-                        PRIMARY KEY(attempt, repository, number)
-                    ) STRICT;
-                    PRAGMA user_version=4;",
-];
+pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
+    sql: include_str!("pr_contribution_schema.sql"),
+    version: 1,
+};
 /// Allocation is represented in millionths for exact validation.
 pub const WEIGHT_ONE: u32 = 1_000_000;
 const MAX_LINKS: usize = 256;
@@ -229,7 +186,7 @@ pub struct Contribution {
 }
 
 /// Host callers supply facts from authoritative dispatch or workflow records.
-pub struct Contributions(Connection, usize);
+pub struct Contributions(pub(crate) Connection);
 impl Contributions {
     /// Read without creating or migrating a store, including committed WAL data.
     pub fn open_read_only(host: &Path, call: &Request<'_>) -> Result<Option<Self>> {
@@ -247,37 +204,16 @@ impl Contributions {
         }
         crate::db::companions(&root, FILE)?;
         let db = provenant_sqlite::open_connection(&host.join(FILE), true)?;
-        match provenant_sqlite::read_version(&db, 4)? {
-            version @ 1..=4 => Ok(Some(Self(db, version))),
-            _ => Err(RunError::Version(0)),
+        if provenant_sqlite::stored_version(&db)? == 0 {
+            return Ok(None);
         }
+        provenant_sqlite::check_version(&db, SCHEMA)?;
+        Ok(Some(Self(db)))
     }
     pub fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
-        let (root, db, _lock) = open_database(host, FILE, call)?;
-        let initial_version = provenant_sqlite::read_version(&db, MIGRATIONS.len())?;
-        for version in initial_version..MIGRATIONS.len() {
-            immediate(&db, call, |tx| {
-                provenant_sqlite::migrate(
-                    tx,
-                    &MIGRATIONS[..=version],
-                    version,
-                    || {
-                        if version == initial_version {
-                            let stamp = call
-                                .clock
-                                .wall_now()
-                                .map_err(|_| RunError::Validation("wall clock"))?
-                                .as_micros();
-                            provenant_sqlite::snapshot_database(&root, host, FILE, stamp)?;
-                        }
-                        Ok::<(), RunError>(())
-                    },
-                    |_, _| Ok(()),
-                )?;
-                Ok(())
-            })?;
-        }
-        Ok(Self(db, 4))
+        let (_, db, _lock) = open_database(host, FILE, call)?;
+        provenant_sqlite::ensure_schema(&db, SCHEMA)?;
+        Ok(Self(db))
     }
 
     /// Snapshot a registered local worktree at dispatch, independent of outcome.
@@ -467,9 +403,6 @@ impl Contributions {
         call: &Request<'_>,
     ) -> Result<Vec<PullRequest>> {
         call.check()?;
-        if self.1 < 3 {
-            return Ok(Vec::new());
-        }
         {
             let mut query = self.0.prepare(
                 "SELECT DISTINCT repository,number FROM branch_prs
@@ -648,11 +581,7 @@ impl Contributions {
     pub fn is_bound(&self, pr: &PullRequest, call: &Request<'_>) -> Result<bool> {
         call.check()?;
         pr.validate()?;
-        let bindings = if self.1 == 1 {
-            ""
-        } else {
-            " OR EXISTS(SELECT 1 FROM branch_prs WHERE repository=?1 AND number=?2)"
-        };
+        let bindings = " OR EXISTS(SELECT 1 FROM branch_prs WHERE repository=?1 AND number=?2)";
         Ok(self.0.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM links WHERE repository=?1 AND number=?2){bindings}"
@@ -670,9 +599,6 @@ impl Contributions {
     pub fn truncated_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<bool> {
         call.check()?;
         pr.validate()?;
-        if self.1 < 3 {
-            return Ok(false);
-        }
         {
             Ok(self.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM truncations t WHERE
@@ -693,9 +619,6 @@ impl Contributions {
     pub fn reassigned_from_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
         call.check()?;
         pr.validate()?;
-        if self.1 < 4 {
-            return Ok(0);
-        }
         {
             let count: i64 = self.0.query_row(
                 "SELECT count(*) FROM reassignments WHERE repository=?1 AND number=?2",
@@ -714,9 +637,6 @@ impl Contributions {
     pub fn unplaced_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
         call.check()?;
         pr.validate()?;
-        if self.1 < 3 {
-            return Ok(0);
-        }
         {
             let count: i64 = self.0.query_row(
                 "SELECT count(*) FROM links l JOIN branch_attempts a USING(attempt)
@@ -736,9 +656,6 @@ impl Contributions {
     pub fn skipped_sealed_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
         call.check()?;
         pr.validate()?;
-        if self.1 < 3 {
-            return Ok(0);
-        }
         {
             let count: i64 = self.0.query_row(
                 "SELECT count(DISTINCT a.attempt) FROM branch_attempts a
@@ -764,33 +681,15 @@ impl Contributions {
         pr.validate()?;
         let number =
             i64::try_from(pr.number).map_err(|_| RunError::Validation("PR number too large"))?;
-        let metadata = if self.1 == 1 {
-            "NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL"
-        } else if self.1 == 2 {
-            "a.branch,p.head,CASE a.role WHEN 'review' THEN 'read_only' ELSE a.role END,a.model,a.account,NULL,NULL,NULL,NULL"
-        } else {
-            "a.branch,p.head,a.role,a.model,a.account,a.run,a.outcome,a.queued_at,a.finished_at"
-        };
-        let joins = if self.1 == 1 {
-            ""
-        } else {
-            "LEFT JOIN branch_attempts a USING(attempt) LEFT JOIN branch_prs p ON p.project=a.project AND p.branch=a.branch AND p.repository=l.repository AND p.number=l.number"
-        };
-        let generation_join = if self.1 < 3 {
-            ""
-        } else {
-            " AND p.generation=a.generation"
-        };
-        let truncated = if self.1 < 3 {
-            "0"
-        } else {
-            "EXISTS(SELECT 1 FROM truncations t WHERE t.attempt=l.attempt)"
-        };
-        let sql = format!("SELECT l.attempt,l.weight,{metadata},
+        let sql = "SELECT l.attempt,l.weight,
+            a.branch,p.head,a.role,a.model,a.account,a.run,a.outcome,a.queued_at,a.finished_at,
             (SELECT count(*) FROM links c WHERE c.attempt=l.attempt),
-            NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=l.attempt),{truncated}
-            FROM links l {joins}{generation_join} WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001");
-        let mut query = self.0.prepare(&sql)?;
+            NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=l.attempt),
+            EXISTS(SELECT 1 FROM truncations t WHERE t.attempt=l.attempt)
+            FROM links l LEFT JOIN branch_attempts a USING(attempt)
+            LEFT JOIN branch_prs p ON p.project=a.project AND p.branch=a.branch AND p.repository=l.repository AND p.number=l.number AND p.generation=a.generation
+            WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001";
+        let mut query = self.0.prepare(sql)?;
         let mut rows = query.query(params![pr.repository, number])?;
         let mut result = Vec::new();
         while let Some(row) = rows.next()? {
@@ -1317,154 +1216,4 @@ mod tests {
 
     // These persisted versions remain accepted by both readers and migrations.
     // Keep their data-preservation coverage while those production paths live.
-    #[test]
-    fn v3_store_migrates_to_v4_keeping_its_links()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let (context, mut attempt, old, _) = fixture(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let head = GitOid::parse(&"a".repeat(40))?;
-        db.bind(context.project_id, "feat/x", &old, head, &call)?;
-        attempt.attempt_id = AttemptId::from_bytes([1; 16]);
-        db.capture(&attempt, "feat/x", "worker", &call)?;
-        db.0.execute_batch("DROP TABLE reassignments; PRAGMA user_version=3;")?;
-        drop(db);
-        let v3 = Contributions::open_read_only(context.state_root.as_path(), &call)?
-            .ok_or("v3 store")?;
-        assert_eq!(v3.for_pr(&old, &call)?.len(), 1);
-        assert_eq!(v3.reassigned_from_pr(&old, &call)?, 0);
-        drop(v3);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        assert_eq!(db.for_pr(&old, &call)?.len(), 1);
-        let backup = context
-            .state_root
-            .as_path()
-            .join(format!("{FILE}.bak-{}", call.clock.wall_now()?.as_micros()));
-        let backup = provenant_sqlite::open_connection(&backup, true)?;
-        assert_eq!(
-            backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            3
-        );
-        assert_eq!(
-            backup.query_row("SELECT count(*) FROM branch_prs", [], |row| row
-                .get::<_, i64>(0))?,
-            1
-        );
-        let tables: i64 = db.0.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name='reassignments'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(tables, 1);
-        assert_eq!(
-            db.0.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            4
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn migrates_legacy_links_without_inventing_metadata()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let pr = PullRequest {
-            repository: "owner/repo".into(),
-            number: 42,
-        };
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        db.link(AttemptId::from_bytes([1; 16]), &pr, &call)?;
-        db.0.execute_batch(
-            "DROP TABLE branch_attempts; DROP TABLE branch_prs; DROP TABLE branch_generations; DROP TABLE truncations; DROP TABLE reassignments; PRAGMA user_version=1;",
-        )?;
-        drop(db);
-        let legacy = Contributions::open_read_only(context.state_root.as_path(), &call)?
-            .ok_or("legacy store")?;
-        let rows = legacy.for_pr(&pr, &call)?;
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].role.is_none());
-        assert!(rows[0].run.is_none());
-        assert!(rows[0].queued_at.is_none());
-        assert_eq!(
-            legacy
-                .0
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            1
-        );
-        drop(legacy);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let rows = db.for_pr(&pr, &call)?;
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].role.is_none());
-        assert!(rows[0].weight_millionths.is_none());
-        assert!(rows[0].head.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn v2_metadata_is_readable_and_migrates_without_losing_links()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let pr = PullRequest {
-            repository: "owner/repo".into(),
-            number: 42,
-        };
-        let id = AttemptId::from_bytes([1; 16]);
-        let head = "a".repeat(40);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        db.link(id, &pr, &call)?;
-        db.0.execute_batch(
-            "DROP TABLE branch_attempts; DROP TABLE branch_prs;
-             DROP TABLE branch_generations; DROP TABLE truncations; DROP TABLE reassignments;
-             CREATE TABLE branch_attempts (
-                 attempt TEXT PRIMARY KEY, project TEXT NOT NULL, branch TEXT NOT NULL,
-                 role TEXT NOT NULL, model TEXT, account TEXT) STRICT;
-             CREATE TABLE branch_prs (
-                 project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
-                 number INTEGER NOT NULL, head TEXT NOT NULL,
-                 PRIMARY KEY(project,branch,repository,number)) STRICT;
-             PRAGMA user_version=2;",
-        )?;
-        db.0.execute(
-            "INSERT INTO branch_attempts VALUES (?1,?2,'feat','review','fixture/model',NULL)",
-            params![id.to_string(), context.project_id.to_string()],
-        )?;
-        db.0.execute(
-            "INSERT INTO branch_prs VALUES (?1,'feat','owner/repo',42,?2)",
-            params![context.project_id.to_string(), head],
-        )?;
-        drop(db);
-        let legacy =
-            Contributions::open_read_only(context.state_root.as_path(), &call)?.ok_or("store")?;
-        let before = legacy.for_pr(&pr, &call)?;
-        assert_eq!(before.len(), 1);
-        assert_eq!(before[0].role.as_deref(), Some("read_only"));
-        assert_eq!(before[0].model.as_deref(), Some("fixture/model"));
-        assert!(before[0].run.is_none());
-        assert_eq!(
-            legacy
-                .0
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            2
-        );
-        drop(legacy);
-        let migrated = Contributions::open(context.state_root.as_path(), &call)?;
-        assert_eq!(migrated.for_pr(&pr, &call)?, before);
-        migrated.close(context.project_id, &pr, &call)?;
-        assert_eq!(
-            Contributions::generation(&migrated.0, context.project_id, "feat")?,
-            1
-        );
-        Ok(())
-    }
 }

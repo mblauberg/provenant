@@ -304,62 +304,6 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
     }
     Ok(())
 }
-#[test]
-fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 20_000,
-        read_only_spacing_ms: 2_000,
-        ..AdmissionPolicy::default()
-    });
-    let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-         CREATE INDEX lease_projects ON leases(project);";
-    // A spacing that cannot be dropped fails the upgrade after it has added
-    // the lease class column. A crash at that point must leave version 1 whole.
-    old_ledger(
-        &store,
-        &format!(
-            "{version_1}
-             CREATE VIEW spacing AS SELECT 1 AS id, 4000000000000 AS last_start;
-             PRAGMA user_version=1;"
-        ),
-    )?;
-    let [first, second] = writers(&store, [98, 99], &call)?;
-    assert!(store.claim(first, &host, &call).is_err());
-    let file = store.writer_registry.join("admission.sqlite3");
-    let raw = rusqlite::Connection::open(&file)?;
-    let classes: i64 = raw.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('leases') WHERE name='class'",
-        [],
-        |r| r.get(0),
-    )?;
-    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    assert_eq!(
-        (classes, version),
-        (0, 1),
-        "the failed upgrade left no trace"
-    );
-    raw.execute_batch(
-        "DROP VIEW spacing;
-         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
-         INSERT INTO spacing(id,last_start) VALUES (1,4000000000000);",
-    )?;
-    drop(raw);
-    assert!(
-        store.claim(first, &host, &call)?.is_none(),
-        "the upgrade carried the start into the new ledger"
-    );
-    host.pass_ms(20_500);
-    assert!(
-        store.claim(first, &host, &call)?.is_some(),
-        "a start in the wall future held the class one spacing, and no longer"
-    );
-    assert!(store.claim(second, &host, &call)?.is_none());
-    Ok(())
-}
 
 #[test]
 fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult {
