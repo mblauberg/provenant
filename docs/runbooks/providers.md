@@ -319,7 +319,9 @@ revoke every copy outstanding, and live lanes fail with `authentication_failed`.
 Such a lane settles with terminal cause `lane_token_lost`, naming the account;
 a writer continues from its handoff on a fresh token, bounded by
 `lane.max_continuations`. A login that really lapsed refuses the successor at
-launch as `account_login_required`.
+launch as `account_login_required`. If the registered lane token itself is
+rejected, the lane settles as a token problem without continuation, naming the
+account and directing the owner to recreate it with `claude setup-token`.
 
 To remove the cause, register a long-lived lane token per account. It comes
 from its own grant, so renewing the login never revokes it, and the host stops
@@ -342,9 +344,11 @@ refreshing the login for lanes on that account:
    one hard link or is group- or world-readable refuses the launch.
 
 Provenant cannot check that the token belongs to the registered account; the
-account's login probe still runs at each launch. The token lasts about a year.
-To renew it, repeat these steps. To revert to the login token, delete the file.
-Never copy the file between account directories.
+account's login probe still runs at each launch. The token lasts about a year
+rather than hours, so a leak from a lane is usable for longer. To revoke it, open
+your Claude account settings on claude.ai and revoke the token under
+Authorization tokens. To revert the host to the login token, delete the file.
+To renew it, repeat these steps. Never copy the file between account directories.
 
 ## Agy accounts
 

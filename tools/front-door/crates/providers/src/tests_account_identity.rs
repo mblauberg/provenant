@@ -999,6 +999,26 @@ fn claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login() {
 }
 
 #[test]
+fn claude_lane_token_refuses_permissive_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude-pro");
+    std::fs::create_dir_all(&config).unwrap();
+    let token = config.join(claude::LANE_TOKEN_FILE);
+    std::fs::write(&token, "fixture-lane-token\n").unwrap();
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let login = claude::Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    let err = claude::lane_token(&login).unwrap_err();
+    assert!(matches!(err, ProviderError::CredentialReadFailed(_)));
+}
+
+#[test]
 fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
     use crate::claude::{
         CredentialAuthority, Login, refresh_for_account_authorised, refresh_if_expiring,

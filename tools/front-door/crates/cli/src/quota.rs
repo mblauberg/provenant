@@ -1189,6 +1189,32 @@ pub(crate) fn lane_token_lost_diagnostic<'a>(
     )
 }
 
+/// The account's registered lane token was rejected by the provider. The
+/// remedy is to recreate it with `claude setup-token`, not to continue on
+/// the dead token.
+pub(crate) fn registered_lane_token_diagnostic<'a>(
+    entries: impl IntoIterator<Item = &'a provenant_providers::accounts::Registration>,
+    adapter: &str,
+    key: Option<&str>,
+) -> String {
+    let account = entries
+        .into_iter()
+        .find(|entry| entry.adapter == adapter && Some(entry.key.as_str()) == key)
+        .map_or_else(
+            || "account unavailable".to_owned(),
+            |entry| {
+                format!(
+                    "{} [{}]",
+                    entry.label.escape_debug(),
+                    entry.adapter.escape_debug()
+                )
+            },
+        );
+    format!(
+        "{account}: the registered lane token was rejected and should be recreated with `claude setup-token` (docs/runbooks/providers.md)"
+    )
+}
+
 /// Diagnostic facts are account-scoped and contain no provider output.
 pub(crate) fn login_diagnostic(
     entry: Option<&provenant_providers::accounts::Registration>,

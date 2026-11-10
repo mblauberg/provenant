@@ -3299,6 +3299,15 @@ pub(super) fn prepare_candidates(
             "resume_continuations".into(),
             serde_json::json!(model_policy.lane.resume_continuations.unwrap_or(false)),
         );
+        if refreshed
+            .as_ref()
+            .is_some_and(|token| token.is_lane_token())
+        {
+            provider.extra.insert("lane_token".into(), true.into());
+            provider
+                .extra
+                .insert("registered_lane_token".into(), true.into());
+        }
         provider.extra.insert("project_paths".into(), project_paths);
         provider.extra.insert(
             "argv_prompt_limit".into(),

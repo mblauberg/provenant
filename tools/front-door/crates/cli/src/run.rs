@@ -898,11 +898,35 @@ impl Registry<'_> {
                 let config = self.roots.and_then(|roots| {
                     provenant_config::read_with_domains(roots, &crate::domains::SECTIONS).ok()
                 });
+                let key = route.account_key.as_deref();
+                let matching_entry = config.as_ref().and_then(|config| {
+                    config.domains.accounts.entries.values().find(|entry| {
+                        entry.adapter == adapter.id() && Some(entry.key.as_str()) == key
+                    })
+                });
+                let registered_token = route
+                    .extra
+                    .get("registered_lane_token")
+                    .or_else(|| route.extra.get("lane_token"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or_else(|| {
+                        if adapter.id() == "claude" {
+                            matching_entry.is_some_and(|entry| {
+                                entry
+                                    .directory
+                                    .join(provenant_providers::claude::LANE_TOKEN_FILE)
+                                    .is_file()
+                            })
+                        } else {
+                            false
+                        }
+                    });
                 let entries = config
                     .iter()
                     .flat_map(|config| config.domains.accounts.entries.values());
-                let key = route.account_key.as_deref();
-                let reason = if lane_token {
+                let reason = if lane_token && registered_token {
+                    crate::quota::registered_lane_token_diagnostic(entries, adapter.id(), key)
+                } else if lane_token {
                     decoded.terminal_cause = Some(run::TerminalCause::LaneTokenLost);
                     crate::quota::lane_token_lost_diagnostic(entries, adapter.id(), key)
                 } else if config.is_some() {

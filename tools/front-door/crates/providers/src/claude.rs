@@ -122,6 +122,7 @@ pub struct OauthToken {
     pub(crate) access: String,
     expires_at_ms: u64,
     account: Option<(String, std::path::PathBuf)>,
+    pub(crate) lane_token: bool,
 }
 
 impl std::fmt::Debug for OauthToken {
@@ -131,6 +132,11 @@ impl std::fmt::Debug for OauthToken {
 }
 
 impl OauthToken {
+    /// True when this credential is a registered long-lived lane token,
+    /// rather than a rotating login access token.
+    pub fn is_lane_token(&self) -> bool {
+        self.lane_token
+    }
     /// Construct an in-memory token for cross-crate fixtures.
     #[cfg(feature = "fixture")]
     pub fn fixture() -> Result<Self, ProviderError> {
@@ -175,6 +181,7 @@ impl OauthToken {
             access: oauth.access,
             expires_at_ms: oauth.expires_at_ms,
             account: None,
+            lane_token: false,
         })
     }
 
@@ -294,28 +301,40 @@ fn keychain_source(login: &Login<'_>) -> CredentialSource {
 
 /// Reads the account's long-lived lane token when the owner registered one.
 /// It must be a single regular file that only its owner can read.
-fn lane_token(login: &Login<'_>) -> Result<Option<OauthToken>, ProviderError> {
+pub(crate) fn lane_token(login: &Login<'_>) -> Result<Option<OauthToken>, ProviderError> {
     let directory = Directory::open_anchor(login.config_dir)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
     let name = OsStr::new(LANE_TOKEN_FILE);
-    match directory.metadata_at(name, false) {
-        Ok(meta)
-            if meta.kind == provenant_os::fs::FileKind::Regular
-                && meta.links == 1
-                && meta.mode & 0o077 == 0 => {}
-        Ok(_) => {
+    let mut file = match directory.open_read(name) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error)
+            if error.is_symlink()
+                || matches!(error, provenant_os::fs::FsError::NotRegular { .. }) =>
+        {
             return Err(ProviderError::CredentialReadFailed(format!(
                 "{LANE_TOKEN_FILE} must be a single regular file with mode 0600"
             )));
         }
-        Err(error) if error.is_not_found() => return Ok(None),
         Err(_) => {
             return Err(ProviderError::CredentialReadFailed(format!(
                 "cannot inspect {LANE_TOKEN_FILE}"
             )));
         }
+    };
+    let meta = file.metadata().map_err(|_| {
+        ProviderError::CredentialReadFailed(format!("cannot inspect {LANE_TOKEN_FILE}"))
+    })?;
+    if meta.kind != provenant_os::fs::FileKind::Regular
+        || meta.uid != provenant_os::fs::effective_uid()
+        || meta.links != 1
+        || meta.mode & 0o077 != 0
+    {
+        return Err(ProviderError::CredentialReadFailed(format!(
+            "{LANE_TOKEN_FILE} must be a single regular file with mode 0600"
+        )));
     }
-    let bytes = directory.read_bounded(name, 4096).map_err(|_| {
+    let bytes = file.read_bounded(4096).map_err(|_| {
         ProviderError::CredentialReadFailed(format!("cannot read {LANE_TOKEN_FILE}"))
     })?;
     let access = std::str::from_utf8(bytes.trim_ascii()).map_err(|_| ProviderError::Malformed)?;
@@ -327,6 +346,7 @@ fn lane_token(login: &Login<'_>) -> Result<Option<OauthToken>, ProviderError> {
         // The owner renews it yearly; the host never refreshes it.
         expires_at_ms: u64::MAX,
         account: None,
+        lane_token: true,
     }))
 }
 
