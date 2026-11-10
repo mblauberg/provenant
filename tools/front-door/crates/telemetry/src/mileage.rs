@@ -24,7 +24,6 @@ pub struct Reading {
     pub used_basis_points: u64,
     pub resets_unix_seconds: Option<i64>,
     pub plan: Option<String>,
-    pub tier: Option<String>,
     /// API-equivalent cost of the usage between the previous reading and this
     /// one, or none when any of that usage is unpriced.
     pub cost_microdollars: Option<u64>,
@@ -108,7 +107,6 @@ pub struct RunView {
     /// (a drop with no reset time) or `plan_change`.
     pub reset: Option<&'static str>,
     pub plan: Option<String>,
-    pub tier: Option<String>,
     pub readings: u64,
     pub segments: u64,
     pub priced_segments: u64,
@@ -165,7 +163,6 @@ struct Run {
     start_at: i64,
     reset: Option<&'static str>,
     plan: Option<String>,
-    tier: Option<String>,
     readings: u64,
     segments: Vec<Segment>,
 }
@@ -176,7 +173,7 @@ fn boundary(prev: &Reading, curr: &Reading) -> Option<&'static str> {
         (Some(a), Some(b)) => a != b,
         _ => false,
     };
-    if known(&prev.plan, &curr.plan) || known(&prev.tier, &curr.tier) {
+    if known(&prev.plan, &curr.plan) {
         return Some("plan_change");
     }
     if let (Some(before), Some(after)) = (prev.resets_unix_seconds, curr.resets_unix_seconds)
@@ -200,7 +197,6 @@ fn partition(readings: &[Reading]) -> Vec<Run> {
         start_at: first.observed_unix_seconds,
         reset: None,
         plan: first.plan.clone(),
-        tier: first.tier.clone(),
         readings: 1,
         segments: Vec::new(),
     };
@@ -213,7 +209,6 @@ fn partition(readings: &[Reading]) -> Vec<Run> {
                 start_at: curr.observed_unix_seconds,
                 reset: Some(reason),
                 plan: curr.plan.clone(),
-                tier: curr.tier.clone(),
                 readings: 1,
                 segments: Vec::new(),
             };
@@ -319,7 +314,7 @@ fn step_change(readings: &[Reading], latest: i64, options: Options) -> StepChang
         if boundary(prev, curr).is_some() || curr.used_basis_points <= prev.used_basis_points {
             continue;
         }
-        let same_plan = last.is_none_or(|last| curr.plan == last.plan && curr.tier == last.tier);
+        let same_plan = last.is_none_or(|last| curr.plan == last.plan);
         if !same_plan {
             continue;
         }
@@ -418,7 +413,6 @@ pub fn analyse(series: &Series, options: Options) -> SeriesReport {
                     .map_or(run.start_at, |segment| segment.end_at),
                 reset: run.reset,
                 plan: run.plan.clone(),
-                tier: run.tier.clone(),
                 readings: run.readings,
                 segments: run.segments.len() as u64,
                 priced_segments: run.segments.iter().filter(|s| s.priced).count() as u64,
@@ -633,7 +627,6 @@ mod tests {
             used_basis_points: used,
             resets_unix_seconds: Some(10_000_000),
             plan: Some("max_5x".into()),
-            tier: None,
             cost_microdollars: cost,
             usage: [0; 5],
             priced: cost.is_some(),

@@ -14,19 +14,6 @@ pub(crate) struct Split {
     pub(crate) ephemeral_1h_input_tokens: Option<u64>,
 }
 impl Raw {
-    pub(crate) fn counts(&self) -> [Option<u64>; 4] {
-        let one_hour = self
-            .cache_creation
-            .as_ref()
-            .and_then(|split| split.ephemeral_1h_input_tokens);
-        [
-            self.input_tokens,
-            self.cache_read_input_tokens,
-            self.cache_creation_input_tokens.max(one_hour),
-            self.output_tokens,
-        ]
-    }
-
     /// A message repeats as it streams; the largest count of each field is its
     /// final one.
     pub(crate) fn merge(&mut self, other: Self) {
@@ -60,6 +47,9 @@ mod tests {
         )
         .unwrap();
         raw.merge(later);
-        assert_eq!(raw.counts()[2], Some(7));
+        assert_eq!(
+            raw.cache_creation.and_then(|split| split.ephemeral_1h_input_tokens),
+            Some(7)
+        );
     }
 }

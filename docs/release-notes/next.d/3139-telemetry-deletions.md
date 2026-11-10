@@ -1,0 +1,1 @@
+`telemetry stats --claude-subagents`, the token-per-PR study module and its document, and the `tier` field of quota history records are removed; stored history lines that carry `tier` are still read and the field is ignored. Default `telemetry stats` output no longer lists native sub-agent attempts one per row; use `--detail` or `--json` for them.

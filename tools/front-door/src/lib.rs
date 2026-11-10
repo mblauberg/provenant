@@ -1216,12 +1216,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     provenant_cli::run::stats_by_pr(cmd, edge, merged)
                 })
             } else {
-                let workspace = if stats_dispatch(&cmd) == StatsDispatch::Directory {
-                    Workspace::Directory
-                } else {
-                    Workspace::Project
-                };
-                run_edge_workspace(&inv.leaf, globals, workspace, |edge| {
+                run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
                     provenant_cli::run::stats(cmd, edge)
                 })
             }
@@ -1265,7 +1260,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 outcomes: true,
                 suggest: false,
                 pipeline: cmd.pipeline,
-                claude_subagents: None,
                 usage: false,
                 since: None,
                 until: None,
@@ -1464,7 +1458,6 @@ mod telemetry_stats_dispatch_tests {
 enum StatsDispatch {
     Usage,
     MergedPullRequests,
-    Directory,
     Project,
 }
 
@@ -1473,8 +1466,6 @@ fn stats_dispatch(command: &provenant_cli::Stats) -> StatsDispatch {
         StatsDispatch::Usage
     } else if command.by == Some(provenant_cli::StatsBy::Pr) {
         StatsDispatch::MergedPullRequests
-    } else if command.claude_subagents.is_some() {
-        StatsDispatch::Directory
     } else {
         StatsDispatch::Project
     }
