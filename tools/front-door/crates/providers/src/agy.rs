@@ -809,7 +809,14 @@ mod identity_tests {
         std::fs::write(&keychain, "synthetic").unwrap();
         let key = "agy-google-0123456789ab";
         let stamp = keychain_stamp(&directory);
-        assert!(remember_identity(temp.path(), &directory, key, 100, stamp, &[]));
+        assert!(remember_identity(
+            temp.path(),
+            &directory,
+            key,
+            100,
+            stamp,
+            &[]
+        ));
         assert_eq!(
             cached_identity(temp.path(), &directory, 100).as_deref(),
             Some(key)

@@ -360,7 +360,9 @@ pub fn extract_agy_models(payload: Option<&Value>, stderr: Option<&str>) -> Vec<
                     for item in arr {
                         if let Some(s) = item.as_str() {
                             let s = s.trim();
-                            if !s.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(s)) {
+                            if !s.is_empty()
+                                && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(s))
+                            {
                                 models.push(s.to_owned());
                             }
                         }
@@ -373,7 +375,9 @@ pub fn extract_agy_models(payload: Option<&Value>, stderr: Option<&str>) -> Vec<
                         let list = &desc[idx + PREFIX.len()..];
                         for item in list.split(',') {
                             let item = item.trim().trim_end_matches('.');
-                            if !item.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(item)) {
+                            if !item.is_empty()
+                                && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(item))
+                            {
                                 models.push(item.to_owned());
                             }
                         }
@@ -387,9 +391,7 @@ pub fn extract_agy_models(payload: Option<&Value>, stderr: Option<&str>) -> Vec<
         for line in stderr.lines() {
             let trimmed = line.trim();
             let lower = trimmed.to_ascii_lowercase();
-            if lower.starts_with("available models:")
-                || lower.starts_with("offered models:")
-            {
+            if lower.starts_with("available models:") || lower.starts_with("offered models:") {
                 in_models = true;
                 continue;
             }
@@ -399,7 +401,11 @@ pub fn extract_agy_models(payload: Option<&Value>, stderr: Option<&str>) -> Vec<
                     continue;
                 }
                 let clean = trimmed.trim_start_matches(['-', '*', '•']).trim();
-                if !clean.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(clean)) {
+                if !clean.is_empty()
+                    && !models
+                        .iter()
+                        .any(|m: &String| m.eq_ignore_ascii_case(clean))
+                {
                     models.push(clean.to_owned());
                 }
             }

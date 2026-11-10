@@ -150,10 +150,19 @@ fn model_matches_single(requested: &str, offered: &str) -> bool {
 
     // Distinct tiers must never cross (e.g. Flash vs Pro vs Opus vs Sonnet).
     const TIERS: &[&str] = &[
-        "flash", "pro", "opus", "sonnet", "haiku", "mini", "nano", "large", "medium", "small", "ultra",
+        "flash", "pro", "opus", "sonnet", "haiku", "mini", "nano", "large", "medium", "small",
+        "ultra",
     ];
-    let req_tiers: Vec<&str> = TIERS.iter().copied().filter(|&t| req_lower.contains(t)).collect();
-    let off_tiers: Vec<&str> = TIERS.iter().copied().filter(|&t| off_lower.contains(t)).collect();
+    let req_tiers: Vec<&str> = TIERS
+        .iter()
+        .copied()
+        .filter(|&t| req_lower.contains(t))
+        .collect();
+    let off_tiers: Vec<&str> = TIERS
+        .iter()
+        .copied()
+        .filter(|&t| off_lower.contains(t))
+        .collect();
     if !req_tiers.is_empty() && !off_tiers.is_empty() {
         if !req_tiers.iter().any(|t| off_tiers.contains(t)) {
             return false;
@@ -162,8 +171,16 @@ fn model_matches_single(requested: &str, offered: &str) -> bool {
 
     // Distinct families must never cross (e.g. Gemini vs Claude vs GPT).
     const FAMILIES: &[&str] = &["gemini", "claude", "gpt", "deepseek", "codex"];
-    let req_fams: Vec<&str> = FAMILIES.iter().copied().filter(|&f| req_lower.contains(f)).collect();
-    let off_fams: Vec<&str> = FAMILIES.iter().copied().filter(|&f| off_lower.contains(f)).collect();
+    let req_fams: Vec<&str> = FAMILIES
+        .iter()
+        .copied()
+        .filter(|&f| req_lower.contains(f))
+        .collect();
+    let off_fams: Vec<&str> = FAMILIES
+        .iter()
+        .copied()
+        .filter(|&f| off_lower.contains(f))
+        .collect();
     if !req_fams.is_empty() && !off_fams.is_empty() {
         if !req_fams.iter().any(|f| off_fams.contains(f)) {
             return false;
@@ -171,7 +188,11 @@ fn model_matches_single(requested: &str, offered: &str) -> bool {
     }
 
     // If both have family and tier and they agree, they match.
-    if !req_tiers.is_empty() && !off_tiers.is_empty() && !req_fams.is_empty() && !off_fams.is_empty() {
+    if !req_tiers.is_empty()
+        && !off_tiers.is_empty()
+        && !req_fams.is_empty()
+        && !off_fams.is_empty()
+    {
         return true;
     }
 

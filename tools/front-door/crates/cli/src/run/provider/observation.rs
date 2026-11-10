@@ -379,9 +379,9 @@ pub(super) fn observe_account(
     if observed_models.is_empty()
         && let Some(roots) = roots
         && let Ok(records) = crate::quota::read_cache(roots)
-        && let Some(cached) = records.iter().find(|r| {
-            r.account.adapter == entry.adapter && r.account.account_key == entry.key
-        })
+        && let Some(cached) = records
+            .iter()
+            .find(|r| r.account.adapter == entry.adapter && r.account.account_key == entry.key)
         && let Some(models) = cached
             .snapshot
             .as_ref()
