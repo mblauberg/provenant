@@ -212,6 +212,7 @@ mod tests {
             repository: provenant_core::RepoId::from_bytes([3; 16]),
             number: 1,
             head: GitOid::Sha1([6; 20]),
+            base: GitOid::Sha1([5; 20]),
         }
     }
     fn claim() -> ReviewClaim {

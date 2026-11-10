@@ -186,7 +186,7 @@ fn accepted_decision() -> Value {
     json!({"status":"accepted","actor_id":ID,"at":10,"reason":"done","user_approval":approval()})
 }
 fn receipt() -> Value {
-    json!({"schema_version":1,"delivery_id":ID,"project_id":ID,"revision":1,"subject":subject(),
+    json!({"schema_version":2,"delivery_id":ID,"project_id":ID,"revision":1,"subject":subject(),
         "authors":[{"kind":"agent","actor_id":ID,"route":observed_provenance()}],"risk":risk(),
         "review_attempts":[],"decision":accepted_decision(),"created_at":10,"updated_at":10})
 }
@@ -311,7 +311,7 @@ cases! {
     evidence_ref_preserves_digest: workflow::EvidenceRef => evidence();
     approval_ref_preserves_digest: workflow::ApprovalRef => approval();
     risk_record_preserves_digest: workflow::RiskRecord => risk();
-    pr_subject_preserves_digest: workflow::Subject => json!({"kind":"pr","repository":ID,"number":1,"head":"abababababababababababababababababababab"});
+    pr_subject_preserves_digest: workflow::Subject => json!({"kind":"pr","repository":ID,"number":1,"head":"abababababababababababababababababababab","base":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"});
     document_subject_preserves_digest: workflow::Subject => subject();
     observed_provenance_preserves_digest: workflow::RouteProvenance => observed_provenance();
     attested_provenance_preserves_digest: workflow::RouteProvenance => json!({"source":"chair_attested","route":"codex/model@high","tier":"principal","declared_family":null,"evidence":evidence()});
@@ -434,7 +434,8 @@ fn older_install_receipt_defaults_state_format_version() -> TestResult {
 #[test]
 fn receipt_without_changed_paths_and_with_repo_id_loads() -> TestResult {
     let mut value = receipt();
-    value["subject"] = json!({"kind":"pr","repository":ID,"number":1,"head":GIT_OID});
+    value["subject"] =
+        json!({"kind":"pr","repository":ID,"number":1,"head":GIT_OID,"base":GIT_OID});
     let decoded: workflow::DeliveryReceipt = serde_json::from_value(value.clone())?;
     assert!(decoded.risk().changed_paths().is_empty());
     assert!(

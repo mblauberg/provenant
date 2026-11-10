@@ -36,6 +36,7 @@ pub struct LandSettings {
     pub integration: Integration,
     pub batch_size: u64,
     pub batch_wait_seconds: u64,
+    pub approval: ApprovalSource,
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
     pub publish_settle_seconds: u64,
@@ -62,6 +63,8 @@ pub struct LandOverride {
     pub batch_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_wait_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_ref_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +171,9 @@ land_enum!(MergeMethod, Merge, Squash, Rebase);
 land_enum!(PrCiMode, Always, OptIn, Affected, None);
 land_enum!(LocalGateMode, Warn, Enforce, Off);
 land_enum!(GateKind, Checks, Commands);
+// What stands as a pull request's approval for batch landing: an approving
+// forge review at the head, or a Provenant review record that covers it.
+land_enum!(ApprovalSource, Forge, Receipt);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -264,6 +270,7 @@ impl Default for LandSettings {
             integration: Integration::Batch,
             batch_size: 8,
             batch_wait_seconds: 30,
+            approval: ApprovalSource::Forge,
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
             publish_settle_seconds: 30,
@@ -410,6 +417,7 @@ poll_seconds = 30
 integration = "batch"
 batch_size = 8
 batch_wait_seconds = 30
+approval = "forge"
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
 publish_settle_seconds = 30
@@ -442,6 +450,7 @@ timeout_seconds = 60
     FieldMetadata::enumeration("land.integration", &["batch", "single", "forge_queue"]),
     FieldMetadata::int("land.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.batch_wait_seconds", "int"),
+    FieldMetadata::enumeration("land.approval", &["forge", "receipt"]),
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
     FieldMetadata::new("land.publish_settle_seconds", "int"),
@@ -484,6 +493,8 @@ timeout_seconds = 60
     FieldMetadata::int("land.tiers.{tier}.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.projects.{project}.batch_wait_seconds", "int"),
     FieldMetadata::new("land.tiers.{tier}.batch_wait_seconds", "int"),
+    FieldMetadata::enumeration("land.projects.{project}.approval", &["forge", "receipt"]),
+    FieldMetadata::enumeration("land.tiers.{tier}.approval", &["forge", "receipt"]),
     FieldMetadata::new("land.projects.{project}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.tiers.{tier}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.projects.{project}.max_rebuilds", "int"),
