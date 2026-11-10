@@ -411,6 +411,7 @@ mod diagnostic_tests {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
         };
         let reason = read_failure_reason(&error);
         assert!(reason.contains("io"));

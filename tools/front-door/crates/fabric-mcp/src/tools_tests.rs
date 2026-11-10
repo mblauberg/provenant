@@ -230,6 +230,7 @@ fn process_limit_keeps_io_code_and_omits_source_text() {
             },
         )),
         input_failure: None,
+        cause: None,
     };
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
@@ -250,6 +251,7 @@ fn unreadable_input_io_projects_safe_reason() {
         delivery_stage: None,
         resource: None,
         input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
+        cause: None,
     };
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
@@ -853,6 +855,7 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         operation: "TOKEN_SENTINEL\u{1b}".into(),
         path: Some("/private/host".into()),
     })
