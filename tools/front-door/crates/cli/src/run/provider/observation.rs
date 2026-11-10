@@ -357,39 +357,12 @@ pub(super) fn observe_account(
             unavailable()
         )));
     }
-    let mut observed_models = if entry.adapter == "agy" {
+    // Only agy reports its offered models today; other adapters place no restriction.
+    let observed_models = if entry.adapter == "agy" {
         provenant_providers::agy::cached_models(executor.root(), &directory)
     } else {
         Vec::new()
     };
-    if observed_models.is_empty()
-        && let Some(models) = entry.settings.get("models")
-    {
-        if let Some(arr) = models.as_array() {
-            observed_models.extend(arr.iter().filter_map(|v| v.as_str()).map(str::to_owned));
-        } else if let Some(s) = models.as_str() {
-            observed_models.extend(
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-            );
-        }
-    }
-    if observed_models.is_empty()
-        && let Some(roots) = roots
-        && let Ok(records) = crate::quota::read_cache(roots)
-        && let Some(cached) = records
-            .iter()
-            .find(|r| r.account.adapter == entry.adapter && r.account.account_key == entry.key)
-        && let Some(models) = cached
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.details.as_ref())
-            .map(|d| &d.models)
-    {
-        observed_models.extend(models.clone());
-    }
     Ok(provenant_providers::AvailabilityRecord {
         schema_version: 1,
         adapter: entry.adapter.clone(),

@@ -845,7 +845,7 @@ mod identity_tests {
 
     #[test]
     fn agy_result_error_is_preserved_as_text() {
-        let raw = br#"{"type":"result","result":{"conversation_id":"c1","status":"ERROR","response":"","error":"Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let raw = br#"{"event":"result","result":{"conversation_id":"c1","status":"ERROR","response":"","error":"Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B","usage":{"input_tokens":0,"output_tokens":0}}}"#;
         let events = decode(raw).expect("decode");
         assert_eq!(
             events,

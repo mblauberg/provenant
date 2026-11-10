@@ -1268,6 +1268,9 @@ fn unoffered_model(
     now: i64,
 ) -> Option<Vec<String>> {
     let key = route.account_key.as_deref()?;
+    if route.adapter != "agy" {
+        return None;
+    }
     let record = availability.iter().find(|record| {
         record.adapter == route.adapter
             && record.account_key.as_deref() == Some(key)

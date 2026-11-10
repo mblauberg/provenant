@@ -140,82 +140,23 @@ pub fn model_matches_offered(requested: &str, offered_models: &[String]) -> bool
 }
 
 fn model_matches_single(requested: &str, offered: &str) -> bool {
-    let req = requested.strip_prefix("agy/").unwrap_or(requested).trim();
-    let off = offered.strip_prefix("agy/").unwrap_or(offered).trim();
-    if req.eq_ignore_ascii_case(off) {
-        return true;
+    fn tokens(name: &str) -> Vec<String> {
+        name.strip_prefix("agy/")
+            .unwrap_or(name)
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
-    let req_lower = req.to_ascii_lowercase();
-    let off_lower = off.to_ascii_lowercase();
-
-    // Distinct tiers must never cross (e.g. Flash vs Pro vs Opus vs Sonnet).
-    const TIERS: &[&str] = &[
-        "flash", "pro", "opus", "sonnet", "haiku", "mini", "nano", "large", "medium", "small",
-        "ultra",
-    ];
-    let req_tiers: Vec<&str> = TIERS
-        .iter()
-        .copied()
-        .filter(|&t| req_lower.contains(t))
-        .collect();
-    let off_tiers: Vec<&str> = TIERS
-        .iter()
-        .copied()
-        .filter(|&t| off_lower.contains(t))
-        .collect();
-    if !req_tiers.is_empty()
-        && !off_tiers.is_empty()
-        && !req_tiers.iter().any(|t| off_tiers.contains(t))
-    {
+    let (req, off) = (tokens(requested), tokens(offered));
+    if req.is_empty() || off.is_empty() {
         return false;
     }
-
-    // Distinct families must never cross (e.g. Gemini vs Claude vs GPT).
-    const FAMILIES: &[&str] = &["gemini", "claude", "gpt", "deepseek", "codex"];
-    let req_fams: Vec<&str> = FAMILIES
-        .iter()
-        .copied()
-        .filter(|&f| req_lower.contains(f))
-        .collect();
-    let off_fams: Vec<&str> = FAMILIES
-        .iter()
-        .copied()
-        .filter(|&f| off_lower.contains(f))
-        .collect();
-    if !req_fams.is_empty()
-        && !off_fams.is_empty()
-        && !req_fams.iter().any(|f| off_fams.contains(f))
-    {
-        return false;
-    }
-
-    // If both have family and tier and they agree, they match.
-    if !req_tiers.is_empty()
-        && !off_tiers.is_empty()
-        && !req_fams.is_empty()
-        && !off_fams.is_empty()
-    {
-        return true;
-    }
-
-    // Token-based matching.
-    let req_tokens: Vec<&str> = req_lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let off_tokens: Vec<&str> = off_lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if !off_tokens.is_empty() && off_tokens.iter().all(|t| req_tokens.contains(t)) {
-        return true;
-    }
-    if !req_tokens.is_empty() && req_tokens.iter().all(|t| off_tokens.contains(t)) {
-        return true;
-    }
-
-    false
+    // Whole tokens only: "mini" never matches inside "gemini". An offered
+    // display name ("Gemini Flash") matches a technical id that contains all of
+    // its tokens ("gemini-3.8-flash").
+    off.iter().all(|t| req.contains(t)) || req.iter().all(|t| off.contains(t))
 }
 
 pub struct Prompt {
@@ -502,5 +443,6 @@ mod tests {
 
         let technical = vec!["gemini-2.5-flash".to_string()];
         assert!(!model_matches_offered("gemini-3.8-pro", &technical));
+        assert!(model_matches_offered("agy/Gemini-2.5-Flash", &technical));
     }
 }
