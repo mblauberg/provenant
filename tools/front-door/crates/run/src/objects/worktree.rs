@@ -110,6 +110,12 @@ fn blob_hashes(
         if change.path.contains(&b'\n') {
             continue;
         }
+        // hash-object fails on a missing path, and a lane may add or delete
+        // files. Only regular files on disk have a hash to compare.
+        let full = repo.root_path().join(OsStr::from_bytes(&change.path));
+        if !std::fs::symlink_metadata(&full).is_ok_and(|metadata| metadata.file_type().is_file()) {
+            continue;
+        }
         input.extend_from_slice(&change.path);
         input.push(b'\n');
         listed.push(change.path.clone());
