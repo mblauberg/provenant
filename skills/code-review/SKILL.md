@@ -16,7 +16,7 @@ Conventions and the review ladder come from the repo's own `AGENTS.md`,
 provenant run --use review --file BRIEF.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain
 ```
 
-Supply the subject and base on the command line, and put the spec in the brief. The host fetches remote subjects and supplies pinned Git context; the read-only lane cannot fetch. Use `review` by default;
+Supply the subject and base on the command line (a ref is enough for the base; the host computes the merge base), and put the spec in the brief. The host fetches remote subjects and supplies pinned Git context; the read-only lane cannot fetch. Use `review` by default;
 a dotted flavour such as `review.security` selects a specific lens. A composite
 runs `review` over a panel resolved at launch, then `review.verify` and `review.synthesis`
 where needed. The planner chooses lenses and tiers from risk, changed paths

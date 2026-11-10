@@ -618,10 +618,10 @@ For Codex, supply its environment name or full ID:
 provenant run --file brief.md --mode read-only --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=1800}" --explain
 ```
 
-A writer takes `--mode worktree-write` and may take a delivery target:
+A writer takes `--mode worktree-write` and delivers with `provenant lane deliver ATTEMPT --deliver push`:
 
 ```sh
-provenant run --file brief.md --mode worktree-write --deliver push --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=3600}" --explain
+provenant run --file brief.md --mode worktree-write --set "attempt.cloud={target='codex-cloud',provider='codex',environment='provenant',repository='mblauberg/provenant',branch='main',model='gpt-6.1-sol',deadline_seconds=3600}" --explain
 ```
 
 Replace the repository, branch, model and environment with your own values.
