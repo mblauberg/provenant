@@ -722,6 +722,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                     depth: 1,
                     attempt: AttemptId::from_bytes([6; 16]),
                     assets: &assets,
+                    fabric_mcp: true,
                 },
             })?;
             assert_eq!(launch.argv[2], "resume");

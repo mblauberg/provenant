@@ -54,13 +54,12 @@ pub struct Arm {
     pub samples: usize,
     pub confirmed: u64,
     pub false_positives: u64,
-    pub cost_microdollars: u64,
-    pub missing_cost: usize,
     pub missing_dispositions: usize,
-    pub confirmed_per_dollar: Option<f64>,
-    /// Wilson confirmed share scaled by dispositions per dollar. Conditional
-    /// on observed costs; this does not estimate cost variability.
-    pub confirmed_per_dollar_interval: Option<Interval>,
+    /// Confirmed findings per deduplicated node: yield per unit of work.
+    /// Precision is ranked separately by the false-positive gate.
+    pub confirmed_per_node: Option<f64>,
+    /// Wilson confirmed share scaled by dispositions per node.
+    pub confirmed_per_node_interval: Option<Interval>,
     pub false_positive_rate: Rate,
     pub escaped_defect_rate: Rate,
     pub ci: &'static str,
@@ -93,7 +92,7 @@ pub struct Suggestions {
     pub suggestions: Vec<Suggestion>,
 }
 
-/// A conservative Pareto comparison: separated confirmed-per-dollar intervals,
+/// A conservative Pareto comparison: separated confirmed-per-node intervals,
 /// and no worse observed false-positive or escaped-defect rates. Only mature,
 /// fully measured arms with the same risk/task strata can generate advice.
 pub fn rank(
@@ -145,8 +144,7 @@ pub fn rank(
                 .collect();
             let mut confirmed = 0u64;
             let mut false_positives = 0u64;
-            let mut cost = 0u64;
-            let mut missing_cost = 0;
+            let mut nodes = 0u64;
             let mut missing_dispositions = 0;
             let mut merges = BTreeSet::new();
             let mut escaped = BTreeSet::new();
@@ -156,16 +154,12 @@ pub fn rank(
                 if !identities.insert(&row.evidence.sample) {
                     continue;
                 }
+                nodes += 1;
                 let e = &row.evidence;
                 let add = |a: u64, b: u64| {
                     a.checked_add(b)
                         .ok_or_else(|| "ranking count overflow".to_owned())
                 };
-                if let Some(value) = e.cost_microdollars {
-                    cost = add(cost, value)?;
-                } else {
-                    missing_cost += 1;
-                }
                 match (e.confirmed, e.false_positives) {
                     (Some(c), Some(f)) => {
                         confirmed = add(confirmed, c)?;
@@ -185,12 +179,12 @@ pub fn rank(
             let dispositions = confirmed
                 .checked_add(false_positives)
                 .ok_or("ranking count overflow")?;
-            let per_dollar = (missing_cost == 0 && cost > 0 && missing_dispositions == 0)
-                .then(|| confirmed as f64 * 1_000_000.0 / cost as f64);
-            let interval = per_dollar
+            let per_node =
+                (missing_dispositions == 0 && nodes > 0).then(|| confirmed as f64 / nodes as f64);
+            let interval = per_node
                 .and_then(|_| wilson(confirmed, dispositions))
                 .map(|i| {
-                    let scale = dispositions as f64 * 1_000_000.0 / cost as f64;
+                    let scale = dispositions as f64 / nodes as f64;
                     Interval {
                         low: i.low * scale,
                         high: i.high * scale,
@@ -198,7 +192,6 @@ pub fn rank(
                 });
             let sufficient = samples.len() >= min_samples
                 && merges.len() >= min_samples
-                && missing_cost == 0
                 && missing_dispositions == 0
                 && dispositions > 0
                 && interval.is_some()
@@ -230,11 +223,9 @@ pub fn rank(
                 samples: samples.len(),
                 confirmed,
                 false_positives,
-                cost_microdollars: cost,
-                missing_cost,
                 missing_dispositions,
-                confirmed_per_dollar: per_dollar,
-                confirmed_per_dollar_interval: interval,
+                confirmed_per_node: per_node,
+                confirmed_per_node_interval: interval,
                 false_positive_rate: rate(false_positives, dispositions),
                 escaped_defect_rate,
                 ci: outcomes.ci,
@@ -265,10 +256,9 @@ pub fn rank(
             {
                 continue;
             }
-            let (Some(ai), Some(bi)) = (
-                a.confirmed_per_dollar_interval,
-                b.confirmed_per_dollar_interval,
-            ) else {
+            let (Some(ai), Some(bi)) =
+                (a.confirmed_per_node_interval, b.confirmed_per_node_interval)
+            else {
                 continue;
             };
             if ai.low > bi.high
@@ -344,7 +334,7 @@ mod tests {
             (Some("unknown"), Some("repair")),
         ] {
             let mut rows = Vec::new();
-            for (choice, confirmed, cost) in [("good", 10, 1_000_000), ("poor", 1, 10_000_000)] {
+            for (choice, confirmed) in [("good", 10), ("poor", 1)] {
                 for i in 0..20 {
                     let sample = format!("{choice}-{i}");
                     rows.push(Attributed {
@@ -354,7 +344,6 @@ mod tests {
                             pattern: Some(choice.into()),
                             risk_tier: risk.map(str::to_owned),
                             task_kind: task.map(str::to_owned),
-                            cost_microdollars: Some(cost),
                             confirmed: Some(confirmed),
                             false_positives: Some(0),
                             ..Evidence::default()

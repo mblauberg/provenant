@@ -197,9 +197,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             directory.to_str().ok_or("account path")?
         ));
     }
+    // The Fabric MCP server is opt-in; these cases drive it inside the lane.
     let config = |depth: u8| {
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n{accounts}"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'fabric.mcp_server'=true\n{accounts}"
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;

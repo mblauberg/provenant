@@ -431,5 +431,7 @@ fn parse(line: &[u8]) -> Result<Row, String> {
     serde_json::from_value(value).map_err(|error| format!("invalid {FORMAT} row: {error}"))
 }
 
+pub mod report;
+
 #[cfg(test)]
 mod tests;
