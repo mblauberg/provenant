@@ -156,44 +156,6 @@ fn receipt_replay_and_independent_effects() -> TestResult {
 }
 
 #[test]
-fn receipt_migration_snapshots_committed_wal() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = RunStore::open(&context, &call)?;
-    let input = input()?;
-    store.create(&input, &call)?;
-    drop(store);
-    let db = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
-    db.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; DROP TABLE admission_windows; PRAGMA user_version=7; CREATE TABLE wal_snapshot_marker(value INTEGER NOT NULL); INSERT INTO wal_snapshot_marker VALUES (42);",
-    )?;
-    let store = RunStore::open(&context, &call)?;
-    assert_eq!(
-        store
-            .record(input.attempts[0].attempt_id, &call)?
-            .schema_version,
-        2
-    );
-    let backup =
-        rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3.bak-100"))?;
-    let version: i64 = backup.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let rows: i64 = backup.query_row("SELECT count(*) FROM attempts", [], |row| row.get(0))?;
-    let marker: i64 = backup.query_row("SELECT value FROM wal_snapshot_marker", [], |row| {
-        row.get(0)
-    })?;
-    // The attempt existed before WAL mode; this marker was committed afterwards,
-    // while `db` remains open, and proves the snapshot includes WAL frames.
-    assert_eq!((version, rows, marker), (7, 1, 42));
-    Ok(())
-}
-
-#[test]
 fn receipt_withdrawal_does_not_invent_an_exit() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

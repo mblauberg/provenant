@@ -2719,11 +2719,16 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 
 #[test]
 fn host_stores_match_their_schema_and_refuse_other_versions_unchanged() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
+    // tempfile uses the umask default, which can leave group or other access;
+    // the stores refuse that for their host directory. Canonical like `context`.
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+    let canonical = std::fs::canonicalize(temp.path())?;
+    let host = canonical.as_path();
     let clock = clock();
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
-    let host = temp.path();
     let admission = crate::ledger::open(host, &call)?;
     let work = crate::correlation::WorkIndex::open(host, &call)?;
     let contributions = crate::pr_contribution::Contributions::open(host, &call)?;

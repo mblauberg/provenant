@@ -70,6 +70,9 @@ fn fabric_commits_signal_inbox_and_board() {
 fn signal_failure_reports_a_committed_fabric_write() {
     let fixture = Fixture::new();
     let store = fixture.open();
+    // Opening writes no commit, so no signal exists yet: create one with a bump.
+    let inbox = provenant_os::changes::Scope::Inbox;
+    provenant_os::changes::bump(fixture.root.as_path(), inbox).unwrap();
     let signal = fixture
         .root
         .as_path()
