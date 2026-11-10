@@ -74,7 +74,7 @@ pub fn decode(
     match adapter {
         "claude" => decode_claude(payload, &mut windows, &mut details),
         "codex" => decode_codex(payload, &mut windows, &mut details),
-        "agy" => decode_agy(payload, &mut windows)?,
+        "agy" => decode_agy(payload, &mut windows, &mut details)?,
         "cursor" => decode_cursor(payload, &mut windows, &mut details),
         "opencode" => {
             decode_opencode(payload, &mut windows);
@@ -336,9 +336,90 @@ fn decode_codex_group(group: &Value, prefix: &str, windows: &mut Vec<QuotaWindow
     }
 }
 
-fn decode_agy(payload: &Value, windows: &mut Vec<QuotaWindow>) -> Result<(), QuotaError> {
+pub fn extract_agy_models(payload: Option<&Value>, stderr: Option<&str>) -> Vec<String> {
+    let mut models = Vec::new();
+    if let Some(payload) = payload {
+        let root = payload.get("payload").unwrap_or(payload);
+        let data = root
+            .get("command")
+            .and_then(|c| c.get("data"))
+            .unwrap_or(root);
+        if let Some(arr) = data.get("models").and_then(Value::as_array) {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    let s = s.trim();
+                    if !s.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(s)) {
+                        models.push(s.to_owned());
+                    }
+                }
+            }
+        }
+        if let Some(groups) = data.get("groups").and_then(Value::as_array) {
+            for group in groups {
+                if let Some(arr) = group.get("models").and_then(Value::as_array) {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            let s = s.trim();
+                            if !s.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(s)) {
+                                models.push(s.to_owned());
+                            }
+                        }
+                    }
+                }
+                if let Some(desc) = group.get("description").and_then(Value::as_str) {
+                    const PREFIX: &str = "models within this group:";
+                    let lower = desc.to_ascii_lowercase();
+                    if let Some(idx) = lower.find(PREFIX) {
+                        let list = &desc[idx + PREFIX.len()..];
+                        for item in list.split(',') {
+                            let item = item.trim().trim_end_matches('.');
+                            if !item.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(item)) {
+                                models.push(item.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(stderr) = stderr {
+        let mut in_models = false;
+        for line in stderr.lines() {
+            let trimmed = line.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.starts_with("available models:")
+                || lower.starts_with("offered models:")
+            {
+                in_models = true;
+                continue;
+            }
+            if in_models {
+                if trimmed.is_empty() {
+                    in_models = false;
+                    continue;
+                }
+                let clean = trimmed.trim_start_matches(['-', '*', '•']).trim();
+                if !clean.is_empty() && !models.iter().any(|m: &String| m.eq_ignore_ascii_case(clean)) {
+                    models.push(clean.to_owned());
+                }
+            }
+        }
+    }
+    models
+}
+
+fn decode_agy(
+    payload: &Value,
+    windows: &mut Vec<QuotaWindow>,
+    details: &mut Option<QuotaDetails>,
+) -> Result<(), QuotaError> {
     if payload.get("status").and_then(Value::as_str) != Some("SUCCESS") {
         return Err(QuotaError::Invalid("agy quota response"));
+    }
+    let models = extract_agy_models(Some(payload), None);
+    if !models.is_empty() {
+        let d = details_mut(details);
+        d.models = models;
     }
     let data = payload
         .get("command")

@@ -1178,6 +1178,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         "provider rate limited (HTTP 429)",
                     ));
                 } else {
+                    if let Some(result) = result.filter(|message| !message.is_empty()) {
+                        events.push(E::Text(result));
+                    }
                     events.push(E::Error);
                 }
             } else {

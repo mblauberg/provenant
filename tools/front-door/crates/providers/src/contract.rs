@@ -128,6 +128,73 @@ pub struct AvailabilityRecord {
     pub expires_unix_seconds: i64,
 }
 
+/// Match a requested model against a list of offered models reported by an account.
+/// Empty offered models means no restriction is known.
+pub fn model_matches_offered(requested: &str, offered_models: &[String]) -> bool {
+    if offered_models.is_empty() {
+        return true;
+    }
+    offered_models
+        .iter()
+        .any(|offered| model_matches_single(requested, offered))
+}
+
+fn model_matches_single(requested: &str, offered: &str) -> bool {
+    let req = requested.strip_prefix("agy/").unwrap_or(requested).trim();
+    let off = offered.strip_prefix("agy/").unwrap_or(offered).trim();
+    if req.eq_ignore_ascii_case(off) {
+        return true;
+    }
+    let req_lower = req.to_ascii_lowercase();
+    let off_lower = off.to_ascii_lowercase();
+
+    // Distinct tiers must never cross (e.g. Flash vs Pro vs Opus vs Sonnet).
+    const TIERS: &[&str] = &[
+        "flash", "pro", "opus", "sonnet", "haiku", "mini", "nano", "large", "medium", "small", "ultra",
+    ];
+    let req_tiers: Vec<&str> = TIERS.iter().copied().filter(|&t| req_lower.contains(t)).collect();
+    let off_tiers: Vec<&str> = TIERS.iter().copied().filter(|&t| off_lower.contains(t)).collect();
+    if !req_tiers.is_empty() && !off_tiers.is_empty() {
+        if !req_tiers.iter().any(|t| off_tiers.contains(t)) {
+            return false;
+        }
+    }
+
+    // Distinct families must never cross (e.g. Gemini vs Claude vs GPT).
+    const FAMILIES: &[&str] = &["gemini", "claude", "gpt", "deepseek", "codex"];
+    let req_fams: Vec<&str> = FAMILIES.iter().copied().filter(|&f| req_lower.contains(f)).collect();
+    let off_fams: Vec<&str> = FAMILIES.iter().copied().filter(|&f| off_lower.contains(f)).collect();
+    if !req_fams.is_empty() && !off_fams.is_empty() {
+        if !req_fams.iter().any(|f| off_fams.contains(f)) {
+            return false;
+        }
+    }
+
+    // If both have family and tier and they agree, they match.
+    if !req_tiers.is_empty() && !off_tiers.is_empty() && !req_fams.is_empty() && !off_fams.is_empty() {
+        return true;
+    }
+
+    // Token-based matching.
+    let req_tokens: Vec<&str> = req_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let off_tokens: Vec<&str> = off_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if !off_tokens.is_empty() && off_tokens.iter().all(|t| req_tokens.contains(t)) {
+        return true;
+    }
+    if !req_tokens.is_empty() && req_tokens.iter().all(|t| off_tokens.contains(t)) {
+        return true;
+    }
+
+    false
+}
+
 pub struct Prompt {
     text: String,
     file: Option<std::path::PathBuf>,
@@ -389,4 +456,28 @@ pub trait Adapter: Sync {
         &self,
         provenance: &RouteProvenance<'_>,
     ) -> Result<VerifiedLineage, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_matches_offered() {
+        let flash_only = vec!["Gemini Flash".to_string()];
+        assert!(!model_matches_offered("gemini-3.8-pro", &flash_only));
+        assert!(!model_matches_offered("agy/gemini-3.8-pro", &flash_only));
+        assert!(model_matches_offered("gemini-3.8-flash", &flash_only));
+        assert!(model_matches_offered("agy/gemini-3.8-flash", &flash_only));
+
+        let both = vec!["Gemini Flash".to_string(), "Gemini Pro".to_string()];
+        assert!(model_matches_offered("gemini-3.8-pro", &both));
+        assert!(model_matches_offered("gemini-3.8-flash", &both));
+
+        let empty: Vec<String> = Vec::new();
+        assert!(model_matches_offered("gemini-3.8-pro", &empty));
+
+        let technical = vec!["gemini-2.5-flash".to_string()];
+        assert!(!model_matches_offered("gemini-3.8-pro", &technical));
+    }
 }

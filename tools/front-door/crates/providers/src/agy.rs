@@ -43,6 +43,8 @@ struct IdentityProbe {
     key: String,
     observed: i64,
     stamp: Option<(u64, u64, u64, i64, i64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    models: Vec<String>,
 }
 
 fn identity_file(directory: &std::path::Path) -> String {
@@ -93,6 +95,7 @@ pub(crate) fn remember_identity(
     key: &str,
     now: i64,
     expected_stamp: Option<KeychainStamp>,
+    models: &[String],
 ) -> bool {
     let current_stamp = keychain_stamp(directory);
     if current_stamp != expected_stamp {
@@ -104,6 +107,7 @@ pub(crate) fn remember_identity(
             key: key.into(),
             observed: now,
             stamp: current_stamp,
+            models: models.to_vec(),
         })?;
         root.atomic_write(
             identity_file(directory).as_ref(),
@@ -115,6 +119,19 @@ pub(crate) fn remember_identity(
         Ok(())
     };
     publish().is_ok()
+}
+
+pub fn cached_models(state: &std::path::Path, directory: &std::path::Path) -> Vec<String> {
+    let Ok(root) = provenant_os::fs::Directory::open_anchor(state) else {
+        return Vec::new();
+    };
+    let file = identity_file(directory);
+    let Ok(bytes) = root.read_bounded(file.as_ref(), 64 * 1024) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<IdentityProbe>(&bytes)
+        .map(|probe| probe.models)
+        .unwrap_or_default()
 }
 
 pub(crate) fn forget_identity(state: &std::path::Path, directory: &std::path::Path) {
@@ -654,14 +671,19 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     events.push(E::DeniedNote {
                         action: action.into(),
                     });
-                    events.push(if result.error.is_some() || result.status != "SUCCESS" {
+                    if let Some(error) = result.error {
+                        events.push(E::Text(error));
+                    }
+                    events.push(if result.status != "SUCCESS" {
                         E::Error
                     } else {
                         E::Terminal
                     });
                 }
             } else if result.error.is_some() || result.status != "SUCCESS" {
-                if !result.response.is_empty() {
+                if let Some(error) = result.error {
+                    events.push(E::Text(error));
+                } else if !result.response.is_empty() {
                     events.push(E::Text(result.response));
                 }
                 events.push(E::Error);
@@ -787,7 +809,7 @@ mod identity_tests {
         std::fs::write(&keychain, "synthetic").unwrap();
         let key = "agy-google-0123456789ab";
         let stamp = keychain_stamp(&directory);
-        assert!(remember_identity(temp.path(), &directory, key, 100, stamp));
+        assert!(remember_identity(temp.path(), &directory, key, 100, stamp, &[]));
         assert_eq!(
             cached_identity(temp.path(), &directory, 100).as_deref(),
             Some(key)
@@ -807,9 +829,31 @@ mod identity_tests {
             &directory,
             key,
             102,
-            new_stamp
+            new_stamp,
+            &[]
         ));
         forget_identity(temp.path(), &directory);
         assert!(cached_identity(temp.path(), &directory, 103).is_none());
+    }
+
+    #[test]
+    fn agy_result_error_is_preserved_as_text() {
+        let raw = br#"{"type":"result","result":{"conversation_id":"c1","status":"ERROR","response":"","error":"Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let events = decode(raw).expect("decode");
+        assert_eq!(
+            events,
+            vec![
+                E::Usage {
+                    input: 0,
+                    output: 0,
+                    cache_read: None,
+                    cache_write: None,
+                    cache_write_1h: None,
+                },
+                E::Session("c1".into()),
+                E::Text("Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B".into()),
+                E::Error,
+            ]
+        );
     }
 }
