@@ -1071,13 +1071,13 @@ mod tests {
 
     fn seed_v1(dir: &std::path::Path, provider: &str, model: &str) {
         let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
-        db.execute_batch(
-            "CREATE TABLE IF NOT EXISTS message (session_id TEXT, data TEXT)",
-        )
-        .unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS message (session_id TEXT, data TEXT)")
+            .unwrap();
         db.execute(
             "INSERT INTO message VALUES ('ses_z', ?)",
-            [format!(r#"{{"role":"assistant","providerID":"{provider}","modelID":"{model}"}}"#)],
+            [format!(
+                r#"{{"role":"assistant","providerID":"{provider}","modelID":"{model}"}}"#
+            )],
         )
         .unwrap();
     }
