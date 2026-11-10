@@ -681,10 +681,11 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     });
                 }
             } else if result.error.is_some() || result.status != "SUCCESS" {
+                if !result.response.is_empty() {
+                    events.push(E::Text(result.response));
+                }
                 if let Some(error) = result.error {
                     events.push(E::Text(error));
-                } else if !result.response.is_empty() {
-                    events.push(E::Text(result.response));
                 }
                 events.push(E::Error);
             } else {

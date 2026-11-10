@@ -357,12 +357,13 @@ pub(super) fn observe_account(
             unavailable()
         )));
     }
-    // Only agy reports its offered models today; other adapters place no restriction.
-    let observed_models = if entry.adapter == "agy" {
-        provenant_providers::agy::cached_models(executor.root(), &directory)
-    } else {
-        Vec::new()
-    };
+    // An adapter flagged `offered_models` reads the offer list its usage probe cached.
+    let observed_models =
+        if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.offered_models) {
+            provenant_providers::agy::cached_models(executor.root(), &directory)
+        } else {
+            Vec::new()
+        };
     Ok(provenant_providers::AvailabilityRecord {
         schema_version: 1,
         adapter: entry.adapter.clone(),
