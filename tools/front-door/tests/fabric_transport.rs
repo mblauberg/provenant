@@ -2082,12 +2082,7 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
     let task = &request.tasks[0];
     assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
     assert_eq!(task.profile.knobs["lanes.silence_seconds"], 2);
-    let plan = provenant_run::capture_plan(
-        &request.tasks[0],
-        request.tasks[0].provider_timeout_seconds,
-        u64::MAX,
-        "codex",
-    );
+    let plan = provenant_run::capture_plan(&request.tasks[0], &Default::default());
     assert_eq!(plan.silence_ms, 2000);
     assert!(!plan.silent(1999, Some(0)));
     assert!(plan.silent(2000, Some(0)));
