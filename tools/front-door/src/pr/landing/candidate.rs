@@ -1,5 +1,6 @@
 use super::{
     LandingError,
+    approval::Approver,
     model::*,
     ports::{Forge, MergeTree, PullRequestState, Repo},
 };
@@ -8,27 +9,47 @@ use provenant_core::{Clock, MonoTime};
 /// Select eligible pull requests in requested order, up to the configured batch limit.
 pub fn select_batch(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     numbers: &[u64],
     target: &str,
     limit: usize,
     batch_wait_seconds: u64,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    select_batch_with_dependencies(forge, numbers, numbers, target, limit, batch_wait_seconds)
+    select_batch_with_dependencies(
+        forge,
+        approver,
+        numbers,
+        numbers,
+        target,
+        limit,
+        batch_wait_seconds,
+    )
 }
 
 pub fn select_batch_with_dependencies(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     numbers: &[u64],
     requested: &[u64],
     target: &str,
     limit: usize,
     batch_wait_seconds: u64,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    Ok(select_batch_with_reasons(forge, numbers, requested, target, limit, batch_wait_seconds)?.0)
+    Ok(select_batch_with_reasons(
+        forge,
+        approver,
+        numbers,
+        requested,
+        target,
+        limit,
+        batch_wait_seconds,
+    )?
+    .0)
 }
 
 pub fn select_batch_with_reasons(
     forge: &mut dyn Forge,
+    approver: &mut Approver<'_, '_>,
     numbers: &[u64],
     requested: &[u64],
     target: &str,
@@ -103,23 +124,19 @@ pub fn select_batch_with_reasons(
                 reasons.insert(number, reason);
                 continue;
             }
-            let approval = forge
-                .approvals(number, &info.head)?
-                .into_iter()
-                .find(|approval| {
-                    !approval.reference.is_empty()
-                        && !approval.reviewer.is_empty()
-                        && !approval.reviewer.eq_ignore_ascii_case(&info.author)
-                });
             if info.author.is_empty() {
                 reasons.insert(number, "pull request author is missing".into());
                 continue;
             }
+            let standing = approver.approvals(forge, number, &info.head)?;
+            let approval = standing.approvals.iter().find(|approval| {
+                !approval.reference.is_empty() && approver.independent(approval, &info.author)
+            });
             if let Some(approval) = approval {
                 selected.push(EligiblePr {
                     number,
                     head: info.head,
-                    approval: approval.reference,
+                    approval: approval.reference.clone(),
                     base_branch: info.base_branch,
                 });
                 if selected.len() == limit {
@@ -128,7 +145,7 @@ pub fn select_batch_with_reasons(
             } else {
                 reasons.insert(
                     number,
-                    "no independent approval for the current head".into(),
+                    standing.exclusion("no independent approval for the current head"),
                 );
             }
         }
@@ -216,6 +233,7 @@ pub fn build_candidate(
 mod tests {
     use super::*;
     use crate::pr::landing::{
+        approval::Approvals,
         fakes::{FakeForge, FakeRepo},
         ports::{Approval, PullRequestInfo},
     };
@@ -234,8 +252,16 @@ mod tests {
     fn unapproved_pull_request_reports_why_it_was_excluded() {
         let mut forge = FakeForge::default();
         forge.pull_requests.insert(7, info(7, "author", "main"));
-        let (selected, reasons) =
-            select_batch_with_reasons(&mut forge, &[7], &[7], "main", 1, 0).unwrap();
+        let (selected, reasons) = select_batch_with_reasons(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[7],
+            &[7],
+            "main",
+            1,
+            0,
+        )
+        .unwrap();
         assert!(selected.is_empty());
         assert!(reasons[&7].contains("no independent approval"));
     }
@@ -265,7 +291,15 @@ mod tests {
                 },
             ],
         );
-        let error = select_batch(&mut forge, &[2], "main", 1, 0).unwrap_err();
+        let error = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[2],
+            "main",
+            1,
+            0,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("#1"));
         assert!(forge.merge_attempts.is_empty());
     }
@@ -290,8 +324,16 @@ mod tests {
                 })
                 .collect(),
         );
-        let error =
-            select_batch_with_dependencies(&mut forge, &[3], &[1, 3], "main", 1, 0).unwrap_err();
+        let error = select_batch_with_dependencies(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[3],
+            &[1, 3],
+            "main",
+            1,
+            0,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("#2"));
     }
     #[test]
@@ -321,7 +363,14 @@ mod tests {
                 }],
             );
         }
-        let selected = select_batch(&mut forge, &[4, 2, 1, 3], "main", 4, 0)?;
+        let selected = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[4, 2, 1, 3],
+            "main",
+            4,
+            0,
+        )?;
         assert_eq!(
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2]
@@ -347,12 +396,26 @@ mod tests {
             );
             forge.pull_requests.insert(number, pr);
         }
-        let selected = select_batch(&mut forge, &[3, 2, 1], "main", 1, 0)?;
+        let selected = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[3, 2, 1],
+            "main",
+            1,
+            0,
+        )?;
         assert_eq!(
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2]
         );
-        let selected = select_batch(&mut forge, &[3, 2, 1], "main", 3, 0)?;
+        let selected = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[3, 2, 1],
+            "main",
+            3,
+            0,
+        )?;
         assert_eq!(
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2, 1]

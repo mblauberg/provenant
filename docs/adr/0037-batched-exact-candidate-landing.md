@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-11-05, #2856.
+Changed: 2026-11-05, #2856; 2026-11-10, #3137.
 
 ## Context
 
@@ -54,6 +54,21 @@ an `unsettled` alarm. Command gates scrub forge token environment variables
 unless explicitly passed through. Candidate CI must trigger on the configured
 ref prefix.
 
+## Addendum: one CI observer per repository (2026-11-10, #3137)
+
+`pr status`, `pr watch`, `land` waiting, the candidate gate and the post-merge
+follow read check runs and commit statuses for a commit only through one
+observer per repository. It takes any commit, so a candidate head on a
+`land/**` ref is read the same way as a pull request head. Answers are cached
+per commit in project state under `ci-observer/<owner--name>/`, shared by every
+process on the host, and revalidated with conditional requests, so an unchanged
+answer costs a 304. A per-commit lock lets one waiter read while the others
+reuse its answer: a waiter accepts an answer younger than its poll interval,
+and a one-shot decision always revalidates. A rate-limit response is recorded
+once with its reset time; every waiter sleeps until the reset, or fails naming
+it if the reset is beyond its deadline. Which checks are required, pinned
+heads and the tree comparison are unchanged.
+
 ## Alternatives and consequences
 
 Always updating branches was rejected because disjoint changes would incur
@@ -63,3 +78,26 @@ SHAs; merge commits preserve them. Other methods require the receipt mapping.
 The candidate gate adds an integration build, but it checks the combination
 intended for publication. Ordered REST publication must verify the resulting
 tree because the forge creates the merge commits.
+
+## Addendum: review receipts as approval
+
+`land.approval = "receipt"` lets an accepted Provenant delivery receipt stand in
+place of an approving forge review, through one approval port beside the
+forge's. The receipt's pull request subject records the reviewed head `H` and
+base `B`, which the save reads from the forge as the head's merge base with the
+branch the pull request merges into; for a stack member `B` is the head of the
+branch below. Receipts are matched by repository and pull request number. A head `H'`
+keeps the review when, with `B'` the merge base of `H'` and the fetched
+target, `H' == H` and `B' == B`, or `B` is an ancestor of `B'`, `B'` is an
+ancestor of the target and `tree(H')` equals `merge_tree(H, B')`. An unchanged
+head is held to the base too: a stack member retargeted past the branch below
+it brings that branch's unreviewed changes into its diff, so it fails. Selection, revalidation
+before and during publication, recovery and the post-merge approval recheck all
+apply this proof against the target they already read; a head that fails it is
+excluded and never merged. A record whose proof cannot be read excludes only
+its pull request, as unprovable. A receipt without a base covers only its own head.
+The graph land node applies the same rule to the head its verdict gate reviewed,
+against the branch the land branch's pull request merges into.
+Pinned heads, markers, recovery, the tree comparison and forge-required checks
+are unchanged. The second condition holds by construction of `B'`; it stays so
+the rule reads the same wherever `B'` comes from.

@@ -913,6 +913,7 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
         max_failed_checks: usize,
     ) -> provenant_fabric_runtime::graph::CiObservation {
         crate::pr::status::observe_ci(
+            self.factory.context.roots.state.as_path(),
             &self.factory.cwd,
             target,
             checks,
@@ -1854,6 +1855,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .graph
             .land
             .choose(Some(&project), tier)
+    }
+    fn review_coverage(
+        &mut self,
+        branch: &str,
+        reviewed: provenant_core::review_cover::Reviewed<'_>,
+        head: &str,
+    ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {
+        // A proof that cannot be read, including before the branch has a
+        // pull request, refuses the land as an unproved one does.
+        Ok(
+            crate::pr::landing::approval::graph_coverage(&self.factory.cwd, branch, reviewed, head)
+                .ok(),
+        )
     }
     fn land(
         &mut self,
