@@ -1556,15 +1556,8 @@ fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
     if let Some(chair) = &report.chair {
         let unread: u64 = chair.unread.values().sum();
         text.push_str(&format!(
-            "chair: {} sessions on this host ({unread} unread), {}\n",
-            chair.sessions,
-            chair.cost.complete.as_ref().map_or_else(
-                || chair.cost.known_lower_bound.as_ref().map_or_else(
-                    || "cost unknown".to_owned(),
-                    |money| format!("est. API-equivalent at least ${}", money.usd),
-                ),
-                |money| format!("est. API-equivalent ${}", money.usd)
-            )
+            "chair: {} sessions on this host ({unread} unread)\n",
+            chair.sessions
         ));
     }
     text

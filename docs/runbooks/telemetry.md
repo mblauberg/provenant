@@ -14,10 +14,11 @@ thinking per inferred trigger, `context_bands` for spend by the context each
 reply sent, and `cli_ergonomics` for help, retry, wait and poll counts. Native replies and CLI counts cover the host window; attempt
 context covers this project's finished attempts. Missing fields remain unknown.
 The report states when release changes, harness experiments, task difficulty
-and user activity cannot be separated. Accepted-outcome cost uses recorded
-workflow acceptance and reports its numerator scope and denominator.
+and user activity cannot be separated. Accepted outcomes use recorded
+workflow acceptance and report their denominator.
 
-Cost is an API-equivalent estimate, not a bill. The report separately counts
+`stats` reports no cost; `telemetry cost` does. Cost is an API-equivalent
+estimate, not a bill. The report separately counts
 attempts whose price-table entry is marked as a subscription, including those
 whose token usage or API-equivalent price is unavailable. This classification
 does not verify account billing. An unknown cost is not zero.
@@ -26,8 +27,7 @@ Group supervised attempts with `--by issue|graph|preset|role`. `issue` reads
 the P7 `work_item` label; missing labels form an `unknown` group. Graph groups
 also include the latest checkpoint's verdicts, findings and repair rounds,
 plus selected attempts' partial-signal counts when available. `--by pr` joins the retained local
-contribution store to PRs GitHub reports as merged, and apportions usage and
-cost by each contribution's recorded weight. Missing weights are reported as
+contribution store to PRs GitHub reports as merged, and apportions usage by each contribution's recorded weight. Missing weights are reported as
 unknown allocations and counted at full value. PR lookup requires `gh` access
 to the current repository. Add `--since` and `--until` to bound both the
 attempt window and the merged-PR snapshot.

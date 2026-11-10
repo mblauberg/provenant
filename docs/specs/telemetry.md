@@ -20,9 +20,9 @@ routes do not fill missing resolved values.
 
 Every `telemetry stats` report also includes `route_outcomes`, grouped by
 resolved route, access mode, effort and pool assignment. Each row gives sample
-size, complete successes, success rate with a Wilson interval, API-equivalent
-cost per success and provider milliseconds per success. The last two divide
-all measured attempt cost or time, including failures, by complete successes.
+size, complete successes, success rate with a Wilson interval and provider
+milliseconds per success, which divides all measured attempt time, including
+failures, by complete successes. Rows carry no cost; `telemetry cost` reports it.
 A successful settlement with a partial-completion signal is not a complete
 success. Missing measurements and ratios with no successes remain unknown.
 Only an original weighted pool draw is marked `hash_assigned_pool`; exact
@@ -30,8 +30,8 @@ routes, preference overrides and conditional redraws are observational. A draw
 whose receipt lists a graph or flag exclusion in `considered_exclusions`, such
 as a graph restart excluding its predecessors' models, depends on the earlier
 attempt and is observational too; standing configuration exclusions are not.
-- Test: `crates/telemetry/src/tests.rs::route_outcomes_report_success_cost_time_access_effort_and_assignment`;
-  `crates/telemetry/src/tests.rs::route_outcomes_zero_success_and_unknown_cost_remain_unknown`;
+- Test: `crates/telemetry/src/tests.rs::route_outcomes_report_success_time_access_effort_and_assignment`;
+  `crates/telemetry/src/tests.rs::route_outcomes_zero_success_and_unknown_time_remain_unknown`;
   `crates/telemetry/src/tests.rs::pool_preferences_and_fallbacks_are_not_hash_comparisons`;
   `tests/telemetry_pipeline_cli.rs::stats_reports_route_access_effort_outcomes_and_nonrandom_comparison`
 - Owner: `crates/telemetry/src/route_outcomes.rs`, `crates/cli/src/run/telemetry.rs`
@@ -236,9 +236,9 @@ run identity; request proposals and provider session identifiers cannot supply
 that join. Graph and node labels come from existing work context. Each field
 reports known and unknown coverage. Missing historical context is never filled
 from the reporting host's current release or instructions.
-Each attempt context row includes that exact attempt's usage and API-equivalent
-cost from the existing reducer beside its chair and graph binding. These are
-individually rounded breakdowns; use report totals for aggregate cost.
+Each attempt context row includes that exact attempt's usage from the existing
+reducer beside its chair and graph binding; it carries no cost (`telemetry cost`
+reports it).
 
 Native reply rows retain structural event enums separately from inferred
 trigger labels. Narrow status questions and recognised notification/error
@@ -269,8 +269,9 @@ workflow receipt among selected attempts. Provider success alone is not
 acceptance. Cost per accepted outcome divides the complete API-equivalent cost
 of selected attempts linked to those accepted deliveries by that count, as an
 exact rational number of microdollars. Missing cost or a zero denominator stays
-unknown. This excludes unattributed chair cost and attempts outside the selected
-window; receipt decisions and graph checkpoints are labelled latest snapshots.
+unknown. `stats` reports only the denominator; the numerator is read with
+`telemetry cost`. Unattributed chair cost and attempts outside the selected
+window are excluded; receipt decisions and graph checkpoints are labelled latest snapshots.
 
 These are observational comparisons. Missing joint coverage or simultaneous
 changes prevent separating a release effect from harness experiments, task

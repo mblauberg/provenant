@@ -235,7 +235,7 @@ pub(super) fn stats_inner(
                 .is_none_or(|record| !record.partial_signals.is_empty()),
         });
     }
-    let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence, &prices)
+    let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let mut chair_bindings = BTreeMap::new();
     // This is the explicit real-time deadline of the read-only Fabric boundary.
@@ -607,11 +607,11 @@ pub(super) fn stats_inner(
                 .unwrap_or_else(|| "unknown".into())
         };
         human.push_str(&format!(
-            "outcomes {} access={} effort={} n={} successes={} success_rate={} cost/success_microdollars={} time/success_ms={} comparison={} pool={} cost_basis={}\n",
+            "outcomes {} access={} effort={} n={} successes={} success_rate={} time/success_ms={} comparison={} pool={}\n",
             plain_text(&row.route, 256), row.access, row.effort,
             row.samples, row.successes, number(row.success_rate),
-            number(row.cost_per_success_microdollars), number(row.time_per_success_ms),
-            row.comparison, row.pool.as_deref().unwrap_or("none"), row.cost_basis,
+            number(row.time_per_success_ms),
+            row.comparison, row.pool.as_deref().unwrap_or("none"),
         ));
     }
     data["route_outcomes"] = json!(route_outcomes);
@@ -670,7 +670,9 @@ pub(super) fn stats_inner(
 fn strip_cost(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            map.remove("cost");
+            for key in ["cost", "cost_microdollars", "missing_cost"] {
+                map.remove(key);
+            }
             map.values_mut().for_each(strip_cost);
         }
         Value::Array(items) => items.iter_mut().for_each(strip_cost),
