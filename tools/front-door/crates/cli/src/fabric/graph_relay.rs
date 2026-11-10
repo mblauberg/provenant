@@ -971,21 +971,10 @@ fn launch_resolvers_with(
         "design",
         "adversarial",
     ]) {
-        let advice = if lens == "tests"
-            && matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal"))
-        {
-            include_str!("../../../../assets/review-tests-advice.txt")
-        } else {
-            ""
-        };
-        let mut advice = advice.to_owned();
-        for warning in &panel.warnings {
-            if !advice.is_empty() {
-                advice.push('\n');
-            }
-            advice.push_str("Panel warning: ");
-            advice.push_str(warning);
-        }
+        let advice = panel.lens_advice(
+            lens,
+            matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal")),
+        );
         resolvers.insert(format!("review-advice-{lens}"), vec![advice]);
     }
     if !panel.minimum_family_counts.is_empty()

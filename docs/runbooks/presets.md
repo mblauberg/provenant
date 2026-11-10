@@ -224,7 +224,9 @@ work. When previews are clipped, status keeps the full count, reports how many
 entries are shown and points to the complete result; the typed handoff retains
 every concern.
 
-Set `max_repair_cycles` to a positive integer (default three; no ceiling). This counts repairs
+Set `max_repair_cycles` to a positive integer (default three; no ceiling). Within
+the default budget the third review asks the principal for design judgement; a
+raised budget runs every round before the principal. This counts repairs
 after the first review and is separate from CI's `max_iterations`. Each repair
 starts a fresh writer attempt. Prefer a route outside the reviewers' families;
 when none is available, continue on the available route and retain the separation

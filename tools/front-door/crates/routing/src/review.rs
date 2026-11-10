@@ -210,7 +210,28 @@ fn is_advisory(diversity: &FamilyDiversity) -> bool {
     *diversity == FamilyDiversity::Advisory
 }
 
+/// Extra review guidance for the tests lens on high-risk work.
+pub const TESTS_ADVICE: &str = include_str!("../../../assets/review-tests-advice.txt");
+
 impl PanelResolution {
+    /// Advice for one lens's reviewer preamble: the tests advice when the
+    /// caller asks for it on the tests lens, then each panel warning.
+    pub fn lens_advice(&self, lens: &str, tests_advice: bool) -> String {
+        let mut advice = if tests_advice && lens == "tests" {
+            TESTS_ADVICE.to_owned()
+        } else {
+            String::new()
+        };
+        for warning in &self.warnings {
+            if !advice.is_empty() {
+                advice.push('\n');
+            }
+            advice.push_str("Panel warning: ");
+            advice.push_str(warning);
+        }
+        advice
+    }
+
     /// Assign hard family requirements using the ordinary eligible route resolver.
     /// The callback probes a slot without launching it. Unconstrained panels do
     /// not probe or alter any route, preserving ordinary pool selection.
@@ -227,8 +248,6 @@ impl PanelResolution {
             slot.satisfied_family = None;
         }
         self.warnings.clear();
-        let strict = self.diversity == FamilyDiversity::Strict;
-        let mut warnings = Vec::new();
         let mut selected = vec![None; self.slots.len()];
         let mut fixed_counts = BTreeMap::<String, usize>::new();
         for (index, slot) in self.slots.iter().enumerate() {
@@ -248,7 +267,7 @@ impl PanelResolution {
         }
         let mut demands = Vec::new();
         let mut edges = Vec::new();
-        let mut exclusions = Vec::new();
+        let mut exclusions = BTreeMap::<&String, Vec<String>>::new();
         for (family, count) in &self.minimum_family_counts {
             let remaining = count.saturating_sub(*fixed_counts.get(family).unwrap_or(&0));
             if remaining == 0 {
@@ -269,23 +288,14 @@ impl PanelResolution {
                     Err(reason) => reasons.push(format!("{}: {reason}", slot.lens)),
                 }
             }
+            // Demands beyond the panel size can never be matched; the
+            // shortfall below reports them with the rest.
             let room = self.slots.len().saturating_sub(demands.len());
-            if remaining > room {
-                let message = format!(
-                    "required provider family {family}: count {count} cannot be met by {} lenses; exclusions: {}",
-                    self.slots.len(),
-                    reasons.join("; ")
-                );
-                if strict {
-                    return Err(message);
-                }
-                warnings.push(message);
-            }
             for _ in 0..remaining.min(room) {
                 demands.push(family.clone());
                 edges.push(candidates.clone());
-                exclusions.push(reasons.clone());
             }
+            exclusions.insert(family, reasons);
         }
         fn assign(
             demand: usize,
@@ -306,32 +316,42 @@ impl PanelResolution {
             false
         }
         let mut owners = vec![None; self.slots.len()];
-        for (demand, family) in demands.iter().enumerate() {
-            if !assign(
+        for demand in 0..demands.len() {
+            assign(
                 demand,
                 &edges,
                 &mut owners,
                 &mut vec![false; self.slots.len()],
-            ) {
-                let count = self.minimum_family_counts[family];
-                let reasons = if exclusions[demand].is_empty() {
-                    "eligible lenses are needed by other required family counts".to_owned()
-                } else {
-                    exclusions[demand].join("; ")
-                };
-                let message = format!(
-                    "required provider family {family}: count {count} cannot be met; exclusions: {reasons}"
-                );
-                if strict {
-                    return Err(message);
-                }
-                warnings.push(message);
-            }
+            );
         }
         for (index, owner) in owners.iter().enumerate() {
             if let Some(demand) = owner {
                 selected[index] = Some(demands[*demand].clone());
             }
+        }
+        // One rule for every exit: compare what was met with each minimum
+        // and report at most one shortfall per family.
+        let mut warnings = Vec::new();
+        for (family, &count) in &self.minimum_family_counts {
+            let met = selected
+                .iter()
+                .filter(|selected| selected.as_ref() == Some(family))
+                .count();
+            if met >= count {
+                continue;
+            }
+            let reasons = match exclusions.get(family) {
+                Some(reasons) if !reasons.is_empty() => reasons.join("; "),
+                _ => "eligible lenses are needed by other required family counts".to_owned(),
+            };
+            let message = format!(
+                "required provider family {family}: count {count} cannot be met ({met} of {count} met by {} lenses); exclusions: {reasons}",
+                self.slots.len()
+            );
+            if self.diversity == FamilyDiversity::Strict {
+                return Err(message);
+            }
+            warnings.push(message);
         }
         for (slot, family) in self.slots.iter_mut().zip(selected) {
             slot.satisfied_family = family;
@@ -2621,8 +2641,9 @@ mod tests {
         panel
             .resolve_families(|slot, _| Err(format!("{} account unavailable", slot.lens)))
             .unwrap();
-        assert_eq!(panel.warnings.len(), 1);
+        assert_eq!(panel.warnings.len(), 1, "{:?}", panel.warnings);
         assert!(panel.warnings[0].contains("family alpha"));
+        assert!(panel.warnings[0].contains("0 of 2 met"));
         assert!(panel.warnings[0].contains("count 2"));
         assert!(panel.warnings[0].contains("account unavailable"));
         assert!(
