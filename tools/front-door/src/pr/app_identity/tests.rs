@@ -55,9 +55,8 @@ fn app() -> Option<GithubAppConfig> {
     Some(GithubAppConfig {
         app_id: 42,
         installation_id: None,
-        private_key_path: None,
-        keychain_account: Some("owner".into()),
-        keychain_path: Some("/fixture/provenant-app.keychain-db".into()),
+        private_key_path: Some("/fixture/app.pem".into()),
+        keychain_account: None,
     })
 }
 
@@ -288,16 +287,6 @@ fn key_file_must_be_0600_and_outside_repositories() {
 }
 
 #[test]
-fn keychain_output_decodes_plain_and_hex() {
-    assert_eq!(
-        decode_keychain_output(FAKE_KEY.as_bytes()),
-        FAKE_KEY.trim().as_bytes()
-    );
-    let hex: String = FAKE_KEY.bytes().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(decode_keychain_output(hex.as_bytes()), FAKE_KEY.as_bytes());
-}
-
-#[test]
 #[allow(clippy::disallowed_methods, reason = "drives the system openssl")]
 fn openssl_signature_verifies_for_a_generated_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -387,9 +376,8 @@ fn an_owner_app_serves_its_repositories_and_a_project_app_overrides_it() {
     let app = |id| GithubAppConfig {
         app_id: id,
         installation_id: None,
-        private_key_path: None,
-        keychain_account: Some("owner".into()),
-        keychain_path: Some("/fixture/provenant-app.keychain-db".into()),
+        private_key_path: Some("/fixture/app.pem".into()),
+        keychain_account: None,
     };
     let mut policy = provenant_config::GithubPolicy::default();
     policy.apps.insert("Acme".into(), app(1));
@@ -424,15 +412,49 @@ fn api_flags_fail_closed_in_every_spelling() {
 }
 
 #[test]
-fn login_keychain_is_never_a_key_store() {
-    assert!(!dedicated_keychain(Path::new(
-        "/Users/u/Library/Keychains/login.keychain-db"
-    )));
-    assert!(!dedicated_keychain(Path::new(
-        "/Users/u/Library/Keychains/app.keychain-db"
-    )));
-    assert!(!dedicated_keychain(Path::new("/x/login.keychain")));
-    assert!(dedicated_keychain(Path::new(
-        "/Users/u/.provenant/app.keychain-db"
-    )));
+fn keychain_source_refuses_with_message_pointing_to_file_option() {
+    let backend = SystemBackend {
+        project: PathBuf::from("/fixture"),
+    };
+    let app = GithubAppConfig {
+        app_id: 1,
+        installation_id: None,
+        private_key_path: None,
+        keychain_account: Some("owner".into()),
+    };
+    let err = backend.read_key(&app).unwrap_err();
+    assert!(
+        err.contains("Keychain storage is not supported"),
+        "error {err:?} should name Keychain storage"
+    );
+    assert!(
+        err.contains("private_key_path"),
+        "error {err:?} should point to private_key_path"
+    );
+    assert!(
+        err.contains("0600"),
+        "error {err:?} should mention 0600 file"
+    );
+}
+
+#[test]
+fn missing_key_source_refuses_pointing_to_file_option() {
+    let backend = SystemBackend {
+        project: PathBuf::from("/fixture"),
+    };
+    let app = GithubAppConfig {
+        app_id: 1,
+        installation_id: None,
+        private_key_path: None,
+        keychain_account: None,
+    };
+    let err = backend.read_key(&app).unwrap_err();
+    assert!(
+        err.contains("private_key_path"),
+        "error {err:?} should point to private_key_path"
+    );
+    assert!(
+        err.contains("0600"),
+        "error {err:?} should mention 0600 file"
+    );
 }

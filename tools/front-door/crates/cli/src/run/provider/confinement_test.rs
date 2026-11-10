@@ -217,7 +217,7 @@ fn app_key_paths_are_denied_to_every_adapter() -> Result<(), Box<dyn std::error:
     std::fs::create_dir_all(&project_dir)?;
     std::fs::write(
         project_dir.join("github.json"),
-        r#"{"app":{"app_id":1,"private_key_path":"/fixture/app/key.pem","keychain_path":"/fixture/app/provenant.keychain-db"}}"#,
+        r#"{"app":{"app_id":1,"private_key_path":"/fixture/app/key.pem"}}"#,
     )?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
@@ -246,12 +246,11 @@ fn app_key_paths_are_denied_to_every_adapter() -> Result<(), Box<dyn std::error:
         )?;
         let plan = ConfinedPlan::new(request)?;
         let denied = &plan.permissions().policy.as_ref().ok_or("policy")?.optional().deny_read;
-        for path in ["/fixture/app/key.pem", "/fixture/app/provenant.keychain-db"] {
-            assert!(
-                denied.iter().any(|d| d.path == Path::new(path)),
-                "{adapter}: {path}"
-            );
-        }
+        let path = "/fixture/app/key.pem";
+        assert!(
+            denied.iter().any(|d| d.path == Path::new(path)),
+            "{adapter}: {path}"
+        );
     }
     Ok(())
 }

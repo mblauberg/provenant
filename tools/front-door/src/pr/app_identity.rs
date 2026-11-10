@@ -4,10 +4,10 @@
 //! rate-limit bucket. Without one they use the user's `gh` login and one
 //! warning per process says so.
 //!
-//! The private key is read only at mint time, from the macOS Keychain or from
-//! a mode-0600 file outside any repository. It is handed to `openssl` on
-//! stdin, never written to disk, logged, placed in an environment or given to
-//! a lane. The App identity never acts as a reviewer: see [`app_may_run`].
+//! The private key is read only at mint time, from a mode-0600 file outside
+//! any repository. It is handed to `openssl` on stdin, never written to disk,
+//! logged, placed in an environment or given to a lane. The App identity
+//! never acts as a reviewer: see [`app_may_run`].
 use provenant_config::GithubAppConfig;
 use std::{
     collections::HashMap,
@@ -20,8 +20,6 @@ type Result<T> = std::result::Result<T, String>;
 
 /// A token is reused until this long before it expires.
 const REFRESH_MARGIN_SECONDS: i64 = 300;
-/// Keychain service name the owner stores the key under.
-pub(crate) const KEYCHAIN_SERVICE: &str = "provenant-github-app";
 /// Permissions requested for an installation token: what landing needs.
 const PERMISSIONS: [(&str, &str); 5] = [
     ("contents", "write"),
@@ -334,27 +332,6 @@ pub(crate) fn read_key_file(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(&canonical).map_err(|_| "private key file unreadable".into())
 }
 
-/// `security -w` prints a multi-line secret as hex; accept either form.
-pub(crate) fn decode_keychain_output(output: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(output);
-    let trimmed = text.trim();
-    if !trimmed.contains("-----BEGIN")
-        && trimmed.len().is_multiple_of(2)
-        && !trimmed.is_empty()
-        && trimmed.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        let bytes = trimmed.as_bytes();
-        let decoded: Option<Vec<u8>> = bytes
-            .chunks(2)
-            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
-            .collect();
-        if let Some(decoded) = decoded {
-            return decoded;
-        }
-    }
-    trimmed.as_bytes().to_vec()
-}
-
 fn gh_env(token: &str) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(name, _)| name != "GH_TOKEN" && name != "GITHUB_TOKEN")
@@ -363,22 +340,7 @@ fn gh_env(token: &str) -> Vec<(OsString, OsString)> {
     env
 }
 
-/// A keychain file other than the login keychain or anything under the user's
-/// `Library/Keychains` directory, where lane grants reach.
-pub(crate) fn dedicated_keychain(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    !name.starts_with("login.keychain")
-        && !path
-            .components()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair[0].as_os_str() == "Library" && pair[1].as_os_str() == "Keychains")
-}
-
-/// Real effects: Keychain or file, `openssl`, and `gh api`.
+/// Real effects: file, `openssl`, and `gh api`.
 pub(crate) struct SystemBackend {
     project: PathBuf,
 }
@@ -422,40 +384,13 @@ impl Backend for SystemBackend {
     }
 
     fn read_key(&self, config: &GithubAppConfig) -> Result<Vec<u8>> {
-        if let Some(path) = &config.private_key_path {
-            return read_key_file(path);
+        if config.keychain_account.is_some() {
+            return Err("Keychain storage is not supported; store the private key in a mode-0600 file outside any repository and configure private_key_path".into());
         }
-        let account = config
-            .keychain_account
-            .as_deref()
-            .ok_or("neither private_key_path nor keychain_account is configured")?;
-        // Only a dedicated keychain no lane is granted. The login keychain is
-        // readable from Keychain-granted lanes, so it is never a key store.
-        let keychain = config
-            .keychain_path
-            .as_deref()
-            .ok_or("keychain_account requires keychain_path (a dedicated keychain, not the login keychain)")?;
-        if !keychain.is_absolute() || !dedicated_keychain(keychain) {
-            return Err("keychain_path must be an absolute path to a dedicated keychain".into());
-        }
-        let keychain = keychain.to_string_lossy();
-        let output = self
-            .run(
-                &[
-                    "/usr/bin/security",
-                    "find-generic-password",
-                    "-s",
-                    KEYCHAIN_SERVICE,
-                    "-a",
-                    account,
-                    "-w",
-                    &keychain,
-                ],
-                None,
-                None,
-            )
-            .map_err(|_| "Keychain item unavailable")?;
-        Ok(decode_keychain_output(&output))
+        let Some(path) = &config.private_key_path else {
+            return Err("neither private_key_path nor a valid key source is configured; store the private key in a mode-0600 file outside any repository and configure private_key_path".into());
+        };
+        read_key_file(path)
     }
 
     fn sign(&self, key: &[u8], message: &[u8]) -> Result<Vec<u8>> {

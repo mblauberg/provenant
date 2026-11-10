@@ -20,10 +20,6 @@ pub struct GithubAppConfig {
     pub private_key_path: Option<PathBuf>,
     #[serde(default)]
     pub keychain_account: Option<String>,
-    /// A dedicated keychain file holding the key. Never the login keychain,
-    /// which Keychain-granted lanes can read.
-    #[serde(default)]
-    pub keychain_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -54,17 +50,12 @@ impl GithubPolicy {
         })
     }
 
-    /// Every configured key file or dedicated keychain path, which no lane's
-    /// sandbox may read.
+    /// Every configured key file, which no lane's sandbox may read.
     pub fn key_paths(&self) -> impl Iterator<Item = &Path> {
-        self.app.iter().chain(self.apps.values()).flat_map(|app| {
-            [
-                app.private_key_path.as_deref(),
-                app.keychain_path.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-        })
+        self.app
+            .iter()
+            .chain(self.apps.values())
+            .flat_map(|app| app.private_key_path.as_deref())
     }
 
     /// Read the policy for the host-bound project. Only absence means empty.
