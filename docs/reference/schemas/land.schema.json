@@ -506,7 +506,6 @@
                         "type": "integer"
                       },
                       "requested_route": {},
-                      "resolved_route": {},
                       "result_path": {
                         "anyOf": [
                           {

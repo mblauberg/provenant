@@ -302,6 +302,7 @@ fn collect(
     deadline: Instant,
     until: Condition,
     follow: bool,
+    once: bool,
     out: &mut impl FnMut(Value) -> Result<()>,
 ) -> Result<bool> {
     let mut latest = BTreeMap::<String, Snapshot>::new();
@@ -332,7 +333,7 @@ fn collect(
                 "terminal": snapshot.terminal, "data": snapshot.data}),
             )?;
         }
-        let all = latest.len() == count && latest.values().all(|row| row.terminal);
+        let all = latest.len() == count && (once || latest.values().all(|row| row.terminal));
         if all || (!follow && matches!(until, Condition::Any) && (changed || snapshot.terminal)) {
             return Ok(true);
         }
@@ -341,7 +342,7 @@ fn collect(
 
 pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
     use crate::roots::{Product, Workspace};
-    let run = || -> Result<(bool, bool)> {
+    let run = || -> Result<(bool, bool, bool)> {
         let resolved = crate::roots::resolve(globals, Workspace::Project, Product::Required)
             .map_err(|e| e.to_string())?;
         let settings =
@@ -349,6 +350,8 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                 .map_err(|e| e.to_string())?
                 .domains
                 .wait;
+        // Targets without `--wait` report their current status once.
+        let once = command.wait.is_none();
         let seconds = settings.timeout(command.wait);
         let deadline = Instant::now() + Duration::from_secs(seconds);
         let mut names = command.target;
@@ -409,7 +412,7 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                             }
                             continue;
                         }
-                        let terminal = snapshot.as_ref().is_ok_and(|row| row.terminal);
+                        let terminal = once || snapshot.as_ref().is_ok_and(|row| row.terminal);
                         let failed = snapshot.is_err();
                         if snapshot.as_ref().ok() != last.as_ref() || failed {
                             last = snapshot.as_ref().ok().cloned();
@@ -440,7 +443,8 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                 targets.len(),
                 deadline,
                 command.until,
-                command.follow,
+                command.follow || once,
+                once,
                 &mut |event| {
                     refused |= event["data"]["operation"]["state"] == "refused";
                     write_event(&event, globals.json)
@@ -450,10 +454,11 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
             drop(receiver);
             result
         })?;
-        Ok((met, refused))
+        Ok((met, refused, once))
     };
     match run() {
-        Ok((met, refused)) => {
+        Ok((met, refused, true)) => wait_exit(met, refused),
+        Ok((met, refused, false)) => {
             let event = json!({"event": "end", "condition_met": met, "timed_out": !met});
             if let Err(error) = write_event(&event, globals.json) {
                 return crate::fail(
@@ -578,6 +583,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(1),
                 Condition::Any,
                 false,
+                false,
                 &mut |e| {
                     events.push(e);
                     Ok(())
@@ -609,6 +615,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(1),
                 Condition::Any,
                 true,
+                false,
                 &mut |e| {
                     events.push(e);
                     Ok(())
@@ -636,6 +643,7 @@ mod tests {
                 Instant::now() + Duration::from_millis(10),
                 Condition::All,
                 false,
+                false,
                 &mut |_| Ok(())
             ),
             Ok(false)
@@ -656,6 +664,7 @@ mod tests {
                 1,
                 Instant::now() + Duration::from_millis(20),
                 Condition::Any,
+                false,
                 false,
                 &mut |e| {
                     events.push(e);
@@ -680,6 +689,7 @@ mod tests {
                 1,
                 Instant::now() + Duration::from_secs(1),
                 Condition::Any,
+                false,
                 false,
                 &mut |e| {
                     events2.push(e);

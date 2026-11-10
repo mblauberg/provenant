@@ -903,6 +903,17 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
+        self.graph_document_announcing(input, budget, cancel, None)
+    }
+
+    /// `graph_document`, announcing a submitted graph's first saved checkpoint.
+    pub(crate) fn graph_document_announcing(
+        &self,
+        input: Value,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        announce: Option<super::graph_execution::Announce<'_>>,
+    ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
         if let Some(wait) = input.get("wait_seconds") {
             let seconds = wait.as_u64().ok_or_else(|| {
@@ -986,7 +997,7 @@ impl Factory {
                         "detached".into(),
                     )));
                 }
-                self.submit_document(&input, budget, cancel)
+                self.submit_document(&input, budget, cancel, announce)
             }
             "edit" => self.edit_document(&input, budget, cancel),
             "trace" => self.graph_trace(required(&input, "id")?),
@@ -1033,6 +1044,7 @@ impl Factory {
         input: &Value,
         budget: WaitBudget,
         cancel: &CancelToken,
+        announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let input = launch_input(&run_envelope(input)?)?;
         let input = &input;
@@ -1059,7 +1071,7 @@ impl Factory {
                 )
                 .map_err(graph_journal_error)?
                 .ok_or(FacadeError::StateCorrupt)?;
-                return self.launch_submission(execution.document, input, budget, cancel);
+                return self.launch_submission(execution.document, input, budget, cancel, announce);
             }
         }
         if input["explain"] != true {
@@ -1447,7 +1459,7 @@ impl Factory {
         if input["explain"] == true {
             return Ok(json!({"document":document}));
         }
-        self.launch_submission(document, input, budget, cancel)
+        self.launch_submission(document, input, budget, cancel, announce)
     }
 
     fn launch_submission(
@@ -1456,6 +1468,7 @@ impl Factory {
         input: &Value,
         budget: WaitBudget,
         cancel: &CancelToken,
+        announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let scratch = self
             .prepare_scratch(cancel, budget)
@@ -1474,6 +1487,7 @@ impl Factory {
                 .get("wait_seconds")
                 .and_then(Value::as_u64)
                 .map(|_| budget),
+            announce,
         )?;
         let run = self.wait_document(run, input, budget, cancel, &path, &scratch)?;
         let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
@@ -1805,6 +1819,7 @@ impl Factory {
                 budget,
                 cancel,
                 Some(scratch),
+                None,
                 None,
             )
         })

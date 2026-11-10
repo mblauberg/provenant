@@ -1166,6 +1166,7 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant status" => &[
             "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
+            "--target without --wait reports each target's current status once",
             "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
             "follow waits for all targets to be terminal; land targets only observe their PR",
         ],
@@ -2180,7 +2181,7 @@ mod tests {
         invalid(&["status", "--wait=0"]);
         invalid(&["status", "--wait=5h"]);
         invalid(&["status", "--follow"]);
-        invalid(&["status", "--target", "pr:2721"]);
+        valid(&["status", "--target", "pr:2721"]);
         for wait in ["1", "14400"] {
             valid(&["status", &format!("--wait={wait}")]);
         }
