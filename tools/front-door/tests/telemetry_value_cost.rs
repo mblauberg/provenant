@@ -211,6 +211,9 @@ fn value_has_a_row_per_account_with_readings_and_states_coverage() -> Result {
     assert_eq!(play["usage"]["complete"], true);
     // The attempt with no account is stated, not folded into another row.
     assert_eq!(report["unattributed"]["attempts"], 1);
+    // The fixture records no accepted receipt, so no cost per outcome is stated.
+    assert_eq!(report["accepted_outcomes"]["denominator"], 0);
+    assert!(report["accepted_outcomes"]["microdollars_per_accepted_outcome"].is_null());
     let narrowed = data(
         &rig,
         &[

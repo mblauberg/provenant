@@ -251,7 +251,7 @@ involved. Usage counters never log arguments, prompts or results.
 | --- | --- |
 | `provenant telemetry stats` | Tokens by run and attempt |
 | `provenant telemetry cost [TARGET]` | API-equivalent cost from the usage ledger, priced from [`config/telemetry-prices.toml`](config/telemetry-prices.toml) |
-| `provenant telemetry value` | Each account's usage against its plan price and quota readings |
+| `provenant telemetry value` | Each account's usage against its plan price and quota readings, and cost per accepted outcome |
 | `provenant telemetry stats --usage` | How often each CLI verb and MCP tool is used, including installed ones never called |
 | `provenant telemetry trace` | A timeline of attempts across hosts, for [Perfetto](https://ui.perfetto.dev) |
 | `provenant status` | Active and recent lanes; `--all` and `--json` show full records |

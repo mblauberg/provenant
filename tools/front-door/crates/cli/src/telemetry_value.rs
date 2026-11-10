@@ -210,6 +210,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         .iter()
         .filter(|row| seconds(row) >= since)
         .collect();
+    let (accepted_json, accepted_line) = accepted_section(edge, since, &in_window)?;
     let config =
         provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS).map_err(io)?;
     let history = crate::quota_history::read(
@@ -280,6 +281,7 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
     if rows.is_empty() {
         human.push_str("no account has a quota reading and a configured plan\n");
     }
+    human.push_str(&accepted_line);
     // Usage that cannot be tied to an account with a reading is stated, not dropped.
     let unattributed = report::totals(
         in_window
@@ -300,7 +302,120 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         "basis": "api_equivalent_since_vs_monthly_plan_price",
         "accounts": rows,
         "unattributed": unattributed,
+        "accepted_outcomes": accepted_json,
     });
     unrecognised(&ledger, &mut data, &mut human);
     Ok((data, human))
+}
+
+/// Cost per accepted outcome for this project, priced from the ledger rows of
+/// the attempts its accepted deliveries link to. `value` is account-level, so
+/// outside a project, or when the project's store cannot be read, the section
+/// says why instead of failing the whole report.
+fn accepted_section(
+    edge: &Edge<'_>,
+    since: i64,
+    in_window: &[&Row],
+) -> Result<(Value, String), Failure> {
+    let accepted = match crate::run::accepted_attempts(edge, since) {
+        Ok(accepted) => accepted,
+        Err(fail) => {
+            let line = format!(
+                "accepted outcomes: unavailable ({})\n",
+                plain_text(&fail.message, 256)
+            );
+            return Ok((json!({"unavailable": fail.message}), line));
+        }
+    };
+    let linked: Vec<&Row> = in_window
+        .iter()
+        .copied()
+        .filter(|row| row.project == accepted.project && accepted.attempts.contains(&row.attempt))
+        .collect();
+    let recorded: std::collections::BTreeSet<&str> =
+        linked.iter().map(|row| row.attempt.as_str()).collect();
+    let unrecorded = accepted
+        .attempts
+        .iter()
+        .filter(|attempt| !recorded.contains(attempt.as_str()))
+        .count();
+    let totals = report::totals(linked.iter().copied()).map_err(io)?;
+    let line = format!(
+        "accepted outcomes: {} (this project; {})\n",
+        accepted.denominator,
+        money(&totals)
+    );
+    let section = accepted_outcomes(
+        accepted.definition,
+        accepted.denominator,
+        &totals,
+        unrecorded,
+    );
+    Ok((section, line))
+}
+
+/// Cost per accepted outcome. The numerator is the complete API-equivalent
+/// cost of the linked attempts, so it is absent while any of them is unpriced
+/// or has no ledger row.
+fn accepted_outcomes(
+    definition: &str,
+    denominator: usize,
+    totals: &report::Totals,
+    unrecorded: usize,
+) -> Value {
+    let numerator = totals
+        .microdollars
+        .filter(|_| totals.complete && unrecorded == 0);
+    json!({
+        "scope": "this project's finished attempts since --since; the account filter does not apply",
+        "definition": definition,
+        "denominator": denominator,
+        "numerator_scope": "API-equivalent cost of attempts linked to accepted deliveries, including retries",
+        "usage": totals,
+        "unrecorded_attempts": unrecorded,
+        "microdollars_per_accepted_outcome": if denominator == 0 {
+            None
+        } else {
+            numerator.map(|microdollars| json!({"numerator": microdollars, "denominator": denominator, "unit": "microdollars"}))
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_cost_needs_every_linked_attempt_priced_and_recorded() {
+        let complete = report::Totals {
+            attempts: 2,
+            priced_attempts: 2,
+            microdollars: Some(12),
+            complete: true,
+            ..report::Totals::default()
+        };
+        let ratio = accepted_outcomes("definition", 2, &complete, 0);
+        assert_eq!(ratio["denominator"], 2);
+        assert_eq!(ratio["microdollars_per_accepted_outcome"]["numerator"], 12);
+        assert_eq!(ratio["microdollars_per_accepted_outcome"]["denominator"], 2);
+        assert!(
+            accepted_outcomes("definition", 0, &complete, 0)["microdollars_per_accepted_outcome"]
+                .is_null()
+        );
+        assert!(
+            accepted_outcomes("definition", 2, &complete, 1)["microdollars_per_accepted_outcome"]
+                .is_null()
+        );
+        let partial = report::Totals {
+            attempts: 2,
+            priced_attempts: 1,
+            unpriced_attempts: 1,
+            microdollars: Some(5),
+            complete: false,
+            ..report::Totals::default()
+        };
+        let ratio = accepted_outcomes("definition", 2, &partial, 0);
+        assert!(ratio["microdollars_per_accepted_outcome"].is_null());
+        assert_eq!(ratio["usage"]["microdollars"], 5);
+    }
 }

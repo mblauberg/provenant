@@ -261,7 +261,7 @@ pub(super) fn stats_inner(
     }
     let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings, &prices)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let task_context = super::telemetry_context::report(&selected, &graph_quality, edge, &prices)?;
+    let task_context = super::telemetry_context::report(&selected, &graph_quality, edge)?;
     let decision_ids = command.detail.then(|| {
         selected
             .iter()
@@ -278,7 +278,6 @@ pub(super) fn stats_inner(
     let pipeline = if command.outcomes || command.suggest {
         Some(pipeline_report(
             &selected,
-            &prices,
             &command.pipeline,
             edge,
             context.project_id,
@@ -667,6 +666,50 @@ pub(super) fn stats_inner(
     Ok((data, human))
 }
 
+/// This project's finished attempts since `since` whose delivery has an
+/// accepted receipt. `telemetry value` prices them from the usage ledger.
+pub(crate) struct AcceptedAttempts {
+    pub(crate) project: provenant_core::ProjectId,
+    pub(crate) definition: &'static str,
+    pub(crate) denominator: usize,
+    pub(crate) attempts: std::collections::BTreeSet<String>,
+}
+
+pub(crate) fn accepted_attempts(edge: &Edge<'_>, since: i64) -> Result<AcceptedAttempts, Fail> {
+    use run::AttemptReader;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let facts = store
+        .as_ref()
+        .map(|store| {
+            store
+                .attempts(
+                    run::AttemptFilter {
+                        run_id: None,
+                        task_id: None,
+                    },
+                    &call,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let selected: Vec<_> = facts
+        .iter()
+        .filter(|fact| fact.finished_at.as_timestamp().as_second() >= since)
+        .collect();
+    let (denominator, attempts) =
+        super::telemetry_context::accepted_attempts_among(&selected, edge);
+    Ok(AcceptedAttempts {
+        project: context.project_id,
+        definition: super::telemetry_context::ACCEPTED_DEFINITION,
+        denominator,
+        attempts,
+    })
+}
+
 fn strip_cost(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -684,7 +727,6 @@ fn strip_cost(value: &mut Value) {
 /// decisions by graph-local finding identity; synthesis copies never add value.
 pub(super) fn pipeline_report(
     facts: &[&provenant_records::AttemptFact],
-    prices: &provenant_telemetry::PriceTable,
     options: &crate::PipelineOptions,
     edge: &Edge<'_>,
     project: provenant_core::ProjectId,
@@ -756,7 +798,7 @@ pub(super) fn pipeline_report(
             .and_then(|s| s.rsplit(['#', '/']).next())
             .and_then(|s| s.parse().ok());
         let (confirmed, false_positives) = pipeline_dispositions(checkpoint, &node);
-        let mut row = Evidence {
+        let row = Evidence {
             sample: json!([graph, node]).to_string(),
             graph,
             pr,
@@ -770,14 +812,9 @@ pub(super) fn pipeline_report(
             task_kind: context
                 .and_then(|c| c.task_kind.clone())
                 .or_else(|| extra("task_kind")),
-            cost_microdollars: None,
             confirmed,
             false_positives,
         };
-        let report =
-            provenant_telemetry::stats(facts, prices, provenant_telemetry::Window::default())
-                .map_err(|e| invalid(e.to_string()))?;
-        row.cost_microdollars = report.totals.cost.complete.map(|m| m.microdollars);
         evidence.push(row);
     }
     let ci: Option<Vec<provenant_telemetry::outcome::CiRun>> = options

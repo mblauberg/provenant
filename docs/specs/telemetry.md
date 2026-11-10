@@ -266,11 +266,11 @@ offline pipeline. Prompt text is not parsed into a guessed acceptance count.
 
 An accepted outcome is one distinct delivery ID with a recorded accepted
 workflow receipt among selected attempts. Provider success alone is not
-acceptance. Cost per accepted outcome divides the complete API-equivalent cost
-of selected attempts linked to those accepted deliveries by that count, as an
-exact rational number of microdollars. Missing cost or a zero denominator stays
-unknown. `stats` reports only the denominator; the numerator is read with
-`telemetry cost`. Unattributed chair cost and attempts outside the selected
+acceptance. `stats` reports only that denominator. `telemetry value` reports cost
+per accepted outcome for this project's attempts since `--since`: the complete
+API-equivalent cost of ledger rows linked to those deliveries, divided by the
+count, as microdollars. Missing cost, an unrecorded linked attempt or a zero
+denominator stays unknown. Unattributed chair cost and attempts outside the
 window are excluded; receipt decisions and graph checkpoints are labelled latest snapshots.
 
 These are observational comparisons. Missing joint coverage or simultaneous
@@ -331,9 +331,9 @@ microdollars, rounded once.
 
 `provenant telemetry cost [TARGET] [--by route|account|model|graph|node] [--since]`
 and `provenant telemetry value [--account] [--window] [--since]` are the only
-producers of cost and plan value. Both read the usage ledger and price nothing:
-a row carries the cost settled with its attempt. `stats`, `mileage` and
-`quota usage` report no cost. `TARGET` takes the target form of the other lane
+producers of cost, plan value and cost per accepted outcome. Both read the usage
+ledger and price nothing: a row carries the cost settled with its attempt.
+`stats`, `mileage` and `quota usage` report no cost. `TARGET` takes the target form of the other lane
 commands (attempt, task or run ID or prefix, or a graph or `graph/node` name);
 rows backfilled from format 1 are selected by their opaque labels. One
 attempt's report is a few lines, so a lane may call it.
@@ -346,7 +346,8 @@ attempt with no account is reported as `unattributed`, as a group under
 `value` gives one row per account that has both a quota reading and a
 configured plan: the plan price in force, the reading's quota windows, the
 API-equivalent usage since `--since` (default 30 days) and the coverage of that
-usage (attempts, priced and unpriced). It is a comparison, not a bill.
+usage (attempts, priced and unpriced). It is a comparison, not a bill. `value` also reports `accepted_outcomes`:
+this project's cost per accepted outcome, described under accepted outcomes.
 A ledger line this build cannot read is named in the reply, not skipped.
 - Why (default): cost had three producers that disagreed on what was missing;
   one reader of one ledger cannot.
@@ -405,29 +406,31 @@ supply these strata where present; absent values stay `unknown`. Both strata
 must be known for a comparison to be sufficient; unknown strata are reported
 as insufficient with a reason. Escapes are attributed per PR, so every node
 arm in that PR is charged with the PR outcome. This change
-adds no context capture. Nodes combine selected attempts' costs, including
+adds no context capture. A node combines its selected attempts, including
 retries. A node attributes to a model only when every selected attempt names
 the same model; mixed or missing identities stay `unknown` for model ranking.
 Only leaf source findings enter the
 confirmed and false-positive counts: graph-local IDs join `accepted` and
 `rejected` verifier dispositions, deduplicated across verifier copies.
 Conflicting, deferred or absent dispositions, ambiguous source IDs and missing
-checkpoints remain unmeasured. Verifier copies contribute their costs and no
-extra findings.
+checkpoints remain unmeasured. Verifier copies contribute no extra findings.
 
-Arms show confirmed findings per API-equivalent dollar, false-positive rate,
-and the fraction of distinct mature attributed merges with any escaped signal.
-Only mature merges enter an attributed ranking cohort. The default minimum is
-20 distinct graphs and mature merges per arm (`--min-samples`). Unknown costs,
-missing dispositions or CI input and smaller arms are `insufficient`.
+Arms show confirmed findings per deduplicated node (`confirmed_per_node`),
+false-positive rate, and the fraction of distinct mature attributed merges with
+any escaped signal. A node is one graph and node pair, however many attempts it
+retried. `stats` reports no cost, so the ranking uses none. Only mature merges
+enter an attributed ranking cohort. The default minimum is 20 distinct graphs
+and mature merges per arm (`--min-samples`). Missing dispositions or CI input
+and smaller arms are `insufficient`.
 Without CI input, escaped-rate values and intervals are null; its retained
 numerator counts only the observed Git signals.
-Rates have 95% Wilson intervals. The confirmed-per-dollar interval scales the
-Wilson confirmed share by observed dispositions per dollar, conditional on
-observed costs; it does not model cost variability or finding correlation.
-Raw finding volume never determines preference. Advice requires separated
-confirmed-per-dollar intervals and no higher observed false-positive or
-escaped-defect rates in the same stratum.
+Rates have 95% Wilson intervals. The confirmed-per-node interval scales the
+Wilson confirmed share by observed dispositions per node; it does not model
+finding correlation.
+Finding volume alone never determines preference. Advice requires separated
+confirmed-per-node intervals and no higher observed false-positive or
+escaped-defect rates in the same stratum, so yield gained through more false
+positives or escapes cannot win.
 
 A suggestion includes both sample counts, intervals, references to its full
 arm evidence and an RFC3339 expiry, default 14 days (`--expiry-days`). Reports

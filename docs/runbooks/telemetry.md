@@ -17,7 +17,7 @@ The report states when release changes, harness experiments, task difficulty
 and user activity cannot be separated. Accepted outcomes use recorded
 workflow acceptance and report their denominator.
 
-`stats` reports no cost; `telemetry cost` does. Cost is an API-equivalent
+`stats` reports no cost; `telemetry cost` and `telemetry value` do. Cost is an API-equivalent
 estimate, not a bill. The report separately counts
 attempts whose price-table entry is marked as a subscription, including those
 whose token usage or API-equivalent price is unavailable. This classification
@@ -109,7 +109,9 @@ nothing priced reads `unknown`, never `$0`. Attempts with no account form the
 `provenant telemetry value [--account LABEL] [--window POOL] [--since T]`
 gives one row per account with a quota reading and a configured plan: plan
 price, the latest quota windows, and API-equivalent usage since `--since`
-(default 30 days) with its coverage. Compare a full billing period with quota
+(default 30 days) with its coverage. It also gives `accepted_outcomes`: this
+project's cost per accepted outcome, with the count of linked attempts it could
+not price or record. Compare a full billing period with quota
 history before acting on it. Run `telemetry backfill` first on a host that has
 not yet copied its run history into the ledger.
 
