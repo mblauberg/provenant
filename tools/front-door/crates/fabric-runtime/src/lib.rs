@@ -14,8 +14,6 @@ pub mod inbox;
 pub mod peer_agent;
 pub mod read_roots;
 pub use provenant_records::result_capture;
-#[cfg(test)]
-mod forward_compatibility;
 pub mod runs;
 #[cfg(test)]
 mod test_support;

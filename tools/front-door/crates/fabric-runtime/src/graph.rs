@@ -19,14 +19,14 @@ mod ci;
 pub use ci::{CiFailedCheck, CiTarget};
 mod budget;
 #[cfg(test)]
+#[path = "graph/checkpoint_tests.rs"]
+mod checkpoint_tests;
+#[cfg(test)]
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
 mod composites;
 pub mod cutover;
 mod envelope;
-#[cfg(test)]
-#[path = "graph/forward_compatibility.rs"]
-mod forward_compatibility;
 mod journal;
 mod land;
 #[cfg(test)]

@@ -1342,7 +1342,6 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Decode(_)
             | Error::Encode(_)
             | Error::SchemaVersion(_)
-            | Error::UnversionedDatabase
             | Error::JournalMode(_)
             | Error::Time(_) => Self::StateCorrupt,
             // checked_directory's device refusal names only the child component.

@@ -41,7 +41,7 @@ pub(crate) fn import_cancelled(
     owner: provenant_core::ActorId,
 ) -> Result<bool> {
     let marked = read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
-        .map(|raw| crate::db::decode_unversioned::<provenant_supervisor::custody::Scope>(&raw))
+        .map(|raw| crate::db::decode_column::<provenant_supervisor::custody::Scope>(&raw))
         .transpose()?
         .is_some_and(|saved| saved == scope);
     if !marked {
@@ -375,7 +375,7 @@ impl RunStore {
                     }
             )
         };
-        let receipts: SettlementReceipts = crate::db::decode_unversioned(raw)?;
+        let receipts: SettlementReceipts = crate::db::decode_column(raw)?;
         let record = self.record(id, call)?;
         let delivery = Self::delivery_outcome(&record) && retryable(&receipts.delivery);
         let manifest = retryable(&receipts.manifest_conflict)
@@ -614,7 +614,7 @@ impl RunStore {
             if attempt.generation != generation { return Err(RunError::Conflict); }
             let existing: Option<(i64, Vec<u8>)> = tx.query_row("SELECT generation,record FROM settlement_receipts WHERE attempt=?1", [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
             let mut receipts: SettlementReceipts = match existing {
-                Some((saved, raw)) if saved == sql_int(generation)? => crate::db::decode_unversioned(&raw)?,
+                Some((saved, raw)) if saved == sql_int(generation)? => crate::db::decode_column(&raw)?,
                 Some(_) => return Err(RunError::Conflict),
                 None => SettlementReceipts::default(),
             };
@@ -644,7 +644,7 @@ impl RunStore {
             if attempt.generation != generation { return Err(RunError::Conflict); }
             if disposition == CancellationDisposition::Effective && attempt.cancellation_disposition != Some(CancellationDisposition::Effective) { return Err(RunError::Conflict); }
             let raw: Option<Vec<u8>> = tx.query_row("SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2", params![id.to_string(), sql_int(generation)?], |row| row.get(0)).optional()?;
-            let mut receipts: SettlementReceipts = raw.as_deref().map(crate::db::decode_unversioned).transpose()?.unwrap_or_default();
+            let mut receipts: SettlementReceipts = raw.as_deref().map(crate::db::decode_column).transpose()?.unwrap_or_default();
             if disposition == CancellationDisposition::AcknowledgedIneffective && !matches!(receipts.cancellation, Some(CancellationDisposition::DeliveryEffective | CancellationDisposition::ImportEffective)) {
                 receipts.late_cancellation_acknowledged = true;
             }

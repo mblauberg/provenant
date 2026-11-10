@@ -48,11 +48,6 @@ fn candidates_sql(candidates: Candidates, tolerate_invalid: bool) -> String {
              {hook_filter} AND (?7 IS NULL OR o.answer>?7) ORDER BY o.answer LIMIT ?6")
 }
 
-#[cfg(test)]
-pub(crate) fn pending_candidates_sql() -> String {
-    candidates_sql(Candidates::Pending, false)
-}
-
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn before(deadline: Instant) -> Result<()> {
     if Instant::now() >= deadline {

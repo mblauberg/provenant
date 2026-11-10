@@ -255,9 +255,8 @@ pub struct Schema {
     pub version: i64,
 }
 
-/// The refusal code for a store written by another release. The host is
-/// drained with that release before this one opens the state.
-pub const DRAIN_CODE: &str = "UPGRADE_DRAIN_REQUIRED";
+/// The refusal code for a store at another version. Its message names the reset.
+pub const RESET_CODE: &str = "STATE_RESET_REQUIRED";
 
 #[derive(Debug)]
 pub enum VersionError {
@@ -275,7 +274,7 @@ impl std::fmt::Display for VersionError {
         match self {
             Self::Refused { found, expected } => write!(
                 f,
-                "store schema version {found} is not {expected}: drain the host with the release that wrote it, then remove the store"
+                "{RESET_CODE}: store schema version {found} is not {expected}; run `install --reset-state` to discard it"
             ),
             Self::Sqlite(error) => error.fmt(f),
         }
