@@ -1,6 +1,7 @@
 //! Completion-triggered GC. Settlement makes one detached attempt to collect the
-//! settled lane's worktree. Nothing is recorded when that attempt misses: the
-//! `provenant gc` sweep walks every lane and collects what it left.
+//! settled lane's worktree. Nothing beyond its settlement receipt is recorded
+//! when that attempt misses: the `provenant gc` sweep runs the same owner-bound
+//! collection for every settled lane whose receipt is not final.
 use super::*;
 
 /// The payload `provenant internal lane-cleanup` accepts.
@@ -70,7 +71,20 @@ pub(crate) fn run(
 // Keep lock-contention regression tests deterministic without a two-minute sleep.
 #[cfg(test)]
 thread_local! {
-    pub(super) static COLLECTION_WAIT_SECONDS: std::cell::Cell<u64> = const { std::cell::Cell::new(120) };
+    pub(crate) static COLLECTION_WAIT_SECONDS: std::cell::Cell<u64> = const { std::cell::Cell::new(120) };
+}
+
+/// How an owner-bound collection gets the GC collection lock.
+pub(crate) enum Collection<'a> {
+    /// Settlement's detached worker takes the lock, waiting a bounded time.
+    Acquire,
+    /// The `provenant gc` sweep already holds the lock. `upstream` is the
+    /// default-branch tip that sweep fetched; with no delivery receipt, the
+    /// lane must have landed there rather than only on its owner's base.
+    Held {
+        _lock: &'a provenant_os::fs::LockGuard,
+        upstream: Option<provenant_core::GitOid>,
+    },
 }
 
 pub(crate) fn collect_owned_worktree(
@@ -78,6 +92,147 @@ pub(crate) fn collect_owned_worktree(
     roots: &provenant_core::Roots,
     workers: &dyn WorkerObserver,
     delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    collect_owned_worktree_with(
+        settled,
+        roots,
+        workers,
+        delivery_override,
+        Collection::Acquire,
+    )
+}
+
+/// The sweep's half of completion cleanup. Settlement makes one detached
+/// attempt and leaves a receipt that is not final until it succeeds. For each
+/// settled lane whose receipt is still deferred, retryable or mid-prune and
+/// whose worktree still exists, run the same owner-bound collection under the
+/// lock the sweep holds. That receipt is the only marker: nothing else is
+/// recorded. Returns the worktrees this removed.
+pub(crate) fn collect_unsettled(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    checkout: &Path,
+    project_id: provenant_core::ProjectId,
+    lock: &provenant_os::fs::LockGuard,
+    upstream: Option<provenant_core::GitOid>,
+    workers: &dyn WorkerObserver,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let context = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id,
+        actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+        read_prompts: false,
+    };
+    let Some(store) = provenant_run::RunStore::open_disk_read_only(&context, &call)? else {
+        return Ok(Vec::new());
+    };
+    let mut pending = Vec::new();
+    let mut query = provenant_run::LaneQuery {
+        targets: Vec::new(),
+        all: true,
+        limit: 100,
+        after: 0,
+        newest_first: false,
+        owner: None,
+        unseen_after: None,
+    };
+    loop {
+        let page = store.lanes(&query, &call)?;
+        for attempt in page.lanes {
+            if attempt.superseded_by.is_some()
+                || !matches!(attempt.state, provenant_run::AttemptState::Terminal { .. })
+            {
+                continue;
+            }
+            let Some(writer) = store
+                .request(attempt.run_id, &call)?
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == attempt.task_id)
+                .and_then(|task| task.writer)
+            else {
+                continue;
+            };
+            if std::fs::symlink_metadata(&writer.worktree).is_err() {
+                continue;
+            }
+            let unsettled = store
+                .worktree_settlement(attempt.attempt_id, &call)?
+                .is_some_and(|receipt| {
+                    receipt["cleanup_deferred"] == true
+                        || receipt["retryable"] == true
+                        || receipt["state"] == "pruning"
+                });
+            if unsettled {
+                let actor_id = store.run(attempt.run_id, &call)?.actor_id;
+                pending.push((
+                    attempt.run_id,
+                    attempt.attempt_id,
+                    actor_id,
+                    writer.worktree,
+                ));
+            }
+        }
+        match page.next {
+            Some(next) => query.after = next,
+            None => break,
+        }
+    }
+    drop(store);
+    let mut removed = Vec::new();
+    for (run_id, attempt_id, actor_id, worktree) in pending {
+        let settled = provenant_run::HolderContext {
+            schema_version: 1,
+            roots: provenant_run::RootSeed {
+                home: home.to_path_buf(),
+                checkout: checkout.to_path_buf(),
+                state_root: roots.state.as_path().to_path_buf(),
+            },
+            project_id,
+            actor_id,
+            run_id,
+            attempt_id,
+            host_delivery: None,
+            launch: None,
+            sealed: None,
+        };
+        // A miss keeps its receipt for the next sweep; carry on with the rest.
+        let collected = collect_owned_worktree_with(
+            &settled,
+            roots,
+            workers,
+            None,
+            Collection::Held {
+                _lock: lock,
+                upstream,
+            },
+        );
+        if let Err(error) = collected {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: settled lane collection failed for {}: {error}",
+                worktree.display()
+            );
+        } else if std::fs::symlink_metadata(&worktree).is_err() {
+            removed.push(worktree);
+        }
+    }
+    Ok(removed)
+}
+
+fn collect_owned_worktree_with(
+    settled: &provenant_run::HolderContext,
+    roots: &provenant_core::Roots,
+    workers: &dyn WorkerObserver,
+    delivery_override: Option<&provenant_run::WriterDeliveryReceipt>,
+    collection: Collection<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorktreeGcPolicy, WorktreeOrigin};
     let clock = SystemClock;
@@ -215,19 +370,26 @@ pub(crate) fn collect_owned_worktree(
     let collection_wait = COLLECTION_WAIT_SECONDS.get();
     #[cfg(not(test))]
     let collection_wait = 120;
-    let _collection = match crate::worktrees::collection_lock_for(roots, Some(collection_wait)) {
+    let sweep_upstream = match collection {
+        Collection::Held { upstream, .. } => upstream,
+        Collection::Acquire => None,
+    };
+    let _collection = match matches!(collection, Collection::Acquire)
+        .then(|| crate::worktrees::collection_lock_for(roots, Some(collection_wait)))
+        .transpose()
+    {
         Ok(lock) => lock,
         // A long-running collector still owns the pass. Leave a visible
         // receipt rather than skipping silently; replay ignores retained ones.
         Err(crate::worktrees::Error::Fs(provenant_os::fs::FsError::LockTimeout { .. })) => {
             let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":writer.worktree, "reason":crate::worktrees::COLLECTION_BUSY, "retryable":true});
             // Never replace a receipt that already settled or began pruning.
-            if store
-                .worktree_settlement(record.attempt_id, &call)?
-                .is_none_or(|receipt| receipt["cleanup_deferred"] == true)
-            {
-                record_worktree_settlement(&store, record.attempt_id, &receipt)?;
-            }
+            store.record_worktree_settlement_if(
+                record.attempt_id,
+                &receipt,
+                |current| current.is_none_or(|receipt| receipt["cleanup_deferred"] == true),
+                &call,
+            )?;
             return Ok(());
         }
         Err(error) => return Err(error.into()),
@@ -400,8 +562,11 @@ pub(crate) fn collect_owned_worktree(
                             format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
                         }
                     });
-                let upstream = upstream.as_deref().unwrap_or(&owner.base);
-                let pinned = worktrees::resolve_base(context, upstream, cancel)?;
+                let pinned = match (upstream, sweep_upstream) {
+                    (Some(upstream), _) => worktrees::resolve_base(context, &upstream, cancel)?,
+                    (None, Some(fetched)) => fetched,
+                    (None, None) => worktrees::resolve_base(context, &owner.base, cancel)?,
+                };
                 let Some(head) = record.head.or_else(|| {
                     (record.provider_launched == Some(false))
                         .then(|| owner.base.parse().ok())

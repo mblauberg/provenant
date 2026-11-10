@@ -1229,6 +1229,69 @@ pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Re
         !fixture.worktree.exists(),
         "the sweep must collect a lane its settlement attempt missed"
     );
+    let receipt = settlement_receipt(&fixture)?;
+    assert_eq!(receipt["state"], "pruned", "{receipt}");
+    Ok(())
+}
+
+/// A lane with its own commits, landed by fast-forward so its head is on the
+/// upstream's first-parent line, whose settlement collection found the
+/// collector busy or never ran. The path-based sweep keeps such a lane; the
+/// owner-bound pass for unsettled receipts collects it.
+pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Result {
+    use crate::fabric::gc_cleanup::{COLLECTION_WAIT_SECONDS, SPAWNED};
+    for busy in [true, false] {
+        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+        let rig = &fixture.rig;
+        let lane = fixture.worktree.to_str().ok_or("lane path")?;
+        publish_upstream(rig, &git(rig, &["-C", lane, "rev-parse", "HEAD"])?)?;
+        if busy {
+            SPAWNED.set(Ok(Vec::new()));
+            crate::fabric::settle_owned_worktree(
+                &fixture.settled,
+                &fixture.roots,
+                &FreeWorkers,
+                None,
+            )?;
+            let request = SPAWNED
+                .replace(Ok(Vec::new()))
+                .map_err(|error| error.to_string())?
+                .pop()
+                .ok_or("settlement did not start collection")?;
+            // A sweep in progress holds the collector, so the worker exits.
+            let held = crate::worktrees::collection_lock(&fixture.roots)?;
+            COLLECTION_WAIT_SECONDS.set(1);
+            let outcome = crate::fabric::gc_cleanup::run(&request, &FreeWorkers);
+            COLLECTION_WAIT_SECONDS.set(120);
+            drop(held);
+            outcome?;
+            let receipt = settlement_receipt(&fixture)?;
+            assert_eq!(
+                receipt["reason"],
+                crate::worktrees::COLLECTION_BUSY,
+                "{receipt}"
+            );
+            assert_eq!(receipt["retryable"], true, "{receipt}");
+        } else {
+            SPAWNED.set(Err("detached collection could not start".into()));
+            crate::fabric::settle_owned_worktree(
+                &fixture.settled,
+                &fixture.roots,
+                &FreeWorkers,
+                None,
+            )?;
+            SPAWNED.set(Ok(Vec::new()));
+            assert_eq!(settlement_receipt(&fixture)?["cleanup_deferred"], true);
+        }
+        assert!(fixture.worktree.exists(), "busy={busy}");
+        ok(rig, &["gc", "--apply", "--json"])?;
+        assert!(
+            !fixture.worktree.exists(),
+            "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy})"
+        );
+        let receipt = settlement_receipt(&fixture)?;
+        assert_eq!(receipt["state"], "pruned", "busy={busy}: {receipt}");
+    }
     Ok(())
 }
 

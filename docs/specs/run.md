@@ -1396,9 +1396,12 @@ Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
 `outcome`, `reason`, `head`): under `artefacts` in the settlement receipt and
 `worktree_cleanup[].refs` in `gc --json`. A failure warns and never fails the
 settlement or the pass. Completion cleanup is one detached attempt per
-settlement and keeps no queue or retry state. A transient failure leaves the
-worktree for the next `gc` sweep, which walks every lane under the same removal
-checks; dirty trees and unlanded work are retained by both.
+settlement and keeps no queue or retry state. A transient failure leaves a
+non-final receipt. The next applied `gc` sweep runs the same owner-bound
+collection, under the collection lock it holds, for each terminal lane whose
+receipt is deferred, retryable or pruning and whose worktree exists, landing
+against the fetched default branch; dirty trees and unlanded work are retained
+by both.
 - Why (default): finished lanes leave nothing behind once their work has landed, and
   never take a ref Provenant did not make.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`

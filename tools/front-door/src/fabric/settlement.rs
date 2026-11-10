@@ -372,23 +372,20 @@ pub(crate) fn settle_owned_worktree(
     let reason = settlement_retention_reason(&record.state, task.deliver.is_some(), delivery)
         .unwrap_or("worktree cleanup deferred to completion GC");
     // Record before spawning so the worker's receipt always comes later. A
-    // worker that began pruning owns the receipt and its replay.
-    if prior
-        .as_ref()
-        .is_none_or(|receipt| receipt["state"] != "pruning")
-    {
-        record_worktree_settlement(
-            &store,
-            record.attempt_id,
-            &serde_json::json!({
-                "schema_version":1,
-                "state":"retained",
-                "worktree":writer.worktree,
-                "reason":reason,
-                "cleanup_deferred":true,
-            }),
-        )?;
-    }
+    // worker that began pruning owns the receipt and its replay, so the check
+    // runs under the receipt lock rather than against `prior`.
+    store.record_worktree_settlement_if(
+        record.attempt_id,
+        &serde_json::json!({
+            "schema_version":1,
+            "state":"retained",
+            "worktree":writer.worktree,
+            "reason":reason,
+            "cleanup_deferred":true,
+        }),
+        |current| current.is_none_or(|receipt| receipt["state"] != "pruning"),
+        &call,
+    )?;
     // One attempt. A miss records nothing; the gc sweep walks every lane.
     if let Err(error) = super::gc_cleanup::spawn(settled, delivery_override) {
         use std::io::Write;
