@@ -25,17 +25,17 @@ pub mod install;
 pub mod limits;
 mod metadata;
 pub mod mileage;
-pub mod telemetry_args;
-pub mod telemetry_value;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
+pub mod telemetry_args;
+pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-pub use telemetry_args::CostBy;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
+pub use telemetry_args::CostBy;
 
 use thiserror::Error;
 

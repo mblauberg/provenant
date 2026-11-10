@@ -1,9 +1,9 @@
 //! `telemetry value` and `telemetry cost`: plan value and cost, each read from
 //! the usage ledger. Nothing here prices anything; the ledger rows carry the
 //! cost settled with the attempt.
+use crate::Target;
 use crate::run::{Edge, Reply};
 use crate::telemetry_args::{CostBy, TelemetryCost, TelemetryValue};
-use crate::Target;
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_records::{CommandError, CommandResult, Outcome as Status};
 use provenant_run::ErrorKind;
@@ -79,9 +79,15 @@ fn money(totals: &report::Totals) -> String {
 }
 
 fn coverage(totals: &report::Totals) -> String {
-    let mut text = format!("{} of {} attempts priced", totals.priced_attempts, totals.attempts);
+    let mut text = format!(
+        "{} of {} attempts priced",
+        totals.priced_attempts, totals.attempts
+    );
     if totals.unattributed_attempts > 0 {
-        text.push_str(&format!(", {} without an account", totals.unattributed_attempts));
+        text.push_str(&format!(
+            ", {} without an account",
+            totals.unattributed_attempts
+        ));
     }
     text
 }
@@ -94,8 +100,12 @@ fn selects(target: &Target, row: &Row) -> bool {
     let prefix = |held: Option<&str>, part: &str| held.is_some_and(|held| held.starts_with(part));
     let (run, task) = (row.labels.run.as_deref(), row.labels.task.as_deref());
     if target.run.is_some() || target.task.is_some() || target.attempt.is_some() {
-        return target.run.is_none_or(|id| run == Some(id.to_string().as_str()))
-            && target.task.is_none_or(|id| task == Some(id.to_string().as_str()))
+        return target
+            .run
+            .is_none_or(|id| run == Some(id.to_string().as_str()))
+            && target
+                .task
+                .is_none_or(|id| task == Some(id.to_string().as_str()))
             && target
                 .attempt
                 .is_none_or(|id| row.attempt == id.to_string());
@@ -200,8 +210,8 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         .iter()
         .filter(|row| seconds(row) >= since)
         .collect();
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(io)?;
+    let config =
+        provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS).map_err(io)?;
     let history = crate::quota_history::read(
         edge.roots.state.as_path(),
         &crate::quota_history::Query {
@@ -271,8 +281,13 @@ fn value_inner(command: &TelemetryValue, edge: &Edge<'_>) -> Output {
         human.push_str("no account has a quota reading and a configured plan\n");
     }
     // Usage that cannot be tied to an account with a reading is stated, not dropped.
-    let unattributed = report::totals(in_window.iter().copied().filter(|row| row.account.is_none()))
-        .map_err(io)?;
+    let unattributed = report::totals(
+        in_window
+            .iter()
+            .copied()
+            .filter(|row| row.account.is_none()),
+    )
+    .map_err(io)?;
     if unattributed.attempts > 0 {
         human.push_str(&format!(
             "unattributed: {} ({})\n",
