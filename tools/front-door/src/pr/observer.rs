@@ -32,6 +32,7 @@ const PAGE: usize = 100;
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(15);
 const RATE_FILE: &str = "rate-limit.json";
+const RATE_LOCK: &str = "rate-limit.lock";
 const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// One reported check run or the latest state of one status context.
@@ -275,17 +276,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     Err(Fetch::Limited(reset)) => {
                         // A reset already past still pauses, and a later
                         // recorded reset is never replaced by an earlier one.
-                        let reset = reset
-                            .max(now.as_second().saturating_add(1))
-                            .max(self.recorded_reset());
-                        if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset }) {
-                            let _ = self.dir.atomic_write(
-                                OsStr::new(RATE_FILE),
-                                ".rate-",
-                                &bytes,
-                                PublishMode::Replace,
-                            );
-                        }
+                        let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
                         drop(guard);
                         if timestamp(reset) > deadline {
                             return Err(ObserveError::RateLimited {
@@ -320,7 +311,38 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         }
     }
 
-    /// The reset of a rate limit another waiter recorded, while it lasts.
+    /// Record a rate limit's reset, keeping the later of it and any already
+    /// recorded. The read-max-write runs under a repository lock, because the
+    /// per-commit lock does not order writers on different commits.
+    fn record_reset(&self, reset: i64) -> i64 {
+        // A lost lock only risks an earlier reset replacing a later one; the
+        // next limited read records the limit again.
+        let _guard = self
+            .dir
+            .lock(
+                OsStr::new(RATE_LOCK),
+                LockMode::Exclusive,
+                WaitBudget::up_to(
+                    SystemClock.mono_now(),
+                    DurationMicros::from_micros(5_000_000),
+                ),
+                &CancelToken::new(),
+                &SystemClock,
+            )
+            .ok();
+        let reset = reset.max(self.recorded_reset());
+        if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset }) {
+            let _ = self.dir.atomic_write(
+                OsStr::new(RATE_FILE),
+                ".rate-",
+                &bytes,
+                PublishMode::Replace,
+            );
+        }
+        reset
+    }
+
+    /// The reset recorded in the rate-limit file, or 0 when none is.
     fn recorded_reset(&self) -> i64 {
         self.dir
             .read_bounded(OsStr::new(RATE_FILE), 4096)
@@ -329,6 +351,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             .map_or(0, |limit| limit.reset)
     }
 
+    /// The reset of a rate limit another waiter recorded, while it lasts.
     fn rate_limited(&self, now: jiff::Timestamp) -> Option<i64> {
         let bytes = self.dir.read_bounded(OsStr::new(RATE_FILE), 4096).ok()?;
         let limit: RateLimit = serde_json::from_slice(&bytes).ok()?;
@@ -623,7 +646,7 @@ mod tests {
         collections::BTreeMap,
         hash::{Hash, Hasher},
         io,
-        sync::{Arc, Mutex},
+        sync::{Arc, Condvar, Mutex},
     };
 
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -645,9 +668,33 @@ mod tests {
         past_limit: bool,
         delay: Duration,
     }
+    /// Holds a forge read open until enough waiters have entered `checks`.
+    #[derive(Default)]
+    struct Gate {
+        entered: Mutex<usize>,
+        needed: Mutex<usize>,
+        changed: Condvar,
+    }
     #[derive(Clone, Default)]
-    struct Shared(Arc<Mutex<World>>);
+    struct Shared(Arc<Mutex<World>>, Arc<Gate>);
     impl Shared {
+        fn hold_reads_until(&self, waiters: usize) {
+            *self.1.needed.lock().expect("gate") = waiters;
+        }
+        fn enter(&self) {
+            *self.1.entered.lock().expect("gate") += 1;
+            self.1.changed.notify_all();
+        }
+        fn pass(&self) {
+            let needed = *self.1.needed.lock().expect("gate");
+            let entered = self.1.entered.lock().expect("gate");
+            drop(
+                self.1
+                    .changed
+                    .wait_while(entered, |entered| *entered < needed)
+                    .expect("gate"),
+            );
+        }
         fn new() -> Self {
             let shared = Self::default();
             shared.with(|world| world.now_ms = START);
@@ -665,6 +712,7 @@ mod tests {
     }
     impl Forge for Shared {
         fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
+            self.pass();
             let delay = self.with(|world| {
                 world.requests.push((path.into(), etag.map(str::to_owned)));
                 world.delay
@@ -751,13 +799,20 @@ mod tests {
                 .insert(HEAD.into(), page(vec![run("build", "in_progress", None)]));
             world.delay = Duration::from_millis(100);
         });
+        // The first read stays open until both waiters are inside `checks`,
+        // so the second must queue behind it and be served from its cache.
+        shared.hold_reads_until(2);
         let dir = state();
         let poll = |shared: &Shared| {
             std::thread::scope(|scope| {
                 let waiters: Vec<_> = (0..2)
                     .map(|_| {
                         let mut observer = shared.observer(dir.path());
-                        scope.spawn(move || observer.checks(HEAD, POLL, Duration::from_secs(60)))
+                        let shared = shared.clone();
+                        scope.spawn(move || {
+                            shared.enter();
+                            observer.checks(HEAD, POLL, Duration::from_secs(60))
+                        })
                     })
                     .collect();
                 waiters
