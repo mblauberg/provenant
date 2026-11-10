@@ -1124,7 +1124,16 @@ fn a_refused_first_account_hands_the_lane_to_the_next_account()
     }
     let prepared =
         prepare_over_two_accounts(&["spent-a"], None)?.map_err(|error| format!("{error}"))?;
-    assert_eq!(prepared.route.account_key.as_deref(), Some("ready"));
+    // Either remaining account is a valid next account; the router breaks the
+    // tie between two unprobed accounts, so the test does not pin which one.
+    assert!(
+        matches!(
+            prepared.route.account_key.as_deref(),
+            Some("ready" | "spent-b")
+        ),
+        "{:?}",
+        prepared.route.account_key
+    );
     assert!(
         prepared
             .skipped_routes
@@ -1157,8 +1166,9 @@ fn every_refused_account_is_named_when_the_lane_is_usage_limited()
         fallback_outcome,
         Some(provenant_records::run::PreparationFailure::UsageLimited)
     );
+    // The message lists each refused account as `accounts skipped: <label>: …`.
     for label in ["ready", "spent-a", "spent-b"] {
-        assert!(message.contains(&format!("account {label}")), "{message}");
+        assert!(message.contains(&format!("{label}: ")), "{message}");
     }
     Ok(())
 }
@@ -1177,7 +1187,7 @@ fn a_pinned_account_is_not_swapped_when_its_allowance_is_refused()
         )
         .into()),
         Err(PrepareError::Candidates { message, .. }) => {
-            assert!(message.contains("allowance exhausted"), "{message}");
+            assert!(message.contains("allowance is exhausted"), "{message}");
             assert!(!message.contains("account ready"), "{message}");
             Ok(())
         }
