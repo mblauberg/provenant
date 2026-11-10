@@ -180,6 +180,10 @@ pub fn follow(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "follow-up uses the landing boundaries"
+)]
 fn follow_with(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,

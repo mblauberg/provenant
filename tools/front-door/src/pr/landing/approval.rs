@@ -2,7 +2,7 @@
 //! at the head, or a Provenant review record whose review covers the head.
 use super::{
     LandingError,
-    ports::{Approval, Forge, MergeTree, Repo, ReviewRecord, ReviewRecords},
+    ports::{Approval, Forge, MergeTree, Repo, ReviewRecords},
 };
 use provenant_cli::domains::ApprovalSource;
 use provenant_core::review_cover::{self, ReviewGit, Reviewed};
@@ -18,7 +18,7 @@ pub struct Approvals<'a> {
 struct NoRecords;
 #[cfg(test)]
 impl ReviewRecords for NoRecords {
-    fn reviews(&self, _number: u64) -> Result<Vec<ReviewRecord>, LandingError> {
+    fn reviews(&self, _number: u64) -> Result<Vec<super::ports::ReviewRecord>, LandingError> {
         Ok(Vec::new())
     }
 }
