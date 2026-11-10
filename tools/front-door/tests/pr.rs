@@ -31,6 +31,11 @@ fn rig() -> Result<TestRig> {
         rig.project.join("checks.json"),
         r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#,
     )?;
+    // The fake forge has no reviews or target to read, so land on CI alone.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\napproval_tier = 'none'\n",
+    )?;
     Ok(rig)
 }
 #[path = "support/rest_calls.rs"]

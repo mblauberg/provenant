@@ -63,6 +63,8 @@ pub trait Forge {
     fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError>;
     fn repository_identity(&mut self) -> Result<String, LandingError>;
     fn target_branch(&mut self) -> Result<String, LandingError>;
+    /// The login the forge authenticates this run as.
+    fn actor(&mut self) -> Result<String, LandingError>;
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
@@ -154,6 +156,8 @@ pub trait Repo {
     fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError>;
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
+    /// The paths that differ between two commits or trees, both names of a rename.
+    fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError>;
     /// The merge base of two commits, or `None` when they share no history.
     fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError>;
 }

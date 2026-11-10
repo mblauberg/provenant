@@ -9,6 +9,18 @@ pub struct EligiblePr {
     pub head: String,
     pub approval: String,
     pub base_branch: String,
+    /// Paths changed after the review, none of them production code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_paths: Vec<String>,
+    /// Set when the chair landed the pull request without a covering review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<Accepted>,
+}
+/// A delta landed on the chair's word, with who gave it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accepted {
+    pub reason: String,
+    pub actor: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CandidateStep {

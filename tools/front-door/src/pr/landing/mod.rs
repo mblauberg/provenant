@@ -61,6 +61,7 @@ pub enum LandingError {
         report: Box<driver::Report>,
     },
 }
+use provenant_confinement::review_exempt::ReviewExempt;
 pub mod adapters;
 pub mod approval;
 pub mod budget;
@@ -86,6 +87,8 @@ pub struct Options {
     pub batch: bool,
     pub shadow: bool,
     pub tier: Option<String>,
+    /// Land a delta no review covers; the reason is recorded in the receipt.
+    pub accept_delta: Option<String>,
 }
 
 pub(crate) fn run(
@@ -266,6 +269,90 @@ fn gate_definition(
     })
 }
 
+/// The review-exempt paths of a project's host configuration.
+fn review_exempt(state: &std::path::Path, project: Option<&str>) -> ReviewExempt {
+    project.map_or_else(ReviewExempt::none, |project| {
+        provenant_confinement::run_config::RunConfig::review_exempt_at(state, project)
+    })
+}
+
+/// The approval source of a run: receipts need a registered project and the
+/// forge's repository.
+fn review_records(
+    forge: &mut dyn ports::Forge,
+    effective: &provenant_cli::domains::LandSettings,
+    state: &provenant_core::StateRoot,
+    project: Option<&str>,
+) -> Result<adapters::DeliveryReviews, Box<dyn std::error::Error>> {
+    use provenant_cli::domains::ApprovalSource;
+    let project_id = project.map(provenant_core::ProjectId::parse).transpose()?;
+    let scope = match (effective.approval, project_id) {
+        (ApprovalSource::Receipt, Some(project)) => Ok((project, adapters::repository_id(forge)?)),
+        (ApprovalSource::Receipt, None) => Err("needs a registered project".to_owned()),
+        (ApprovalSource::Forge, _) => Err("approval source is the forge".to_owned()),
+    };
+    Ok(adapters::DeliveryReviews::new(state.clone(), scope))
+}
+
+/// Decide a single pull request's approval with the function batch landing uses.
+fn single_approval(
+    number: u64,
+    head: Option<String>,
+    options: &Options,
+    effective: &provenant_cli::domains::LandSettings,
+    (resolved, project): (&crate::roots::Resolved, Option<&str>),
+    globals: &provenant_cli::Globals,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut forge, mut repo, _, _) = adapters::connect(
+        &resolved.project,
+        resolved.roots.state.as_path(),
+        globals,
+        workers,
+        Default::default(),
+    )?;
+    let info = forge.pull_request(number)?;
+    if info.state != ports::PullRequestState::Open {
+        return Ok(());
+    }
+    let reviews = review_records(&mut *forge, effective, &resolved.roots.state, project)?;
+    let exempt = review_exempt(resolved.roots.state.as_path(), project);
+    let approvals = approval::Approvals::new(effective.approval, &reviews).governed(
+        effective.approval_tier,
+        &exempt,
+        options.accept_delta.as_deref(),
+    );
+    let target = if approvals.needs_target() {
+        repo.fetch_target_untracked(&info.base_branch)?
+    } else {
+        String::new()
+    };
+    let head = head.unwrap_or_else(|| info.head.clone());
+    match approvals
+        .at(&mut *repo, &target)
+        .decide(&mut *forge, number, &head, &info.author)?
+    {
+        approval::Decision::Approved(approved) => {
+            if let Some(accepted) = approved.accepted {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: pull request #{number} lands without a review covering its delta; accepted by {}: {}",
+                    accepted.actor,
+                    accepted.reason
+                );
+            }
+            Ok(())
+        }
+        approval::Decision::Refused(reason) => Err(super::wait::failure(
+            "LAND_REFUSED",
+            format!(
+                "pull request #{number} was refused: {reason}; review the delta or pass --accept-delta REASON"
+            ),
+        )),
+    }
+}
+
 fn run_inner(
     options: Options,
     globals: &provenant_cli::Globals,
@@ -374,6 +461,15 @@ fn run_inner(
             .as_deref()
             .map(|name| super::git::Git::new()?.resolve_commit(&resolved.project, name))
             .transpose()?;
+        single_approval(
+            options.numbers[0],
+            head.map(|head| head.to_string()),
+            &options,
+            &effective,
+            (&resolved, project.as_deref()),
+            globals,
+            workers,
+        )?;
         return Ok(super::land::run(
             options.numbers[0],
             head,
@@ -408,22 +504,13 @@ fn run_inner(
         tracking,
     )?;
     let target = forge.target_branch()?;
-    let project_id = project
-        .as_deref()
-        .map(provenant_core::ProjectId::parse)
-        .transpose()?;
-    let scope = match (effective.approval, project_id) {
-        (provenant_cli::domains::ApprovalSource::Receipt, Some(project)) => {
-            Ok((project, adapters::repository_id(&mut *forge)?))
-        }
-        (provenant_cli::domains::ApprovalSource::Receipt, None) => {
-            Err("needs a registered project".to_owned())
-        }
-        (provenant_cli::domains::ApprovalSource::Forge, _) => {
-            Err("approval source is the forge".to_owned())
-        }
-    };
-    let reviews = adapters::DeliveryReviews::new(resolved.roots.state.clone(), scope);
+    let reviews = review_records(
+        &mut *forge,
+        &effective,
+        &resolved.roots.state,
+        project.as_deref(),
+    )?;
+    let exempt = review_exempt(resolved.roots.state.as_path(), project.as_deref());
     let result = driver::run(
         &mut *forge,
         &mut *repo,
@@ -437,7 +524,11 @@ fn run_inner(
             gate: &definition,
             shadow: options.shadow,
             state: resolved.roots.state.as_path(),
-            approvals: approval::Approvals::new(effective.approval, &reviews),
+            approvals: approval::Approvals::new(effective.approval, &reviews).governed(
+                effective.approval_tier,
+                &exempt,
+                options.accept_delta.as_deref(),
+            ),
         },
     );
     let (mut report, failure) = match result {

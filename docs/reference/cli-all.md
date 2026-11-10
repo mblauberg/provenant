@@ -1876,6 +1876,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
 | `--poll` | `{"bounds": [1, 18446744073709551615], "description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
 | `--explain` | `{"defaults": ["false"], "description": "Show the resolved landing policy without landing", "name": "explain", "values": ["true", "false"]}` |
+| `--accept-delta` | `{"description": "Land a delta no review covers, recording this reason and who accepted it", "name": "accept_delta"}` |
 
 ```json
 {
@@ -1895,7 +1896,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "head",
         "wait",
         "poll",
-        "explain"
+        "explain",
+        "accept_delta"
       ],
       "multiple": true,
       "name": "Land",

@@ -1,6 +1,6 @@
 use super::{
     LandingError,
-    approval::{Approvals, Approver},
+    approval::{Approvals, Approver, Decision},
     model::*,
     ports::{Forge, Repo},
 };
@@ -96,14 +96,17 @@ pub fn revalidate_with_reasons(
     for step in &candidate.steps {
         let pr = &step.pr;
         let head = forge.head(pr.number)?;
-        let reason = if forge.pull_request(pr.number)?.base_branch != pr.base_branch {
+        let info = forge.pull_request(pr.number)?;
+        let reason = if info.base_branch != pr.base_branch {
             Some("base branch changed".to_owned())
         } else if head != pr.head {
             Some("head changed".to_owned())
         } else {
-            let standing = approver.approvals(forge, pr.number, &pr.head)?;
-            (!standing.includes(&pr.approval))
-                .then(|| standing.exclusion("approval for the pinned head changed"))
+            match approver.decide(forge, pr.number, &pr.head, &info.author)? {
+                Decision::Approved(approved) if approved.reference == pr.approval => None,
+                Decision::Approved(_) => Some("approval for the pinned head changed".to_owned()),
+                Decision::Refused(reason) => Some(reason),
+            }
         };
         if let Some(reason) = reason {
             excluded.push((pr.clone(), reason));
@@ -235,6 +238,8 @@ mod tests {
                 number,
                 head: head.into(),
                 approval: format!("approval-{number}"),
+                carried_paths: Vec::new(),
+                accepted: None,
                 base_branch: "main".into(),
             },
             commit: commit.into(),

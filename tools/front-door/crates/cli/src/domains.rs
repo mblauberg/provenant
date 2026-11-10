@@ -37,6 +37,7 @@ pub struct LandSettings {
     pub batch_size: u64,
     pub batch_wait_seconds: u64,
     pub approval: ApprovalSource,
+    pub approval_tier: ApprovalTier,
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
     pub publish_settle_seconds: u64,
@@ -65,6 +66,8 @@ pub struct LandOverride {
     pub batch_wait_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_tier: Option<ApprovalTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_ref_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +177,12 @@ land_enum!(GateKind, Checks, Commands);
 // What stands as a pull request's approval for batch landing: an approving
 // forge review at the head, or a Provenant review record that covers it.
 land_enum!(ApprovalSource, Forge, Receipt);
+// What approval a pull request needs. `auto` is `none` for a pull request that
+// touches only tests, docs or review-exempt paths and `carry` otherwise.
+// `none`: CI only. `carry`: a review that still covers the head, a change
+// after it that touches no production code, or a review of the delta since.
+// `delta`: as `carry`, but every change after the review needs its own review.
+land_enum!(ApprovalTier, Auto, None, Carry, Delta);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -271,6 +280,7 @@ impl Default for LandSettings {
             batch_size: 8,
             batch_wait_seconds: 30,
             approval: ApprovalSource::Forge,
+            approval_tier: ApprovalTier::Auto,
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
             publish_settle_seconds: 30,
@@ -411,6 +421,7 @@ impl DomainConfig for PrSettings {
         errors
     }
 }
+const TIERS: &[&str] = &["auto", "none", "carry", "delta"];
 const PR_SECTION: DomainSection = DomainSection::new::<PrSettings>("pr", |_| {
     r#"[land]
 poll_seconds = 30
@@ -418,6 +429,7 @@ integration = "batch"
 batch_size = 8
 batch_wait_seconds = 30
 approval = "forge"
+approval_tier = "auto"
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
 publish_settle_seconds = 30
@@ -451,6 +463,7 @@ timeout_seconds = 60
     FieldMetadata::int("land.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.batch_wait_seconds", "int"),
     FieldMetadata::enumeration("land.approval", &["forge", "receipt"]),
+    FieldMetadata::enumeration("land.approval_tier", TIERS),
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
     FieldMetadata::new("land.publish_settle_seconds", "int"),
@@ -495,6 +508,8 @@ timeout_seconds = 60
     FieldMetadata::new("land.tiers.{tier}.batch_wait_seconds", "int"),
     FieldMetadata::enumeration("land.projects.{project}.approval", &["forge", "receipt"]),
     FieldMetadata::enumeration("land.tiers.{tier}.approval", &["forge", "receipt"]),
+    FieldMetadata::enumeration("land.projects.{project}.approval_tier", TIERS),
+    FieldMetadata::enumeration("land.tiers.{tier}.approval_tier", TIERS),
     FieldMetadata::new("land.projects.{project}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.tiers.{tier}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.projects.{project}.max_rebuilds", "int"),
