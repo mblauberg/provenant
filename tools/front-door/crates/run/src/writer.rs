@@ -2730,7 +2730,12 @@ impl WriterLaunch {
                 self.base, moved.moved
             );
             if !moved.kept.is_empty() {
-                let listed: Vec<_> = moved.kept.iter().take(UNCOMMITTED_LISTED).cloned().collect();
+                let listed: Vec<_> = moved
+                    .kept
+                    .iter()
+                    .take(UNCOMMITTED_LISTED)
+                    .cloned()
+                    .collect();
                 note.push_str(&format!("; left as found: {}", listed.join(", ")));
             }
             Ok(note)

@@ -179,8 +179,7 @@ fn side(
     let Some(executable) = mode_of(mode) else {
         return Side::Other;
     };
-    if !metadata.file_type().is_file()
-        || (metadata.permissions().mode() & 0o111 != 0) != executable
+    if !metadata.file_type().is_file() || (metadata.permissions().mode() & 0o111 != 0) != executable
     {
         return Side::Other;
     }

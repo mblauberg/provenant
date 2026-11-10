@@ -672,7 +672,10 @@ fn committed_merge_leaves_the_bound_worktree_clean_at_the_lane_tip()
         private_git(&fixture, &scratch, &git, &["merge", "--no-edit", &theirs])?;
         Ok(())
     })?;
-    assert_eq!(worktree_git(&fixture, &git, &["status", "--porcelain"])?, "");
+    assert_eq!(
+        worktree_git(&fixture, &git, &["status", "--porcelain"])?,
+        ""
+    );
     let head = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
     let lane = worktree_git(&fixture, &git, &["rev-parse", "refs/heads/lane"])?;
     assert_eq!(head, lane);
@@ -705,10 +708,9 @@ fn unpublished_lane_files_move_back_without_touching_foreign_edits()
     let tip = private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?;
     // Someone else edits a path the lane also committed.
     std::fs::write(wt.join("foreign.txt"), "someone else\n")?;
-    let repo_source = crate::objects::bound_source(&Directory::open_anchor(
-        &fixture.root.join("attempt"),
-    )?)?
-    .ok_or("source")?;
+    let repo_source =
+        crate::objects::bound_source(&Directory::open_anchor(&fixture.root.join("attempt"))?)?
+            .ok_or("source")?;
     let (base_oid, tip_oid) = (GitOid::parse(&base)?, GitOid::parse(&tip)?);
     let scratch_git = scratch.join("git-common");
     let objects = scratch.join("git-objects");
