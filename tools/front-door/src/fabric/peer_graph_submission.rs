@@ -635,7 +635,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     // reaches preparation, whose refusal now has an explicit graph cause.
     assert_eq!(node.advance_error_code.as_deref(), Some("preparation_refused"), "{node:#?}");
     let attempt = node.attempts.first().ok_or("review attempt missing")?;
-    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::RouteResolutionRefused)), "{node:#?}");
+    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::AccessPolicyRefused)), "{node:#?}");
     assert!(!attempt.launched, "{node:#?}");
     let key = &attempt.key;
     let operation = graph_operation("graph-attempt-operation", key)?;
