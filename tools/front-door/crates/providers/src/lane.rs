@@ -2574,7 +2574,10 @@ mod tests {
                 _ => None,
             });
             assert_eq!(
-                servers.ok_or(ProviderError::Malformed)?.get("fabric").is_some(),
+                servers
+                    .ok_or(ProviderError::Malformed)?
+                    .get("fabric")
+                    .is_some(),
                 fabric_mcp
             );
         }

@@ -4390,13 +4390,11 @@ fn opting_out_keeps_an_edited_owned_entry() {
     let mut f = Fixture::new();
     apply(&f);
     let config = f.home.join(".codex/config.toml");
-    let edited = fs::read_to_string(&config)
-        .unwrap()
-        .replacen(
-            "[mcp_servers.fabric]",
-            "[mcp_servers.fabric]\nstartup_timeout_sec = 5",
-            1,
-        );
+    let edited = fs::read_to_string(&config).unwrap().replacen(
+        "[mcp_servers.fabric]",
+        "[mcp_servers.fabric]\nstartup_timeout_sec = 5",
+        1,
+    );
     assert!(edited.contains("startup_timeout_sec"), "{edited}");
     fs::write(&config, &edited).unwrap();
     f.targets.fabric_mcp = false;
