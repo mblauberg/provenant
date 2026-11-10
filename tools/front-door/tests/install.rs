@@ -281,6 +281,7 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
         } else {
             install_args.extend(["--bin-dir".into(), bin_dir.into_os_string()]);
         }
+        enable_fabric_mcp(&rig)?;
         let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
         let installed = rig.execute_os(binary, &install_args, None)?;
         assert_eq!(
@@ -510,7 +511,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     fs::write(
         rig.state.join("config.toml"),
         // Sections other commands write must not block installation.
-        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n",
+        "schema_version=1\n[domains.fabric]\nclient_label=\"install-fixture\"\n[domains.accounts]\n[knobs]\n'fabric.mcp_server'=true\n",
     )?;
     let installed = rig.execute_os(binary, &args(&stage, false), None)?;
     assert_eq!(
@@ -569,6 +570,7 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
     let second = staged_named(&rig, "new-release", b"new release")?;
     let config = rig.root.join("claude");
     assert!(!config.starts_with(&rig.home));
+    enable_fabric_mcp(&rig)?;
     for (stage, hooks) in [(&first, true), (&second, false)] {
         let mut args = vec![
             "install",
@@ -2697,6 +2699,7 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
     support::register_account(&rig, "claude", "work", "work-key", &claude[1])?;
     support::register_account(&rig, "claude", "pro", "pro-key", &claude[2])?;
     support::register_account(&rig, "codex", "alt", "alt-key", &codex[1])?;
+    enable_fabric_mcp(&rig)?;
     // User-owned content and credentials sit beside the managed entries.
     fs::write(
         claude[2].join("settings.json"),
@@ -2963,6 +2966,19 @@ fn registering_an_account_installs_managed_content_when_an_install_exists() -> R
     Ok(())
 }
 
+/// Opt the Fabric MCP server in, keeping whatever the config already holds.
+fn enable_fabric_mcp(rig: &TestRig) -> Result {
+    fs::create_dir_all(&rig.state)?;
+    let config = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = match fs::read_to_string(&config) {
+        Ok(text) => text.parse()?,
+        Err(_) => "schema_version = 1\n".parse()?,
+    };
+    doc["knobs"]["fabric.mcp_server"] = toml_edit::value(true);
+    fs::write(config, doc.to_string())?;
+    Ok(())
+}
+
 fn write_accounts_section(rig: &TestRig, edit: impl FnOnce(&mut toml_edit::Table)) -> Result {
     let config = rig.state.join("config.toml");
     let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
@@ -2996,6 +3012,7 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
     }
     support::register_account(&rig, "claude", "work", "work-key", &work)?;
     support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
+    enable_fabric_mcp(&rig)?;
     let source = rig.root.join("source-settings.json");
     let write_source = |style: &str| -> Result {
         fs::write(

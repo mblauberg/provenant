@@ -96,7 +96,6 @@ pub struct Evidence {
     pub model: Option<String>,
     pub risk_tier: Option<String>,
     pub task_kind: Option<String>,
-    pub cost_microdollars: Option<u64>,
     pub confirmed: Option<u64>,
     pub false_positives: Option<u64>,
 }

@@ -803,8 +803,17 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
             }
         })
     });
-    let mut summary = crate::Summary::new(headline, rows, next);
-    for lane in listed.iter().take(crate::limits::SUMMARY_ROWS) {
+    // Every active and needs-attention lane is listed whatever their number;
+    // each row is still bounded in bytes. Only settled lanes are held back.
+    let mut summary = crate::Summary::complete(headline, rows, next);
+    let settled = lanes.len() - listed.len();
+    if settled > 0 {
+        summary.lines.push(format!(
+            "{settled} settled lane{} not listed; provenant status --all lists them",
+            if settled == 1 { "" } else { "s" }
+        ));
+    }
+    for lane in &listed {
         if lane.state == "failed" {
             if let Some(reason) = &lane.git_import_failure {
                 summary

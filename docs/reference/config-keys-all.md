@@ -494,6 +494,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."` |
 | `type` | `"bool"` |
 
+## `fabric.mcp_server`
+
+| Field | Value |
+|---|---|
+| `default` | `false` |
+| `effect` | `"Register the Fabric MCP server (&#96;provenant fabric mcp&#96;) in installed harness configurations and launch lanes with it, for clients without a shell."` |
+| `reader` | `"tools/front-door/crates/config/src/harness.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Off keeps every default session and lane free of the MCP tool surface, since the &#96;provenant fabric&#96; CLI covers each tool; on adds the server and its tool schemas to every session context."` |
+| `type` | `"bool"` |
+
 ## `lanes.context_handoff_tokens`
 
 | Field | Value |

@@ -2209,7 +2209,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
     "dates mean midnight UTC; timestamps need an offset",
     "since must precede until"
   ],
-  "description": "Summarise local attempts, usage and cost",
+  "description": "Summarise local attempts and usage",
   "groups": [
     {
       "arguments": [],
@@ -2343,7 +2343,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 ```json
 {
-  "description": "Report quota mileage and effective token rates from quota history and ingested usage",
+  "description": "Report quota mileage from quota history and ingested usage",
   "groups": [
     {
       "arguments": [
@@ -2357,6 +2357,58 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
       ],
       "multiple": true,
       "name": "Mileage",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant telemetry value`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"description": "Account label or key", "name": "account"}` |
+| `--window` | `{"description": "Quota window, such as five_hour or weekly (default every window)", "name": "window"}` |
+| `--since` | `{"description": "Count usage from this date or timestamp, or a span such as 7d (default 30d)", "name": "since"}` |
+
+```json
+{
+  "description": "Compare each account's API-equivalent lane usage with its plan price and quota readings",
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "window",
+        "since"
+      ],
+      "multiple": true,
+      "name": "TelemetryValue",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant telemetry cost`
+
+| Argument | Contract |
+|---|---|
+| `target` | `{"description": "Count only this attempt, task or run; default every attempt in the ledger", "name": "target", "positional": true}` |
+| `--by` | `{"description": "Break the cost down; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["route", "account", "model", "graph", "node"]}` |
+| `--since` | `{"description": "Count attempts finished from this date or timestamp, or a span such as 7d", "name": "since"}` |
+
+```json
+{
+  "description": "Report API-equivalent cost from the usage ledger, for one attempt or grouped",
+  "groups": [
+    {
+      "arguments": [
+        "target",
+        "by",
+        "since"
+      ],
+      "multiple": true,
+      "name": "TelemetryCost",
       "required": false
     }
   ]

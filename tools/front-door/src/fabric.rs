@@ -5,6 +5,7 @@ mod graph_status;
 mod interface;
 #[cfg(test)]
 mod lane_read_tests;
+mod refusal_detail;
 mod unified;
 pub(crate) use unified::{
     GraphCommand, append_graph_status, read_lane_graph, read_status_rows, target_text,
