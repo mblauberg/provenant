@@ -11,6 +11,8 @@ struct Fake {
     keys_read: AtomicUsize,
     warnings: Mutex<Vec<String>>,
     seen: Mutex<Vec<String>>,
+    repositories: Mutex<Vec<String>>,
+    lane: std::sync::atomic::AtomicBool,
 }
 
 impl Backend for &Fake {
@@ -28,7 +30,14 @@ impl Backend for &Fake {
     fn find_installation(&self, _: &str) -> Result<u64> {
         Ok(7)
     }
-    fn mint(&self, jwt: &str, installation: u64) -> Result<Minted> {
+    fn in_lane(&self) -> bool {
+        self.lane.load(Ordering::SeqCst)
+    }
+    fn mint(&self, jwt: &str, installation: u64, repository: &str) -> Result<Minted> {
+        self.repositories
+            .lock()
+            .unwrap()
+            .push(repository.to_owned());
         self.seen.lock().unwrap().push(jwt.to_owned());
         let n = self.mints.fetch_add(1, Ordering::SeqCst);
         Ok(Minted {
@@ -57,7 +66,7 @@ const READ: &[&str] = &["gh", "api", "repos/{owner}/{repo}/pulls/1"];
 #[test]
 fn app_configured_calls_carry_installation_token() {
     let fake = Fake::default();
-    let identity = Identity::new(app(), &fake);
+    let identity = Identity::new(app(), &fake).in_repository("repo");
     assert_eq!(identity.token_for(READ).as_deref(), Some("ghs_install_7_0"));
     assert!(fake.warnings.lock().unwrap().is_empty());
 }
@@ -65,7 +74,7 @@ fn app_configured_calls_carry_installation_token() {
 #[test]
 fn no_app_uses_user_login_and_warns_once() {
     let fake = Fake::default();
-    let identity = Identity::new(None, &fake);
+    let identity = Identity::new(None, &fake).in_repository("repo");
     assert_eq!(identity.token_for(READ), None);
     assert_eq!(identity.token_for(READ), None);
     let warnings = fake.warnings.lock().unwrap();
@@ -77,7 +86,7 @@ fn no_app_uses_user_login_and_warns_once() {
 #[test]
 fn token_is_reused_until_five_minutes_before_expiry() {
     let fake = Fake::default();
-    let identity = Identity::new(app(), &fake);
+    let identity = Identity::new(app(), &fake).in_repository("repo");
     assert_eq!(identity.token_for(READ).as_deref(), Some("ghs_install_7_0"));
     fake.now.store(3600 - 301, Ordering::SeqCst);
     assert_eq!(identity.token_for(READ).as_deref(), Some("ghs_install_7_0"));
@@ -92,7 +101,7 @@ fn token_is_reused_until_five_minutes_before_expiry() {
 #[test]
 fn private_key_never_reaches_jwt_token_or_warnings() {
     let fake = Fake::default();
-    let identity = Identity::new(app(), &fake);
+    let identity = Identity::new(app(), &fake).in_repository("repo");
     let token = identity.token_for(READ).unwrap_or_default();
     let mut seen = fake.seen.lock().unwrap().clone();
     seen.push(token);
@@ -165,11 +174,59 @@ fn app_never_posts_verdicts_approvals_or_comments() {
             "-f",
             "query=mutation { addComment(input:{}) { clientMutationId } }",
         ],
+        &[
+            "gh",
+            "api",
+            "--method",
+            "POST",
+            "repos/{owner}/{repo}/pulls/1/reviews",
+            "-f",
+            "event=APPROVE",
+            "-f",
+            "note=graphql",
+        ],
+        &[
+            "gh",
+            "api",
+            "repos/{owner}/{repo}/issues/1/comments?x=graphql",
+            "-f",
+            "body=x",
+        ],
+        &["gh", "api", "graphql", "--input", "mutation.json"],
+        &["gh", "api", "graphql", "-F", "query=@mutation.graphql"],
+        &[
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=mutation { mergePullRequest(input:{}) { clientMutationId } }",
+        ],
+        &[
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=query { a } mutation { b }",
+        ],
+        &[
+            "gh",
+            "api",
+            "--method",
+            "PUT",
+            "repos/{owner}/{repo}/pulls/1/merge/../reviews",
+        ],
+        &[
+            "gh",
+            "api",
+            "--method",
+            "PUT",
+            "repos/{owner}/{repo}/pulls/x/merge",
+        ],
     ];
     for argv in denied {
         assert!(!app_may_run(argv), "{argv:?}");
         let fake = Fake::default();
-        let identity = Identity::new(app(), &fake);
+        let identity = Identity::new(app(), &fake).in_repository("repo");
         assert_eq!(identity.token_for(argv), None, "{argv:?}");
         assert_eq!(fake.mints.load(Ordering::SeqCst), 0, "{argv:?}");
     }
@@ -200,13 +257,6 @@ fn app_never_posts_verdicts_approvals_or_comments() {
             "graphql",
             "-f",
             "query=query { viewer { login } }",
-        ],
-        &[
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            "query=mutation { mergePullRequest(input:{}) { clientMutationId } }",
         ],
     ];
     for argv in allowed {
@@ -290,4 +340,60 @@ fn openssl_signature_verifies_for_a_generated_key() {
         s.to_str().unwrap(),
         m.to_str().unwrap()
     ]));
+}
+
+#[test]
+fn installation_tokens_are_limited_to_the_target_repository() {
+    let fake = Fake::default();
+    let identity = Identity::new(app(), &fake).in_repository("repo");
+    assert!(identity.token_for(READ).is_some());
+    assert_eq!(*fake.repositories.lock().unwrap(), ["repo"]);
+    // Without a known repository no token is minted.
+    let fake = Fake::default();
+    let identity = Identity::new(app(), &fake);
+    assert_eq!(identity.token_for(READ), None);
+    assert_eq!(fake.mints.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_lane_never_mints() {
+    let fake = Fake::default();
+    fake.lane.store(true, Ordering::SeqCst);
+    let identity = Identity::new(app(), &fake).in_repository("repo");
+    assert_eq!(identity.token_for(READ), None);
+    assert_eq!(fake.keys_read.load(Ordering::SeqCst), 0);
+    assert_eq!(fake.mints.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn remote_urls_name_owner_and_repository() {
+    for url in [
+        "https://github.com/acme/widget.git\n",
+        "git@github.com:acme/widget.git",
+        "ssh://git@github.com/acme/widget/",
+    ] {
+        assert_eq!(
+            remote_slug(url),
+            Some(("acme".into(), "widget".into())),
+            "{url}"
+        );
+    }
+    assert_eq!(remote_slug("widget"), None);
+}
+
+#[test]
+fn an_owner_app_serves_its_repositories_and_a_project_app_overrides_it() {
+    let app = |id| GithubAppConfig {
+        app_id: id,
+        installation_id: None,
+        private_key_path: None,
+        keychain_account: Some("owner".into()),
+    };
+    let mut policy = provenant_config::GithubPolicy::default();
+    policy.apps.insert("Acme".into(), app(1));
+    assert_eq!(policy.app_for(Some("acme")).map(|a| a.app_id), Some(1));
+    assert_eq!(policy.app_for(Some("other")), None);
+    assert_eq!(policy.app_for(None), None);
+    policy.app = Some(app(2));
+    assert_eq!(policy.app_for(Some("acme")).map(|a| a.app_id), Some(2));
 }

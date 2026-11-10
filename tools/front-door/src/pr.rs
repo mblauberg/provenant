@@ -10,7 +10,7 @@ use provenant_records::{CommandResult, Outcome};
 use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
-mod app_identity;
+pub(crate) mod app_identity;
 pub(super) mod contributions;
 mod git;
 pub(crate) mod land;

@@ -370,15 +370,24 @@ installation, which gives them their own REST bucket instead of the user's
 3. Add an `app` object to the project's `github.json` in the state directory:
    `{"app": {"app_id": 123, "installation_id": 456, "keychain_account": "ACCOUNT"}}`
    or `"private_key_path": "/absolute/path/key.pem"`. `installation_id` is
-   optional and is looked up when absent.
+   optional and is looked up when absent. To serve every repository under one
+   owner, key the entry by owner instead: `{"apps": {"OWNER": {"app_id": 123, ...}}}`.
+   An `app` entry in a project's own `github.json` overrides the owner's.
 
 Provenant mints a one-hour installation token, reuses it until five minutes
 before expiry, and reads the key only when minting. With no App configured it
 uses the user's `gh` login and warns once per process. The App identity only
-reads and merges; review verdicts, approvals and comments always stay on the
-user's identity. Lanes keep the user's login. `lanes.github_request_budget`
+reads and merges, and only on exact endpoints (REST reads, the pull-request
+merge call, inline GraphQL queries); review verdicts, approvals, comments and
+every GraphQL mutation stay on the user's identity. Each token is limited to the
+one target repository. A lane never mints a token, and a lane whose sandbox
+could read the key file is refused at launch. Lanes keep the user's login. `lanes.github_request_budget`
 (default 100, 0 off) stops a lane that makes more `gh` requests than that, and
 the lane's settlement records its `github_requests`.
+
+The request budget is a pacing aid, not a security boundary. It counts `gh`
+invocations, so one `gh api --paginate` call makes many requests but counts
+once, and the counter file lives in the lane's scratch, so the lane can write it.
 
 ### Merge author identity
 

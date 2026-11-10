@@ -380,6 +380,7 @@ outside any repository. It is read only when an installation token is minted,
 passed to `openssl` on stdin, and never logged, written to run files, placed in
 a lane environment or copied into a lane. The App identity never acts as a
 reviewer: only reads and merges use it.
+A lane never mints a token, and a lane whose sandbox reaches the key path is refused at launch. The per-lane request budget is a pacing aid, not a security boundary.
 - Why (default): a leaked App key would let any lane act as the repository's automation.
 - Test: `src/pr/app_identity/tests.rs`
 - Owner: `src/pr/app_identity.rs`

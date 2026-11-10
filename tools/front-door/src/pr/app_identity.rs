@@ -45,7 +45,10 @@ pub(crate) trait Backend: Send + Sync {
     fn sign(&self, key: &[u8], message: &[u8]) -> Result<Vec<u8>>;
     /// Installation id for the project's repository, from an App JWT.
     fn find_installation(&self, jwt: &str) -> Result<u64>;
-    fn mint(&self, jwt: &str, installation: u64) -> Result<Minted>;
+    /// Mint a token restricted to the one repository named `repository`.
+    fn mint(&self, jwt: &str, installation: u64, repository: &str) -> Result<Minted>;
+    /// Whether this process runs inside a lane. A lane never mints.
+    fn in_lane(&self) -> bool;
     fn warn(&self, message: &str);
 }
 
@@ -56,6 +59,8 @@ struct Cached {
 
 pub(crate) struct Identity<B: Backend> {
     config: Option<GithubAppConfig>,
+    /// Name of the target repository, which bounds every minted token.
+    repository: Option<String>,
     backend: B,
     cache: Mutex<Option<Cached>>,
     warned: Mutex<bool>,
@@ -65,10 +70,16 @@ impl<B: Backend> Identity<B> {
     pub(crate) fn new(config: Option<GithubAppConfig>, backend: B) -> Self {
         Self {
             config,
+            repository: None,
             backend,
             cache: Mutex::new(None),
             warned: Mutex::new(false),
         }
+    }
+
+    pub(crate) fn in_repository(mut self, name: impl Into<String>) -> Self {
+        self.repository = Some(name.into());
+        self
     }
 
     fn warn_once(&self, message: &str) {
@@ -82,7 +93,7 @@ impl<B: Backend> Identity<B> {
 
     /// The token to run `argv` with, or `None` for the user's login.
     pub(crate) fn token_for(&self, argv: &[&str]) -> Option<String> {
-        if argv.first() != Some(&"gh") {
+        if argv.first() != Some(&"gh") || self.backend.in_lane() {
             return None;
         }
         let Some(config) = &self.config else {
@@ -121,7 +132,11 @@ impl<B: Backend> Identity<B> {
             Some(id) => id,
             None => self.backend.find_installation(&jwt)?,
         };
-        let minted = self.backend.mint(&jwt, installation)?;
+        let repository = self
+            .repository
+            .as_deref()
+            .ok_or("target repository unknown; a token must be limited to one")?;
+        let minted = self.backend.mint(&jwt, installation, repository)?;
         *cache = Some(Cached {
             token: minted.token.clone(),
             expires_at: minted.expires_at,
@@ -181,44 +196,97 @@ pub(crate) fn app_may_run(argv: &[&str]) -> bool {
     }
 }
 
+/// Flags of `gh api` that consume the following argument.
+const VALUE_FLAGS: [&str; 11] = [
+    "-H",
+    "--header",
+    "-q",
+    "--jq",
+    "-t",
+    "--template",
+    "--hostname",
+    "--cache",
+    "-p",
+    "--preview",
+    "--input",
+];
+
+/// Exact-endpoint, exact-method matching. GraphQL is read-only: only an inline
+/// `query`, never a mutation, subscription or a body read from a file.
 fn api_may_run(args: &[&str]) -> bool {
-    let joined = args.join(" ").to_ascii_lowercase();
-    if joined.contains("graphql") {
-        if !joined.contains("mutation") {
-            return true;
-        }
-        return joined.contains("mergepullrequest")
-            && !["review", "comment", "approve"]
-                .iter()
-                .any(|word| joined.contains(word));
-    }
     let mut method = None;
+    let mut endpoint = None;
+    let mut query = None;
     let mut body = false;
-    let mut iter = args.iter();
+    let mut iter = args.iter().copied();
     while let Some(arg) = iter.next() {
-        match *arg {
-            "-X" | "--method" => method = iter.next().map(|m| m.to_ascii_uppercase()),
-            "-f" | "-F" | "--field" | "--raw-field" | "--input" => body = true,
-            other => {
-                if let Some(value) = other.strip_prefix("--method=") {
-                    method = Some(value.to_ascii_uppercase());
-                } else if other.starts_with("--field=")
-                    || other.starts_with("--raw-field=")
-                    || other.starts_with("--input=")
-                {
-                    body = true;
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if arg.starts_with("--") => (flag, Some(value)),
+            _ => (arg, None),
+        };
+        match flag {
+            "--input" => return false,
+            "-X" | "--method" => {
+                let value = inline.or_else(|| iter.next());
+                method = value.map(str::to_ascii_uppercase);
+            }
+            "-f" | "-F" | "--field" | "--raw-field" => {
+                body = true;
+                let Some(value) = inline.or_else(|| iter.next()) else {
+                    return false;
+                };
+                if let Some(text) = value.strip_prefix("query=") {
+                    if query.replace(text).is_some() {
+                        return false;
+                    }
+                }
+            }
+            flag if VALUE_FLAGS.contains(&flag) => {
+                if inline.is_none() {
+                    iter.next();
+                }
+            }
+            flag if flag.starts_with('-') => {}
+            _ => {
+                if endpoint.replace(arg.trim_start_matches('/')).is_some() {
+                    return false;
                 }
             }
         }
     }
+    let Some(endpoint) = endpoint else {
+        return false;
+    };
     let method = method.unwrap_or_else(|| if body { "POST" } else { "GET" }.to_owned());
+    if endpoint == "graphql" {
+        return method == "POST" && query.is_some_and(is_read_query);
+    }
     match method.as_str() {
         "GET" | "HEAD" => true,
-        "PUT" => args.iter().any(|arg| {
-            arg.contains("/pulls/") && (arg.ends_with("/merge") || arg.ends_with("/merge-async"))
-        }),
+        "PUT" => is_merge_endpoint(endpoint),
         _ => false,
     }
+}
+
+/// An inline query operation with no mutation or subscription anywhere in it.
+fn is_read_query(text: &str) -> bool {
+    let lower = text.trim_start().to_ascii_lowercase();
+    (lower.starts_with("query") || lower.starts_with('{'))
+        && !lower.contains("mutation")
+        && !lower.contains("subscription")
+}
+
+/// `repos/{owner}/{repo}/pulls/{number}/merge` (or `merge-async`).
+fn is_merge_endpoint(endpoint: &str) -> bool {
+    let parts: Vec<&str> = endpoint.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["repos", owner, repo, "pulls", number, "merge" | "merge-async"]
+            if !owner.is_empty()
+                && !repo.is_empty()
+                && !number.is_empty()
+                && number.bytes().all(|b| b.is_ascii_digit())
+    )
 }
 
 /// The key bytes from a file the owner keeps outside every repository, mode
@@ -374,14 +442,19 @@ impl Backend for SystemBackend {
             .ok_or_else(|| "App is not installed on this repository".into())
     }
 
-    fn mint(&self, jwt: &str, installation: u64) -> Result<Minted> {
+    fn in_lane(&self) -> bool {
+        provenant_cli::fabric::in_lane()
+    }
+
+    fn mint(&self, jwt: &str, installation: u64, repository: &str) -> Result<Minted> {
         let endpoint = format!("app/installations/{installation}/access_tokens");
         let fields: Vec<String> = PERMISSIONS
             .iter()
             .map(|(name, level)| format!("permissions[{name}]={level}"))
             .collect();
+        let repositories = format!("repositories[]={repository}");
         let mut argv = vec!["gh", "api", "--method", "POST", endpoint.as_str()];
-        for field in &fields {
+        for field in fields.iter().chain([&repositories]) {
             argv.extend(["-f", field.as_str()]);
         }
         let value = self.gh_json(jwt, &argv)?;
@@ -403,7 +476,37 @@ impl Backend for SystemBackend {
     }
 }
 
-fn load_config(project: &Path) -> Option<GithubAppConfig> {
+/// `(owner, repository)` from an `origin` remote URL in https or scp form.
+pub(crate) fn remote_slug(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let mut parts = trimmed.rsplit(['/', ':']);
+    let repo = parts.next().filter(|part| !part.is_empty())?;
+    let owner = parts.next().filter(|part| !part.is_empty())?;
+    Some((owner.to_owned(), repo.to_owned()))
+}
+
+fn load_config(project: &Path) -> (Option<GithubAppConfig>, Option<String>) {
+    let none = (None, None);
+    let Some(git) = provenant_os::git::git_executable() else {
+        return none;
+    };
+    let backend = SystemBackend {
+        project: project.to_owned(),
+    };
+    let slug = backend
+        .run(
+            &[&git.to_string_lossy(), "remote", "get-url", "origin"],
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|bytes| remote_slug(&String::from_utf8_lossy(&bytes)));
+    let config = load_policy(project, slug.as_ref().map(|(owner, _)| owner.as_str()));
+    (config, slug.map(|(_, repo)| repo))
+}
+
+fn load_policy(project: &Path, owner: Option<&str>) -> Option<GithubAppConfig> {
     let globals = provenant_cli::Globals::default();
     let resolved = crate::roots::resolve(
         &globals,
@@ -426,7 +529,8 @@ fn load_config(project: &Path) -> Option<GithubAppConfig> {
     let binding = provenant_config::lookup_project(&resolved.roots, &location).ok()??;
     provenant_config::GithubPolicy::read(&resolved.roots.state, binding.project_id())
         .ok()?
-        .app
+        .app_for(owner.as_deref())
+        .cloned()
 }
 
 type Shared = Arc<Identity<SystemBackend>>;
@@ -444,12 +548,17 @@ fn identity_for(project: &Path) -> Shared {
     };
     map.entry(project.to_owned())
         .or_insert_with(|| {
-            Arc::new(Identity::new(
-                load_config(project),
+            let (config, repository) = load_config(project);
+            let identity = Identity::new(
+                config,
                 SystemBackend {
                     project: project.to_owned(),
                 },
-            ))
+            );
+            Arc::new(match repository {
+                Some(name) => identity.in_repository(name),
+                None => identity,
+            })
         })
         .clone()
 }
