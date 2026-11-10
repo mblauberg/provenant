@@ -2835,10 +2835,24 @@ pub(super) fn prepare_candidates(
         };
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
+        let limits = run::lane_limits(
+            task,
+            state_root,
+            &project_id.to_string(),
+            adapter.id(),
+            run::HostCaps {
+                runtime_seconds: config
+                    .providers
+                    .get(adapter.id())
+                    .and_then(|provider| provider.runtime_deadline_seconds),
+                continuations: model_policy.lane.max_continuations,
+            },
+        );
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
                 &model_policy.guidance(),
+                &limits,
                 writer.is_some(),
                 writable_handoff.then_some(handoff.as_path())
             )
@@ -3328,10 +3342,6 @@ pub(super) fn prepare_candidates(
             account_source(resume.is_some(), task.account.is_some()).into(),
         );
         provider.extra.insert(
-            "max_continuations".into(),
-            serde_json::json!(model_policy.lane.max_continuations.unwrap_or(0)),
-        );
-        provider.extra.insert(
             "resume_continuations".into(),
             serde_json::json!(model_policy.lane.resume_continuations.unwrap_or(false)),
         );
@@ -3422,6 +3432,7 @@ pub(super) fn prepare_candidates(
             }
         }
         return Ok(run::PreparedLaunch {
+            limits,
             skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,

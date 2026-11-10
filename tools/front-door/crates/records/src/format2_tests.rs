@@ -180,7 +180,7 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
     round_trip(&Stop::declared(blocked).unwrap().unwrap(), true);
     round_trip(&Stop::new(StopCause::Lost, None).unwrap(), true);
     round_trip(
-        &Limit::new(3, LimitSource::Launch, LimitStrength::Enforced),
+        &Limit::new(3, LimitSource::Launch, LimitStrength::Default),
         true,
     );
     let head = GitOid::parse(&"a".repeat(40)).unwrap();

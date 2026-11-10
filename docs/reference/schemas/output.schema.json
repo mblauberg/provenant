@@ -250,6 +250,7 @@
                   ]
                 },
                 "last_output_at": {},
+                "limits": {},
                 "observed_route": {},
                 "overdue": {
                   "anyOf": [
@@ -1322,6 +1323,7 @@
                   ]
                 },
                 "last_output_at": {},
+                "limits": {},
                 "observed_route": {},
                 "overdue": {
                   "anyOf": [
@@ -2490,6 +2492,7 @@
                   ]
                 },
                 "last_output_at": {},
+                "limits": {},
                 "observed_route": {},
                 "overdue": {
                   "anyOf": [
@@ -3563,6 +3566,7 @@
                   ]
                 },
                 "last_output_at": {},
+                "limits": {},
                 "model": {},
                 "observed_route": {},
                 "overdue": {
@@ -4832,6 +4836,7 @@
                     }
                   ]
                 },
+                "limits": {},
                 "next_offset": {
                   "minimum": 0,
                   "type": "integer"

@@ -177,9 +177,15 @@ pub const READING_GUIDANCE: &str = "Reading: locate before you read. Search with
 
 /// The text placed before a lane's task: model policy, the build-slot rule for
 /// writers only, the handoff file, then the reading rule.
-pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: Option<&Path>) -> String {
+pub fn lane_preamble(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    writer: bool,
+    handoff: Option<&Path>,
+) -> String {
     format!(
-        "{model_guidance}\n{}{}{READING_GUIDANCE}",
+        "{model_guidance}\n{}{}{}{READING_GUIDANCE}",
+        limits.preamble(),
         if writer { BUILD_SLOT_GUIDANCE } else { "" },
         handoff.map(handoff_progress_guidance).unwrap_or_default()
     )
@@ -202,13 +208,16 @@ mod tests {
     #[test]
     fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
-        let writer = lane_preamble("Model policy.", true, Some(handoff));
+        let writer = lane_preamble("Model policy.", &Default::default(), true, Some(handoff));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
-        let reader = lane_preamble("Model policy.", false, Some(handoff));
+        let reader = lane_preamble("Model policy.", &Default::default(), false, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
-        assert!(!lane_preamble("Model policy.", false, None).contains("handoff.json"));
+        assert!(
+            !lane_preamble("Model policy.", &Default::default(), false, None)
+                .contains("handoff.json")
+        );
         assert!(writer.contains("locate before you read"));
         assert!(reader.contains("locate before you read"));
     }

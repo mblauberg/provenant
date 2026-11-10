@@ -49,6 +49,7 @@ fn row() -> LaneRow {
         transcript: None,
         title: None,
         requested_priority: None,
+        limits: None,
         provider_seconds: None,
         handoff: None,
         provider_error: None,

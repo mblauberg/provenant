@@ -30,6 +30,25 @@ pub enum CancelReceipt {
         reason: String,
     },
 }
+/// The task's extra fields with this retry's limit raises on top of the
+/// prior ones, for the next launch to resolve.
+fn extensions(task: &TaskRequest, raises: &[(String, u64)]) -> provenant_records::ExtraFields {
+    let mut all = task
+        .extra
+        .get(crate::LIMIT_EXTENSIONS)
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    all.extend(
+        raises
+            .iter()
+            .map(|(name, value)| (name.clone(), (*value).into())),
+    );
+    if all.is_empty() {
+        return Default::default();
+    }
+    [(crate::LIMIT_EXTENSIONS.to_string(), all.into())].into()
+}
+
 /// A continuation of one terminal attempt with new input, as a new run.
 pub struct Resume {
     pub prior: AttemptId,
@@ -39,6 +58,8 @@ pub struct Resume {
     pub attempt_id: AttemptId,
     pub prompt: String,
     pub created_at: WallTime,
+    /// Limit raises (`retry --extend`), by limit name.
+    pub extend: Vec<(String, u64)>,
 }
 /// How long past its runtime deadline a live guardian is left to act on its own
 /// before `reconcile` asks it to stop.
@@ -515,7 +536,7 @@ mod reboot_tests {
                 &Default::default(),
                 None,
                 None,
-                cap,
+                &crate::limits::deadline_only(cap),
                 &call,
             )?;
             let claimed = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
@@ -1227,6 +1248,7 @@ mod lineage_tests {
                 );
             }
             let next = Resume {
+                extend: Vec::new(),
                 prior,
                 expected_generation: 0,
                 operation_id: format!("explicit-resume-{index}").parse()?,
@@ -1449,6 +1471,7 @@ mod lineage_tests {
         worktrees::save_owner(&launch.worktree, &owner)?;
         assert!(store.check_continuation_writer(prior, &call)?.is_some());
         let first = Resume {
+            extend: Vec::new(),
             prior,
             expected_generation: 0,
             operation_id: "queued-resume".parse()?,
@@ -1521,6 +1544,7 @@ mod lineage_tests {
             Ok(())
         })?;
         let next = Resume {
+            extend: Vec::new(),
             prior: first.attempt_id,
             operation_id: "new-resume".parse()?,
             run_id: RunId::from_bytes([50; 16]),
@@ -2576,7 +2600,7 @@ impl RunStore {
                 tasks: vec![TaskRequest {
                     cloud: None,
                     context: None,
-                    extra: Default::default(),
+                    extra: extensions(task, &input.extend),
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),

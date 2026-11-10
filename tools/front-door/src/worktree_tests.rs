@@ -843,6 +843,16 @@ impl provenant_run::Providers for WriterProvider {
             };
             let route = fixture_route();
             Ok(provenant_run::PreparedLaunch {
+                // Custody refuses a launch without a wall-clock deadline, so
+                // the fixture carries the task's allowance as production does.
+                limits: provenant_records::LaneLimits {
+                    deadline_seconds: Some(provenant_records::Limit::new(
+                        task.provider_timeout_seconds,
+                        provenant_records::LimitSource::Launch,
+                        provenant_records::LimitStrength::Default,
+                    )),
+                    ..Default::default()
+                },
                 skipped_routes: Vec::new(),
                 argv,
                 environment: Vec::new(),

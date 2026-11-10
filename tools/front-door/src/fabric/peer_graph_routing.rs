@@ -106,6 +106,7 @@ fn settlement_without_hint_does_not_advance_unrelated_graphs()
     // Two different terminal attempts let the settlement error be attributed
     // to A alone. B's journal still needs its running node to be observed.
     let continuation = provenant_run::Resume {
+extend: Vec::new(),
         prior: fixture.settled.attempt_id,
         expected_generation: 0,
         operation_id: "graph-b-attempt".parse()?,
@@ -375,6 +376,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
         cancel: &cancel,
     };
     let continuation = provenant_run::Resume {
+extend: Vec::new(),
         prior: fixture.settled.attempt_id,
         expected_generation: 0,
         operation_id: "graph-corrupt-auth".parse()?,
@@ -582,6 +584,7 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
     };
     // The upstream attempt ran in the OpenAI family.
     let upstream = provenant_run::Resume {
+extend: Vec::new(),
         prior: fixture.settled.attempt_id,
         expected_generation: 0,
         operation_id: "graph-exact-upstream".parse()?,

@@ -182,6 +182,7 @@ pub fn continue_attempt_mode(
         call,
         fallback,
         false,
+        Vec::new(),
     )
 }
 
@@ -196,6 +197,7 @@ fn retry_attempt_mode(
     call: &run::Request<'_>,
     fallback: bool,
     redo: bool,
+    extend: Vec<(String, u64)>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
     let record = session.service().status(prior, call)?;
@@ -329,6 +331,7 @@ fn retry_attempt_mode(
         attempt_id: fresh(AttemptId::from_bytes)?,
         prompt,
         created_at: now(call.clock)?,
+        extend,
     };
     let fresh_writer = if displaced {
         Some(fresh_continuation_worktree(
@@ -628,13 +631,6 @@ pub(super) fn resume_inner(
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let candidate = targets::resolve(edge, &command.attempt.0, true)?;
-    if !command.extend.is_empty() {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "--extend requires a graph target",
-        ));
-    }
     let (session, target) = targets::open_resolved(edge, candidate, &call)?;
     let prior = match target.attempt {
         Some(id) => id,
@@ -642,6 +638,7 @@ pub(super) fn resume_inner(
     };
     let prompt = retry_prompt(&command, &session, prior, &call)?;
     let record = session.service().status(prior, &call)?;
+    let extend = extensions(&command.extend, record.limits.clone().unwrap_or_default())?;
     if target.run.is_some_and(|run| record.run_id != run)
         || target.task.is_some_and(|task| task != record.task_id)
     {
@@ -668,6 +665,7 @@ pub(super) fn resume_inner(
         &call,
         !command.no_fallback,
         command.node.is_some(),
+        extend,
     )?;
     let (mut data, human, timed_out) = report(
         &session,
@@ -710,6 +708,35 @@ pub(super) fn no_fallback_refusal(
         ));
     }
     fail
+}
+
+/// Parse `--extend NAME=VALUE` against the limits the prior attempt ran
+/// under. A ceiling refuses; a default is raised for the next launch.
+fn extensions(
+    raw: &[String],
+    mut limits: provenant_records::LaneLimits,
+) -> Result<Vec<(String, u64)>, Fail> {
+    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
+    raw.iter()
+        .map(|item| {
+            let (name, value) = item
+                .split_once('=')
+                .and_then(|(name, value)| Some((name, value.parse::<u64>().ok()?)))
+                .ok_or_else(|| invalid(format!("--extend takes NAME=NUMBER, not {item}")))?;
+            match limits.extend(name, value) {
+                Some(Ok(())) => Ok((name.to_owned(), value)),
+                Some(Err(ceiling)) => Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    format!(
+                        "{name} is a ceiling of {} and cannot be raised",
+                        ceiling.value
+                    ),
+                )),
+                None => Err(invalid(format!("{name} is not a limit this attempt has"))),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -70,6 +70,7 @@ lane_row! {
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
+        limits: Value => any();
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
@@ -462,6 +463,7 @@ impl LaneRow {
                 .filter(|priority| Some(i32::from(*priority)) != lane.priority)
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
+            limits: lane.limits.as_ref().map(|limits| json!(limits)),
             handoff: None,
             provider_error: None,
             cloud: lane.cloud_view.0.clone(),

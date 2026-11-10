@@ -298,7 +298,18 @@ pub(super) fn prepare_command(
             .map(|tool| tool.receipt())
             .collect(),
     );
+    let limits = run::lane_limits(
+        task,
+        registry.state_root.unwrap_or(std::path::Path::new("")),
+        &registry
+            .project_id
+            .map(|project| project.to_string())
+            .unwrap_or_default(),
+        provider,
+        run::HostCaps::default(),
+    );
     Ok(run::PreparedLaunch {
+        limits,
         skipped_routes: Vec::new(),
         argv: spec.argv,
         environment: spec.env,

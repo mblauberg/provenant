@@ -257,6 +257,7 @@
                     ]
                   },
                   "last_output_at": {},
+                  "limits": {},
                   "observed_route": {},
                   "overdue": {
                     "anyOf": [

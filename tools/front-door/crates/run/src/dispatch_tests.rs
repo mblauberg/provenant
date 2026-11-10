@@ -48,6 +48,7 @@ impl Providers for Ready {
         _: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         Ok(PreparedLaunch {
+            limits: Default::default(),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),

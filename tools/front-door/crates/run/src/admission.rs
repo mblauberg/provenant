@@ -850,7 +850,7 @@ impl RunStore {
             &AppliedWriteGrants::default(),
             None,
             None,
-            0,
+            &Default::default(),
             call,
         )
     }
@@ -875,7 +875,7 @@ impl RunStore {
             write_grants,
             head,
             None,
-            0,
+            &Default::default(),
             call,
         )
     }
@@ -889,10 +889,14 @@ impl RunStore {
         write_grants: &AppliedWriteGrants,
         head: Option<GitOid>,
         priority: Option<u8>,
-        runtime_seconds: u64,
+        limits: &provenant_records::LaneLimits,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = expected.attempt_id;
+        let runtime_seconds = limits
+            .deadline_seconds
+            .as_ref()
+            .map_or(0, |limit| limit.value);
         if !valid_read_only_writable(writable) {
             return Err(RunError::Validation("invalid read-only writable paths"));
         }
@@ -935,6 +939,7 @@ impl RunStore {
             next.head = head;
             next.requested_priority = priority;
             next.priority = None;
+            next.limits = Some(limits.clone());
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
             next.admission_deadline = Some(ticket.admission_deadline);

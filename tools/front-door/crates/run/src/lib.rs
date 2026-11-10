@@ -34,6 +34,8 @@ mod short_temporary;
 mod store;
 mod telemetry_context;
 pub use telemetry_context::set_build_identity;
+mod limits;
+pub use limits::{EXTENSIONS as LIMIT_EXTENSIONS, HostCaps, lane_limits};
 pub mod token_budget;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Service};

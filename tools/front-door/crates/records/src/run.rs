@@ -1361,6 +1361,9 @@ pub struct AttemptRecord {
     pub continuation: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
+    /// The limits resolved when the attempt was admitted to launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::LaneLimits>,
     pub schema_version: u64,
     pub attempt_id: AttemptId,
     pub run_id: RunId,
