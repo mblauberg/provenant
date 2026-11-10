@@ -268,12 +268,7 @@ fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
     );
     assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
     // Without --wait a target reports its current status once.
-    let output = rig.command(&[
-        "status",
-        "--target",
-        "operation:refused-fixture",
-        "--json",
-    ])?;
+    let output = rig.command(&["status", "--target", "operation:refused-fixture", "--json"])?;
     assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
     let lines = events(&output.stdout.bytes)?;
     assert_eq!(lines.len(), 1, "{lines:?}");
