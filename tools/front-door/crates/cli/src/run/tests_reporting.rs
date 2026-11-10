@@ -56,6 +56,30 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
     );
 }
 #[test]
+fn non_refused_run_error_names_its_safe_cause_only() {
+    let failure = super::Fail::from(provenant_run::RunError::OperationIo {
+        operation: "read attempt",
+        path: Some("/TOKEN_SENTINEL".into()),
+        source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "TOKEN_SENTINEL"),
+    });
+    let reply = super::reply("telemetry stats", Err(failure));
+    let wire = serde_json::to_value(&reply.result).unwrap();
+    assert_eq!(wire["error"]["category"], "error");
+    let cause = wire["error"]["cause"].as_str().unwrap();
+    assert!(cause.contains("read attempt"), "{cause}");
+    assert!(cause.contains("PermissionDenied"), "{cause}");
+    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    let failure = super::Fail::from(provenant_run::RunError::Contention);
+    let reply = super::reply("telemetry stats", Err(failure));
+    let wire = serde_json::to_value(&reply.result).unwrap();
+    assert!(
+        wire["error"]["cause"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{wire}"))
+            .contains("busy timeout")
+    );
+}
+#[test]
 fn cli_safe_local_facts_are_bounded_and_escape_controls() {
     use provenant_confinement::worktrees::WorktreeError;
     use provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES;

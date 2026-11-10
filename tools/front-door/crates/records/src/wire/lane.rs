@@ -68,7 +68,6 @@ lane_row! {
         write_grants: Value => nullable(array(grant_schema()));
         terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work", "context_handoff"]);
         host: String => string();
-        resolved_route: Value => any();
         title: String => string();
         requested_priority: i64 => integer();
         provider_seconds: f64 => nullable(number());
@@ -412,7 +411,6 @@ impl LaneRow {
             waiting_for,
             requested_route: json!(lane.requested_route),
             host: facts.host,
-            resolved_route: Some(project_route(lane.resolved_route.as_ref())),
             applied_route: project_route(lane.applied_route.as_ref()),
             skipped_routes: Value::Array(
                 lane.skipped_routes

@@ -505,7 +505,6 @@
                   "type": "integer"
                 },
                 "requested_route": {},
-                "resolved_route": {},
                 "result_path": {
                   "anyOf": [
                     {
@@ -1671,7 +1670,6 @@
                   "type": "integer"
                 },
                 "requested_route": {},
-                "resolved_route": {},
                 "result_path": {
                   "anyOf": [
                     {
@@ -2747,7 +2745,6 @@
                   "type": "integer"
                 },
                 "requested_route": {},
-                "resolved_route": {},
                 "result_path": {
                   "anyOf": [
                     {
@@ -3826,7 +3823,6 @@
                 },
                 "requested_route": {},
                 "resolved_from": {},
-                "resolved_route": {},
                 "result_path": {
                   "anyOf": [
                     {
@@ -5108,7 +5104,6 @@
                   "type": "integer"
                 },
                 "requested_route": {},
-                "resolved_route": {},
                 "result_path": {
                   "anyOf": [
                     {

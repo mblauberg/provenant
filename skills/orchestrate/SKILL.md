@@ -25,7 +25,7 @@ every later turn, so it reads only what its own judgement needs. Nodes use `over
 and evidence. Layers are bundled, user, repository and inline; project templates go under
 `.provenant/templates/`. Inspect them with `provenant templates NAME --json`.
 
-Register writer worktrees first with `provenant worktree create NAME --base BASE`.
+A single writer needs no registration: `run --branch NAME --base REF` creates its owned worktree. Register a worktree by hand with `provenant worktree create NAME --base BASE` only to share one among `batch` slices.
 The bundled `batch` composite gives every slice the same `worktree` and `write_scope` bindings, so its writers sharing that worktree run in sequence. For parallel writers, define a graph with a separate registered worktree and write scope for each node; review the integrated head. The [planner brief](references/planner.md)
 owns slicing and tier choices; [brief and collect](references/dispatch.md)
 owns the hand-off. Keep coupled writes with one owner.
@@ -44,8 +44,8 @@ cancelled when their parent settles, including a successful exit. Use `--wait`
 to collect their completion before exiting, or explicitly detach a child that
 should outlive its parent. Any agent may return a patch; started attempts stay immutable.
 
-To keep a long writer from paying for a very large context, pass
-`--knob lanes.context_handoff_tokens=200000`: the host stops it at that context
+To keep a long writer from paying for a very large context, set
+`lanes.context_handoff_tokens = 200000` under `[knobs]` in host configuration: the host stops it at that context
 and the graph restarts it fresh from its handoff on the same worktree. The
 setting is off by default until a trial settles it.
 

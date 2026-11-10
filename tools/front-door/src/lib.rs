@@ -1047,7 +1047,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             )
             .unwrap_or(3)
         }
-        Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
+        Command::Status(cmd) if cmd.wait.is_some() || !cmd.target.is_empty() => {
+            status_wait::run(cmd, globals)
+        }
         Command::Status(cmd) => {
             if let Some(id) = &cmd.id
                 && let Some(code) = fabric::unified_graph_command(

@@ -192,12 +192,20 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         let kind = ErrorKind::from(&error);
         let mut projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
-        if projection.detail.is_none() && projection.fact.is_none() && kind.category() == "refused"
-        {
-            projection = projection.detail(provenant_confinement::redact::bounded_line(
-                &error.to_string(),
-                4096,
-            ));
+        if projection.detail.is_none() {
+            // A refusal's text is its owner's explanation; any other error
+            // names only its kind and safe fields, beside any typed fact.
+            let cause = if kind.category() == "refused" {
+                projection
+                    .fact
+                    .is_none()
+                    .then(|| provenant_confinement::redact::bounded_line(&error.to_string(), 4096))
+            } else {
+                safe_cause(&error)
+            };
+            if let Some(cause) = cause {
+                projection = projection.detail(cause);
+            }
         }
         let message = projection.detail.as_ref().map_or_else(
             || kind.summary().to_owned(),
@@ -1341,7 +1349,7 @@ fn graph_quality_rows(
                     == Some(graph_id.as_str())
             })
             .collect();
-        let partial = partial_signal_counts(&in_graph, store, call)?;
+        let partial = partial_signals_value(partial_signal_counts(&in_graph, store, call));
         rows.push(json!({
             "graph_id": graph_id,
             "checkpoint": "read",
@@ -1362,16 +1370,109 @@ fn partial_signal_counts(
     facts: &[&provenant_records::AttemptFact],
     store: Option<&run::RunStore>,
     call: &run::Request<'_>,
-) -> Result<BTreeMap<String, u64>, Fail> {
+) -> Result<BTreeMap<String, u64>, String> {
     let mut partial = BTreeMap::new();
     if let Some(store) = store {
         for fact in facts {
-            for signal in store.record(fact.attempt_id, call)?.partial_signals {
+            let record = store
+                .record(fact.attempt_id, call)
+                .map_err(|error| unavailable_cause(&error))?;
+            for signal in record.partial_signals {
                 *partial.entry(signal.as_str().to_owned()).or_default() += 1;
             }
         }
     }
     Ok(partial)
+}
+
+/// The bounded cause of a run-store read that could not be completed. Only
+/// the error's kind and safe fields are named, never its source text.
+fn unavailable_cause(error: &run::RunError) -> String {
+    safe_cause(error).unwrap_or_else(|| ErrorKind::from(error).summary().to_owned())
+}
+
+/// Why the quota history could not be read, without its source text.
+fn history_unavailable_cause(error: &crate::quota::EdgeError) -> String {
+    use crate::quota::EdgeError as E;
+    use provenant_os::fs::FsError;
+    match error {
+        E::Run(error) => unavailable_cause(error),
+        E::Quota(error) => format!("quota history read failed: {error}"),
+        E::Read { source, .. }
+        | E::Fs(FsError::Io { source, .. } | FsError::ReadIo { source, .. }) => {
+            format!("quota history read failed ({:?})", source.kind())
+        }
+        E::Encode(_) | E::Permissions | E::Time => {
+            format!("quota history read failed: {error}")
+        }
+        _ => "quota history read failed".to_owned(),
+    }
+}
+
+/// A non-refused run error's cause, from its variant and typed fields only.
+/// Variants whose text carries a source error, a path or caller text name
+/// just their safe parts, or nothing; the error code still names the kind.
+fn safe_cause(error: &run::RunError) -> Option<String> {
+    use provenant_os::fs::FsError;
+    use run::RunError as E;
+    let fixed = matches!(
+        error,
+        E::Delivery(_)
+            | E::IntegrationHeadMoved
+            | E::IntegrationParentBusy { .. }
+            | E::IntegrationConflict { .. }
+            | E::OriginDefaultCollision
+            | E::ProtectedDeliveryBranch
+            | E::GitUnavailable
+            | E::AttemptReservationRetained
+            | E::Validation(_)
+            | E::WriterLineage(_)
+            | E::WriterHeadNotLaneBranch
+            | E::WriterSourceMismatch { .. }
+            | E::ReviewAcceptanceRequired
+            | E::ObjectImportLimit(_)
+            | E::Version(_)
+            | E::OperationConflict
+            | E::NotFound
+            | E::Nonterminal
+            | E::ProviderStateExpired
+            | E::Conflict
+            | E::GenerationConflict { .. }
+            | E::TooLarge { .. }
+            | E::PromptTooLarge { .. }
+            | E::TerminalRecoveryRequired
+            | E::Refused
+            | E::DepthExceeded { .. }
+            | E::DepthOverflow
+            | E::Capacity
+            | E::Contention
+            | E::Cancelled
+            | E::Publication(_)
+            | E::Sqlite(_)
+            | E::Path(_)
+    );
+    let cause = match error {
+        _ if fixed => error.to_string(),
+        E::OperationIo {
+            operation, source, ..
+        } => format!("run I/O operation {operation} failed ({:?})", source.kind()),
+        E::Filesystem(FsError::Io {
+            operation, source, ..
+        }) => format!("filesystem {operation} failed ({:?})", source.kind()),
+        E::Filesystem(FsError::ReadIo { source, .. }) => {
+            format!("filesystem read file failed ({:?})", source.kind())
+        }
+        _ => return None,
+    };
+    Some(provenant_confinement::redact::bounded_line(&cause, 512))
+}
+
+/// Partial-signal counts, or a named unavailable field with its cause.
+fn partial_signals_value(counts: Result<BTreeMap<String, u64>, String>) -> Value {
+    match counts {
+        Ok(counts) => json!(counts),
+        Err(cause) => json!({"unavailable": cause}),
+    }
 }
 
 fn graph_quality_counts(
@@ -1435,7 +1536,7 @@ fn plan_value_rows(
     report: &provenant_telemetry::StatsReport,
     accounts: &provenant_providers::accounts::Settings,
     edge: &Edge<'_>,
-) -> Result<Vec<Value>, Fail> {
+) -> Result<Vec<Value>, String> {
     let until = report
         .window
         .until
@@ -1450,7 +1551,7 @@ fn plan_value_rows(
             account: None,
         },
     )
-    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    .map_err(|error| history_unavailable_cause(&error))?;
     let mut latest = BTreeMap::new();
     for record in history {
         latest.insert((record.provider.clone(), record.label.clone()), record);

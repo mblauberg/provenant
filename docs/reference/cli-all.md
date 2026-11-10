@@ -1824,7 +1824,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--stats` | `{"conflicts": ["wait"], "defaults": ["false"], "description": "Report attempt efficiency without counting composite aggregates", "name": "stats", "values": ["true", "false"]}` |
 | `--by` | `{"defaults": ["template"], "description": "Group efficiency by node, requested tier or template", "name": "by", "values": ["node", "tier", "template"]}` |
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
-| `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
+| `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true}` |
 | `--until` | `{"defaults": ["all"], "description": "Return when all targets are terminal (use &#96;any&#96; for the first transition)", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
 | `id` | `{"description": "Show a run, task, attempt or graph ID, or operation:ID for a refusal", "name": "id", "positional": true}` |
@@ -1836,6 +1836,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 {
   "constraints": [
     "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
+    "--target without --wait reports each target's current status once",
     "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
     "follow waits for all targets to be terminal; land targets only observe their PR"
   ],
@@ -2546,7 +2547,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--account` | `{"description": "Account label or key", "name": "account"}` |
 | `--since` | `{"description": "Earliest reading", "name": "since"}` |
 | `--until` | `{"description": "Latest reading", "name": "until"}` |
-| `--limit` | `{"bounds": [1, 100000], "defaults": ["1000"], "description": "Most readings to return", "name": "limit"}` |
+| `--limit` | `{"bounds": [1, 100000], "defaults": ["50"], "description": "Most readings to return", "name": "limit"}` |
 
 ```json
 {
@@ -3714,8 +3715,8 @@ Advisory checks, local input, forge availability and repository settings: [track
 
 | Argument | Contract |
 |---|---|
-| `--base` | `{"description": "Base commit of the range", "name": "base", "requires": ["head"]}` |
-| `--head` | `{"description": "Head commit of the range", "name": "head", "requires": ["base"]}` |
+| `--base` | `{"description": "Base revision of the range: a commit, tag or branch", "name": "base", "requires": ["head"]}` |
+| `--head` | `{"description": "Head revision of the range: a commit, tag or branch", "name": "head", "requires": ["base"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
 

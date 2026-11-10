@@ -267,6 +267,16 @@ fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
         "UNSUPPORTED"
     );
     assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+    // Without --wait a target reports its current status once.
+    let output = rig.command(&["status", "--target", "operation:refused-fixture", "--json"])?;
+    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
+    let lines = events(&output.stdout.bytes)?;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["event"], "snapshot");
+    assert_eq!(
+        lines[0]["data"]["operation"]["refusal"]["code"],
+        "UNSUPPORTED"
+    );
     // Simulate a crash after recording the refusal but before its notice.
     // Reconciliation retries it, and a second pass must not duplicate mail.
     assert_eq!(store.pending_refusal_notices(10, &call)?.len(), 1);
