@@ -28,11 +28,14 @@ pub mod mileage;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
+pub mod telemetry_args;
+pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
+pub use telemetry_args::CostBy;
 
 use thiserror::Error;
 
