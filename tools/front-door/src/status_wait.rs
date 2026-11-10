@@ -207,8 +207,10 @@ impl Snapshot {
             Target::Pr(number) => {
                 let row = crate::pr::status::wait_line(
                     edge.cwd,
+                    edge.roots.state.as_path(),
                     *number,
                     left.min(pr_read_timeout),
+                    crate::pr::observer::POLL,
                     Some(cancel),
                 )
                 .map_err(|e| {

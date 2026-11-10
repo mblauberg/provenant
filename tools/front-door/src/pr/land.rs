@@ -99,7 +99,7 @@ fn read_pull(reader: &super::wait::Reader<'_>, number: &str) -> Result<Pull> {
 }
 pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
     Ok(from_rest(super::rest_pull(
-        &|argv| super::execute(project, argv, false),
+        &|argv| super::execute(project, argv),
         number,
     )?))
 }
@@ -752,10 +752,7 @@ pub(super) fn batch_follow_up(
         let steps = follow_up(git, project, &tracking.view, head, globals, workers)?;
         return Ok(serde_json::to_value(steps)?);
     }
-    let rest = super::rest_pull(
-        &|argv| super::execute(project, argv, false),
-        &number.to_string(),
-    )?;
+    let rest = super::rest_pull(&|argv| super::execute(project, argv), &number.to_string())?;
     let repository = rest.base.repo.as_ref().map(|repo| repo.full_name.clone());
     let pull = from_rest(rest);
     if !pull.cross_repository
@@ -1158,17 +1155,15 @@ pub(crate) fn graph_land(
         };
     };
     if !merge {
-        let pull = match super::rest_pull(
-            &|argv| super::execute(project, argv, false),
-            &number.to_string(),
-        ) {
-            Ok(pull) => pull,
-            Err(error) => {
-                return LandObservation::Pending {
-                    reason: format!("could not read pull request #{number}: {error}"),
-                };
-            }
-        };
+        let pull =
+            match super::rest_pull(&|argv| super::execute(project, argv), &number.to_string()) {
+                Ok(pull) => pull,
+                Err(error) => {
+                    return LandObservation::Pending {
+                        reason: format!("could not read pull request #{number}: {error}"),
+                    };
+                }
+            };
         let next = format!("next: provenant land {number} --head {head}");
         return if pull.head.sha != head {
             LandObservation::Refused {
@@ -1333,8 +1328,13 @@ pub(crate) fn execute(
                 return Err("pull request is closed without merging".into());
             }
             failure_code = "CI_UNAVAILABLE";
+            let state =
+                roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
+                    .roots
+                    .state;
             super::wait::checks(
                 &reader,
+                state.as_path(),
                 number,
                 current,
                 &repository,
@@ -1347,7 +1347,7 @@ pub(crate) fn execute(
             // A merge that errors or times out may still have taken effect, so
             // the PR's own state decides the outcome, never the command's.
             let merge_error = if stacked {
-                let mut forge = super::landing::adapters::GhForge::new(&project);
+                let mut forge = super::landing::adapters::GhForge::new(&project, state.as_path());
                 super::landing::publish::merge_member(
                     &mut forge,
                     number,

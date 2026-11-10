@@ -266,6 +266,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         graph_done: true,
         notice_done: true,
         log_done: true,
+        ledger_done: true,
     };
     store.owe_reaction(&reaction, &call)?;
     store.save_reaction(&reaction, &call)?;

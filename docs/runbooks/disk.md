@@ -90,9 +90,9 @@ JSON in your own chosen destination if evidence is required; investigate
 remaining errors with the owner of each reported path.
 
 Writer admission honours `gc.schedule=false`. Admission pressure collection selects the launching project and is capped at
-five seconds. Fabric settlement immediately queues detached completion GC for recursive cleanup.
-Each host tick retries durable completion requests, independently of the daily
-sweep schedule; settlement itself performs no recursive walk or network call.
+five seconds. Fabric settlement starts one detached completion GC for recursive cleanup;
+settlement itself performs no recursive walk or network call. A missed attempt
+is not retried on its own: the next scheduled or pressure sweep collects the worktree.
 Pressure sweeps prune declared idle output, with a one-day floor below the
 configured free-space floor, while retaining worktrees and skipping fetches.
 

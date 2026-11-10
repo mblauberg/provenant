@@ -913,6 +913,7 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
         max_failed_checks: usize,
     ) -> provenant_fabric_runtime::graph::CiObservation {
         crate::pr::status::observe_ci(
+            self.factory.context.roots.state.as_path(),
             &self.factory.cwd,
             target,
             checks,

@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-11-05, #2856.
+Changed: 2026-11-05, #2856; 2026-11-10, #3137.
 
 ## Context
 
@@ -53,6 +53,21 @@ gate fallback. Post-merge follow polls until checks settle or its timeout raises
 an `unsettled` alarm. Command gates scrub forge token environment variables
 unless explicitly passed through. Candidate CI must trigger on the configured
 ref prefix.
+
+## Addendum: one CI observer per repository (2026-11-10, #3137)
+
+`pr status`, `pr watch`, `land` waiting, the candidate gate and the post-merge
+follow read check runs and commit statuses for a commit only through one
+observer per repository. It takes any commit, so a candidate head on a
+`land/**` ref is read the same way as a pull request head. Answers are cached
+per commit in project state under `ci-observer/<owner--name>/`, shared by every
+process on the host, and revalidated with conditional requests, so an unchanged
+answer costs a 304. A per-commit lock lets one waiter read while the others
+reuse its answer: a waiter accepts an answer younger than its poll interval,
+and a one-shot decision always revalidates. A rate-limit response is recorded
+once with its reset time; every waiter sleeps until the reset, or fails naming
+it if the reset is beyond its deadline. Which checks are required, pinned
+heads and the tree comparison are unchanged.
 
 ## Alternatives and consequences
 
