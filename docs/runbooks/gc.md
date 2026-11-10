@@ -135,21 +135,17 @@ removal, capped at five seconds. Applied full and pressure sweeps share
 Manual `gc --pressure` prints a notice when the project is transient or no
 eligible data is in scope; JSON exposes the reason as `notice`.
 
-Fabric settlement atomically publishes a completion request under a non-blocking
-per-request lock. It records `cleanup_deferred = true` when it holds the lock;
-otherwise the lock holder owns the receipt. A queue failure records a retryable
-retained receipt with a warning. The host
-tick dispatches a detached worker to collect its worktree, declared output and
+Fabric settlement records a retained receipt with `cleanup_deferred = true`, then
+spawns one detached worker to collect the lane's worktree, declared output and
 Cargo caches. Settlement fetches no refs and walks no payload trees. The worker retains
 all ownership, continuation, terminal-state, live-writer, landing-proof and
-expected-tip lease checks. Durable requests under `<state>/gc/completions/`
-contain both intent and retry state. A worker claims the whole record by rename
-to a `.claim` filename and holds an OS lock while processing it. A dead worker's
-claim remains retryable; a requeue publishes fresh pending intent even when the
-earlier claim has exhausted its budget. Exhaustion moves the whole record to
-`gc/completion-exhausted` in one rename. Each host tick retries independently of the daily
-GC deadline and `gc.schedule`. A busy worker waits up to 120 seconds for collection
-custody before leaving its request for retry. `land` retains its explicit cleanup.
+expected-tip lease checks, and replaces the receipt with its outcome. Completion
+cleanup keeps no queue. When the spawn fails, the worker dies or collection
+custody stays busy for 120 seconds, nothing further is recorded: the next full
+or pressure sweep walks every lane and collects the worktree under the same
+removal checks. A lane with no commit of its own stays until removed explicitly,
+because the sweep keeps a tree at the integration tip or on its first-parent line.
+`land` retains its explicit cleanup.
 Kept files, live writers and reservations still prevent removal.
 
 `gc --dry-run` uses the existing run-size ledger and shared bounded filesystem
