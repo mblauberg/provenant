@@ -417,10 +417,11 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                     drop_resolved_route(&mut before, &format!("{name} {id} output"))?;
                     // A failed attempt's output reports the provider error from its
                     // structured result (#3143). The pre-cut capture predates that
-                    // field, so it is checked on its own rather than compared.
-                    assert_eq!(
-                        before.as_object_mut().unwrap().remove("provider_error"),
-                        Some(Value::Null),
+                    // field: successful outputs omit it and failed ones carry null.
+                    // It is checked on its own rather than compared.
+                    let pre_cut_error = before.as_object_mut().unwrap().remove("provider_error");
+                    assert!(
+                        matches!(pre_cut_error, None | Some(Value::Null)),
                         "pre-cut output carries no provider error: {name} {id}"
                     );
                     let reported = new["data"]
