@@ -295,7 +295,7 @@ impl RunStore {
                             match raw {
                                 Some(raw) => {
                                     let receipts: provenant_records::run::SettlementReceipts =
-                                        crate::db::decode_unversioned(&raw)?;
+                                        crate::db::decode_column(&raw)?;
                                     !matches!(
                                         receipts.cleanup_custody_release,
                                         provenant_records::run::EffectDisposition::Done

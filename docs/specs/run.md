@@ -202,7 +202,7 @@ and exclude unbound, ambiguous, truncated, skipped or missing coverage until res
 creating or migrating a store; GitHub's repository lookup supplies the
 canonical repository namespace. `--bind` explicitly retries binding using the
 observed branch, head and state, and refuses fork PRs. The database is outside attempts and worktrees; GC, landing cleanup and
-worktree removal retain contribution links. The source owns forward migrations.
+worktree removal retain contribution links.
 
 ### PR contributions JSON reference
 
@@ -581,11 +581,11 @@ landed-writer paths all enforce that distinction. A stop accepted between the la
 the commit is acknowledged ineffective from the host-sealed request after the
 commit; a lane-rewritable record never decides whether a held handle stops.
 
-Run-store schema 7 is a forward-only migration. Before migrating an existing
-store, the owner takes a timestamped SQLite snapshot including committed WAL
-contents while excluding concurrent writes. Downgrade is unsupported; recovery
-requires the pre-migration copy or a forward repair.
-Peers sharing a state root must upgrade together: schema 7 and the version 2 attempt record are not readable by earlier builds.
+Every SQLite store (`run`, `admission`, `work-index`, `pr-contributions`,
+the workflow log, and Fabric's `fabric` and `host`) is created from one schema
+file at one version. A store at any other version, older or newer, is refused
+with `STATE_RESET_REQUIRED`, which names `install --reset-state`, and its bytes
+are left unchanged. There is no migration, snapshot or older-shape reader.
 
 `stop` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
@@ -1162,7 +1162,8 @@ unreserved `tmp/`; owner locks such as `writer.lock`,
 ## Store
 
 The run store is SQLite with write-ahead logging (WAL), foreign keys and `synchronous=FULL`.
-The store refuses unknown or newer versions without modifying them and
+The store opens from one schema file at one version and refuses any other
+version (`STATE_RESET_REQUIRED`, naming `install --reset-state`) without modifying it; it also
 refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,
 4 MiB result) make an oversized result a typed failure, never a truncation.
 

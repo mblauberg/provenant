@@ -8,6 +8,10 @@ use provenant_records::AbsolutePath;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
+    sql: include_str!("work_index_schema.sql"),
+    version: 1,
+};
 pub const WORK_INDEX_FILE: &str = "work-index.sqlite3";
 const ROW_LIMIT: usize = 64;
 const MEMBER_BYTES: usize = 64 * 1024;
@@ -100,26 +104,11 @@ struct Membership {
 ///     let _ = WorkIndex::open(path, call);
 /// }
 /// ```
-pub struct WorkIndex(Connection);
+pub struct WorkIndex(pub(crate) Connection);
 impl WorkIndex {
     pub(crate) fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
         let (_, db, _lock) = open_database(host, WORK_INDEX_FILE, call)?;
-        let version = provenant_sqlite::read_version(&db, 1)?;
-        match version {
-            0 => immediate(&db, call, |tx| {
-                tx.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS membership (
-                    project TEXT NOT NULL, run TEXT NOT NULL, task TEXT NOT NULL,
-                    attempt TEXT PRIMARY KEY, record BLOB NOT NULL
-                ) STRICT;
-                CREATE INDEX IF NOT EXISTS work_runs ON membership(project,run,task,attempt);
-                PRAGMA user_version=1;",
-                )?;
-                Ok(())
-            })?,
-            1 => {}
-            other => return Err(RunError::Version(other as i64)),
-        }
+        provenant_sqlite::ensure_schema(&db, SCHEMA)?;
         Ok(Self(db))
     }
     pub fn validate(&self, selection: &WorkSelector, call: &Request<'_>) -> Result<WorkCoverage> {

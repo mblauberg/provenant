@@ -62,8 +62,7 @@ pub fn overview(
     let page = Store::open_existing(root, &call)
         .and_then(|store| store.pending_human_requests(100, max_bytes, &call))
         .map_err(|error| match error {
-            provenant_fabric_store::Error::SchemaVersion(_)
-            | provenant_fabric_store::Error::UnversionedDatabase => OverviewError::Incompatible,
+            provenant_fabric_store::Error::SchemaVersion(_) => OverviewError::Incompatible,
             _ => OverviewError::Unavailable,
         })?;
     Ok(OverviewBatch {

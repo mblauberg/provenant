@@ -78,10 +78,10 @@ pub enum Error {
     Busy,
     #[error("request cancelled")]
     Cancelled,
-    #[error("unsupported database version {0}")]
+    #[error(
+        "STATE_RESET_REQUIRED: database schema version {0} is not supported; run `install --reset-state` to discard it"
+    )]
     SchemaVersion(i64),
-    #[error("non-empty database has no schema version")]
-    UnversionedDatabase,
     #[error("SQLite refused WAL journal mode (returned {0})")]
     JournalMode(String),
     #[error("unsafe state component: {0}")]
@@ -100,17 +100,6 @@ impl From<rusqlite::Error> for Error {
             Self::Busy
         } else {
             Self::Sqlite(error)
-        }
-    }
-}
-
-impl From<provenant_sqlite::SnapshotError> for Error {
-    fn from(error: provenant_sqlite::SnapshotError) -> Self {
-        match error {
-            provenant_sqlite::SnapshotError::Filesystem(error) => error.into(),
-            provenant_sqlite::SnapshotError::Sqlite(error) => error.into(),
-            provenant_sqlite::SnapshotError::PathEncoding => Self::PathEncoding,
-            provenant_sqlite::SnapshotError::ExhaustedNames => Self::Conflict,
         }
     }
 }

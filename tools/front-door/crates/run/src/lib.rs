@@ -176,22 +176,8 @@ impl From<rusqlite::Error> for RunError {
 impl From<provenant_sqlite::VersionError> for RunError {
     fn from(error: provenant_sqlite::VersionError) -> Self {
         match error {
-            provenant_sqlite::VersionError::Unsupported(version) => Self::Version(version),
-            provenant_sqlite::VersionError::Unversioned => Self::Version(0),
+            provenant_sqlite::VersionError::Refused { found, .. } => Self::Version(found),
             provenant_sqlite::VersionError::Sqlite(error) => error.into(),
-        }
-    }
-}
-
-impl From<provenant_sqlite::SnapshotError> for RunError {
-    fn from(error: provenant_sqlite::SnapshotError) -> Self {
-        match error {
-            provenant_sqlite::SnapshotError::Filesystem(error) => error.into(),
-            provenant_sqlite::SnapshotError::Sqlite(error) => error.into(),
-            provenant_sqlite::SnapshotError::PathEncoding => {
-                Self::Validation("backup path is not UTF-8")
-            }
-            provenant_sqlite::SnapshotError::ExhaustedNames => Self::Conflict,
         }
     }
 }
@@ -433,7 +419,9 @@ pub enum RunError {
     ObjectImportLimit(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
-    #[error("run-store schema version {0} is unsupported")]
+    #[error(
+        "STATE_RESET_REQUIRED: schema version {0} is not supported; run `install --reset-state` to discard the store"
+    )]
     Version(i64),
     #[error("run-store path {} is not private or contained: {check}", path.display())]
     UnsafePath {
