@@ -104,6 +104,7 @@ impl F3Facade for WaitFacade {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "read".into(),
                 path: Some("/private/host/wait".into()),
             });
@@ -143,6 +144,7 @@ impl F3Facade for WaitFacade {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "read".into(),
                 path: Some("/private/host/output".into()),
             });

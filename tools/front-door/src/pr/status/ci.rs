@@ -1,8 +1,12 @@
 //! Exact-head observations for deterministic graph gates.
 use super::{Check, encode, mark_conflict, required_checks, summarise_ci};
+use crate::pr::observer::{Check as Observed, Observer};
 use provenant_fabric_runtime::graph::{CiFailedCheck, CiObservation, CiState};
 use serde::Deserialize;
-use std::path::Path;
+use std::{path::Path, time::Duration};
+
+/// The longest a graph gate's one observation may spend reading checks.
+const READ_BUDGET: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Head {
@@ -10,23 +14,23 @@ struct Head {
     sha: String,
 }
 
-struct Evidence {
-    check: Check,
-    url: Option<String>,
-    excerpt: String,
-}
-
 pub(super) fn observe(
+    state: &Path,
     project: &Path,
     target: &str,
     names: &[String],
     failed_checks_max_bytes: usize,
     max_failed_checks: usize,
 ) -> CiObservation {
-    let read = |args: &[&str]| {
-        super::super::successful(super::super::execute(project, args, false).ok()?).ok()
+    let read =
+        |args: &[&str]| super::super::successful(super::super::execute(project, args).ok()?).ok();
+    let evidence = |head: &Head| {
+        Observer::open(state, project, &head.repository, READ_BUDGET)
+            .ok()?
+            .checks(&head.sha, crate::pr::observer::POLL, READ_BUDGET)
+            .ok()
     };
-    let mut result = observe_with(target, names, &read, |head| {
+    let mut result = observe_with(target, names, &read, evidence, |head| {
         required_checks(project, &policy_target(target, head, &read)?)
     });
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
@@ -98,6 +102,7 @@ fn observe_with(
     target: &str,
     names: &[String],
     read: &dyn Fn(&[&str]) -> Option<Vec<u8>>,
+    evidence: impl FnOnce(&Head) -> Option<Vec<Observed>>,
     policy: impl FnOnce(&Head) -> Option<Vec<String>>,
 ) -> CiObservation {
     let Some(before) = resolve_head(target, read) else {
@@ -108,14 +113,14 @@ fn observe_with(
     } else {
         Some(("configured", names.to_vec()))
     };
-    let evidence = read_evidence(&before, read);
+    let evidence = evidence(&before);
     let mut result = summarise_ci(
         evidence.as_ref().map(|checks| {
             checks
                 .iter()
                 .map(|evidence| Check {
-                    name: evidence.check.name.clone(),
-                    bucket: evidence.check.bucket.clone(),
+                    name: evidence.name.clone(),
+                    bucket: evidence.bucket.clone(),
                 })
                 .collect()
         }),
@@ -132,18 +137,18 @@ fn observe_with(
                 .filter(|evidence| {
                     required
                         .as_ref()
-                        .is_none_or(|(_, names)| names.contains(&evidence.check.name))
+                        .is_none_or(|(_, names)| names.contains(&evidence.name))
                 })
                 .collect();
             let missing = required.as_ref().is_some_and(|(_, names)| {
                 names
                     .iter()
-                    .any(|name| !selected.iter().any(|evidence| &evidence.check.name == name))
+                    .any(|name| !selected.iter().any(|evidence| &evidence.name == name))
             });
             (selected.is_empty() || missing)
                 && !selected
                     .iter()
-                    .any(|evidence| evidence.check.bucket == "skipping")
+                    .any(|evidence| evidence.bucket == "skipping")
         })
     {
         result.state = CiState::Pending;
@@ -160,14 +165,14 @@ fn observe_with(
         result.failed_checks = evidence
             .into_iter()
             .filter(|evidence| {
-                matches!(evidence.check.bucket.as_str(), "fail" | "cancel")
+                matches!(evidence.bucket.as_str(), "fail" | "cancel")
                     && required
                         .as_ref()
-                        .is_none_or(|(_, names)| names.contains(&evidence.check.name))
+                        .is_none_or(|(_, names)| names.contains(&evidence.name))
             })
             .map(|evidence| CiFailedCheck {
                 extra: Default::default(),
-                name: evidence.check.name,
+                name: evidence.name,
                 url: evidence.url,
                 excerpt: evidence.excerpt,
             })
@@ -282,114 +287,6 @@ fn valid_head(repository: String, sha: String) -> Option<Head> {
     Some(Head { repository, sha })
 }
 
-fn read_evidence(head: &Head, read: &dyn Fn(&[&str]) -> Option<Vec<u8>>) -> Option<Vec<Evidence>> {
-    let root = format!("repos/{}/commits/{}", head.repository, head.sha);
-    let check_endpoint = format!("{root}/check-runs?per_page=100&filter=latest");
-    let checks: Vec<serde_json::Value> = serde_json::from_slice(&read(&[
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        &check_endpoint,
-    ])?)
-    .ok()?;
-    let status_endpoint = format!("{root}/statuses?per_page=100");
-    let statuses: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&read(&[
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        &status_endpoint,
-    ])?)
-    .ok()?;
-    parse_evidence(head, &checks, &statuses)
-}
-
-fn parse_evidence(
-    head: &Head,
-    pages: &[serde_json::Value],
-    status_pages: &[Vec<serde_json::Value>],
-) -> Option<Vec<Evidence>> {
-    let mut result = Vec::new();
-    for page in pages {
-        for value in page.get("check_runs")?.as_array()? {
-            if value.get("head_sha")?.as_str()? != head.sha {
-                return None;
-            }
-            let status = value.get("status")?.as_str()?;
-            let bucket = match status {
-                "completed" => match value.get("conclusion")?.as_str()? {
-                    "success" => "pass",
-                    "skipped" | "neutral" => "skipping",
-                    "cancelled" => "cancel",
-                    "failure" | "timed_out" | "action_required" | "startup_failure" | "stale" => {
-                        "fail"
-                    }
-                    _ => return None,
-                },
-                "queued" | "in_progress" | "pending" | "waiting" | "requested" => "pending",
-                _ => return None,
-            };
-            let output = value.get("output");
-            let excerpt = ["title", "summary", "text"]
-                .into_iter()
-                .filter_map(|key| output?.get(key)?.as_str())
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n");
-            result.push(Evidence {
-                check: Check {
-                    name: value.get("name")?.as_str()?.into(),
-                    bucket: bucket.into(),
-                },
-                url: value
-                    .get("details_url")
-                    .and_then(|url| url.as_str())
-                    .map(str::to_owned),
-                excerpt,
-            });
-        }
-    }
-    // The statuses endpoint is newest first, including prior updates to the
-    // same context. Only its latest state belongs in the observation.
-    let mut seen = std::collections::BTreeSet::new();
-    for value in status_pages.iter().flatten() {
-        let name = value.get("context")?.as_str()?;
-        if !seen.insert(name) {
-            continue;
-        }
-        if value
-            .get("sha")
-            .and_then(|v| v.as_str())
-            .is_some_and(|sha| sha != head.sha)
-        {
-            return None;
-        }
-        let bucket = match value.get("state")?.as_str()? {
-            "success" => "pass",
-            "pending" | "expected" => "pending",
-            "error" | "failure" => "fail",
-            _ => return None,
-        };
-        result.push(Evidence {
-            check: Check {
-                name: name.into(),
-                bucket: bucket.into(),
-            },
-            url: value
-                .get("target_url")
-                .and_then(|url| url.as_str())
-                .map(str::to_owned),
-            excerpt: value
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .into(),
-        });
-    }
-    Some(result)
-}
-
 #[cfg(test)]
 #[allow(unused_imports, dead_code)] // The worktree driver includes this module without libtest.
 mod tests {
@@ -402,6 +299,15 @@ mod tests {
 
     fn pull(sha: &str) -> serde_json::Value {
         json!({"headRefOid":sha,"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}})
+    }
+
+    /// The observer's reading of whatever check pages the fixture serves.
+    fn evidence(read: &dyn Fn(&[&str]) -> Option<Vec<u8>>, head: &Head) -> Option<Vec<Observed>> {
+        let root = format!("repos/{}/commits/{}", head.repository, head.sha);
+        let page = |suffix: &str| -> Option<Vec<serde_json::Value>> {
+            serde_json::from_slice(&read(&["gh", "api", &format!("{root}/{suffix}")])?).ok()
+        };
+        crate::pr::observer::parse_pages(&page("check-runs")?, &page("statuses")?, &head.sha)
     }
 
     fn checks(sha: &str, status: &str, conclusion: Option<&str>) -> serde_json::Value {
@@ -428,7 +334,13 @@ mod tests {
             };
             serde_json::to_vec(&value).ok()
         };
-        let observation = observe_with("feature", &["build".into()], &read, |_| None);
+        let observation = observe_with(
+            "feature",
+            &["build".into()],
+            &read,
+            |head| evidence(&read, head),
+            |_| None,
+        );
         assert_eq!(observation.state, CiState::Failed);
         assert_eq!(observation.head_sha.as_deref(), Some(OLD));
         assert_eq!(observation.check_names, ["build"]);
@@ -475,7 +387,13 @@ mod tests {
             };
             serde_json::to_vec(&value).ok()
         };
-        let observation = observe_with("feature", &["build".into()], &read, |_| None);
+        let observation = observe_with(
+            "feature",
+            &["build".into()],
+            &read,
+            |head| evidence(&read, head),
+            |_| None,
+        );
         assert_eq!(observation.state, CiState::Pending);
         assert_eq!(observation.head_sha.as_deref(), Some(NEW));
         assert!(observation.summary.contains("superseded"));
@@ -500,7 +418,13 @@ mod tests {
                 })
                 .ok()
             };
-            let observation = observe_with("feature", &["build".into()], &read, |_| None);
+            let observation = observe_with(
+                "feature",
+                &["build".into()],
+                &read,
+                |head| evidence(&read, head),
+                |_| None,
+            );
             assert_eq!(observation.state, expected, "{sha} {status} {conclusion:?}");
             assert!(observation.failed_checks.is_empty());
         }
@@ -525,7 +449,13 @@ mod tests {
             };
             serde_json::to_vec(&value).ok()
         };
-        let observation = observe_with("feature/repair", &["build".into()], &read, |_| None);
+        let observation = observe_with(
+            "feature/repair",
+            &["build".into()],
+            &read,
+            |head| evidence(&read, head),
+            |_| None,
+        );
         assert_eq!(observation.state, CiState::Passed);
         assert_eq!(observation.head_sha.as_deref(), Some(OLD));
         assert!(
@@ -554,7 +484,13 @@ mod tests {
             };
             serde_json::to_vec(&value).ok()
         };
-        let observation = observe_with("refs/heads/123", &["build".into()], &read, |_| None);
+        let observation = observe_with(
+            "refs/heads/123",
+            &["build".into()],
+            &read,
+            |head| evidence(&read, head),
+            |_| None,
+        );
         assert_eq!(observation.state, CiState::Passed);
         assert_eq!(observation.head_sha.as_deref(), Some(OLD));
         assert!(
@@ -569,25 +505,6 @@ mod tests {
                 .iter()
                 .any(|call| call.starts_with("gh pr view"))
         );
-    }
-
-    #[test]
-    fn ci_probe_uses_the_latest_legacy_status_per_context() {
-        let head = Head {
-            repository: "owner/repo".into(),
-            sha: OLD.into(),
-        };
-        let evidence = parse_evidence(
-            &head,
-            &[json!({"check_runs":[]})],
-            &[vec![
-                json!({"context":"legacy","state":"success"}),
-                json!({"context":"legacy","state":"failure","description":"obsolete failure"}),
-            ]],
-        )
-        .unwrap();
-        assert_eq!(evidence.len(), 1);
-        assert_eq!(evidence[0].check.bucket, "pass");
     }
 
     #[test]
@@ -611,8 +528,13 @@ mod tests {
                 })
                 .ok()
             };
-            let observation =
-                observe_with("feature", &["build".into(), "lint".into()], &read, |_| None);
+            let observation = observe_with(
+                "feature",
+                &["build".into(), "lint".into()],
+                &read,
+                |head| evidence(&read, head),
+                |_| None,
+            );
             assert_eq!(observation.state, expected, "{check_pages}");
             if expected == CiState::Pending {
                 assert!(observation.summary.contains("awaiting check registration"));
@@ -643,7 +565,13 @@ mod tests {
                 })
                 .ok()
             };
-            let observation = observe_with("feature", &[], &read, |_| None);
+            let observation = observe_with(
+                "feature",
+                &[],
+                &read,
+                |head| evidence(&read, head),
+                |_| None,
+            );
             assert_eq!(observation.state, expected, "{check_pages} {mergeable}");
             assert_eq!(observation.head_sha.as_deref(), Some(OLD));
             match expected {

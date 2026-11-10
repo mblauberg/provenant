@@ -343,8 +343,9 @@ fn invoke(
             )
         }
         Err(error) => {
-            let projection = error
-                .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
+            let facade =
+                error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>();
+            let projection = facade
                 .map(|error| error.diagnostic())
                 .or_else(|| {
                     error
@@ -352,12 +353,10 @@ fn invoke(
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
                 .unwrap_or_else(|| *cli_input_error("graph input could not be processed"));
-            let outcome = error
-                .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
-                .map_or(
-                    Outcome::Invalid,
-                    provenant_cli::fabric::coordination_outcome,
-                );
+            let outcome = facade.map_or(
+                Outcome::Invalid,
+                provenant_cli::fabric::coordination_outcome,
+            );
             let mut result = CommandResult::new(command, outcome, Value::Null);
             result.error = Some(provenant_records::CommandError {
                 diagnostic: Some((&projection).into()),
@@ -366,7 +365,7 @@ fn invoke(
                     .detail
                     .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
-                cause: None,
+                cause: facade.and_then(|error| error.cause()).map(str::to_owned),
                 repair: projection.next,
             });
             crate::emit(&result, globals, "", false)

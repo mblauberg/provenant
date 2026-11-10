@@ -1,10 +1,12 @@
 //! Whole-receipt replacement at an expected revision. No old-state imports.
 use crate::{persistence, receipt, risk};
-use provenant_core::{CancelToken, Clock, DeliveryId, ProjectId, StateRoot, UtcMicros, WaitBudget};
+use provenant_core::{
+    CancelToken, Clock, DeliveryId, ProjectId, RepoId, StateRoot, UtcMicros, WaitBudget,
+};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, Publication, PublishMode};
 use provenant_records::{
     DecodeError,
-    workflow::{ChairDowngrade, DeliveryReceipt, RiskPolicy, Subject},
+    workflow::{ChairDowngrade, DeliveryReceipt, ReceiptHeader, RiskPolicy, Subject, SubjectKey},
 };
 use std::{ffi::OsStr, io};
 use thiserror::Error;
@@ -17,6 +19,11 @@ pub enum StoreError {
     InvalidCandidate(#[source] receipt::ReceiptError),
     #[error("unsupported receipt version")]
     Version,
+    /// A receipt of an earlier shape. Saving the delivery again replaces it.
+    #[error(
+        "receipt shape retired: save it again (delivery {delivery}, --expected-revision {revision})"
+    )]
+    Retired { delivery: DeliveryId, revision: u64 },
     #[error("receipt exceeds 64 KiB or 256 review references")]
     Limit,
     #[error("receipt identity does not match the store key")]
@@ -82,6 +89,10 @@ pub(crate) fn cause(error: FsError) -> IoCause {
 impl From<receipt::ReceiptError> for StoreError {
     fn from(error: receipt::ReceiptError) -> Self {
         match error {
+            receipt::ReceiptError::Retired(header) => Self::Retired {
+                delivery: header.delivery_id,
+                revision: header.revision,
+            },
             receipt::ReceiptError::Version
             | receipt::ReceiptError::Decode(DecodeError::UnsupportedVersion { .. }) => {
                 Self::Version
@@ -121,6 +132,72 @@ pub struct SaveContext<'a> {
     pub downgrade_approval: Option<&'a ChairDowngrade>,
     /// Complete changed paths, including both sides of renames, from the edge.
     pub changed_paths: &'a [String],
+}
+/// The receipts in `project` whose subject is pull request `number` of
+/// `repository`.
+#[derive(Debug, Default)]
+pub struct PullRequestReceipts {
+    pub receipts: Vec<DeliveryReceipt>,
+    /// Receipts of a retired shape: they approve nothing until saved again.
+    pub retired: Vec<StoreError>,
+}
+/// Every receipt in `project` for pull request `number` of `repository`. A
+/// receipt that cannot be decoded at all names no subject and is skipped.
+pub fn pull_request_receipts(
+    root: &StateRoot,
+    project: ProjectId,
+    repository: RepoId,
+    number: u64,
+) -> Result<PullRequestReceipts, StoreError> {
+    let mut found = PullRequestReceipts::default();
+    let deliveries = match persistence::collection(root, project, "deliveries") {
+        Ok(deliveries) => deliveries,
+        Err(error) if error.is_not_found() => return Ok(found),
+        Err(error) => return Err(error.into()),
+    };
+    for name in deliveries.entries()? {
+        let Some(delivery) = name?.to_str().and_then(|name| DeliveryId::parse(name).ok()) else {
+            continue;
+        };
+        let store = ReceiptStore::new(root.clone(), project, delivery);
+        let dir = match store.directory(false) {
+            Ok(dir) => dir,
+            Err(StoreError::Io { cause, .. }) if cause.kind == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        match store.prior_in(&dir) {
+            Ok(Prior::Current(receipt)) => {
+                if matches!(receipt.subject(), Subject::Pr { repository: repo, number: pr, .. }
+                    if *repo == repository && *pr == number)
+                {
+                    found.receipts.push(*receipt);
+                }
+            }
+            Ok(Prior::Retired(header)) => {
+                if header.subject == (SubjectKey::Pr { repository, number }) {
+                    found.retired.push(StoreError::Retired {
+                        delivery,
+                        revision: header.revision,
+                    });
+                }
+            }
+            Ok(Prior::Absent)
+            | Err(
+                StoreError::Malformed(_)
+                | StoreError::Version
+                | StoreError::Limit
+                | StoreError::Identity,
+            ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(found)
+}
+/// What a save replaces.
+enum Prior {
+    Absent,
+    Current(Box<DeliveryReceipt>),
+    Retired(Box<ReceiptHeader>),
 }
 pub struct ReceiptStore {
     root: StateRoot,
@@ -181,14 +258,34 @@ impl ReceiptStore {
         )?)
     }
     fn read_in(&self, dir: &Directory) -> Result<Option<DeliveryReceipt>, StoreError> {
+        match self.prior_in(dir)? {
+            Prior::Absent => Ok(None),
+            Prior::Current(receipt) => Ok(Some(*receipt)),
+            Prior::Retired(header) => Err(StoreError::Retired {
+                delivery: header.delivery_id,
+                revision: header.revision,
+            }),
+        }
+    }
+    fn prior_in(&self, dir: &Directory) -> Result<Prior, StoreError> {
         let bytes = match self.filesystem.read_bounded(dir) {
             Ok(bytes) => bytes,
-            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) if error.is_not_found() => return Ok(Prior::Absent),
             Err(error) => return Err(error.into()),
         };
-        let receipt = receipt::read(bytes.as_slice())?;
-        self.check_identity(&receipt)?;
-        Ok(Some(receipt))
+        match receipt::read(bytes.as_slice()) {
+            Ok(receipt) => {
+                self.check_identity(&receipt)?;
+                Ok(Prior::Current(Box::new(receipt)))
+            }
+            Err(receipt::ReceiptError::Retired(header)) => {
+                if header.project_id != self.project || header.delivery_id != self.delivery {
+                    return Err(StoreError::Identity);
+                }
+                Ok(Prior::Retired(header))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
     fn check_identity(&self, receipt: &DeliveryReceipt) -> Result<(), StoreError> {
         if receipt.project_id() != self.project || receipt.delivery_id() != self.delivery {
@@ -233,8 +330,12 @@ impl ReceiptStore {
                 StoreError::from(error)
             })?;
         check_wait(budget, cancel, clock)?;
-        let previous = self.read_in(&dir)?;
-        let observed = previous.as_ref().map_or(0, DeliveryReceipt::revision);
+        let prior = self.prior_in(&dir)?;
+        let observed = match &prior {
+            Prior::Absent => 0,
+            Prior::Current(receipt) => receipt.revision(),
+            Prior::Retired(header) => header.revision,
+        };
         if observed != expected_revision {
             return Err(StoreError::Conflict {
                 expected: expected_revision,
@@ -258,20 +359,26 @@ impl ReceiptStore {
         if now >= context.valid_until {
             return Err(StoreError::Expired);
         }
-        let prior_time = previous.as_ref().map_or(now, DeliveryReceipt::updated_at);
+        let prior_time = match &prior {
+            Prior::Absent => now,
+            Prior::Current(receipt) => receipt.updated_at(),
+            Prior::Retired(header) => header.updated_at,
+        };
         let regression = (now < prior_time).then_some(ClockRegression {
             previous: prior_time,
             observed: now,
         });
-        let committed = candidate
-            .clone()
-            .with_commit_metadata(previous.as_ref(), now)
-            .map_err(|error| match error {
-                provenant_records::workflow::RecordError::RevisionOverflow => {
-                    StoreError::RevisionOverflow
-                }
-                error => StoreError::candidate(error.into()),
-            })?;
+        let committed = match &prior {
+            Prior::Absent => candidate.clone().with_commit_metadata(None, now),
+            Prior::Current(previous) => candidate.clone().with_commit_metadata(Some(previous), now),
+            Prior::Retired(header) => candidate.clone().replacing_retired(header, now),
+        }
+        .map_err(|error| match error {
+            provenant_records::workflow::RecordError::RevisionOverflow => {
+                StoreError::RevisionOverflow
+            }
+            error => StoreError::candidate(error.into()),
+        })?;
         let bytes = receipt::canonical(&committed).map_err(StoreError::candidate)?;
         // Cancellation/deadline boundary: finish staging, replacement and sync
         // after this check, even if a cancellation subsequently arrives.

@@ -2123,8 +2123,13 @@ pub fn attempt_facts(
                         delivery,
                     )
                     .read()
-                    .map_err(|error| {
-                        Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                    .map_err(|error| match error {
+                        provenant_workflow::store::StoreError::Retired { .. } => {
+                            Fail::new(Status::Refused, ErrorKind::Invalid, error.to_string())
+                        }
+                        error => {
+                            Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                        }
                     })?;
                     match receipt {
                         Some(receipt) => (

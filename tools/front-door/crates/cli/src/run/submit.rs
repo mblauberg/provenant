@@ -126,6 +126,7 @@ pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
                 delivery_stage: None,
                 resource: None,
                 input_failure: Some(fact),
+                cause: None,
             };
             let mut projection = detail.diagnostic();
             projection.code = ErrorKind::Io.code().into();

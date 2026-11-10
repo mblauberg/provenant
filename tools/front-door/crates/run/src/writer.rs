@@ -52,6 +52,18 @@ fn error<E: std::fmt::Display>(
         source: std::io::Error::other(source.to_string()),
     }
 }
+/// A utility failure keeps its fixed cause, when it has one, beside its text.
+fn utility_error(
+    operation: &'static str,
+    path: Option<&Path>,
+) -> impl FnOnce(provenant_confinement::utility::UtilityError) -> RunError {
+    let path = path.map(Path::to_path_buf);
+    move |source| RunError::OperationIo {
+        operation,
+        path,
+        source: crate::CausedSource::io(source.to_string(), source.safe_cause()),
+    }
+}
 /// Held-directory errors name paths relative to their anchor. Retain a known
 /// anchor before crossing the edge; the facade omits paths with unknown anchors.
 fn anchored_error(error: FsError, anchor: &Path) -> RunError {
@@ -110,7 +122,7 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
         SystemExecutor::new(1).map_err(error("initialise source system executor", None))?;
     let selected = utility
         .project_location(&executor, cwd, budget()?, &CancelToken::new())
-        .map_err(error("locate source project", Some(cwd)))?;
+        .map_err(utility_error("locate source project", Some(cwd)))?;
     let repo = selected
         .repository
         .ok_or(RunError::Validation("source needs a Git project"))?;
@@ -161,7 +173,7 @@ fn resolve_writer_with(
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let selected = utility
         .project_location(&executor, cwd, budget()?, &CancelToken::new())
-        .map_err(error("locate writer project", Some(cwd)))?;
+        .map_err(utility_error("locate writer project", Some(cwd)))?;
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
@@ -524,7 +536,7 @@ pub(crate) fn cleanup_git_pins(
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let repo = utility
         .open_repo(&executor, &writer.project, budget()?, &CancelToken::new())
-        .map_err(error(
+        .map_err(utility_error(
             "open writer repository for Git ref cleanup",
             Some(&writer.project),
         ))?;
@@ -680,7 +692,10 @@ pub fn prepare_writer_with_facts(
     )?;
     let repo = utility
         .open_repo(&executor, &request.project, budget()?, &cancel)
-        .map_err(error("open writer repository", Some(&request.project)))?;
+        .map_err(utility_error(
+            "open writer repository",
+            Some(&request.project),
+        ))?;
     if !common.metadata()?.same_identity(&repo.common_identity()) {
         return Err(RunError::Validation(
             "writer repository changed during setup",
@@ -1061,7 +1076,7 @@ fn prepare_writer_git(
     let config_lock = lock_config(LockMode::Shared)?;
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
-        .map_err(error("reopen writer repository", Some(&project)))?;
+        .map_err(utility_error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -1101,7 +1116,7 @@ fn prepare_writer_git(
     // Refresh every dependent snapshot only after regaining the common owner.
     let fresh_repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
-        .map_err(error(
+        .map_err(utility_error(
             "reopen writer repository after fetch",
             Some(&project),
         ))?;
@@ -1190,7 +1205,7 @@ fn prepare_writer_git(
     for merge in [false, true] {
         let repo = utility
             .open_repo(&executor, &project, budget()?, cancel)
-            .map_err(error("reopen writer repository", Some(&project)))?;
+            .map_err(utility_error("reopen writer repository", Some(&project)))?;
         let worktree = provenant_confinement::verify_worktree(&repo, &path)
             .map_err(worktrees::WorktreeError::from)?;
         if !root_identity.same_identity(&worktree.identity())
@@ -1214,7 +1229,7 @@ fn prepare_writer_git(
     }
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
-        .map_err(error("reopen writer repository", Some(&project)))?;
+        .map_err(utility_error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
