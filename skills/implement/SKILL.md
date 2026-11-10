@@ -27,18 +27,16 @@ runbooks. Run targeted checks locally; leave full suites to CI.
 
 ## How it runs
 
-Register a writer worktree first (`provenant worktree create slice --base BASE`).
-Save `slice.toml`, replacing the path, scope and brief:
+Save `slice.toml`, replacing the scope and brief. `run --branch NAME --base REF` creates the writer's owned worktree, so register none by hand:
 
 ```toml
 use = "implement"
 tier = "junior"
-worktree = "/absolute/project/.worktrees/slice"
 write_scope = ["src"]
 brief = "Meet the approved criteria; run the named checks, commit and report."
 ```
 
-Run `provenant run --route junior --file slice.toml --explain`, then omit
+Run `provenant run --route junior --file slice.toml --branch NAME --base REF --explain`, then omit
 `--explain` to submit.
 
 Check authority, write scopes and gates in the explanation,
