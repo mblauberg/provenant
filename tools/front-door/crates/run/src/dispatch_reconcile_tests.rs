@@ -134,7 +134,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
             Err(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 resource: None,
-                terminal_cause: None,
+                terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
                 message: self.message.into(),
                 fallback_outcome: None,
@@ -227,7 +227,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             Err(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 resource: None,
-                terminal_cause: None,
+                terminal_cause: provenant_records::run::TerminalCause::HandoffRefused,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
                 fallback_outcome: (!self.0)

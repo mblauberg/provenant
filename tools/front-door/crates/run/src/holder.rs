@@ -2075,7 +2075,7 @@ impl RunStore {
                 });
             }
         }
-        let terminal_note = if exit.never_spawned && !cancelled {
+        let mut terminal_note = if exit.never_spawned && !cancelled {
             exit.launch_refusal.map(|fact| {
                 let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new(
                     ErrorKind::Refused.code(),
@@ -2215,6 +2215,21 @@ impl RunStore {
         } else {
             partial.clear();
         }
+        // A blocked writer settles with its own cause and its note. A failure
+        // or another cause already recorded keeps its place.
+        if task.writer.is_some()
+            && decoded.terminal_cause.is_none()
+            && matches!(
+                decoded.outcome,
+                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+            )
+            && let Some(blocked) = handoff.as_ref().filter(|handoff| {
+                handoff.status == provenant_records::handoff::HandoffStatus::Blocked
+            })
+        {
+            decoded.terminal_cause = Some(TerminalCause::Blocked);
+            terminal_note = Some(bounded_note(&blocked.note));
+        }
         // No-work is a host Git fact, never inferred from provider prose or a
         // missing head. Keep failures and uncommitted work distinct.
         if task.writer.is_some()
@@ -2317,7 +2332,10 @@ impl RunStore {
             call,
         )?;
         let decoded_reason = decoded.reason.take().map(bounded_reason);
+        let stop = provenant_records::Stop::sealed(decoded.terminal_cause, handoff.clone())
+            .map_err(|_| RunError::Validation("stop could not be sealed"))?;
         let publication = TerminalPublication {
+            stop,
             terminal_cause: decoded.terminal_cause,
             terminal_note,
             outcome: decoded.outcome,
@@ -3364,7 +3382,12 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (changed, dirty) in [(false, false), (true, false), (false, true)] {
+        for (changed, dirty, blocked) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -3468,10 +3491,27 @@ mod writer_recovery_tests {
             } else {
                 "Acceptance remains unfinished"
             };
+            let status = if blocked { "blocked" } else { "stopped_early" };
             fake.answer = Some(format!(
-                "```handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
+                "```handoff\n{{\"schema_version\":2,\"status\":\"{status}\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
             ));
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            if blocked {
+                // A blocked writer seals one typed stop and restarts nothing.
+                let AttemptState::Terminal { extra, .. } = &finished.state else {
+                    panic!("not terminal")
+                };
+                assert_eq!(
+                    extra.get("terminal_cause"),
+                    Some(&serde_json::json!(TerminalCause::Blocked))
+                );
+                let stop: provenant_records::Stop =
+                    serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
+                assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
+                assert_eq!(stop.note(), Some(note));
+                assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
+                continue;
+            }
             let successor = store.pending_attempts(run.run_id, &call)?;
             assert_eq!(successor.len(), 1);
             assert_eq!(finished.superseded_by, Some(successor[0].attempt_id));

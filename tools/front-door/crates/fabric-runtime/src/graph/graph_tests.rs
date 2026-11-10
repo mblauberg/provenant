@@ -765,7 +765,7 @@ fn capture(text: &str) -> crate::result_capture::CapturedResult {
     capture.push(text.as_bytes());
     // The sealed handoff a settled attempt carries, as the fixture text declares it.
     let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_result(text);
+    result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
     result
 }
 

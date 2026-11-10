@@ -271,7 +271,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         if plan_error == "resolver" {
             assert_eq!(
                 refusal.terminal_cause,
-                Some(provenant_records::run::TerminalCause::RouteResolutionRefused),
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
             );
             assert_eq!(
                 refusal.terminal_note.as_deref(),
