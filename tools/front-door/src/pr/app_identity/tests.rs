@@ -247,6 +247,7 @@ fn keychain_output_decodes_plain_and_hex() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods, reason = "drives the system openssl")]
 fn openssl_signature_verifies_for_a_generated_key() {
     let dir = tempfile::tempdir().unwrap();
     let key = dir.path().join("k.pem");

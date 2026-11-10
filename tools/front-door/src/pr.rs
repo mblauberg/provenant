@@ -90,7 +90,7 @@ fn execute_cancellable(
     let mut options = ExecOptions::new(&argv, project, timeout);
     options.stdin = stdin;
     options.cancel = cancel;
-    let app_environment = app_identity::environment(project, &argv_text);
+    let app_environment = app_identity::environment(project, argv_text);
     options.env = app_environment.as_deref();
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };

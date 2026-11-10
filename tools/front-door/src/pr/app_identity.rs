@@ -248,7 +248,7 @@ pub(crate) fn decode_keychain_output(output: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(output);
     let trimmed = text.trim();
     if !trimmed.contains("-----BEGIN")
-        && trimmed.len() % 2 == 0
+        && trimmed.len().is_multiple_of(2)
         && !trimmed.is_empty()
         && trimmed.bytes().all(|b| b.is_ascii_hexdigit())
     {
