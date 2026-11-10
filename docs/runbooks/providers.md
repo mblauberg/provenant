@@ -346,8 +346,7 @@ refreshing the login for lanes on that account:
 Provenant cannot check that the token belongs to the registered account; the
 account's login probe still runs at each launch. The token lasts about a year
 rather than hours, so a leak from a lane is usable for longer. To revoke it, open
-your Claude account settings on claude.ai and revoke the token under
-Authorization tokens. To revert the host to the login token, delete the file.
+your Claude account settings on claude.ai and revoke the token there. To revert the host to the login token, delete the file.
 To renew it, repeat these steps. Never copy the file between account directories.
 
 ## Agy accounts
