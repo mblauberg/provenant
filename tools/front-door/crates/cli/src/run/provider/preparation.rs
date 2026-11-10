@@ -2640,7 +2640,10 @@ pub(super) fn prepare_candidates(
             // account may still serve the same model, so move on to it once per
             // account, never past a pinned one.
             let spent = error.contains("allowance exhausted");
-            let refused_key = route.account_key.clone().filter(|_| spent && selected.is_none());
+            let refused_key = route
+                .account_key
+                .clone()
+                .filter(|_| spent && selected.is_none());
             let Some(key) = refused_key else {
                 reasons.push(skip(&label, SkipKind::Unavailable, error));
                 continue;
@@ -2648,7 +2651,10 @@ pub(super) fn prepare_candidates(
             let name = entries
                 .iter()
                 .find(|entry| entry.adapter == route.adapter && entry.key == key)
-                .map_or_else(|| "unregistered account".to_owned(), |entry| entry.label.clone());
+                .map_or_else(
+                    || "unregistered account".to_owned(),
+                    |entry| entry.label.clone(),
+                );
             let mut skipped = skip(
                 &label,
                 SkipKind::Account,
@@ -2661,7 +2667,10 @@ pub(super) fn prepare_candidates(
             );
             refused_accounts.insert((route.adapter.clone(), key));
             let remaining = without_refused_accounts(&availability, &refused_accounts);
-            if remaining.iter().any(|record| record.adapter == route.adapter) {
+            if remaining
+                .iter()
+                .any(|record| record.adapter == route.adapter)
+            {
                 if let Ok(model) = provenant_routing::ModelId::parse(&label) {
                     rejected.retain(|tried| *tried != model);
                 }
