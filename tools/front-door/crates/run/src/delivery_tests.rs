@@ -568,6 +568,176 @@ fn stopped_merge_is_restored(
     Ok(())
 }
 
+/// A lane that commits a clean merge in its private Git view, as a lane which
+/// merged the default branch and pushed does. Returns the fixture, a runner for
+/// private-view Git, and the host's Git environment.
+fn lane_with_committed_merge() -> std::result::Result<
+    (PrepareFixture, std::path::PathBuf, std::path::PathBuf),
+    Box<dyn std::error::Error>,
+> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    let fixture = PrepareFixture::new()?;
+    fixture.git(&["update-ref", "refs/remotes/origin/main", "refs/heads/lane"])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    std::fs::write(fixture.writer.project.join("theirs.txt"), "theirs\n")?;
+    fixture.git(&["add", "theirs.txt"])?;
+    fixture.commit(&fixture.writer.project, "theirs")?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let attempt_path = fixture.root.join("attempt");
+    let scratch = attempt_path.join("tmp/candidate-0");
+    std::fs::create_dir_all(&scratch)?;
+    let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &fixture.writer.project,
+        UtilityBudget::bounded(Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+    let base = crate::objects::resolve_ref(&git, worktree.repo(), "refs/heads/lane")?;
+    crate::objects::prepare_bound(
+        &git,
+        worktree.repo(),
+        &Directory::open_anchor(&attempt_path)?,
+        &scratch,
+        "refs/heads/lane",
+        base,
+    )?;
+    Ok((fixture, scratch, git))
+}
+
+fn private_git(
+    fixture: &PrepareFixture,
+    scratch: &Path,
+    git: &Path,
+    args: &[&str],
+) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let output = provenant_os::fixture::git_command_at(git)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .env("GIT_DIR", scratch.join("git-common"))
+        .env("GIT_COMMON_DIR", scratch.join("git-common"))
+        .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+        .env("GIT_WORK_TREE", &fixture.writer.worktree)
+        .current_dir(&fixture.writer.worktree)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn worktree_git(
+    fixture: &PrepareFixture,
+    git: &Path,
+    args: &[&str],
+) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let output = provenant_os::fixture::git_command_at(git)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .current_dir(&fixture.writer.worktree)
+        .args(args)
+        .output()?;
+    assert!(output.status.success());
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+/// A lane which merged the default branch and committed leaves HEAD, index and
+/// files at the same commit once settlement publishes it.
+#[test]
+fn committed_merge_leaves_the_bound_worktree_clean_at_the_lane_tip()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let theirs = {
+        let output = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(k, v)| (k, v)))
+            .current_dir(&fixture.writer.project)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)?.trim().to_owned()
+    };
+    fixture.terminal(|| {
+        std::fs::write(fixture.writer.worktree.join("ours.txt"), "ours\n")?;
+        private_git(&fixture, &scratch, &git, &["add", "ours.txt"])?;
+        private_git(&fixture, &scratch, &git, &["commit", "-qm", "ours"])?;
+        private_git(&fixture, &scratch, &git, &["merge", "--no-edit", &theirs])?;
+        Ok(())
+    })?;
+    assert_eq!(worktree_git(&fixture, &git, &["status", "--porcelain"])?, "");
+    let head = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
+    let lane = worktree_git(&fixture, &git, &["rev-parse", "refs/heads/lane"])?;
+    assert_eq!(head, lane);
+    assert_ne!(head, theirs);
+    Ok(())
+}
+
+/// When the lane's commits cannot be published, its files move back, except
+/// any file someone else changed, and they move forward again on publication.
+#[test]
+fn unpublished_lane_files_move_back_without_touching_foreign_edits()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use crate::objects::worktree::{Stores, converge};
+    let (fixture, scratch, git) = lane_with_committed_merge()?;
+    let wt = &fixture.writer.worktree;
+    std::fs::write(wt.join("base.txt"), "base\n")?;
+    fixture.lane_git(&["add", "base.txt"])?;
+    fixture.commit(wt, "base file")?;
+    let base = worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?;
+    // The private view shares the host's refs at launch; move it forward.
+    std::fs::write(
+        scratch.join("git-common/refs/heads/lane"),
+        format!("{base}\n"),
+    )?;
+    std::fs::write(wt.join("added.txt"), "added\n")?;
+    std::fs::write(wt.join("base.txt"), "changed\n")?;
+    std::fs::write(wt.join("foreign.txt"), "lane\n")?;
+    private_git(&fixture, &scratch, &git, &["add", "-A"])?;
+    private_git(&fixture, &scratch, &git, &["commit", "-qm", "lane"])?;
+    let tip = private_git(&fixture, &scratch, &git, &["rev-parse", "HEAD"])?;
+    // Someone else edits a path the lane also committed.
+    std::fs::write(wt.join("foreign.txt"), "someone else\n")?;
+    let repo_source = crate::objects::bound_source(&Directory::open_anchor(
+        &fixture.root.join("attempt"),
+    )?)?
+    .ok_or("source")?;
+    let (base_oid, tip_oid) = (GitOid::parse(&base)?, GitOid::parse(&tip)?);
+    let scratch_git = scratch.join("git-common");
+    let objects = scratch.join("git-objects");
+    let utility = provenant_confinement::UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let executor = SystemExecutor::new(1)?;
+    let repo = utility.open_repo(
+        &executor,
+        &fixture.writer.project,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        &CancelToken::new(),
+    )?;
+    let verified = provenant_confinement::verify_worktree(&repo, wt)?;
+    let stores = Stores {
+        git_dir: &scratch_git,
+        objects: Some(&objects),
+    };
+    let back = converge(&git, verified.repo(), &stores, tip_oid, base_oid)?;
+    assert_eq!(back.moved, 2);
+    assert_eq!(back.kept, ["foreign.txt"]);
+    assert!(!wt.join("added.txt").exists());
+    assert_eq!(std::fs::read_to_string(wt.join("base.txt"))?, "base\n");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("foreign.txt"))?,
+        "someone else\n"
+    );
+    drop(repo_source);
+    Ok(())
+}
+
 /// A prepared host whose Git prints `bytes` of output for any call containing
 /// `pattern`, once prepared. Every other call goes to the real Git. Preparing
 /// lists worktrees too, so the fake stays inert until the flag file exists.

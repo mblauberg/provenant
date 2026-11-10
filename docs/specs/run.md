@@ -468,6 +468,14 @@ terminal settlement.
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
 
+A worktree-write lane edits the bound worktree's files while its commits stay
+in private Git, so until publication the files are ahead of HEAD and the index.
+When settlement cannot publish, it moves back every file that still holds the
+lane's own content to the branch the host holds, keeps any other file as found,
+and names the lane's commit and branch in the settlement reason. A later
+successful publication moves those files forward again, so files, index and HEAD
+always describe one commit.
+
 A chair can release an unsettleable writer fence with
 `provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
 continues retrying by default. Abandonment requires a terminal attempt,

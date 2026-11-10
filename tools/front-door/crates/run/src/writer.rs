@@ -2601,6 +2601,7 @@ impl WriterLaunch {
                     self.branch.as_str(),
                 )? == verified_tip
             {
+                self.advance_files(attempt, verified_tip)?;
                 crate::objects::restore_index(source, self.worktree.repo())?;
                 if !merge_objects.is_empty() {
                     crate::artifacts::seal(
@@ -2686,6 +2687,74 @@ impl WriterLaunch {
                 head: verified_tip,
             })?,
             crate::RECORD_LIMIT,
+        )?;
+        Ok(())
+    }
+}
+impl WriterLaunch {
+    /// Put the bound worktree's files back at the branch the host still holds
+    /// when the lane's commits could not be published, and say where the work
+    /// is. Only files that still hold the lane's own content move. Best effort:
+    /// the note says what happened either way.
+    pub(crate) fn unpublish(&self, attempt: &Directory) -> String {
+        let attempt_work = || -> Result<String> {
+            let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+            let Some(source) = crate::objects::bound_source(attempt)? else {
+                return Ok(String::new());
+            };
+            let repo = self.worktree.repo();
+            let branch = self.branch.as_str();
+            let tip = crate::objects::private_tip(&source, branch)?;
+            let held = crate::objects::resolve_ref(&git, repo, branch)?;
+            let location = format!(
+                "the lane's work is commit {tip} on branch {branch}, retained in its private Git"
+            );
+            if tip == self.base || held != self.base {
+                return Ok(String::new());
+            }
+            let scratch = source.refs.current_path()?;
+            let objects = source.objects.current_path()?;
+            let moved = crate::objects::worktree::converge(
+                &git,
+                repo,
+                &crate::objects::worktree::Stores {
+                    git_dir: &scratch,
+                    objects: Some(&objects),
+                },
+                tip,
+                self.base,
+            )?;
+            crate::objects::worktree::seal_reverted(attempt, tip)?;
+            let mut note = format!(
+                "worktree restored to {} ({} files); {location}",
+                self.base, moved.moved
+            );
+            if !moved.kept.is_empty() {
+                let listed: Vec<_> = moved.kept.iter().take(UNCOMMITTED_LISTED).cloned().collect();
+                note.push_str(&format!("; left as found: {}", listed.join(", ")));
+            }
+            Ok(note)
+        };
+        attempt_work().unwrap_or_else(|error| format!("worktree files not restored: {error}"))
+    }
+
+    /// After a revert, publication moves the files forward again so the files,
+    /// index and HEAD agree at the published commit.
+    fn advance_files(&self, attempt: &Directory, tip: GitOid) -> Result<()> {
+        if !crate::objects::worktree::reverted(attempt)? || tip == self.base {
+            return Ok(());
+        }
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let repo = self.worktree.repo();
+        crate::objects::worktree::converge(
+            &git,
+            repo,
+            &crate::objects::worktree::Stores {
+                git_dir: repo.common_git_dir(),
+                objects: None,
+            },
+            self.base,
+            tip,
         )?;
         Ok(())
     }

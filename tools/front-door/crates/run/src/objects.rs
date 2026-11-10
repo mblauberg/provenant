@@ -13,6 +13,7 @@ use std::{
 };
 
 mod view;
+pub(crate) mod worktree;
 #[cfg(test)]
 use view::object_binding;
 #[cfg(test)]
