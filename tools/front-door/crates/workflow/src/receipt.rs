@@ -2,7 +2,7 @@
 use crate::{review, risk};
 use provenant_core::{DeliveryId, Digest, ProjectId, UtcMicros};
 use provenant_records::workflow::*;
-use provenant_records::{CanonicalBytes, CanonicalV1, DecodeError, Limits, decode_v1};
+use provenant_records::{CanonicalBytes, CanonicalV1, DecodeError, Limits, decode};
 use std::io::Read;
 
 pub const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
@@ -26,6 +26,8 @@ pub enum ReceiptError {
     Record(#[from] RecordError),
     #[error("unsupported receipt schema version")]
     Version,
+    #[error("receipt shape retired: save it again")]
+    Retired(Box<ReceiptHeader>),
     #[error("receipt exceeds its byte or review-reference limit")]
     Limit,
 }
@@ -63,9 +65,24 @@ pub fn new(
     validate(&receipt)?;
     Ok(receipt)
 }
-/// Bounded stored-claim decoding, without claiming current verification or authority.
+/// Bounded stored-claim decoding, without claiming current verification or
+/// authority. A receipt of a retired shape is reported with its header so the
+/// store can replace it; its claims are never read.
 pub fn read(reader: impl Read) -> Result<DeliveryReceipt, ReceiptError> {
-    let receipt = decode_v1(reader, LIMITS)?;
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(DecodeError::Read)?;
+    if let Ok(header) = decode::<ReceiptHeader, _>(bytes.as_slice(), LIMITS) {
+        if header.schema_version < RECEIPT_SCHEMA_VERSION {
+            return Err(ReceiptError::Retired(Box::new(header)));
+        }
+        if header.schema_version > RECEIPT_SCHEMA_VERSION {
+            return Err(ReceiptError::Version);
+        }
+    }
+    let receipt = decode(bytes.as_slice(), LIMITS)?;
     validate(&receipt)?;
     Ok(receipt)
 }
@@ -80,7 +97,7 @@ pub fn canonical(receipt: &DeliveryReceipt) -> Result<CanonicalBytes, ReceiptErr
 pub fn digest(receipt: &DeliveryReceipt) -> Result<Digest, ReceiptError> {
     Ok(provenant_records::record_digest(
         "workflow.receipt",
-        1,
+        RECEIPT_SCHEMA_VERSION,
         &canonical(receipt)?,
     )?)
 }
@@ -88,7 +105,7 @@ pub fn validate(receipt: &DeliveryReceipt) -> Result<(), ReceiptError> {
     canonical(receipt).map(|_| ())
 }
 fn validate_shape(receipt: &DeliveryReceipt) -> Result<(), ReceiptError> {
-    if receipt.schema_version() != 1 {
+    if receipt.schema_version() != RECEIPT_SCHEMA_VERSION {
         return Err(ReceiptError::Version);
     }
     if receipt.review_attempts().len() > MAX_REVIEW_REFS {
@@ -244,7 +261,7 @@ mod tests {
         let bytes = canonical(&receipt()).unwrap();
         let text = std::str::from_utf8(bytes.as_bytes()).unwrap();
         for bad in [
-            text.replace("\"schema_version\":1", "\"schema_version\":2"),
+            text.replace("\"schema_version\":2", "\"schema_version\":3"),
             text.replacen('{', "{\"revision\":1,", 1),
             text.replace("\"created_at\":1234567", "\"created_at\":1.5"),
             text.replace("\"revision\":1", "\"revision\":18446744073709551616"),

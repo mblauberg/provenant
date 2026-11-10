@@ -442,7 +442,7 @@ fn acceptance_error<R: AttemptOwner>(
     owner: &mut R,
     land: &str,
     writer: &str,
-    head: &str,
+    (branch, head): (&str, &str),
 ) -> Result<Option<String>, R::Error> {
     let writer_index = positions.get(writer).copied();
     let mut reviewed = Vec::new();
@@ -476,6 +476,7 @@ fn acceptance_error<R: AttemptOwner>(
                 continue;
             }
             let coverage = owner.review_coverage(
+                branch,
                 Reviewed {
                     head: &subject.head,
                     base: subject.base.as_deref(),
@@ -661,7 +662,13 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             );
         };
         if let Some(reason) = acceptance_error(
-            plan, checkpoint, positions, owner, &node.id, &spec.node, &head,
+            plan,
+            checkpoint,
+            positions,
+            owner,
+            &node.id,
+            &spec.node,
+            (branch.as_str(), head.as_str()),
         )
         .map_err(GraphError::Run)?
         {

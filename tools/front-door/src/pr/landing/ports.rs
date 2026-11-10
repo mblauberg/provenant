@@ -44,10 +44,17 @@ pub struct ReviewRecord {
     pub head: String,
     pub base: String,
 }
+/// A pull request's accepted review records, and the receipts for it that
+/// cannot be read as one, each with the reason and its remedy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reviews {
+    pub records: Vec<ReviewRecord>,
+    pub unusable: Vec<String>,
+}
 /// Accepted Provenant review records, read when `land.approval = "receipt"`.
 /// This is the approval port beside [`Forge::approvals`].
 pub trait ReviewRecords {
-    fn reviews(&self, number: u64) -> Result<Vec<ReviewRecord>, LandingError>;
+    fn reviews(&self, number: u64) -> Result<Reviews, LandingError>;
 }
 pub trait Forge {
     fn set_project_path(&mut self, _path: &std::path::Path) {}

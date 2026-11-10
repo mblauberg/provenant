@@ -201,8 +201,11 @@ impl Forge for FakeForge {
 #[derive(Default)]
 pub struct FakeReviews(pub BTreeMap<u64, Vec<ReviewRecord>>);
 impl ReviewRecords for FakeReviews {
-    fn reviews(&self, number: u64) -> Result<Vec<ReviewRecord>, LandingError> {
-        Ok(self.0.get(&number).cloned().unwrap_or_default())
+    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+        Ok(Reviews {
+            records: self.0.get(&number).cloned().unwrap_or_default(),
+            unusable: Vec::new(),
+        })
     }
 }
 #[derive(Default)]

@@ -531,11 +531,13 @@ pub trait AttemptOwner {
         crate::config::GraphLand::default().choose(None, tier)
     }
 
-    /// Prove whether a review of `reviewed` covers the land `head` that moved
-    /// after it, against the fetched land target. `None` means this host
-    /// cannot prove carry-over, so only the reviewed head itself may land.
+    /// Prove whether a review of `reviewed` covers the land `head` of
+    /// `branch` that moved after it, against a fetch of the branch its pull
+    /// request merges into. `None` means this host cannot prove carry-over,
+    /// so only the reviewed head itself may land.
     fn review_coverage(
         &mut self,
+        _branch: &str,
         _reviewed: provenant_core::review_cover::Reviewed<'_>,
         _head: &str,
     ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {

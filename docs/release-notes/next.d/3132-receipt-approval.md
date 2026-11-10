@@ -5,4 +5,4 @@
 
 ## Breaking changes
 
-- A pull request delivery receipt's subject now requires `base`, the commit the review read the head against. Receipts saved without it no longer load; save them again. (#3132)
+- Delivery receipts move to schema version 2. A pull request subject now records `base`, the head's merge base with the branch the pull request merges into (for a stack member, the head of the branch below), and its repository; `workflow receipt save` reads both from the forge and ignores any the request carries. Changed paths are read from that base. A receipt saved before this release is reported as `receipt shape retired: save it again`; saving the delivery at its revision replaces it, with the decision reset to pending. (#3132)

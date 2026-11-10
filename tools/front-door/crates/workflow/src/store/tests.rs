@@ -116,6 +116,56 @@ fn saves_one_complete_receipt_and_rejects_a_stale_revision() {
     assert_eq!(store.read().unwrap(), Some(second));
 }
 
+#[test]
+fn a_retired_receipt_names_the_remedy_and_is_replaced_by_saving_again() {
+    let (_temp, store, r) = setup();
+    let first = save(&store, &r, 0, 20).unwrap();
+    // Version 1: a pull request subject without the reviewed base.
+    let mut retired = serde_json::to_value(&first).unwrap();
+    retired["schema_version"] = 1.into();
+    retired["subject"].as_object_mut().unwrap().remove("base");
+    std::fs::write(
+        directory(&store).join("receipt.json"),
+        serde_json::to_vec(&retired).unwrap(),
+    )
+    .unwrap();
+    let error = store.read().unwrap_err();
+    assert!(matches!(error, StoreError::Retired { revision: 1, .. }));
+    assert!(
+        error
+            .to_string()
+            .starts_with("receipt shape retired: save it again"),
+        "{error}"
+    );
+    let Subject::Pr {
+        repository, number, ..
+    } = *first.subject()
+    else {
+        panic!("pull request fixture");
+    };
+    let found = pull_request_receipts(&store.root, store.project, repository, number).unwrap();
+    assert!(found.receipts.is_empty());
+    assert!(matches!(
+        found.retired.as_slice(),
+        [StoreError::Retired { revision: 1, .. }]
+    ));
+    let saved = save(&store, &r, 1, 30).unwrap();
+    assert_eq!(saved.revision(), 2);
+    assert_eq!(saved.created_at(), first.created_at());
+    assert_eq!(saved.schema_version(), RECEIPT_SCHEMA_VERSION);
+    assert_eq!(store.read().unwrap(), Some(saved));
+    let found = pull_request_receipts(&store.root, store.project, repository, number).unwrap();
+    assert_eq!(found.receipts.len(), 1);
+    assert!(found.retired.is_empty());
+    let other = provenant_core::RepoId::from_bytes([9; 16]);
+    assert!(
+        pull_request_receipts(&store.root, store.project, other, number)
+            .unwrap()
+            .receipts
+            .is_empty()
+    );
+}
+
 #[cfg(test)]
 #[path = "concurrency.rs"]
 mod concurrency;
@@ -175,7 +225,7 @@ fn refuses_stale_subject_identity_versions_and_bounds_without_publication() {
     assert!(matches!(
         save(
             &store,
-            &changed(&first, |v| v["schema_version"] = 2.into()),
+            &changed(&first, |v| v["schema_version"] = 3.into()),
             1,
             30
         ),
@@ -226,7 +276,7 @@ fn refuses_stale_subject_identity_versions_and_bounds_without_publication() {
             _ => assert!(store.read().is_ok()),
         }
     }
-    let version = changed(&first, |v| v["schema_version"] = 2.into());
+    let version = changed(&first, |v| v["schema_version"] = 3.into());
     std::fs::write(&file, serde_json::to_vec(&version).unwrap()).unwrap();
     assert!(matches!(store.read(), Err(StoreError::Version)));
 }

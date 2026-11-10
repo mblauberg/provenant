@@ -208,8 +208,7 @@ fn follow_with(
     for pr in receipt.pull_requests.clone() {
         let standing = approvals
             .standing(forge, repo, pr.number, &pr.head, &receipt.base)?
-            .iter()
-            .any(|approval| approval.reference == pr.approval);
+            .includes(&pr.approval);
         if !standing {
             let message = format!(
                 "approval {} for pull request {} is no longer present at {}",

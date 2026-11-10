@@ -268,9 +268,26 @@ enum DecisionInput {
         user_approval: Option<ApprovalInput>,
     },
 }
+/// What a save names as its subject. A pull request is named by its number
+/// and reviewed head only: the edge reads its repository and reviewed base
+/// from the forge, and ignores any the request carries.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SubjectRequest {
+    Pr {
+        number: u64,
+        head: provenant_core::GitOid,
+    },
+    Document {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        path: provenant_records::PathWire,
+        digest: provenant_core::Digest,
+    },
+}
 #[derive(Deserialize, Serialize)]
 struct SaveRequest {
-    subject: Subject,
+    subject: SubjectRequest,
     authors: Vec<Author>,
     risk: RiskInput,
     #[serde(default)]
@@ -768,22 +785,18 @@ fn read_session(cmd: Workflow, roots: &Roots, cwd: &Path) -> Result<Value, Error
         _ => unreachable_read(),
     }
 }
-/// Verify the PR head, then read the delta the review covered: from the
-/// recorded base to the head.
-fn subject_changed_paths(
-    cwd: &Path,
-    subject: &Subject,
-    cancel: &CancelToken,
-) -> Result<Vec<String>, Error> {
-    use provenant_confinement::{UtilityBudget, UtilityRuntime, run_read_utility};
+/// A pull request as the forge reports it.
+struct ForgePullRequest {
+    repository: provenant_core::RepoId,
+    head: provenant_core::GitOid,
+    /// The tip of the branch the pull request merges into.
+    base_tip: provenant_core::GitOid,
+}
+
+/// Read pull request `number` of the checkout's repository from the forge.
+fn forge_pull_request(cwd: &Path, number: u64) -> Result<ForgePullRequest, Error> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::{ffi::OsString, time::Duration};
-    let Subject::Pr {
-        number, head, base, ..
-    } = subject
-    else {
-        return Ok(Vec::new());
-    };
     let executor = SystemExecutor::new(1).map_err(|e| invalid(e.to_string()))?;
     let argv: Vec<OsString> = [
         "gh",
@@ -791,7 +804,7 @@ fn subject_changed_paths(
         "view",
         &number.to_string(),
         "--json",
-        "headRefOid",
+        "url,headRefOid,baseRefOid",
     ]
     .iter()
     .map(OsString::from)
@@ -803,50 +816,137 @@ fn subject_changed_paths(
         .execute(options)
         .map_err(|e| invalid(e.to_string()))?;
     if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {
-        return Err(invalid("cannot establish PR diff: gh pr view failed"));
+        return Err(invalid("gh pr view failed"));
     }
     let metadata: Value =
         serde_json::from_slice(&out.stdout.bytes).map_err(|e| invalid(e.to_string()))?;
     let oid = |key: &str| {
         provenant_core::GitOid::parse(metadata[key].as_str().unwrap_or_default())
-            .map_err(|e| invalid(e.to_string()))
+            .map_err(|e| invalid(format!("{key}: {e}")))
     };
-    if oid("headRefOid")? != *head {
-        return Err(invalid("PR head differs from receipt subject"));
+    Ok(ForgePullRequest {
+        repository: repository_of_url(metadata["url"].as_str().unwrap_or_default())?,
+        head: oid("headRefOid")?,
+        base_tip: oid("baseRefOid")?,
+    })
+}
+
+/// The repository of a pull request URL, `https://host/owner/name/pull/N`.
+fn repository_of_url(url: &str) -> Result<provenant_core::RepoId, Error> {
+    let parts: Vec<_> = url
+        .strip_prefix("https://")
+        .unwrap_or_default()
+        .split('/')
+        .collect();
+    match parts.as_slice() {
+        [host, owner, name, "pull", _] if [host, owner, name].iter().all(|p| !p.is_empty()) => {
+            Ok(forge_repository_id(host, &format!("{owner}/{name}")))
+        }
+        _ => Err(invalid("pull request URL names no repository")),
     }
+}
+
+/// Run `read` against the checkout's repository through the read-only Git utility.
+fn with_git_reads<T>(
+    cwd: &Path,
+    cancel: &CancelToken,
+    read: impl FnOnce(
+        &mut dyn FnMut(provenant_confinement::GitRead) -> Result<Vec<u8>, Error>,
+    ) -> Result<T, Error>,
+) -> Result<T, Error> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime, run_read_utility};
+    use provenant_os::exec::{SystemExecutor, Termination};
+    let executor = SystemExecutor::new(1).map_err(|e| invalid(e.to_string()))?;
     let git = provenant_os::git::git_executable().ok_or_else(|| invalid("Git unavailable"))?;
     let runtime = UtilityRuntime::read_only(git).map_err(|e| invalid(e.to_string()))?;
-    let budget =
-        UtilityBudget::bounded(Duration::from_secs(30)).map_err(|e| invalid(e.to_string()))?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(30))
+        .map_err(|e| invalid(e.to_string()))?;
     let repo = runtime
         .open_read_repo(&executor, cwd, budget, cancel)
         .map_err(|e| invalid(e.to_string()))?;
-    diff_paths(*base, *head, &mut |operation| {
+    read(&mut |operation| {
         let out = run_read_utility(&executor, operation, &repo, &runtime, budget, cancel)
             .map_err(|e| invalid(e.to_string()))?;
         if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {
             return Err(invalid(
-                "cannot establish complete PR diff; fetch the PR base and head commits",
+                "Git read failed; fetch the PR base and head commits",
             ));
         }
         Ok(out.stdout.bytes)
     })
 }
 
+/// The subject a save records. The request names a pull request and its
+/// head; the forge and the checkout supply its repository and the base its
+/// head was read against, so a request can neither choose the paths a
+/// review covers nor the repository it approves in. A stored subject at the
+/// same head was resolved by an earlier save and is kept.
+fn resolve_subject(
+    cwd: &Path,
+    request: SubjectRequest,
+    stored: Option<&DeliveryReceipt>,
+    cancel: &CancelToken,
+) -> Result<Subject, Error> {
+    let (number, head) = match request {
+        SubjectRequest::Pr { number, head } => (number, head),
+        SubjectRequest::Document {
+            extra,
+            path,
+            digest,
+        } => {
+            return Ok(Subject::Document {
+                extra,
+                path,
+                digest,
+            });
+        }
+    };
+    if let Some(receipt) = stored
+        && matches!(receipt.subject(), Subject::Pr { number: n, head: h, .. } if *n == number && *h == head)
+    {
+        return Ok(receipt.subject().clone());
+    }
+    let pull = forge_pull_request(cwd, number)
+        .map_err(|e| invalid(format!("cannot establish the PR's base: {e}")))?;
+    if pull.head != head {
+        return Err(invalid("PR head differs from receipt subject"));
+    }
+    let base = with_git_reads(cwd, cancel, |read| reviewed_base(pull.base_tip, head, read))
+        .map_err(|e| invalid(format!("cannot establish the PR's base: {e}")))?;
+    Ok(Subject::Pr {
+        extra: Default::default(),
+        repository: pull.repository,
+        number,
+        head,
+        base,
+    })
+}
+
+/// The base a pull request's head is read against: its merge base with the
+/// branch it merges into. For a stack member that is the head of the branch
+/// below.
+fn reviewed_base(
+    base_tip: provenant_core::GitOid,
+    head: provenant_core::GitOid,
+    read: &mut dyn FnMut(provenant_confinement::GitRead) -> Result<Vec<u8>, Error>,
+) -> Result<provenant_core::GitOid, Error> {
+    let merge = read(provenant_confinement::GitRead::MergeBase {
+        left: base_tip,
+        right: head,
+    })?;
+    let merge = std::str::from_utf8(&merge).map_err(|e| invalid(e.to_string()))?;
+    provenant_core::GitOid::parse(merge.trim()).map_err(|e| invalid(e.to_string()))
+}
+
+/// Every path a pull request changes from its reviewed base, including both
+/// names of renames.
 fn diff_paths(
     base: provenant_core::GitOid,
     head: provenant_core::GitOid,
     read: &mut dyn FnMut(provenant_confinement::GitRead) -> Result<Vec<u8>, Error>,
 ) -> Result<Vec<String>, Error> {
-    use provenant_confinement::GitRead;
-    let merge = read(GitRead::MergeBase {
-        left: base,
-        right: head,
-    })?;
-    let merge = std::str::from_utf8(&merge).map_err(|e| invalid(e.to_string()))?;
-    let base = provenant_core::GitOid::parse(merge.trim()).map_err(|e| invalid(e.to_string()))?;
     // ChangedPaths uses --no-renames: both deleted and added names survive.
-    let bytes = read(GitRead::ChangedPaths { base, head })?;
+    let bytes = read(provenant_confinement::GitRead::ChangedPaths { base, head })?;
     let text = std::str::from_utf8(&bytes).map_err(|e| invalid(e.to_string()))?;
     if !text.is_empty() && !text.ends_with('\0') {
         return Err(invalid("incomplete changed path list"));
@@ -866,14 +966,11 @@ fn save_changed_paths(
     read: impl FnOnce() -> Result<Vec<String>, Error>,
 ) -> Result<(Vec<String>, Vec<String>), Error> {
     use provenant_records::workflow::RiskTier;
-    let Subject::Pr { head, .. } = subject else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    if tier == RiskTier::Terminal {
+    if !matches!(subject, Subject::Pr { .. }) || tier == RiskTier::Terminal {
         return Ok((Vec::new(), Vec::new()));
     }
     if let Some(receipt) = stored
-        && matches!(receipt.subject(), Subject::Pr { head: saved, .. } if saved == head)
+        && receipt.subject() == subject
         && !receipt.risk().changed_paths().is_empty()
     {
         return Ok((receipt.risk().changed_paths().to_vec(), Vec::new()));
@@ -902,22 +999,32 @@ fn save(
     let config = provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?;
     let store = ReceiptStore::new(edge.roots.state.clone(), edge.project, delivery);
-    let stored = store.read()?;
+    // A retired receipt is replaced by this save; it has nothing to reuse.
+    let stored = match store.read() {
+        Err(provenant_workflow::store::StoreError::Retired { .. }) => None,
+        stored => stored?,
+    };
+    let subject = resolve_subject(&edge.cwd, req.subject, stored.as_ref(), &edge.cancel)?;
     let initial_policy = config.domains.routing.review.workflow_risk_policy(&[]);
     let is_downgrade = req.risk.tier < risk::minimum(&req.risk.factors, &initial_policy);
     let (changed_paths, warnings) = save_changed_paths(
-        &req.subject,
+        &subject,
         req.risk.tier,
         is_downgrade,
         stored.as_ref(),
-        || subject_changed_paths(&edge.cwd, &req.subject, &edge.cancel),
+        || match &subject {
+            Subject::Pr { base, head, .. } => with_git_reads(&edge.cwd, &edge.cancel, |read| {
+                diff_paths(*base, *head, read)
+            }),
+            Subject::Document { .. } => Ok(Vec::new()),
+        },
     )?;
     let policy = config
         .domains
         .routing
         .review
         .workflow_risk_policy(&changed_paths);
-    if !matches!(req.subject, Subject::Pr { .. })
+    if !matches!(subject, Subject::Pr { .. })
         && req.risk.tier < risk::minimum(&req.risk.factors, &policy)
     {
         return Err(invalid(
@@ -937,7 +1044,7 @@ fn save(
         ReceiptInput {
             delivery_id: delivery,
             project_id: edge.project,
-            subject: req.subject.clone(),
+            subject: subject.clone(),
             authors: req.authors,
             risk,
         },
@@ -947,7 +1054,7 @@ fn save(
         downgrade.as_ref(),
     )
     .map_err(|e| invalid(e.to_string()))?;
-    let facts = edge.bind(&req.reviews, &req.subject, delivery)?;
+    let facts = edge.bind(&req.reviews, &subject, delivery)?;
     candidate = candidate
         .with_review_attempts(facts.iter().map(|f| f.attempt_id).collect())
         .map_err(|e| invalid(e.to_string()))?;
@@ -995,7 +1102,7 @@ fn save(
         &candidate,
         expected,
         SaveContext {
-            subject: &req.subject,
+            subject: &subject,
             valid_until,
             risk_policy: &policy,
             downgrade_approval: downgrade.as_ref(),
@@ -1028,6 +1135,7 @@ fn classify(error: &Error) -> (Outcome, &'static str) {
         Error::Store(S::Conflict { .. } | S::StaleSubject | S::Expired) => {
             (Outcome::Refused, "CONFLICT")
         }
+        Error::Store(S::Retired { .. }) => (Outcome::Refused, "RECEIPT_RETIRED"),
         Error::Store(
             S::Malformed(_) | S::InvalidCandidate(_) | S::Version | S::Limit | S::Risk(_),
         ) => (Outcome::Invalid, "INVALID"),
@@ -1199,7 +1307,7 @@ mod tests {
         let base = provenant_core::GitOid::Sha1([1; 20]);
         let head = provenant_core::GitOid::Sha1([2; 20]);
         let merge = provenant_core::GitOid::Sha1([3; 20]);
-        let paths = super::diff_paths(base, head, &mut |op| match op {
+        let mut read = |op| match op {
             GitRead::MergeBase { left, right } => {
                 assert_eq!((left, right), (base, head));
                 Ok(format!("{merge}\n").into_bytes())
@@ -1210,8 +1318,9 @@ mod tests {
                 Ok(b"src/credentials/store.rs\0src/plain.rs\0".to_vec())
             }
             _ => panic!("unexpected Git operation"),
-        })
-        .unwrap();
+        };
+        let reviewed = super::reviewed_base(base, head, &mut read).unwrap();
+        let paths = super::diff_paths(reviewed, head, &mut read).unwrap();
         let policy = provenant_routing::ReviewConfig::default().workflow_risk_policy(&paths);
         assert_eq!(
             policy.boundary_floors["src/credentials/store.rs"],

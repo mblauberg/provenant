@@ -123,6 +123,7 @@ impl AttemptOwner for Owner {
     }
     fn review_coverage(
         &mut self,
+        _branch: &str,
         reviewed: provenant_core::review_cover::Reviewed<'_>,
         head: &str,
     ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {

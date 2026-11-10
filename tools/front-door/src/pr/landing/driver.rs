@@ -1044,6 +1044,57 @@ mod tests {
         Ok(())
     }
 
+    /// PR 2's record names a head whose history this repository lacks, so
+    /// its proof cannot be read. That excludes PR 2 alone, with the reason.
+    #[test]
+    fn an_unprovable_review_record_excludes_only_its_pull_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(3);
+        forge.approvals_at_head.clear();
+        let target = repo.target.clone();
+        let reviewed_base = "b".repeat(40);
+        repo.parents
+            .insert(target.clone(), vec![reviewed_base.clone()]);
+        let reviewed = format!("{:040x}", 0xa2);
+        // PR 2 merged the target into its reviewed head; its tree is unreadable.
+        repo.parents
+            .insert(format!("{:040x}", 2), vec![reviewed.clone(), target]);
+        let record = |n: u64, head: String| ReviewRecord {
+            reference: format!("delivery-{n}"),
+            reviewer: "reviewer".into(),
+            head,
+            base: reviewed_base.clone(),
+        };
+        let reviews = FakeReviews(BTreeMap::from([
+            (1, vec![record(1, format!("{:040x}", 1))]),
+            (2, vec![record(2, reviewed)]),
+            (3, vec![record(3, format!("{:040x}", 3))]),
+        ]));
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2, 3],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Excluded);
+        assert_eq!(report.outcomes[&3], Outcome::Landed);
+        assert!(
+            report.exclusion_reasons[&2].starts_with("unprovable: delivery-2"),
+            "{}",
+            report.exclusion_reasons[&2]
+        );
+        Ok(())
+    }
+
     #[test]
     fn driver_three_prs_gate_once_and_publish_ordered_parents()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -186,7 +186,7 @@ fn accepted_decision() -> Value {
     json!({"status":"accepted","actor_id":ID,"at":10,"reason":"done","user_approval":approval()})
 }
 fn receipt() -> Value {
-    json!({"schema_version":1,"delivery_id":ID,"project_id":ID,"revision":1,"subject":subject(),
+    json!({"schema_version":2,"delivery_id":ID,"project_id":ID,"revision":1,"subject":subject(),
         "authors":[{"kind":"agent","actor_id":ID,"route":observed_provenance()}],"risk":risk(),
         "review_attempts":[],"decision":accepted_decision(),"created_at":10,"updated_at":10})
 }

@@ -39,17 +39,62 @@ fn receipt_request(critical: &str, decision: Value) -> Value {
 }
 const DELIVERY: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
-fn pr_receipt_request() -> Value {
+/// A save naming pull request 12 at `head`. The repository and base it
+/// carries are the chair's claims: the edge reads both from the forge.
+fn pr_receipt_request(head: &str) -> Value {
     let mut value = receipt_request("none", json!({"status": "pending"}));
     value["subject"] = json!({
-        "kind": "pr", "repository": "02".repeat(16), "number": 12,
-        "head": "ab".repeat(20), "base": "ba".repeat(20)
+        "kind": "pr", "repository": "02".repeat(16), "number": 12, "head": head
     });
     value
 }
 
 #[cfg(unix)]
-fn record_gh_calls(rig: &mut TestRig) -> Result {
+fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let output = rig.execute(&git, args, None)?;
+    if code(&output) != 0 {
+        return Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+}
+
+/// The target's commit, then a pull request of two commits on it: the
+/// first adds `docs/a.md`, the second `docs/b.md`.
+#[cfg(unix)]
+struct History {
+    target: String,
+    first: String,
+    second: String,
+}
+
+#[cfg(unix)]
+fn pull_request_history(rig: &TestRig) -> Result<History> {
+    git(rig, &["commit", "-q", "--allow-empty", "-m", "target"])?;
+    let target = git(rig, &["rev-parse", "HEAD"])?;
+    let mut heads = Vec::new();
+    for name in ["a", "b"] {
+        std::fs::create_dir_all(rig.project.join("docs"))?;
+        std::fs::write(rig.project.join(format!("docs/{name}.md")), name)?;
+        git(rig, &["add", "docs"])?;
+        git(rig, &["commit", "-q", "-m", name])?;
+        heads.push(git(rig, &["rev-parse", "HEAD"])?);
+    }
+    Ok(History {
+        target,
+        first: heads.remove(0),
+        second: heads.remove(0),
+    })
+}
+
+/// A `gh` that records its arguments and reports pull request 12 of
+/// `owner/repo` at `head`, merging into a branch whose tip is `base`.
+#[cfg(unix)]
+fn record_gh_calls(rig: &mut TestRig, head: &str, base: &str) -> Result {
     use std::os::unix::fs::PermissionsExt;
     let bin = rig.root.join("bin");
     std::fs::create_dir_all(&bin)?;
@@ -57,9 +102,8 @@ fn record_gh_calls(rig: &mut TestRig) -> Result {
     std::fs::write(
         &gh,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"headRefOid\":\"{}\"}}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"url\":\"https://github.com/owner/repo/pull/12\",\"headRefOid\":\"{head}\",\"baseRefOid\":\"{base}\"}}'\n",
             rig.root.join("gh-called").display(),
-            "cd".repeat(20),
         ),
     )?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
@@ -72,31 +116,31 @@ fn record_gh_calls(rig: &mut TestRig) -> Result {
 }
 
 #[cfg(unix)]
-#[test]
-fn pr_report_without_downgrade_never_calls_github() -> Result {
-    let mut rig = TestRig::new()?;
-    record_gh_calls(&mut rig)?;
-    let pending = request(&rig, "pr.json", pr_receipt_request())?;
-    let saved = call(
-        &rig,
+fn save_receipt(rig: &TestRig, request: &str, revision: &str, expected: i64) -> Result<Value> {
+    call(
+        rig,
         &[
             "workflow",
             "receipt",
             "save",
             DELIVERY,
             "--expected-revision",
-            "0",
+            revision,
             "--request",
-            &pending,
+            request,
         ],
-        0,
-    )?;
-    assert!(
-        !saved["data"]["warnings"]
-            .as_array()
-            .ok_or("warnings")?
-            .is_empty()
-    );
+        expected,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_report_without_downgrade_never_calls_github() -> Result {
+    let mut rig = TestRig::new()?;
+    let history = pull_request_history(&rig)?;
+    record_gh_calls(&mut rig, &history.second, &history.target)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
+    save_receipt(&rig, &pending, "0", 0)?;
     let marker = rig.root.join("gh-called");
     assert!(marker.exists());
     std::fs::remove_file(&marker)?;
@@ -107,92 +151,30 @@ fn pr_report_without_downgrade_never_calls_github() -> Result {
     Ok(())
 }
 
+/// A chair that records the delta's base after a head moved still gets a
+/// receipt read from the pull request's own base: every path it changes.
 #[cfg(unix)]
 #[test]
-fn pr_resave_with_unchanged_head_reuses_recorded_paths() -> Result {
+fn pr_receipt_base_and_repository_come_from_the_forge() -> Result {
     let mut rig = TestRig::new()?;
-    record_gh_calls(&mut rig)?;
-    let pending = request(&rig, "pr.json", pr_receipt_request())?;
-    let saved = call(
-        &rig,
-        &[
-            "workflow",
-            "receipt",
-            "save",
-            DELIVERY,
-            "--expected-revision",
-            "0",
-            "--request",
-            &pending,
-        ],
-        0,
-    )?;
-    let mut stored = saved["data"]["receipt"].clone();
-    stored["risk"]["changed_paths"] = json!(["docs/x.md"]);
-    let project = stored["project_id"].as_str().ok_or("project id")?;
-    let path = rig.state.join(format!(
-        "workflow/projects/{project}/deliveries/{DELIVERY}/receipt.json"
-    ));
-    std::fs::write(path, serde_json::to_vec(&stored)?)?;
-    let marker = rig.root.join("gh-called");
-    std::fs::remove_file(&marker)?;
-    let saved = call(
-        &rig,
-        &[
-            "workflow",
-            "receipt",
-            "save",
-            DELIVERY,
-            "--expected-revision",
-            "1",
-            "--request",
-            &pending,
-        ],
-        0,
-    )?;
-    assert_eq!(
-        saved["data"]["receipt"]["risk"]["changed_paths"],
-        json!(["docs/x.md"])
-    );
-    assert!(!marker.exists());
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn pr_head_mismatch_refuses_downgrade() -> Result {
-    let mut rig = TestRig::new()?;
-    record_gh_calls(&mut rig)?;
-    let mut value = pr_receipt_request();
-    value["risk"]["factors"]["oracle_quality"] = json!("weak");
-    value["risk"]["downgrade_approval"] = json!({
-        "actor_id": "01".repeat(16),
-        "evidence": {
-            "path": {"encoding": "utf8", "path": "authority/approval.json"},
-            "digest": format!("sha256:{}", "0".repeat(64))
-        },
-        "reason": "chair approved a narrower review"
-    });
+    let history = pull_request_history(&rig)?;
+    record_gh_calls(&mut rig, &history.second, &history.target)?;
+    let mut value = pr_receipt_request(&history.second);
+    value["subject"]["base"] = json!(history.first);
     let pending = request(&rig, "pr.json", value)?;
-    let refused = call(
-        &rig,
-        &[
-            "workflow",
-            "receipt",
-            "save",
-            DELIVERY,
-            "--expected-revision",
-            "0",
-            "--request",
-            &pending,
-        ],
-        2,
-    )?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("PR head differs")
+    let saved = save_receipt(&rig, &pending, "0", 0)?;
+    let receipt = &saved["data"]["receipt"];
+    assert_eq!(receipt["subject"]["base"], json!(history.target));
+    assert_eq!(
+        receipt["subject"]["repository"],
+        json!(
+            provenant_records::workflow::forge_repository_id("github.com", "owner/repo")
+                .to_string()
+        )
+    );
+    assert_eq!(
+        receipt["risk"]["changed_paths"],
+        json!(["docs/a.md", "docs/b.md"])
     );
     let args = std::fs::read_to_string(rig.root.join("gh-called"))?;
     assert!(!args.lines().any(|arg| arg == "--repo"));
@@ -205,24 +187,94 @@ fn pr_head_mismatch_refuses_downgrade() -> Result {
 
 #[cfg(unix)]
 #[test]
+fn pr_resave_with_unchanged_head_reuses_recorded_paths() -> Result {
+    let mut rig = TestRig::new()?;
+    let history = pull_request_history(&rig)?;
+    record_gh_calls(&mut rig, &history.second, &history.target)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
+    let saved = save_receipt(&rig, &pending, "0", 0)?;
+    let mut stored = saved["data"]["receipt"].clone();
+    stored["risk"]["changed_paths"] = json!(["docs/x.md"]);
+    let project = stored["project_id"].as_str().ok_or("project id")?;
+    let path = rig.state.join(format!(
+        "workflow/projects/{project}/deliveries/{DELIVERY}/receipt.json"
+    ));
+    std::fs::write(path, serde_json::to_vec(&stored)?)?;
+    let marker = rig.root.join("gh-called");
+    std::fs::remove_file(&marker)?;
+    let saved = save_receipt(&rig, &pending, "1", 0)?;
+    assert_eq!(
+        saved["data"]["receipt"]["risk"]["changed_paths"],
+        json!(["docs/x.md"])
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
+/// A receipt saved before the reviewed base was recorded is named with its
+/// remedy, and saving the delivery again replaces it.
+#[cfg(unix)]
+#[test]
+fn a_retired_receipt_is_named_and_saved_again() -> Result {
+    let mut rig = TestRig::new()?;
+    let history = pull_request_history(&rig)?;
+    record_gh_calls(&mut rig, &history.second, &history.target)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
+    let saved = save_receipt(&rig, &pending, "0", 0)?;
+    let mut retired = saved["data"]["receipt"].clone();
+    retired["schema_version"] = json!(1);
+    retired["subject"]
+        .as_object_mut()
+        .ok_or("subject")?
+        .remove("base");
+    let project = retired["project_id"].as_str().ok_or("project id")?;
+    let path = rig.state.join(format!(
+        "workflow/projects/{project}/deliveries/{DELIVERY}/receipt.json"
+    ));
+    std::fs::write(path, serde_json::to_vec(&retired)?)?;
+    let review = request(&rig, "review.json", json!({"delivery_id": DELIVERY}))?;
+    let refused = call(&rig, &["workflow", "review", "--request", &review], 1)?;
+    assert_eq!(refused["error"]["code"], "RECEIPT_RETIRED");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .starts_with("receipt shape retired: save it again")
+    );
+    let saved = save_receipt(&rig, &pending, "1", 0)?;
+    assert_eq!(saved["data"]["receipt"]["revision"], 2);
+    assert_eq!(
+        saved["data"]["receipt"]["subject"]["base"],
+        json!(history.target)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_head_mismatch_refuses_the_save() -> Result {
+    let mut rig = TestRig::new()?;
+    let history = pull_request_history(&rig)?;
+    record_gh_calls(&mut rig, &history.first, &history.target)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
+    let refused = save_receipt(&rig, &pending, "0", 2)?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("PR head differs")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn pr_report_downgrade_without_recorded_paths_requires_resave() -> Result {
     let mut rig = TestRig::new()?;
-    record_gh_calls(&mut rig)?;
-    let pending = request(&rig, "pr.json", pr_receipt_request())?;
-    let saved = call(
-        &rig,
-        &[
-            "workflow",
-            "receipt",
-            "save",
-            DELIVERY,
-            "--expected-revision",
-            "0",
-            "--request",
-            &pending,
-        ],
-        0,
-    )?;
+    let history = pull_request_history(&rig)?;
+    record_gh_calls(&mut rig, &history.second, &history.target)?;
+    let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
+    let saved = save_receipt(&rig, &pending, "0", 0)?;
     let mut stored = saved["data"]["receipt"].clone();
     stored["risk"]["factors"]["oracle_quality"] = json!("weak");
     stored["risk"]["derived"] = json!("crucial");

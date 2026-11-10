@@ -97,20 +97,16 @@ pub fn revalidate_with_reasons(
         let pr = &step.pr;
         let head = forge.head(pr.number)?;
         let reason = if forge.pull_request(pr.number)?.base_branch != pr.base_branch {
-            Some("base branch changed")
+            Some("base branch changed".to_owned())
         } else if head != pr.head {
-            Some("head changed")
-        } else if !approver
-            .approvals(forge, pr.number, &pr.head)?
-            .iter()
-            .any(|approval| approval.reference == pr.approval)
-        {
-            Some("approval for the pinned head changed")
+            Some("head changed".to_owned())
         } else {
-            None
+            let standing = approver.approvals(forge, pr.number, &pr.head)?;
+            (!standing.includes(&pr.approval))
+                .then(|| standing.exclusion("approval for the pinned head changed"))
         };
         if let Some(reason) = reason {
-            excluded.push((pr.clone(), reason.to_owned()));
+            excluded.push((pr.clone(), reason));
         }
     }
     Ok(excluded)

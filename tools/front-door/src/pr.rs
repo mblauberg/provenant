@@ -202,6 +202,8 @@ struct BranchPull {
     number: u64,
     state: String,
     head: GitOid,
+    /// The branch the pull request merges into.
+    base_branch: String,
 }
 fn pull_for_branch(project: &Path, branch: &str, head: GitOid) -> Result<BranchPull> {
     pull_for_branch_with(branch, head, &|argv| {
@@ -273,6 +275,7 @@ fn pull_for_branch_with(
                     pull.state.to_uppercase()
                 },
                 head: pull.head.sha,
+                base_branch: pull.base.branch,
             })
         }
         0 => Err(format!("no same-repository pull request has head branch {branch}").into()),

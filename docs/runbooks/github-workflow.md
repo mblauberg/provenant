@@ -294,12 +294,17 @@ default, needs an approving forge review at the head. `receipt` takes an
 accepted delivery receipt for the pull request instead; this repository's
 reviews are such receipts, so its host sets
 `domains.pr.land.projects.<project>.approval = "receipt"`. Save the receipt
-before landing, with a `pr` subject naming the reviewed `head` and the `base`
-the review read it against; for a stacked pull request the base is the head of
-the branch below. The lander proves each head against the fetched target: the
-reviewed head itself, a merge-in from the target, or a rebase with an unchanged
-delta keeps the review; any other change, or a receipt without the head's
-history, excludes the pull request until a new receipt covers it. Forge rules
+before landing, with a `pr` subject naming the pull request `number` and the
+reviewed `head`. The save reads the rest from the forge: the repository, and
+the base, which is the head's merge base with the branch the pull request
+merges into (for a stacked pull request, the head of the branch below). The
+changed paths and their risk floors come from that base, so a receipt for a
+delta review still covers the whole pull request. The lander proves each head
+against the fetched target: the reviewed head itself, a merge-in from the
+target, or a rebase with an unchanged delta keeps the review; any other change
+excludes the pull request until a new receipt covers it. A receipt whose proof
+cannot be read excludes only its pull request, as `unprovable`, and one saved
+before this shape is reported as `receipt shape retired: save it again`. Forge rules
 and required checks still apply.
 
 Every PR gets an outcome receipt under the project state's

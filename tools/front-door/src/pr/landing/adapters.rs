@@ -4,7 +4,7 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
-        ReviewRecord, ReviewRecords, StackMember, StackMembership,
+        ReviewRecord, ReviewRecords, Reviews, StackMember, StackMembership,
     },
 };
 use crate::pr::{
@@ -445,7 +445,6 @@ impl Forge for GhForge {
         self.project = path.to_owned();
     }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
-        use sha2::{Digest, Sha256};
         let repository = self.json("repos/{owner}/{repo}")?;
         let url = repository["html_url"]
             .as_str()
@@ -458,15 +457,13 @@ impl Forge for GhForge {
             .nth(2)
             .filter(|host| !host.is_empty())
             .ok_or_else(|| LandingError::Failed("repository has invalid canonical URL".into()))?;
-        let identity = format!(
-            "{}/{}",
-            host.to_ascii_lowercase(),
-            name.to_ascii_lowercase()
-        );
-        Ok(Sha256::digest(identity.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect())
+        // Its first 16 bytes are the repository ID a receipt subject records.
+        Ok(
+            provenant_records::workflow::forge_repository_digest(host, name)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
     }
 
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
@@ -1091,47 +1088,63 @@ impl Repo for GitRepo<'_> {
 
 // ----- ReviewRecords -----------------------------------------------------
 
-/// Accepted delivery receipts in the project's workflow state. A receipt is
-/// accepted only once its review coverage passes, so its reviewers are
-/// independent of the authors. Each names the head its review read and the
-/// base it read that head against.
+/// Accepted delivery receipts in the project's workflow state for pull
+/// requests of the forge repository. A receipt is accepted only once its
+/// review coverage passes, so its reviewers are independent of the authors.
+/// Each names the head its review read and the base it read that head
+/// against, both recorded by the edge from the forge.
 pub struct DeliveryReviews {
     root: provenant_core::StateRoot,
-    project: Option<provenant_core::ProjectId>,
+    scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
 }
 impl DeliveryReviews {
     pub fn new(
         root: provenant_core::StateRoot,
-        project: Option<provenant_core::ProjectId>,
+        scope: Result<(provenant_core::ProjectId, provenant_core::RepoId), String>,
     ) -> Self {
-        Self { root, project }
+        Self { root, scope }
     }
 }
 impl ReviewRecords for DeliveryReviews {
-    fn reviews(&self, number: u64) -> Result<Vec<ReviewRecord>, LandingError> {
+    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
         use provenant_records::workflow::{DecisionStatus, Subject};
-        let project = self.project.ok_or_else(|| {
-            LandingError::Failed("receipt approval needs a registered project".into())
-        })?;
-        let receipts =
-            provenant_workflow::store::pull_request_receipts(&self.root, project, number)
-                .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
-        Ok(receipts
-            .iter()
-            .filter(|receipt| receipt.decision().status() == DecisionStatus::Accepted)
-            .filter_map(|receipt| {
-                let Subject::Pr { head, base, .. } = receipt.subject() else {
-                    return None;
-                };
-                Some(ReviewRecord {
-                    reference: format!("delivery {} at {head}", receipt.delivery_id()),
-                    reviewer: receipt.decision().actor_id()?.to_string(),
-                    head: head.to_string(),
-                    base: base.to_string(),
+        let (project, repository) = self
+            .scope
+            .clone()
+            .map_err(|error| LandingError::Failed(format!("receipt approval: {error}")))?;
+        let found = provenant_workflow::store::pull_request_receipts(
+            &self.root, project, repository, number,
+        )
+        .map_err(|error| LandingError::Failed(format!("read review records: {error}")))?;
+        Ok(Reviews {
+            records: found
+                .receipts
+                .iter()
+                .filter(|receipt| receipt.decision().status() == DecisionStatus::Accepted)
+                .filter_map(|receipt| {
+                    let Subject::Pr { head, base, .. } = receipt.subject() else {
+                        return None;
+                    };
+                    Some(ReviewRecord {
+                        reference: format!("delivery {} at {head}", receipt.delivery_id()),
+                        reviewer: receipt.decision().actor_id()?.to_string(),
+                        head: head.to_string(),
+                        base: base.to_string(),
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+            unusable: found.retired.iter().map(ToString::to_string).collect(),
+        })
     }
+}
+
+/// The subject repository ID of the forge repository a lander drives.
+pub fn repository_id(forge: &mut dyn Forge) -> Result<provenant_core::RepoId, LandingError> {
+    let identity = forge.repository_identity()?;
+    identity
+        .get(..32)
+        .and_then(|prefix| provenant_core::RepoId::parse(prefix).ok())
+        .ok_or_else(|| LandingError::Failed("repository identity is not a digest".into()))
 }
 
 // ----- GateRunner --------------------------------------------------------

@@ -124,23 +124,19 @@ pub fn select_batch_with_reasons(
                 reasons.insert(number, reason);
                 continue;
             }
-            let approval = approver
-                .approvals(forge, number, &info.head)?
-                .into_iter()
-                .find(|approval| {
-                    !approval.reference.is_empty()
-                        && !approval.reviewer.is_empty()
-                        && !approval.reviewer.eq_ignore_ascii_case(&info.author)
-                });
             if info.author.is_empty() {
                 reasons.insert(number, "pull request author is missing".into());
                 continue;
             }
+            let standing = approver.approvals(forge, number, &info.head)?;
+            let approval = standing.approvals.iter().find(|approval| {
+                !approval.reference.is_empty() && approver.independent(approval, &info.author)
+            });
             if let Some(approval) = approval {
                 selected.push(EligiblePr {
                     number,
                     head: info.head,
-                    approval: approval.reference,
+                    approval: approval.reference.clone(),
                     base_branch: info.base_branch,
                 });
                 if selected.len() == limit {
@@ -149,7 +145,7 @@ pub fn select_batch_with_reasons(
             } else {
                 reasons.insert(
                     number,
-                    "no independent approval for the current head".into(),
+                    standing.exclusion("no independent approval for the current head"),
                 );
             }
         }

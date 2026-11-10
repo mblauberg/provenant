@@ -403,13 +403,22 @@ fn run_inner(
     let (mut forge, mut repo, mut runner, mut alarms) =
         adapters::connect(&resolved.project, globals, workers, tracking)?;
     let target = forge.target_branch()?;
-    let reviews = adapters::DeliveryReviews::new(
-        resolved.roots.state.clone(),
-        project
-            .as_deref()
-            .map(provenant_core::ProjectId::parse)
-            .transpose()?,
-    );
+    let project_id = project
+        .as_deref()
+        .map(provenant_core::ProjectId::parse)
+        .transpose()?;
+    let scope = match (effective.approval, project_id) {
+        (provenant_cli::domains::ApprovalSource::Receipt, Some(project)) => {
+            Ok((project, adapters::repository_id(&mut *forge)?))
+        }
+        (provenant_cli::domains::ApprovalSource::Receipt, None) => {
+            Err("needs a registered project".to_owned())
+        }
+        (provenant_cli::domains::ApprovalSource::Forge, _) => {
+            Err("approval source is the forge".to_owned())
+        }
+    };
+    let reviews = adapters::DeliveryReviews::new(resolved.roots.state.clone(), scope);
     let result = driver::run(
         &mut *forge,
         &mut *repo,

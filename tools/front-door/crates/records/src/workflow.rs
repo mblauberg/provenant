@@ -386,6 +386,57 @@ impl From<&UserApproval> for ApprovalRef {
         }
     }
 }
+/// The receipt shape this build writes and reads. Version 1 had no reviewed
+/// base on a pull request subject; it is retired, not migrated (ADR 0035).
+pub const RECEIPT_SCHEMA_VERSION: u64 = 2;
+
+/// The identity of a forge repository as a pull request subject records it:
+/// the first 16 bytes of the SHA-256 of `host/owner/name`, lowercased.
+pub fn forge_repository_id(host: &str, full_name: &str) -> RepoId {
+    let digest = forge_repository_digest(host, full_name);
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest[..16]);
+    RepoId::from_bytes(id)
+}
+
+/// SHA-256 of a forge repository's canonical `host/owner/name`, lowercased.
+pub fn forge_repository_digest(host: &str, full_name: &str) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let identity = format!(
+        "{}/{}",
+        host.to_ascii_lowercase(),
+        full_name.to_ascii_lowercase()
+    );
+    Sha256::digest(identity.as_bytes()).into()
+}
+
+/// The fields every receipt shape carries: enough to name a retired receipt
+/// and replace it with a new revision, never to read its claims.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ReceiptHeader {
+    pub schema_version: u64,
+    pub delivery_id: DeliveryId,
+    pub project_id: ProjectId,
+    pub revision: u64,
+    pub subject: SubjectKey,
+    #[serde(with = "micros")]
+    pub created_at: UtcMicros,
+    #[serde(with = "micros")]
+    pub updated_at: UtcMicros,
+}
+
+/// What a receipt of any shape is about.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SubjectKey {
+    Pr {
+        repository: RepoId,
+        number: u64,
+    },
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryReceipt {
     #[serde(flatten)]
@@ -415,7 +466,7 @@ impl DeliveryReceipt {
     ) -> Result<Self, RecordError> {
         let receipt = Self {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: RECEIPT_SCHEMA_VERSION,
             delivery_id,
             project_id,
             revision: 1,
@@ -495,6 +546,28 @@ impl DeliveryReceipt {
             .ok_or(RecordError::RevisionOverflow)?;
         self.created_at = previous.map_or(now, Self::created_at);
         self.updated_at = previous.map_or(now, Self::updated_at).max(now);
+        self.validate_shape()?;
+        Ok(self)
+    }
+    /// Replace a retired receipt: the next revision of the same delivery,
+    /// keeping its creation time. Its subject cannot be read, so the decision
+    /// and review references reset as for any changed subject.
+    pub fn replacing_retired(
+        mut self,
+        retired: &ReceiptHeader,
+        now: UtcMicros,
+    ) -> Result<Self, RecordError> {
+        if self.delivery_id != retired.delivery_id || self.project_id != retired.project_id {
+            return Err(RecordError::Receipt);
+        }
+        self.decision = Decision::pending();
+        self.review_attempts.clear();
+        self.revision = retired
+            .revision
+            .checked_add(1)
+            .ok_or(RecordError::RevisionOverflow)?;
+        self.created_at = retired.created_at;
+        self.updated_at = retired.updated_at.max(now);
         self.validate_shape()?;
         Ok(self)
     }
@@ -867,7 +940,7 @@ mod tests {
     #[test]
     fn receipt_and_risk_construction_expose_read_only_values() {
         let r = receipt();
-        assert_eq!(r.schema_version(), 1);
+        assert_eq!(r.schema_version(), RECEIPT_SCHEMA_VERSION);
         assert_eq!(r.revision(), 1);
         assert_eq!(r.delivery_id(), DeliveryId::from_bytes([1; 16]));
         assert_eq!(r.project_id(), ProjectId::from_bytes([2; 16]));

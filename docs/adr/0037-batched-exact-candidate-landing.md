@@ -69,14 +69,18 @@ tree because the forge creates the merge commits.
 `land.approval = "receipt"` lets an accepted Provenant delivery receipt stand in
 place of an approving forge review, through one approval port beside the
 forge's. The receipt's pull request subject records the reviewed head `H` and
-base `B`; for a stack member `B` is the head of the branch below. A head `H'`
+base `B`, which the save reads from the forge as the head's merge base with the
+branch the pull request merges into; for a stack member `B` is the head of the
+branch below. Receipts are matched by repository and pull request number. A head `H'`
 keeps the review when `H' == H`, or when, with `B'` the merge base of `H'` and
 the fetched target, `B` is an ancestor of `B'`, `B'` is an ancestor of the
 target and `tree(H')` equals `merge_tree(H, B')`. Selection, revalidation
 before and during publication, recovery and the post-merge approval recheck all
 apply this proof against the target they already read; a head that fails it is
-excluded and never merged. A receipt without a base covers only its own head.
-The graph land node applies the same rule to the head its verdict gate reviewed.
+excluded and never merged. A record whose proof cannot be read excludes only
+its pull request, as unprovable. A receipt without a base covers only its own head.
+The graph land node applies the same rule to the head its verdict gate reviewed,
+against the branch the land branch's pull request merges into.
 Pinned heads, markers, recovery, the tree comparison and forge-required checks
 are unchanged. The second condition holds by construction of `B'`; it stays so
 the rule reads the same wherever `B'` comes from.
