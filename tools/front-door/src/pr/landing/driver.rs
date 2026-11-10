@@ -997,7 +997,7 @@ mod tests {
             head,
             base: reviewed_base.clone(),
         };
-        let reviews = FakeReviews(BTreeMap::from([
+        let reviews = FakeReviews::of(BTreeMap::from([
             (1, vec![record(1, format!("{:040x}", 1))]),
             (2, vec![record(2, reviewed(2))]),
             (3, vec![record(3, reviewed(3))]),
@@ -1073,7 +1073,7 @@ mod tests {
             head,
             base: reviewed_base.clone(),
         };
-        let reviews = FakeReviews(BTreeMap::from([
+        let reviews = FakeReviews::of(BTreeMap::from([
             (1, vec![record(1, format!("{:040x}", 1))]),
             (2, vec![record(2, reviewed)]),
             (3, vec![record(3, format!("{:040x}", 3))]),
@@ -1118,7 +1118,7 @@ mod tests {
         repo.parents.insert(repo.target.clone(), vec![fork.clone()]);
         repo.parents.insert(lower.clone(), vec![fork]);
         repo.parents.insert(head.clone(), vec![lower.clone()]);
-        let reviews = FakeReviews(BTreeMap::from([(
+        let reviews = FakeReviews::of(BTreeMap::from([(
             1,
             vec![ReviewRecord {
                 reference: "delivery-1".into(),
@@ -1142,6 +1142,86 @@ mod tests {
         )?;
         assert_eq!(report.outcomes[&1], Outcome::Excluded);
         assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+        Ok(())
+    }
+
+    /// An unreadable review store is not a missing approval: the run fails
+    /// with the reason and merges nothing.
+    #[test]
+    fn a_review_store_read_failure_fails_the_run_and_merges_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::fakes::FakeReviews;
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        forge.approvals_at_head.clear();
+        let reviews = FakeReviews {
+            failure: Some("read review records: store unreadable".into()),
+            ..FakeReviews::default()
+        };
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let result = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        );
+        let error = result.err().ok_or("the run should fail")?;
+        assert!(error.to_string().contains("store unreadable"), "{error}");
+        assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+        Ok(())
+    }
+
+    /// A retired receipt beside an accepted record that covers the head does
+    /// not block it; a pull request with only a retired receipt is excluded
+    /// with the remedy.
+    #[test]
+    fn an_accepted_record_lands_despite_a_retired_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{fakes::FakeReviews, ports::ReviewRecord};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        forge.approvals_at_head.clear();
+        let reviewed_base = "b".repeat(40);
+        repo.parents
+            .insert(repo.target.clone(), vec![reviewed_base.clone()]);
+        for n in [1u64, 2] {
+            repo.parents
+                .insert(format!("{n:040x}"), vec![reviewed_base.clone()]);
+        }
+        let retired = "receipt shape retired: save it again".to_owned();
+        let reviews = FakeReviews {
+            records: BTreeMap::from([(
+                1,
+                vec![ReviewRecord {
+                    reference: "delivery-1".into(),
+                    reviewer: "reviewer".into(),
+                    head: format!("{:040x}", 1),
+                    base: reviewed_base,
+                }],
+            )]),
+            unusable: BTreeMap::from([(1, vec![retired.clone()]), (2, vec![retired.clone()])]),
+            failure: None,
+        };
+        settings.approval = ApprovalSource::Receipt;
+        let state = tempfile::tempdir()?;
+        let report = exercise_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+            Approvals::new(ApprovalSource::Receipt, &reviews),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Excluded);
+        assert_eq!(report.exclusion_reasons[&2], retired);
         Ok(())
     }
 

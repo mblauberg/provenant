@@ -450,7 +450,7 @@ mod tests {
             head: head.into(),
             base: "fork".into(),
         };
-        let reviews = FakeReviews(std::collections::BTreeMap::from([
+        let reviews = FakeReviews::of(std::collections::BTreeMap::from([
             (1, vec![record(1, "head-1")]),
             (2, vec![record(2, "reviewed-2")]),
         ]));

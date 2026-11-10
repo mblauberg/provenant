@@ -197,14 +197,30 @@ impl Forge for FakeForge {
         Ok(9000 + number)
     }
 }
-/// Accepted Provenant review records by pull request.
+/// Accepted Provenant review records by pull request, the receipts that
+/// cannot be read as one, and an optional store-wide read failure.
 #[derive(Default)]
-pub struct FakeReviews(pub BTreeMap<u64, Vec<ReviewRecord>>);
+pub struct FakeReviews {
+    pub records: BTreeMap<u64, Vec<ReviewRecord>>,
+    pub unusable: BTreeMap<u64, Vec<String>>,
+    pub failure: Option<String>,
+}
+impl FakeReviews {
+    pub fn of(records: BTreeMap<u64, Vec<ReviewRecord>>) -> Self {
+        Self {
+            records,
+            ..Self::default()
+        }
+    }
+}
 impl ReviewRecords for FakeReviews {
     fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+        if let Some(failure) = &self.failure {
+            return Err(LandingError::Failed(failure.clone()));
+        }
         Ok(Reviews {
-            records: self.0.get(&number).cloned().unwrap_or_default(),
-            unusable: Vec::new(),
+            records: self.records.get(&number).cloned().unwrap_or_default(),
+            unusable: self.unusable.get(&number).cloned().unwrap_or_default(),
         })
     }
 }
