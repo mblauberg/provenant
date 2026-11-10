@@ -884,35 +884,42 @@ impl Registry<'_> {
             adapter.failure_cause(stderr)
         };
         let auth = failure_cause == provenant_providers::FailureCause::AuthRequired;
+        // The host handed this lane a copy of the account's access token at
+        // launch, after its identity probe passed, so a 401 now means the copy
+        // was renewed away or expired, not that the account needs a login.
+        let lane_token = auth
+            && provenant_records::AdapterSpec::get(adapter.id())
+                .is_some_and(|spec| spec.launch_token_refresh);
         let provider_failed = outcome.status() == OutcomeStatus::Failed
             && failure_cause == provenant_providers::FailureCause::Provider;
         (decoded.outcome, decoded.reason) = match outcome.status() {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
-            _ if auth && outcome.status() != OutcomeStatus::Success => (
-                run::Outcome::AuthRequired,
-                Some(
-                    self.roots
-                        .and_then(|roots| {
-                            let config = provenant_config::read_with_domains(
-                                roots,
-                                &crate::domains::SECTIONS,
-                            )
-                            .ok()?;
-                            Some(crate::quota::account_login_diagnostic(
-                                config.domains.accounts.entries.values(),
-                                &[],
-                                adapter.id(),
-                                route.account_key.as_deref(),
-                                &provenant_records::RouteExclusionReason::AuthRequired,
-                            ))
-                        })
-                        .unwrap_or_else(|| {
-                            provenant_records::diagnostic::ProviderFailureFact::AuthRequired
-                                .reason()
-                                .into()
-                        }),
-                ),
-            ),
+            _ if auth && outcome.status() != OutcomeStatus::Success => {
+                let config = self.roots.and_then(|roots| {
+                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS).ok()
+                });
+                let entries = config
+                    .iter()
+                    .flat_map(|config| config.domains.accounts.entries.values());
+                let key = route.account_key.as_deref();
+                let reason = if lane_token {
+                    decoded.terminal_cause = Some(run::TerminalCause::LaneTokenLost);
+                    crate::quota::lane_token_lost_diagnostic(entries, adapter.id(), key)
+                } else if config.is_some() {
+                    crate::quota::account_login_diagnostic(
+                        entries,
+                        &[],
+                        adapter.id(),
+                        key,
+                        &provenant_records::RouteExclusionReason::AuthRequired,
+                    )
+                } else {
+                    provenant_records::diagnostic::ProviderFailureFact::AuthRequired
+                        .reason()
+                        .into()
+                };
+                (run::Outcome::AuthRequired, Some(reason))
+            }
             OutcomeStatus::Refused => (run::Outcome::Rejected, Some("provider refused".into())),
             OutcomeStatus::Failed => (run::Outcome::Failed, Some("provider failed".into())),
             OutcomeStatus::Partial => {

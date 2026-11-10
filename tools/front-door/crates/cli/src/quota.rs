@@ -1164,6 +1164,31 @@ pub(crate) fn account_login_diagnostic<'a>(
     login_diagnostic(entry, last, reason)
 }
 
+/// A lane's launch-time token copy was lost; the account login itself passed
+/// its probe at launch, so the remedy is a fresh attempt, not a login.
+pub(crate) fn lane_token_lost_diagnostic<'a>(
+    entries: impl IntoIterator<Item = &'a provenant_providers::accounts::Registration>,
+    adapter: &str,
+    key: Option<&str>,
+) -> String {
+    let account = entries
+        .into_iter()
+        .find(|entry| entry.adapter == adapter && Some(entry.key.as_str()) == key)
+        .map_or_else(
+            || "account unavailable".to_owned(),
+            |entry| {
+                format!(
+                    "{} [{}]",
+                    entry.label.escape_debug(),
+                    entry.adapter.escape_debug()
+                )
+            },
+        );
+    format!(
+        "{account}: this lane's access token was revoked or expired mid-run (the host renewed or the token lapsed); the account login is not the cause. A writer continues from its handoff on a new token; register a long-lived lane token to avoid this (docs/runbooks/providers.md)"
+    )
+}
+
 /// Diagnostic facts are account-scoped and contain no provider output.
 pub(crate) fn login_diagnostic(
     entry: Option<&provenant_providers::accounts::Registration>,

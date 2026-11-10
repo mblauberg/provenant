@@ -325,11 +325,22 @@ Shell-capable Claude lanes receive only the access token through a pipe,
 use an empty private config directory, scrub child environments and deny
 keychain reads. Claude still holds the
 token and has outbound HTTPS, so isolation is incomplete.
-- Why (default): credential writes belong to the user's own sign-in flow.
+When the account's config directory holds an owner-created long-lived
+`provenant-lane-token` (`claude setup-token`; a single 0600 regular file), lanes
+receive that token instead and the host never refreshes the login for them,
+because a login renewal revokes access tokens copied from it. A lane whose
+copied token is lost mid-run settles as `lane_token_lost`, naming the account
+rather than asking for a login, and a writer continues from its handoff as a
+declared stop; the successor's launch re-probes the account.
+- Why (default): credential writes belong to the user's own sign-in flow, and
+  one renewal must not end every live lane on the account (#3126).
 - Test: `crates/providers/src/tests_account_identity.rs::claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token`;
+  `crates/providers/src/tests_account_identity.rs::claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login`;
+  `crates/run/src/holder.rs::writer_that_lost_its_lane_token_is_continued_from_its_handoff`;
   `crates/providers/src/tests_account_identity.rs::claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token`;
   `crates/providers/src/tests_accounts_and_limits.rs::claude_writer_shell_has_private_config_and_rust_tools`
-- Owner: `crates/providers/src/claude.rs`, `crates/providers/src/host.rs`
+- Owner: `crates/providers/src/claude.rs`, `crates/providers/src/host.rs`,
+  `crates/run/src/holder.rs`
 
 ## Accounts
 

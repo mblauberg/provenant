@@ -953,6 +953,56 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
     assert!(reason.contains("/fixture/work"), "{reason}");
     Ok(())
 }
+/// A Claude lane holds a launch-time copy of its account's token, so a 401
+/// names the account and says the lane token was lost, not that it needs a login.
+#[test]
+fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    use run::Providers;
+    let temp = tempfile::tempdir()?;
+    let mut inputs =
+        provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+    inputs.state_dir = Some(temp.path().join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
+    std::fs::write(
+        roots.state.as_path().join("config.toml"),
+        "schema_version = 1\n[domains.accounts.entries.pro]\nadapter = 'claude'\nlabel = 'pro'\nkey = 'key'\ndirectory = '/fixture/pro'\n",
+    )?;
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        model: Some("claude/example".into()),
+        account_key: Some("key".into()),
+        ..Default::default()
+    };
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let decoded = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    }
+    .decode_captures(
+        &route,
+        include_bytes!("../../../../tests/fixtures/providers/claude/live-auth-required.jsonl"),
+        b"",
+        &exit,
+        temp.path(),
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::LaneTokenLost)
+    );
+    let reason = decoded.reason.unwrap();
+    assert!(reason.contains("pro [claude]"), "{reason}");
+    assert!(
+        reason.contains("lane's access token was revoked or expired"),
+        "{reason}"
+    );
+    assert!(!reason.contains("claude login"), "{reason}");
+    Ok(())
+}
 #[test]
 fn successful_output_with_incidental_auth_stderr_stays_successful() {
     let route = run::RouteRecord {

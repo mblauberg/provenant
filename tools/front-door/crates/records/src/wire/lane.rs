@@ -572,6 +572,7 @@ mod terminal_cause_tests {
             TerminalCause::IdentityUnobserved,
             TerminalCause::StoppedNoWork,
             TerminalCause::ContextHandoff,
+            TerminalCause::LaneTokenLost,
         ] {
             let mut extra = crate::ExtraFields::default();
             extra.insert(

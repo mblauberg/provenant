@@ -703,7 +703,8 @@
                     "host_native_unconfigured",
                     "identity_unobserved",
                     "stopped_no_work",
-                    "context_handoff"
+                    "context_handoff",
+                    "lane_token_lost"
                   ],
                   "type": "string"
                 },
@@ -1868,7 +1869,8 @@
                     "host_native_unconfigured",
                     "identity_unobserved",
                     "stopped_no_work",
-                    "context_handoff"
+                    "context_handoff",
+                    "lane_token_lost"
                   ],
                   "type": "string"
                 },
@@ -2943,7 +2945,8 @@
                     "host_native_unconfigured",
                     "identity_unobserved",
                     "stopped_no_work",
-                    "context_handoff"
+                    "context_handoff",
+                    "lane_token_lost"
                   ],
                   "type": "string"
                 },
@@ -4024,7 +4027,8 @@
                     "host_native_unconfigured",
                     "identity_unobserved",
                     "stopped_no_work",
-                    "context_handoff"
+                    "context_handoff",
+                    "lane_token_lost"
                   ],
                   "type": "string"
                 },
@@ -5302,7 +5306,8 @@
                     "host_native_unconfigured",
                     "identity_unobserved",
                     "stopped_no_work",
-                    "context_handoff"
+                    "context_handoff",
+                    "lane_token_lost"
                   ],
                   "type": "string"
                 },
