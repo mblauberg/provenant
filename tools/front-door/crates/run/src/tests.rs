@@ -3176,6 +3176,7 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
             reaction.notice_done = true;
         }
         reaction.log_done = true;
+        reaction.ledger_done = true;
         Ok(())
     };
     let failed = recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step);
@@ -3204,6 +3205,7 @@ fn two_concurrent_drains_react_once() -> TestResult {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
+        reaction.ledger_done = true;
         Ok(())
     };
     // One drain is mid-flight and holds the run's lock; a second, from another
@@ -3236,6 +3238,7 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
+        reaction.ledger_done = true;
         Ok(())
     })?;
     store.prune_reactions(i64::MAX, &call)?;
@@ -3284,6 +3287,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
         save(reaction)?;
         reaction.notice_done = true;
         reaction.log_done = true;
+        reaction.ledger_done = true;
         Ok(())
     })?;
     assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
@@ -3324,6 +3328,7 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
     store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
         reaction.notice_done = true;
         reaction.log_done = true;
+        reaction.ledger_done = true;
         reaction.graph_done = true;
         Ok(())
     })?;
@@ -3514,6 +3519,7 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
+        reaction.ledger_done = true;
         Ok(())
     })?;
     store

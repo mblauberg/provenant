@@ -1578,8 +1578,8 @@ impl<'a> Compiler<'a> {
         spec.insert("until".into(), Value::String(repeat.until));
         spec.insert("max_rounds".into(), repeat.max_rounds.into());
         if review_repair {
-            if !(1..=3).contains(&repeat.max_rounds) {
-                return Err("review repair cycles must be between 1 and 3".into());
+            if repeat.max_rounds == 0 {
+                return Err("review repair cycles must be at least 1".into());
             }
             spec.insert("review_repair".into(), Value::Bool(true));
         }

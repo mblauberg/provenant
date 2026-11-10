@@ -203,7 +203,7 @@ neither train on nor retain prompts; price does not affect eligibility. Fast or 
 
 ### Required provider families on panels and lenses
 
-Review family constraints are optional hard eligibility requirements. A panel's
+Review family constraints are optional eligibility requirements. A panel's
 `minimum_family_counts` counts lenses, and a lens's `required_family` restricts
 that lens's eligible routes. A lens requirement also contributes to the panel
 minimum. Shape and request minimums combine by taking the larger count per
@@ -213,9 +213,13 @@ Panel expansion carries these declarations to route selection. Selection uses
 `AdapterSpec.family` as its single source of provider identity and applies the
 same candidate eligibility rules before allocating constrained legs. Assignment
 must consider the whole panel: taking a flexible lens for one family must not
-prevent a feasible assignment for another. A failed assignment refuses before
-launch and reports the family, required count and candidate exclusion reasons;
-`--explain` uses this same preflight. Resolved slots retain `satisfied_family`
+prevent a feasible assignment for another. A lens's own `required_family` that
+cannot be met refuses before launch. A panel minimum that cannot be met is
+advisory by default: the panel resolves and `PanelResolution.warnings` and each
+lens's advice name the family, required count and candidate exclusion reasons.
+`review.diversity = "strict"` (configuration) or `diversity = "strict"` (the
+run document's `[review]` table) restores the refusal; `--explain` uses this
+same preflight. Resolved slots retain `satisfied_family`
 and constrained routes retain the family filter through dispatch and fallback.
 Unconstrained panels perform no extra draws and retain their existing expansion.
 
@@ -224,7 +228,7 @@ evidence required for family assurance below.
 - Why (default): a panel can meet a family floor without pinning all its lenses to one model.
 - Test: `crates/routing/src/review.rs::tests::family_floors_keep_shape_minimum_and_record_matching_legs`;
   `crates/routing/src/review.rs::tests::required_lens_family_counts_towards_panel_minimum_and_refuses_with_reason`;
-  `crates/routing/src/review.rs::tests::unsatisfied_panel_family_reports_count_and_candidate_exclusions`;
+  `crates/routing/src/review.rs::tests::unsatisfied_panel_family_warns_by_default_and_refuses_when_strict`;
   `crates/cli/src/fabric/graph_relay.rs::panel_tests::review_family_constraints_use_eligible_pools_and_survive_template_expansion`
 - Owner: `crates/routing/src/review.rs#PanelResolution`,
   `crates/routing/src/resolve.rs#resolve_for_account_with_seed_excluding_family`,

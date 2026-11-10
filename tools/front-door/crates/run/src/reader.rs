@@ -4,7 +4,7 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId, WallTime};
+use provenant_core::{ActorId, AttemptId, OperationId, ProjectId, RunId, TaskId, WallTime};
 use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, ReviewerProvenance};
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
@@ -209,6 +209,21 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         trace: r.trace,
         transcript,
     })
+}
+impl RunStore {
+    /// Every project with a terminal attempt in this store, whichever project
+    /// opened it. The usage backfill reads each one through its own context.
+    pub fn terminal_projects(&self, call: &Request<'_>) -> Result<Vec<ProjectId>> {
+        call.check()?;
+        let mut statement = self
+            .db
+            .prepare("SELECT DISTINCT project FROM attempts WHERE terminal=1 ORDER BY project")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            ProjectId::parse(&row?).map_err(|_| RunError::Validation("attempt project ID"))
+        })
+        .collect()
+    }
 }
 impl AttemptReader for RunStore {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact> {
