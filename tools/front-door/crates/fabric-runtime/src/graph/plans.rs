@@ -18,8 +18,7 @@ pub(super) fn set_expansion_pause(
         fragment_error,
     });
     checkpoint.activate_expansion_pause(index);
-    checkpoint.pause_reason = Some(reason);
-    checkpoint.pause_code = Some("invalid_plan_expansion".into());
+    checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
 }
 
 pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
@@ -48,8 +47,10 @@ pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usi
                     .map(|reason| (index, reason.clone()))
             });
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_reason = next.as_ref().map(|(_, reason)| reason.clone());
-        checkpoint.pause_code = next.as_ref().map(|_| "invalid_plan_expansion".into());
+        checkpoint.pause = None;
+        if let Some((_, reason)) = &next {
+            checkpoint.set_pause(PauseCause::InvalidPlanExpansion, reason);
+        }
         if let Some((next, _)) = next {
             checkpoint.activate_expansion_pause(next);
         }
@@ -288,9 +289,13 @@ pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
 /// occupy once stored in a checkpoint.
 const BLOCK_BYTES: usize = 12 * 1024;
 pub(super) const STORED_BLOCK_BYTES: usize = 2 * BLOCK_BYTES;
-/// A stopped-early handoff is stored whole: its fenced block plus escapes.
-pub(super) const STORED_HANDOFF_BYTES: usize =
-    2 * (provenant_records::handoff::HANDOFF_BYTES + "```handoff\n\n```".len());
+/// A stopped-early handoff is stored whole, as the typed record.
+pub(super) const STORED_HANDOFF_BYTES: usize = provenant_records::handoff::HANDOFF_BYTES;
+/// Review decisions stored on review nodes, counted in the checkpoint size bound.
+pub(super) const STORED_DECISION_BYTES: usize =
+    provenant_records::finding_decision::FINDING_ID_BYTES
+        + provenant_records::finding_decision::DECISION_REASON_BYTES
+        + 256;
 
 fn block<'a>(
     capture: &'a crate::result_capture::CapturedResult,
@@ -363,20 +368,17 @@ fn block<'a>(
 
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
-) -> Result<Option<String>, String> {
+) -> Result<Option<provenant_records::handoff::Handoff>, String> {
     let handoff = capture.handoff.clone().map_err(str::to_owned)?;
-    let Some(fenced) = handoff
-        .filter(provenant_records::handoff::Handoff::unfinished)
-        .map(|handoff| handoff.fenced())
-    else {
+    let Some(handoff) = handoff.filter(provenant_records::handoff::Handoff::unfinished) else {
         return Ok(None);
     };
-    if encoded_len(&fenced) > STORED_HANDOFF_BYTES {
+    if serde_json::to_vec(&handoff).map_or(usize::MAX, |bytes| bytes.len()) > STORED_HANDOFF_BYTES {
         return Err(format!(
             "handoff block has too many escaped characters to store in {STORED_HANDOFF_BYTES} bytes"
         ));
     }
-    Ok(Some(fenced))
+    Ok(Some(handoff))
 }
 
 pub(super) fn agent(node: &PlannedNode) -> bool {
@@ -1727,7 +1729,7 @@ fn continuation(
     node: &PlannedNode,
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
-    note: &str,
+    handoff: &provenant_records::handoff::Handoff,
     blocked: bool,
     limits: &crate::config::GraphLimits,
 ) -> Result<Expansion, String> {
@@ -1782,7 +1784,8 @@ fn continuation(
         });
     }
     child.prompt.push_str(&format!(
-        "\n\nContinue this work in the same worktree. Stopped-early handoff:\n{note}"
+        "\n\nContinue this work in the same worktree. Stopped-early handoff:\n{}",
+        handoff.fenced()
     ));
     // Integrate retains the shared checkout and leaves the graph owning its PR.
     if child.delivery == Some(provenant_records::run::DeliveryMode::Pr) {

@@ -309,8 +309,8 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     )
     .unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
-    assert!(run.checkpoint.pause_reason.is_none());
-    assert!(run.checkpoint.pause_code.is_none());
+    assert!(run.checkpoint.pause.is_none());
+    assert!(run.checkpoint.pause.is_none());
     assert!(
         run.checkpoint
             .asks
@@ -546,7 +546,7 @@ fn a_budget_pause_raises_one_ask_and_an_extend_answer_resumes() {
     assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
     assert!(
         ask.body
-            .contains(paused.checkpoint.pause_reason.as_deref().unwrap())
+            .contains(paused.checkpoint.pause_reason().unwrap())
     );
     assert_eq!(
         advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget)
@@ -648,7 +648,7 @@ fn a_planner_fragment_can_add_a_decide_node() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert_eq!(state(&run, "plan--choose"), NodeState::Succeeded);
     assert_eq!(owner.calls.len(), 2);

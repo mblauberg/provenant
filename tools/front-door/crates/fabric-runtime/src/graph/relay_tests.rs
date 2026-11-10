@@ -1318,7 +1318,7 @@ fn planner_native_child_runs_before_parent_settles_and_final_fragment_closes_onc
         terminal_from("Finished", "final-attempt"),
     ]);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason());
     assert!(run.checkpoint.successful());
     assert_eq!(run.checkpoint.expansions.len(), 2);
     assert_eq!(run.checkpoint.expansions[1].extra.get("final_result"), Some(&json!(true)));

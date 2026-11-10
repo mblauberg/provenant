@@ -17,13 +17,12 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
         .unwrap();
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("invalid_plan_expansion")
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion)
         );
         assert!(
             run.checkpoint
-                .pause_reason
-                .as_deref()
+                .pause_reason()
                 .unwrap()
                 .contains("invalid fragment")
         );
@@ -45,17 +44,16 @@ fn admission_planner_fragment_capability() {
     let run = advance(&planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(
         run.checkpoint
-            .pause_reason
-            .as_deref()
+            .pause_reason()
             .unwrap()
             .contains("invalid fragment"),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -382,7 +380,7 @@ fn invalid_successful_planner_fragment_runs_static_fallback_and_records_reason()
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 4);
@@ -420,7 +418,7 @@ fn planner_fragment_accepts_string_shorthand_inputs_as_result_inputs() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let second = run.checkpoint.expansions[0]
         .nodes
@@ -556,7 +554,7 @@ fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(run.checkpoint.successful());
     assert_eq!(run.checkpoint.expansions.len(), 1);
@@ -621,10 +619,10 @@ fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
-    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    let reason = run.checkpoint.pause_reason().unwrap();
     assert!(
         reason.contains("plan fallback expansion paused"),
         "{reason}"
@@ -658,7 +656,7 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    let reason = paused.checkpoint.pause_reason.as_deref().unwrap();
+    let reason = paused.checkpoint.pause_reason().unwrap();
     assert!(
         reason.contains("planner fragment invalid: fragment block missing"),
         "{reason}"
@@ -735,7 +733,7 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
         resumed.status,
         GraphStatus::Complete,
         "{:?}",
-        resumed.checkpoint.pause_reason
+        resumed.checkpoint.pause_reason()
     );
     assert!(resumed.checkpoint.successful());
     assert_eq!(resumed.checkpoint.expansions.len(), 1);
@@ -805,7 +803,7 @@ fn ordinary_advance_clears_pause_after_admitting_retried_fallback() {
         advanced.status,
         GraphStatus::Complete,
         "{:?}",
-        advanced.checkpoint.pause_reason
+        advanced.checkpoint.pause_reason()
     );
     assert!(advanced.checkpoint.successful());
     assert_eq!(advanced.checkpoint.expansions.len(), 1);
@@ -847,7 +845,7 @@ fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert_eq!(owner.calls.len(), 3, "{:?}", run.checkpoint.nodes);
     assert!(owner.calls[1].0.node_id.contains("plan--fallback--static"));
@@ -993,7 +991,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
             run.status,
             GraphStatus::Complete,
             "{field}: {:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
         assert!(run.checkpoint.successful());
         assert_eq!(run.checkpoint.expansions.len(), 1);
@@ -1120,7 +1118,7 @@ fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
         )
         .is_some(),
         "{:?}",
-        checkpoint.pause_reason
+        checkpoint.pause_reason()
     );
     assert_eq!(
         checkpoint.expansions[0].nodes[0].worktree.as_deref(),
@@ -1183,7 +1181,7 @@ fn planner_requires_write_scope_only_for_writers() {
         run.checkpoint.expansions.len(),
         1,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert_eq!(run.status, GraphStatus::Complete);
 
@@ -1193,8 +1191,8 @@ fn planner_requires_write_scope_only_for_writers() {
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1212,8 +1210,8 @@ fn continuation_rejects_original_pr_delivery_before_integration_rewrite() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1231,8 +1229,8 @@ fn oversized_nested_fragment_id_names_the_source_and_child() {
     )
     .unwrap();
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1262,8 +1260,8 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
         let run = advance(&planner(1), &mut owner, &mut journal).unwrap();
         assert_eq!(run.status, GraphStatus::Paused, "{output}");
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("invalid_plan_expansion"),
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion),
             "{reason}"
         );
         assert!(run.checkpoint.expansions.is_empty());
@@ -1301,8 +1299,8 @@ fn plan_validates_host_limits_before_saving() {
             .unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("invalid_plan_expansion")
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion)
         );
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
@@ -1329,7 +1327,7 @@ fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composi
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(run.checkpoint.successful());
 
@@ -1408,8 +1406,8 @@ fn plan_patterns_refuse_unlisted_invalid_and_widening_instances() {
         .unwrap();
         assert_eq!(run.status, GraphStatus::Paused, "{reason}");
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("invalid_plan_expansion"),
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion),
             "{reason}"
         );
         assert!(run.checkpoint.expansions.is_empty());
@@ -1423,7 +1421,7 @@ fn captured_fragment_text_does_not_become_a_pause_diagnostic() {
     let instance = json!({"id":"impl", "pattern":"TOKEN_SENTINEL/private/host\u{1b}"});
     let mut owner = fixture_owner(&[&pattern_result(instance)]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    let reason = run.checkpoint.pause_reason().unwrap();
     assert!(reason.contains("invalid fragment"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.contains("/private/host"));
@@ -1468,7 +1466,7 @@ fn captured_fragment_text_does_not_become_a_pause_diagnostic() {
         })
     ));
     for text in [
-        paused.checkpoint.pause_reason.as_deref().unwrap(),
+        paused.checkpoint.pause_reason().unwrap(),
         node.expansion_pause.as_deref().unwrap(),
     ] {
         assert!(!text.contains("TOKEN_SENTINEL"));
@@ -1487,8 +1485,8 @@ fn refused_pattern_instantiation_raises_a_pause_decision() {
     let ask = &run.checkpoint.asks[0];
     assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1511,8 +1509,8 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1536,18 +1534,17 @@ fn assert_pattern_parameter_error(
     let run = advance(doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused, "{case}");
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion"),
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion),
         "{case}"
     );
     assert!(
         run.checkpoint
-            .pause_reason
-            .as_deref()
+            .pause_reason()
             .unwrap_or_default()
             .contains("invalid fragment"),
         "{case}: {:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(run.checkpoint.expansions.is_empty(), "{case}");
 }
@@ -1635,8 +1632,8 @@ fn nested_pattern_writer_keeps_its_scope_requirement() {
     let mut owner = fixture_owner(&[&pattern_result(instance)]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
 }
 
@@ -1665,7 +1662,7 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert_eq!(run.checkpoint.expansions[0].nodes.len(), 3);
 
@@ -1681,8 +1678,8 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 
@@ -1701,13 +1698,12 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(
         run.checkpoint
-            .pause_reason
-            .as_deref()
+            .pause_reason()
             .unwrap()
             .contains("limits.nodes")
     );
@@ -1791,8 +1787,8 @@ fn planner_integrate_delivery_needs_the_documents_integration_branch() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 
@@ -1883,6 +1879,7 @@ fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract
             .handoff
             .as_ref()
             .unwrap()
+            .fenced()
             .contains("First half committed")
     );
     assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 1);
@@ -1909,8 +1906,8 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     assert_eq!(run.checkpoint.expansions.len(), 1);
     assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 0);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert_eq!(owner.calls.len(), 2);
     assert_eq!(
@@ -2034,8 +2031,8 @@ fn planner_cannot_add_separate_writer_checkouts_to_one_loop() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -2352,8 +2349,8 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
         let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("invalid_plan_expansion"),
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion),
             "{reason}"
         );
         assert!(run.checkpoint.expansions.is_empty());
@@ -2384,8 +2381,8 @@ fn planner_fragment_cannot_invent_capabilities() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     doc.nodes[0].capabilities = Some(vec!["postgres".into()]);
     let run = advance(
@@ -2415,8 +2412,8 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidPlanExpansion)
     );
     assert!(run.checkpoint.expansions.is_empty());
     assert_eq!(owner.calls.len(), 1);
@@ -2444,7 +2441,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
             run.status,
             GraphStatus::Complete,
             "{:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
         assert_eq!(run.checkpoint.expansions[0].uses.len(), 2);
     }
@@ -2467,7 +2464,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
 }
 
@@ -2502,7 +2499,7 @@ fn planner_adds_lenses_omitted_by_a_path_floor() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let expansion = &run.checkpoint.expansions[0];
     assert!(
@@ -2575,7 +2572,7 @@ fn pattern_routes_may_vary_only_over_a_closed_list() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
 }
 
@@ -2666,7 +2663,7 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let expansion = &run.checkpoint.expansions[0];
     let recorded: Vec<_> = expansion.uses.iter().map(|p| p.name.as_str()).collect();
@@ -2726,7 +2723,7 @@ fn single_planned_review_records_rationale_before_lens() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let planner = run
         .checkpoint
@@ -2775,7 +2772,7 @@ fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let expansion = &run.checkpoint.expansions[0];
     let recorded: Vec<_> = expansion.uses.iter().map(|p| p.name.as_str()).collect();
@@ -2833,7 +2830,7 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
             run.status,
             GraphStatus::Complete,
             "{name}: {:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
         let expanded =
             plans::expand(&doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap();
@@ -2868,7 +2865,7 @@ fn a_hand_written_plan_keeps_its_consumers_declared_inputs() {
             run.status,
             GraphStatus::Complete,
             "{:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
         plans::expand(doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap()
     };
@@ -2927,8 +2924,8 @@ fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadlin
         let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused, "{label}");
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("invalid_plan_expansion"),
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion),
             "{label}"
         );
         assert!(run.checkpoint.expansions.is_empty(), "{label}");
@@ -2945,7 +2942,7 @@ fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadlin
         run.checkpoint.expansions.len(),
         1,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
 }
 
@@ -3324,9 +3321,9 @@ fn planner_fragments_may_emit_composites_and_loops() {
     let mut owner = fixture_owner(&[&output]);
     let run = advance(&planner(8), &mut owner, &mut MemoryJournal::default()).unwrap();
     assert!(
-        run.checkpoint.pause_reason.is_none(),
+        run.checkpoint.pause.is_none(),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let expansion = &run.checkpoint.expansions[0];
     assert!(
@@ -3368,9 +3365,9 @@ fn bundled_plan_admits_a_fragment_patch() {
     )
     .unwrap();
     assert!(
-        run.checkpoint.pause_reason.is_none(),
+        run.checkpoint.pause.is_none(),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(
         run.checkpoint
@@ -3571,9 +3568,9 @@ fn ordinary_reviewer_final_patch_adds_a_follow_up() {
     )
     .unwrap();
     assert!(
-        run.checkpoint.pause_reason.is_none(),
+        run.checkpoint.pause.is_none(),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(
         run.checkpoint
@@ -3594,9 +3591,9 @@ fn planner_template_defaults_satisfy_acceptance_checks() {
     )
     .unwrap();
     assert!(
-        run.checkpoint.pause_reason.is_none(),
+        run.checkpoint.pause.is_none(),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert!(
         run.checkpoint
@@ -3632,9 +3629,9 @@ fn planner_uses_snapshotted_repository_flavour_and_review_panel() {
     )
     .unwrap();
     assert!(
-        run.checkpoint.pause_reason.is_none(),
+        run.checkpoint.pause.is_none(),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     let nodes = &run.checkpoint.expansions[0].nodes;
     assert!(nodes.iter().any(|node| node.id == "plan--repository"
@@ -3695,7 +3692,7 @@ fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() 
         let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.expansions.is_empty());
-        let refusal = run.checkpoint.pause_reason.as_deref().unwrap();
+        let refusal = run.checkpoint.pause_reason().unwrap();
         assert!(!refusal.contains(secret), "{refusal}");
         assert!(run.checkpoint.nodes.iter().all(|node| {
             node.fragment
@@ -3823,12 +3820,11 @@ fn planner_template_overrides_cannot_invent_capabilities() {
         assert!(run.checkpoint.expansions.is_empty());
         assert!(
             run.checkpoint
-                .pause_reason
-                .as_deref()
+                .pause_reason()
                 .unwrap()
                 .contains("postgres"),
             "{:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
     }
 }
@@ -3909,7 +3905,7 @@ fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
     let mut owner = fixture_owner(&[&output, "written", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason());
     assert_eq!(owner.provisioned, vec![(".worktrees/planned-plan--write".into(), "a".repeat(40))]);
     assert_eq!(owner.permissions[1].1.as_deref(), Some("/fixture/.worktrees/planned-plan--write"));
     assert!(relay::pending_provisioning(&run.checkpoint).is_empty());

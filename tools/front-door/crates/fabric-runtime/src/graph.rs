@@ -7,6 +7,7 @@
 
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
+use provenant_records::pause::PauseCause;
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -55,6 +56,8 @@ pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod typed_records_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
@@ -1769,7 +1772,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .as_ref()
                             .and_then(|record| record.wake_at)
                             .is_some_and(|wake| wall_now.is_none_or(|now| now < wake));
-                    if structural_pause.is_none() && checkpoint.pause_reason.is_none() && !waiting {
+                    if structural_pause.is_none() && checkpoint.pause.is_none() && !waiting {
                         land::advance(
                             node_index,
                             node,
@@ -1784,7 +1787,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     continue;
                 }
                 transitions::NodeAction::Gate(condition) => {
-                    if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
+                    if structural_pause.is_some() || checkpoint.pause.is_some() {
                         continue;
                     }
                     let mut replan_error = None;

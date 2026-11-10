@@ -13,6 +13,8 @@ pub enum PauseCause {
     Stop(StopCause),
     /// The continuation budget ran out before the stop's next step.
     ContinuationBudget,
+    /// A graph budget was exceeded before the next node could start.
+    BudgetExceeded,
     /// A plan expansion was refused.
     InvalidPlanExpansion,
     /// A loop decision was refused.

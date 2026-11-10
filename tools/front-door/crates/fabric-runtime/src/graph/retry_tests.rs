@@ -1106,7 +1106,7 @@ fn node_redo_repeated_planner_fallbacks_have_distinct_nodes_and_replay_without_r
             run.status,
             GraphStatus::Complete,
             "{:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
         assert_eq!(owner.calls.len(), 2);
         assert!(fallback_ids.insert(owner.calls[1].0.node_id.clone()));
@@ -1664,7 +1664,7 @@ fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_wor
         assert!(
             run.checkpoint.successful(),
             "{:?}",
-            run.checkpoint.pause_reason
+            run.checkpoint.pause_reason()
         );
         assert_eq!(
             owner
@@ -1741,7 +1741,7 @@ fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the
     assert!(
         run.checkpoint.successful(),
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert_eq!(
         owner
@@ -2103,7 +2103,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     let mut checkpoint = journal.load(&document.graph_id).unwrap().unwrap();
     assert_eq!(checkpoint.nodes[0].state, NodeState::Failed);
     plans::clear_expansion_pause(&mut checkpoint, 0, true);
-    assert!(checkpoint.pause_reason.is_none());
+    assert!(checkpoint.pause.is_none());
     let original = checkpoint.nodes[0].clone();
     assert_eq!(original.advance_error_code.as_deref(), Some("stopped_no_work"));
     assert!(no_work::pending(&document, &checkpoint));
@@ -2358,13 +2358,13 @@ fn no_work_restart_refused_before_planning_saves_a_chair_pause_with_the_stop() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(owner.calls.len(), 1);
     assert!(run.checkpoint.expansions.is_empty());
-    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    let reason = run.checkpoint.pause_reason().unwrap();
     assert!(reason.contains("writer work stopped; its restart was refused"), "{reason}");
     assert!(reason.contains("secret"), "{reason}");
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert!(!no_work::pending(&document, &run.checkpoint));
     let saved = journal.load(&document.graph_id).unwrap().unwrap();
-    assert_eq!(saved.pause_reason, run.checkpoint.pause_reason);
+    assert_eq!(saved.pause_reason(), run.checkpoint.pause_reason());
     assert_eq!(saved.nodes[0].state, NodeState::Failed);
     // Another advance stays paused and launches nothing.
     assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
@@ -2409,7 +2409,7 @@ fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch()
             assert_eq!(run.status, GraphStatus::Paused, "{note}, no_work={no_work}");
             assert_eq!(owner.calls.len(), 1);
             assert!(run.checkpoint.expansions.is_empty());
-            assert!(run.checkpoint.nodes[0].handoff.as_deref().unwrap().contains(note));
+            assert!(run.checkpoint.nodes[0].handoff.as_ref().unwrap().fenced().contains(note));
             assert!(!no_work::pending(&document, &run.checkpoint));
             assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
             assert_eq!(owner.calls.len(), 1);

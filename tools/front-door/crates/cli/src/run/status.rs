@@ -597,7 +597,7 @@ fn paused_graph_reply(
         "cancelled"
     } else if !unfinished {
         "complete"
-    } else if checkpoint.pause_reason.is_some() {
+    } else if checkpoint.pause.is_some() {
         "paused"
     } else {
         "pending"
@@ -610,7 +610,7 @@ fn paused_graph_reply(
     };
     let mut human = format!("Graph {graph_id}: {label}\n");
     let reason = (status == "paused")
-        .then_some(checkpoint.pause_reason.as_deref())
+        .then_some(checkpoint.pause_reason())
         .flatten()
         .map(|reason| provenant_fabric_runtime::hosts::plain_text(reason, 1024));
     if let Some(reason) = &reason {
@@ -681,7 +681,7 @@ mod graph_status_tests {
                 "plan_digest": "digest",
                 "delivery_required": true,
                 "nodes": [],
-                "pause_reason": reason,
+                "pause": {"cause": {"kind": "structural_limit"}, "reason": reason},
             }))
             .unwrap();
         let (data, human) = super::paused_graph_reply("graph-123", checkpoint).unwrap();

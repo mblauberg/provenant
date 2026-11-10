@@ -1695,7 +1695,7 @@ mod result_tests {
     #[test]
     fn paused_graph_status_and_resume_show_the_pause_reason() {
         let mut run = graph_status_fixture();
-        run.checkpoint.pause_reason = Some("invalid planner fragment: missing nodes".into());
+        run.checkpoint.set_pause(provenant_records::pause::PauseCause::InvalidPlanExpansion, "invalid planner fragment: missing nodes");
         run.status = provenant_fabric_runtime::graph::GraphStatus::Paused;
         let globals = provenant_cli::Globals::default();
         for command in ["status", "retry"] {
@@ -1713,7 +1713,7 @@ mod result_tests {
                 .any(|row| { row == "paused: invalid planner fragment: missing nodes" })
         );
 
-        run.checkpoint.pause_reason = Some("x".repeat(2048));
+        run.checkpoint.set_pause(provenant_records::pause::PauseCause::InvalidPlanExpansion, &"x".repeat(2048));
         let human = super::graph_display(&run, "status", &globals);
         let reason_line = human
             .lines()
@@ -1721,7 +1721,7 @@ mod result_tests {
             .unwrap_or_default();
         assert!(reason_line.chars().count() <= 1024 + "Pause reason: ".chars().count() + 1);
 
-        run.checkpoint.pause_reason = Some("before\u{1b}[31mafter".into());
+        run.checkpoint.set_pause(provenant_records::pause::PauseCause::InvalidPlanExpansion, "before\u{1b}[31mafter");
         let human = super::graph_display(&run, "status", &globals);
         assert!(human.contains("Pause reason: before[31mafter"));
         assert!(!human.contains('\u{1b}'));
@@ -1796,7 +1796,7 @@ mod result_tests {
         checkpoint.nodes[0].advance_error_code = Some("dispatch_refused".into());
         checkpoint.nodes[0].attempts.clear();
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
-        checkpoint.pause_reason = Some(display.into());
+        checkpoint.set_pause(provenant_records::pause::PauseCause::InvalidPlanExpansion, display);
         checkpoint.nodes[0].expansion_pause = Some(format!(
             "{display}\n[planner-fragment-retry-context:{}",
             provenant_core::hex(b"invalid fragment: missing nodes")
@@ -1827,7 +1827,7 @@ mod result_tests {
             budget,
             &cancel,
         )?;
-        let reason = status.checkpoint.pause_reason.as_deref().unwrap();
+        let reason = status.checkpoint.pause_reason().unwrap();
         assert!(
             reason.contains("invalid fragment: missing nodes"),
             "{reason}"
@@ -1837,7 +1837,7 @@ mod result_tests {
         assert!(human.contains("invalid fragment: missing nodes"), "{human}");
         let json = serde_json::to_value(&status)?;
         assert!(
-            json["checkpoint"]["pause_reason"]
+            json["checkpoint"]["pause"]["reason"]
                 .as_str()
                 .unwrap()
                 .contains("invalid fragment: missing nodes")
@@ -2417,13 +2417,13 @@ mod result_tests {
             "schema_version": 1,
             "graph_id": "graph",
             "plan_digest": "digest",
-            "pause_reason": "node limit exceeded",
+            "pause": {"cause": {"kind": "structural_limit"}, "reason": "node limit exceeded"},
             "nodes": [{"id": "one", "state": "succeeded", "worktree": null, "attempts": []}]
         }))
         .unwrap();
         let run = super::graph_snapshot(checkpoint.clone());
         assert_eq!(run.status, GraphStatus::Complete);
-        assert!(run.checkpoint.pause_reason.is_none());
+        assert!(run.checkpoint.pause.is_none());
 
         checkpoint.nodes[0].state = NodeState::Running;
         assert_eq!(

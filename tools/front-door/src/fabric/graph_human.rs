@@ -106,7 +106,10 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         .collect();
     action.sort_by_key(|(_, state, _)| rank(state));
     let mut rows: Vec<String> = Vec::new();
-    if let Some(reason) = text(checkpoint, "pause_reason") {
+    if let Some(reason) = checkpoint
+        .get("pause")
+        .and_then(|pause| text(pause, "reason"))
+    {
         rows.push(format!("paused: {}", bounded_reason(&reason)));
     }
     if let Some(error) = text(run, "advance_error") {
@@ -300,7 +303,7 @@ mod test_presentation {
             human.push_str(&format!("Outcome: {outcome:?}\n"));
         }
         if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
-            && let Some(reason) = &run.checkpoint.pause_reason
+            && let Some(reason) = run.checkpoint.pause_reason()
         {
             human.push_str(&format!("Pause reason: {}\n", bounded_reason(reason)));
         }

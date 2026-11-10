@@ -666,6 +666,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 fragment: None,
                 handoff: None,
                 blocked: false,
+                decisions: Vec::new(),
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,
@@ -1060,37 +1061,24 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         .iter()
         .filter_map(|n| n.loop_pause.as_deref())
         .collect();
-    if checkpoint.pause_reason.is_none()
-        || checkpoint
-            .pause_code
-            .as_deref()
-            .and_then(NodeDecisionCause::from_loop_code)
-            .is_some()
-    {
-        checkpoint.pause_code = if reasons.is_empty() {
-            None
+    if checkpoint.pause.is_none() || asks::loop_pause(checkpoint) {
+        let cause = checkpoint
+            .nodes
+            .iter()
+            .filter_map(|node| node.loop_cause.as_ref())
+            .find_map(|cause| match cause {
+                NodeDecisionCause::LoopAskClosed => Some(PauseCause::LoopAskClosed),
+                NodeDecisionCause::InvalidLoopDecision => Some(PauseCause::InvalidLoopDecision),
+                NodeDecisionCause::LoopPaused
+                | NodeDecisionCause::PlanExpansionPaused { .. }
+                | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
+            })
+            .unwrap_or(PauseCause::LoopPaused);
+        if reasons.is_empty() {
+            checkpoint.pause = None;
         } else {
-            Some(
-                checkpoint
-                    .nodes
-                    .iter()
-                    .filter_map(|node| node.loop_cause.as_ref())
-                    .find_map(|cause| match cause {
-                        NodeDecisionCause::LoopAskClosed => Some("loop_ask_closed"),
-                        NodeDecisionCause::InvalidLoopDecision => Some("invalid_loop_decision"),
-                        NodeDecisionCause::LoopPaused
-                        | NodeDecisionCause::PlanExpansionPaused { .. }
-                        | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
-                    })
-                    .unwrap_or("loop_paused")
-                    .into(),
-            )
-        };
-        checkpoint.pause_reason = (!reasons.is_empty()).then(|| {
-            bounded(
-                &format!("loops paused: {}", reasons.join("; ")),
-                PAUSE_REASON_BYTES,
-            )
-        });
+            let reason = format!("loops paused: {}", reasons.join("; "));
+            checkpoint.set_pause(cause, &reason);
+        }
     }
 }

@@ -345,7 +345,7 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
     assert_eq!(clock.mono_now().as_micros(), 2_000_000);
     drop(pause);
     checkpoint.nodes[0].state = NodeState::Running;
-    checkpoint.pause_reason = Some("decision required".into());
+    checkpoint.set_pause(provenant_records::pause::PauseCause::LoopPaused, "decision required");
     let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock)?;
     journal.save(&checkpoint)?;
     drop(journal);

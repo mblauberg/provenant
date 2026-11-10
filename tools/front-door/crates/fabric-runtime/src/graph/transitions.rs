@@ -2,6 +2,7 @@
 //! transition and saves before admitting the next effect. This module deliberately
 //! takes neither an `AttemptOwner` nor a `GraphJournal`.
 use super::*;
+use provenant_core::GitOid;
 
 /// Apply an accepted, nonterminal attempt observation without I/O.
 pub(super) fn apply_pending_observation(
@@ -278,7 +279,7 @@ pub(super) fn apply_attempt_observation(
                     && template::review_node(node)
                     && attempt.attempt_ref.is_some()
                 {
-                    match review_range {
+                    match &review_range {
                         ReviewRange::NoBase => {
                             outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
                             outputs
@@ -454,13 +455,86 @@ pub(super) fn apply_attempt_observation(
                         .and_then(|capture| capture.handoff.as_ref().ok())
                         .and_then(|handoff| handoff.as_ref())
                         .filter(|handoff| handoff.unfinished())
-                        .map(provenant_records::handoff::Handoff::fenced);
+                        .cloned();
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                 progress.outputs = Some(outputs);
                 match outcome {
                     AttemptOutcome::Succeeded => {
                         progress.state = NodeState::Succeeded;
+                        if node.access == AccessMode::ReadOnly && template::review_node(node) {
+                            let head_oid = match &review_range {
+                                ReviewRange::Resolved { head, .. } => GitOid::parse(head).ok(),
+                                _ => None,
+                            }
+                            .or_else(|| {
+                                progress
+                                    .source_commit
+                                    .as_deref()
+                                    .and_then(|h| GitOid::parse(h).ok())
+                            });
+                            if let Some(head) = head_oid {
+                                let base_oid = match &review_range {
+                                    ReviewRange::Resolved { base, .. } => GitOid::parse(base).ok(),
+                                    _ => None,
+                                }
+                                .or_else(|| {
+                                    progress
+                                        .review_base
+                                        .as_deref()
+                                        .or(checkpoint.bound_review_base.as_deref())
+                                        .or_else(|| {
+                                            node.extra
+                                                .get("review_base")
+                                                .and_then(serde_json::Value::as_str)
+                                        })
+                                        .and_then(|b| GitOid::parse(b).ok())
+                                });
+                                let findings = progress
+                                    .outputs
+                                    .as_ref()
+                                    .map(|o| o.findings.as_slice())
+                                    .unwrap_or_default();
+                                if findings.is_empty() {
+                                    if let Ok(decision) = provenant_records::FindingDecision::new(
+                                        &node.id,
+                                        provenant_records::FindingDisposition::Act,
+                                        format!("review {} settled", node.id),
+                                        head,
+                                        base_oid,
+                                    ) {
+                                        progress.decisions = vec![decision];
+                                    }
+                                } else {
+                                    progress.decisions = findings
+                                        .iter()
+                                        .filter_map(|finding| {
+                                            let disposition = match finding.disposition.as_deref() {
+                                                Some("decline") => {
+                                                    provenant_records::FindingDisposition::Decline
+                                                }
+                                                Some("replace") => {
+                                                    provenant_records::FindingDisposition::Replace
+                                                }
+                                                _ => provenant_records::FindingDisposition::Act,
+                                            };
+                                            let reason = finding
+                                                .reason
+                                                .as_deref()
+                                                .unwrap_or("finding decision");
+                                            provenant_records::FindingDecision::new(
+                                                &finding.id,
+                                                disposition,
+                                                reason,
+                                                head,
+                                                base_oid,
+                                            )
+                                            .ok()
+                                        })
+                                        .collect();
+                                }
+                            }
+                        }
                         false
                     }
                     AttemptOutcome::AuthRequired
@@ -565,8 +639,7 @@ pub(super) fn initial_checkpoint(
         cancelled: false,
         cancel_reason: None,
         integration_pin: None,
-        pause_reason: None,
-        pause_code: None,
+        pause: None,
         unknown_usage: Vec::new(),
         unknown_usage_omitted: 0,
         usage_events: Vec::new(),
@@ -596,6 +669,7 @@ pub(super) fn initial_checkpoint(
                 fragment: None,
                 handoff: None,
                 blocked: false,
+                decisions: Vec::new(),
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,
@@ -770,15 +844,12 @@ pub(super) fn admit_attempt(
     }
     checkpoint.nodes[node_index].extra.remove("slot_wait");
     update_usage_warnings(checkpoint);
-    if let Some(reason) = checkpoint
-        .pause_reason
-        .clone()
-        .or_else(|| budget_reason(checkpoint, effective_budget))
+    if checkpoint.pause.is_none()
+        && let Some(reason) = budget_reason(checkpoint, effective_budget)
     {
-        checkpoint.pause_reason = Some(bounded(&reason, PAUSE_REASON_BYTES));
-        checkpoint
-            .pause_code
-            .get_or_insert_with(|| "budget_exceeded".into());
+        checkpoint.set_pause(PauseCause::BudgetExceeded, &reason);
+    }
+    if checkpoint.pause.is_some() {
         return Admission::SaveAndWait;
     }
     if let Some(missing) = required_input_unavailable(node, plan, checkpoint, positions) {
@@ -1250,8 +1321,7 @@ pub(super) fn apply_resume(
         }
     }
     checkpoint.deactivate_expansion_pauses();
-    checkpoint.pause_reason = None;
-    checkpoint.pause_code = None;
+    checkpoint.pause = None;
     Ok(())
 }
 
@@ -1294,8 +1364,7 @@ pub(super) fn refresh_structure_pause(
         })
     {
         checkpoint.activate_expansion_pause(index);
-        checkpoint.pause_reason = Some(reason);
-        checkpoint.pause_code = Some("invalid_plan_expansion".into());
+        checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
     }
     let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
         None
@@ -1304,8 +1373,7 @@ pub(super) fn refresh_structure_pause(
     };
     if let Some(reason) = &structural_pause {
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
-        checkpoint.pause_code = Some("structural_limit".into());
+        checkpoint.set_pause(PauseCause::StructuralLimit, reason);
     }
 
     structural_pause
@@ -1399,10 +1467,9 @@ pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
             .nodes
             .iter()
             .all(|node| node.expansion_pause.is_none())
-        && checkpoint.pause_reason.take().is_some()
+        && checkpoint.pause.take().is_some()
     {
         checkpoint.deactivate_expansion_pauses();
-        checkpoint.pause_code = None;
         return true;
     }
     false
@@ -1422,7 +1489,7 @@ pub(super) fn record_delivery(checkpoint: &mut GraphCheckpoint, url: String) -> 
 
 pub(super) fn graph_run(checkpoint: GraphCheckpoint) -> GraphRun {
     let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
-    let status = if checkpoint.pause_reason.is_some() {
+    let status = if checkpoint.pause.is_some() {
         GraphStatus::Paused
     } else if all_settled && checkpoint.cancelled {
         GraphStatus::Cancelled

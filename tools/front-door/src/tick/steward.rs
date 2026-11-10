@@ -140,7 +140,7 @@ fn task(
 }
 
 fn checkpoint_is_live(checkpoint: &GraphCheckpoint) -> bool {
-    (!checkpoint.cancelled && checkpoint.pause_reason.is_some())
+    (!checkpoint.cancelled && checkpoint.pause.is_some())
         || checkpoint
             .nodes
             .iter()
@@ -157,7 +157,7 @@ fn classify_launch(result: &Value) -> Result<(), LaunchError> {
             .and_then(Value::as_str)
             .or_else(|| {
                 result
-                    .pointer("/checkpoint/pause_reason")
+                    .pointer("/checkpoint/pause/reason")
                     .and_then(Value::as_str)
             })
             .or_else(|| {
@@ -275,7 +275,7 @@ mod tests {
         ] {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version": 1, "graph_id": "steward-live", "plan_digest": "digest",
-                "cancelled": cancelled, "pause_reason": pause_reason,
+                "cancelled": cancelled, "pause": pause_reason.map(|reason| json!({"cause": {"kind": "structural_limit"}, "reason": reason})),
                 "nodes": [{"id": "sweep", "state": state, "worktree": null, "attempts": []}],
             }))
             .unwrap();

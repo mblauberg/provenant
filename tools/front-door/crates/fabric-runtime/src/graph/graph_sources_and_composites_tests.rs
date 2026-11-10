@@ -865,7 +865,7 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     )
     .unwrap();
     assert_eq!(
-        run.checkpoint.pause_reason.as_deref(),
+        run.checkpoint.pause_reason(),
         Some(reason.as_str())
     );
     assert!(owner.calls.is_empty());
