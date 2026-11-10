@@ -2546,7 +2546,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--account` | `{"description": "Account label or key", "name": "account"}` |
 | `--since` | `{"description": "Earliest reading", "name": "since"}` |
 | `--until` | `{"description": "Latest reading", "name": "until"}` |
-| `--limit` | `{"bounds": [1, 100000], "defaults": ["1000"], "description": "Most readings to return", "name": "limit"}` |
+| `--limit` | `{"bounds": [1, 100000], "defaults": ["50"], "description": "Most readings to return", "name": "limit"}` |
 
 ```json
 {
@@ -3714,8 +3714,8 @@ Advisory checks, local input, forge availability and repository settings: [track
 
 | Argument | Contract |
 |---|---|
-| `--base` | `{"description": "Base commit of the range", "name": "base", "requires": ["head"]}` |
-| `--head` | `{"description": "Head commit of the range", "name": "head", "requires": ["base"]}` |
+| `--base` | `{"description": "Base revision of the range: a commit, tag or branch", "name": "base", "requires": ["head"]}` |
+| `--head` | `{"description": "Head revision of the range: a commit, tag or branch", "name": "head", "requires": ["base"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum results per page (1 to 100)", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue from a previous page's cursor", "name": "cursor"}` |
 

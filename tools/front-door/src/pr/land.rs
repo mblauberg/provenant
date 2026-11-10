@@ -1213,15 +1213,9 @@ pub(crate) fn observation(
     let data = &report.data;
     let number = data["number"].as_u64();
     if data["merged"].as_bool() == Some(true) {
-        let cleanup = (data["cleanup_pending"].as_bool() == Some(true)).then(|| {
-            format!(
-                "cleanup pending; next: provenant land {} --full",
-                number.unwrap_or_default()
-            )
-        });
         return LandObservation::Merged {
             pull_request: number,
-            note: data["merge_note"].as_str().map(str::to_owned).or(cleanup),
+            note: data["merge_note"].as_str().map(str::to_owned),
         };
     }
     let Some(error) = &report.error else {
@@ -1581,33 +1575,26 @@ pub(crate) fn execute(
             "merge reported an error but the PR is merged: {note}\n"
         ));
     }
-    if cleanup_pending {
-        text.push_str(&format!("cleanup pending: {}\n", refused.join(", ")));
-        if let Err(error) = &result {
-            text.push_str(&format!("cleanup: {error}\n"));
+    // A merged pull request is a success whatever cleanup remains; the sweep
+    // finishes it.
+    if !merged {
+        for step in &steps {
+            text.push_str(&format!(
+                "  {} {} {}\n",
+                step.step,
+                step.status.name(),
+                step.detail
+            ));
         }
     }
-    for step in &steps {
-        text.push_str(&format!(
-            "  {} {} {}\n",
-            step.step,
-            step.status.name(),
-            step.detail
-        ));
-    }
-    let next = if cleanup_pending {
-        format!("provenant land {number} --full")
-    } else if !merged {
+    let next = if !merged {
         format!("provenant pr status {number} --wait")
     } else {
         "provenant status".into()
     };
     // Compact shows the headline, any merge or cleanup note, then the steps
     // that did not simply pass; --full shows every step.
-    let mut rows: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
-    if merged && !cleanup_pending {
-        rows.retain(|row| !row.starts_with("  "));
-    }
+    let rows: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
     let summary = provenant_cli::Summary::new(
         text.lines().next().unwrap_or_default().to_owned(),
         rows,
@@ -1996,7 +1983,7 @@ esac
             )),
             LandObservation::Merged {
                 pull_request: Some(7),
-                note: Some("cleanup pending; next: provenant land 7 --full".into()),
+                note: None,
             }
         );
         assert!(matches!(
