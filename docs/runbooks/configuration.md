@@ -34,7 +34,9 @@ MCP entry, and lanes launch without the server; every tool has a
 `provenant` CLI command. A client without a shell turns it on with
 `provenant config set fabric.mcp_server true`, then runs `provenant upgrade`
 (or `install`) to write the entry. Turning it off and reinstalling removes the
-entry the installer owns, if it is unchanged; edited or foreign entries stay.
+entry the installer owns, if it is unchanged; edited or foreign entries stay. Turning it on again while an edited
+`fabric` entry is still there stops the install with a conflict rather than
+overwriting it: restore the entry or remove it, then reinstall.
 Already-running sessions keep the servers they started with.
 
 ## Precedence and stamps

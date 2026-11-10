@@ -368,6 +368,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
         .resolve(&Resolver)
         .unwrap();
     let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    targets.fabric_mcp = true;
     targets.peer_agent = Some(b"new home plist\n".to_vec());
     let plist = peer_agent_plist(targets.roots.state.as_path()).unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -3187,6 +3188,7 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             Harness::Opencode,
         ],
     );
+    f.targets.fabric_mcp = true;
     for target in &f.targets.harnesses {
         fs::create_dir_all(&target.skills_dir).unwrap();
         symlink(
@@ -3378,6 +3380,7 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     let (roots, home) = (f.targets.roots.clone(), f.home.clone());
     let claude = |dir: Option<&Path>| {
         let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
+        targets.fabric_mcp = true;
         targets.hooks = true;
         targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
         targets.apply_environment(dir, None).unwrap();
@@ -3582,6 +3585,7 @@ fn mcp_registry_matches_recorded_client_config_contracts() {
         ),
     ] {
         f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[harness]);
+        f.targets.fabric_mcp = true;
         let normalized = fixture
             .replace(
                 "/FIXTURE_ROOT/bin/mcp-probe",
@@ -4359,6 +4363,35 @@ fn default_install_writes_no_fabric_entry_and_creates_no_config() {
     assert!(f.link().is_symlink());
 }
 
+fn codex_config(path: &Path) -> toml_edit::DocumentMut {
+    fs::read_to_string(path).unwrap().parse().unwrap()
+}
+
+fn has_fabric(path: &Path) -> bool {
+    codex_config(path)
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("fabric"))
+        .is_some()
+}
+
+#[test]
+fn opted_in_install_writes_the_fabric_entry() {
+    let f = Fixture::new();
+    apply(&f);
+    let config = f.home.join(".codex/config.toml");
+    let doc = codex_config(&config);
+    assert_eq!(
+        doc["mcp_servers"]["fabric"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .skip_while(|a| *a != "fabric")
+            .collect::<Vec<_>>(),
+        ["fabric", "mcp", "--client", "codex"]
+    );
+}
+
 #[test]
 fn opting_out_removes_an_unchanged_owned_entry_and_keeps_foreign_ones() {
     let mut f = Fixture::new();
@@ -4366,23 +4399,29 @@ fn opting_out_removes_an_unchanged_owned_entry_and_keeps_foreign_ones() {
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(&config, "# mine\n[mcp_servers.other]\ncommand = 'keep'\n").unwrap();
     apply(&f);
-    let on = fs::read_to_string(&config).unwrap();
-    assert!(on.contains("[mcp_servers.fabric]"));
+    assert!(has_fabric(&config));
     f.targets.fabric_mcp = false;
     apply(&f);
     let off = fs::read_to_string(&config).unwrap();
-    assert!(!off.contains("mcp_servers.fabric"), "{off}");
-    assert!(off.contains("# mine"));
-    assert!(off.contains("[mcp_servers.other]"));
+    assert!(off.contains("# mine"), "{off}");
+    assert!(!has_fabric(&config), "{off}");
+    assert_eq!(
+        codex_config(&config)["mcp_servers"]["other"]["command"].as_str(),
+        Some("keep")
+    );
     assert!(f.plan().actions().is_empty());
     // Turning it back on restores the entry.
     f.targets.fabric_mcp = true;
     apply(&f);
-    assert!(
-        fs::read_to_string(&config)
-            .unwrap()
-            .contains("[mcp_servers.fabric]")
-    );
+    assert!(has_fabric(&config));
+}
+
+fn edit_fabric_entry(config: &Path) -> String {
+    let mut doc = codex_config(config);
+    doc["mcp_servers"]["fabric"]["startup_timeout_sec"] = toml_edit::value(5);
+    let edited = doc.to_string();
+    fs::write(config, &edited).unwrap();
+    edited
 }
 
 #[test]
@@ -4390,14 +4429,26 @@ fn opting_out_keeps_an_edited_owned_entry() {
     let mut f = Fixture::new();
     apply(&f);
     let config = f.home.join(".codex/config.toml");
-    let edited = fs::read_to_string(&config).unwrap().replacen(
-        "[mcp_servers.fabric]",
-        "[mcp_servers.fabric]\nstartup_timeout_sec = 5",
-        1,
-    );
-    assert!(edited.contains("startup_timeout_sec"), "{edited}");
-    fs::write(&config, &edited).unwrap();
+    let edited = edit_fabric_entry(&config);
     f.targets.fabric_mcp = false;
     apply(&f);
+    assert_eq!(fs::read_to_string(&config).unwrap(), edited);
+}
+
+#[test]
+fn opting_back_in_over_an_edited_entry_is_a_conflict() {
+    let mut f = Fixture::new();
+    apply(&f);
+    let config = f.home.join(".codex/config.toml");
+    let edited = edit_fabric_entry(&config);
+    f.targets.fabric_mcp = false;
+    apply(&f);
+    f.targets.fabric_mcp = true;
+    // The edited entry is not the recorded one, so re-enabling does not
+    // overwrite it: the user removes or restores it first.
+    assert!(matches!(
+        Snapshots::capture(&f.release(), &f.targets),
+        Err(InstallError::Conflict(path)) if path == f.targets.harnesses[0].mcp_file
+    ));
     assert_eq!(fs::read_to_string(&config).unwrap(), edited);
 }

@@ -281,6 +281,7 @@ fn home_rename_with_flag_or_config_bin_preserves_old_paths() -> Result {
         } else {
             install_args.extend(["--bin-dir".into(), bin_dir.into_os_string()]);
         }
+        enable_fabric_mcp(&rig)?;
         let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
         let installed = rig.execute_os(binary, &install_args, None)?;
         assert_eq!(
@@ -3011,6 +3012,7 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
     }
     support::register_account(&rig, "claude", "work", "work-key", &work)?;
     support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
+    enable_fabric_mcp(&rig)?;
     let source = rig.root.join("source-settings.json");
     let write_source = |style: &str| -> Result {
         fs::write(

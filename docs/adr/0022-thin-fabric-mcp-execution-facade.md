@@ -46,5 +46,7 @@ without a shell:
 - Install and upgrade write the owned `fabric` MCP entry only when the knob is
   on. When it is off they remove the entry they own, if it still matches the
   receipt value; an edited or foreign entry stays.
+  Turning the knob on again over an edited entry is a conflict, not an
+  overwrite.
 - Confined lanes pass the server to their provider only when the knob is on.
 - `provenant fabric mcp` serves the same tools whenever a client starts it.
