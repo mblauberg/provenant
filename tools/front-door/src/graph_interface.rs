@@ -145,10 +145,12 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     };
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
-    let headline = (!announced)
-        .then(|| run_headline(&data["checkpoint"], status, document, input) + "\n")
-        .unwrap_or_default();
-    format!("{headline}next: {next}\n")
+    if announced {
+        format!("next: {next}\n")
+    } else {
+        let headline = run_headline(&data["checkpoint"], status, document, input);
+        format!("{headline}\nnext: {next}\n")
+    }
 }
 
 fn invoke(
@@ -210,7 +212,7 @@ fn invoke(
                 }
             };
         let announce = (command == "run" && !globals.json && !globals.full)
-            .then(|| &announce as fabric::Announce<'_>);
+            .then_some(&announce as fabric::Announce<'_>);
         let mut result = factory.graph_document_announcing(
             input.clone(),
             budget,
