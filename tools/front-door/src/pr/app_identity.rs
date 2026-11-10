@@ -384,11 +384,8 @@ impl Backend for SystemBackend {
     }
 
     fn read_key(&self, config: &GithubAppConfig) -> Result<Vec<u8>> {
-        if config.keychain_account.is_some() {
-            return Err("Keychain storage is not supported; store the private key in a mode-0600 file outside any repository and configure private_key_path".into());
-        }
         let Some(path) = &config.private_key_path else {
-            return Err("neither private_key_path nor a valid key source is configured; store the private key in a mode-0600 file outside any repository and configure private_key_path".into());
+            return Err("private_key_path is not configured; store the private key in a mode-0600 file outside any repository and configure private_key_path".into());
         };
         read_key_file(path)
     }

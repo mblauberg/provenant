@@ -18,8 +18,6 @@ pub struct GithubAppConfig {
     pub installation_id: Option<u64>,
     #[serde(default)]
     pub private_key_path: Option<PathBuf>,
-    #[serde(default)]
-    pub keychain_account: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

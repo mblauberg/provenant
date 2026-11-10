@@ -373,8 +373,7 @@ installation, which gives them their own REST bucket instead of the user's
    whatever its role, so it is not reachable from a lane.
 3. Add an `app` object to the project's `github.json` in the state directory:
    `{"app": {"app_id": 123, "installation_id": 456, "private_key_path": "/absolute/path/key.pem"}}`.
-   Configuring a keychain source is refused with a message pointing to the file
-   option. `installation_id` is optional and is looked up when absent. To serve
+   `installation_id` is optional and is looked up when absent. To serve
    every repository under one owner, key the entry by owner instead:
    `{"apps": {"OWNER": {"app_id": 123, "private_key_path": "/absolute/path/key.pem"}}}`.
    An `app` entry in a project's own `github.json` overrides the owner's.

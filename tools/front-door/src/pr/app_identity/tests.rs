@@ -56,7 +56,6 @@ fn app() -> Option<GithubAppConfig> {
         app_id: 42,
         installation_id: None,
         private_key_path: Some("/fixture/app.pem".into()),
-        keychain_account: None,
     })
 }
 
@@ -377,7 +376,6 @@ fn an_owner_app_serves_its_repositories_and_a_project_app_overrides_it() {
         app_id: id,
         installation_id: None,
         private_key_path: Some("/fixture/app.pem".into()),
-        keychain_account: None,
     };
     let mut policy = provenant_config::GithubPolicy::default();
     policy.apps.insert("Acme".into(), app(1));
@@ -412,32 +410,6 @@ fn api_flags_fail_closed_in_every_spelling() {
 }
 
 #[test]
-fn keychain_source_refuses_with_message_pointing_to_file_option() {
-    let backend = SystemBackend {
-        project: PathBuf::from("/fixture"),
-    };
-    let app = GithubAppConfig {
-        app_id: 1,
-        installation_id: None,
-        private_key_path: None,
-        keychain_account: Some("owner".into()),
-    };
-    let err = backend.read_key(&app).unwrap_err();
-    assert!(
-        err.contains("Keychain storage is not supported"),
-        "error {err:?} should name Keychain storage"
-    );
-    assert!(
-        err.contains("private_key_path"),
-        "error {err:?} should point to private_key_path"
-    );
-    assert!(
-        err.contains("0600"),
-        "error {err:?} should mention 0600 file"
-    );
-}
-
-#[test]
 fn missing_key_source_refuses_pointing_to_file_option() {
     let backend = SystemBackend {
         project: PathBuf::from("/fixture"),
@@ -446,7 +418,6 @@ fn missing_key_source_refuses_pointing_to_file_option() {
         app_id: 1,
         installation_id: None,
         private_key_path: None,
-        keychain_account: None,
     };
     let err = backend.read_key(&app).unwrap_err();
     assert!(
