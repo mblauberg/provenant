@@ -18,7 +18,6 @@ fn repository(project: &Path) -> Result<String> {
     let bytes = successful(execute(
         project,
         &["gh", "repo", "view", "--json", "nameWithOwner"],
-        false,
     )?)?;
     Ok(serde_json::from_slice::<Repository>(&bytes)?
         .name
@@ -119,7 +118,6 @@ impl Tracker {
                 "--json",
                 "state,mergedAt,closedAt",
             ],
-            false,
         )?)?;
         parse_end(&bytes)
     }
@@ -200,7 +198,7 @@ pub(crate) fn merged_prs(
         argv.extend(["--search".into(), search.join(" ")]);
     }
     let args = argv.iter().map(String::as_str).collect::<Vec<_>>();
-    let bytes = successful(execute(&tracker.resolved.project, &args, false)?)?;
+    let bytes = successful(execute(&tracker.resolved.project, &args)?)?;
     let rows: Vec<Merged> = serde_json::from_slice(&bytes)?;
     if rows.len() > 1000 {
         return Err("merged PR snapshot exceeds 1,000 rows; narrow the time window".into());

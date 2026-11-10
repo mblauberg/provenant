@@ -177,6 +177,9 @@ marked `pending` before asking for review, then drop `--dry-run`.
 `provenant pr status 148 149` prints one line per PR, such as
 `#148 OPEN <head> checks=3/4 pending=1 merge=blocked review=none`;
 `--wait=5m` blocks until a snapshot changes and exits 124 if none does.
+`pr status`, `pr watch` and `land` read CI through one observer per
+repository (ADR 0037), so concurrent waiters on a head share one read per poll
+and a rate limit pauses them all until its named reset.
 
 ### Stacked pull requests
 

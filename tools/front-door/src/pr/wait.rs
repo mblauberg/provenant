@@ -1,5 +1,9 @@
 //! Bounded CI polling for a pinned PR head. No progress goes to JSON stdout.
-use super::{Result, execute_for, status::Required};
+use super::{
+    Result, execute_for,
+    observer::{Check, ObserveError},
+    status::Required,
+};
 use provenant_core::GitOid;
 use provenant_core::retry::{Backoff, RetryCause, is_transient};
 use provenant_os::exec::Termination;
@@ -41,16 +45,6 @@ pub(super) const SETTLE: Duration = Duration::from_secs(60);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(15);
 
-pub(super) struct Check {
-    pub name: String,
-    pub bucket: String,
-    /// The GitHub App that reported a check run; legacy statuses have none.
-    pub app: Option<u64>,
-    pub(crate) app_slug: Option<String>,
-    pub(crate) conclusion: Option<String>,
-    /// The latest time GitHub recorded activity for this check.
-    pub registered: Option<jiff::Timestamp>,
-}
 #[derive(Debug, PartialEq)]
 enum State {
     Passed,
@@ -130,6 +124,19 @@ fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State
         return State::Settling;
     }
     State::Passed
+}
+/// The land wait's verdict on `checks` with no named requirement.
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
+pub(super) fn verdict(checks: &[Check], now: jiff::Timestamp) -> &'static str {
+    match state(checks, &[], now) {
+        State::Passed => "passed",
+        State::Pending | State::Settling => "pending",
+        State::Failed => "failed",
+        State::Unavailable => "unavailable",
+        State::Conflict => "conflict",
+        State::NotScheduled => "not scheduled",
+    }
 }
 /// Time still to wait after the newest check activity, or `None` once the
 /// repository has been quiet for `SETTLE`. A check with no time is just now.
@@ -359,130 +366,23 @@ fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, Stri
     };
     (delay, label)
 }
-/// Both check runs and legacy status contexts are addressed by immutable SHA.
-/// GitHub lists statuses newest first; older states of a context cannot veto a
-/// successful retry. Pagination is needed even when required checks arrive late.
-pub(crate) fn commit_checks(
-    repository: &str,
-    head: GitOid,
-    read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
-) -> Result<Vec<Check>> {
-    let load = |suffix: &str| -> Result<serde_json::Value> {
-        let endpoint = format!("{repository}/commits/{head}/{suffix}");
-        let output = read(&["gh", "api", "--paginate", "--slurp", &endpoint])?;
-        if output.termination != Termination::Exit(0) {
-            return Err(failure(
-                "CI_UNAVAILABLE",
-                "cannot read CI for the pinned commit",
-            ));
-        }
-        serde_json::from_slice(&output.stdout.bytes)
-            .map_err(|_| failure("CI_UNAVAILABLE", "CI did not return valid JSON"))
-    };
-    let runs = load("check-runs?per_page=100&filter=latest")?;
-    let statuses = load("statuses?per_page=100")?;
-    parse_commit_checks(&runs, &statuses, head).ok_or_else(|| {
-        failure(
-            "CI_UNAVAILABLE",
-            "CI evidence is incomplete or belongs to another head",
-        )
-    })
-}
-/// `null` is absent; any other malformed time makes the evidence unusable.
-fn timestamp(value: Option<&serde_json::Value>) -> Option<Option<jiff::Timestamp>> {
-    match value {
-        None | Some(serde_json::Value::Null) => Some(None),
-        Some(text) => text.as_str()?.parse().ok().map(Some),
+/// The failure a land wait reports for an observer error.
+pub(super) fn ci_failure(error: ObserveError, retry_command: &str) -> Box<dyn std::error::Error> {
+    match error {
+        ObserveError::RateLimited { reset } => failure(
+            "RATE_LIMITED",
+            format!("GitHub rate limit; reset {reset}; next: {retry_command}"),
+        ),
+        ObserveError::Expired => failure("CI_TIMEOUT", "GitHub wait budget expired"),
+        ObserveError::Unavailable(message) => failure("CI_UNAVAILABLE", message),
     }
-}
-fn parse_commit_checks(
-    runs: &serde_json::Value,
-    statuses: &serde_json::Value,
-    head: GitOid,
-) -> Option<Vec<Check>> {
-    let mut checks = Vec::new();
-    let mut declared = 0;
-    for page in runs.as_array()? {
-        declared = page
-            .get("total_count")
-            .and_then(serde_json::Value::as_u64)
-            .map_or(declared, |count| count.max(declared));
-        for check in page.get("check_runs")?.as_array()? {
-            if check.get("head_sha")?.as_str()? != head.to_string() {
-                return None;
-            }
-            let bucket = match check.get("status")?.as_str()? {
-                "completed" => match check.get("conclusion")?.as_str()? {
-                    "success" => "pass",
-                    "neutral" | "skipped" => "skipping",
-                    "cancelled" => "cancel",
-                    "failure" | "timed_out" | "action_required" | "startup_failure" | "stale" => {
-                        "fail"
-                    }
-                    _ => return None,
-                },
-                "queued" | "in_progress" | "pending" | "waiting" | "requested" => "pending",
-                _ => return None,
-            };
-            let started = timestamp(check.get("started_at"))?;
-            let completed = timestamp(check.get("completed_at"))?;
-            checks.push(Check {
-                name: check.get("name")?.as_str()?.into(),
-                bucket: bucket.into(),
-                app: check
-                    .get("app")
-                    .and_then(|app| app.get("id"))
-                    .and_then(serde_json::Value::as_u64),
-                app_slug: check
-                    .get("app")
-                    .and_then(|app| app.get("slug"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                conclusion: check
-                    .get("conclusion")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                registered: started.max(completed),
-            });
-        }
-    }
-    // A short listing means a page was lost; the missing check could be the
-    // failing one.
-    if checks.len() < usize::try_from(declared).ok()? {
-        return None;
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for page in statuses.as_array()? {
-        for check in page.as_array()? {
-            let name = check.get("context")?.as_str()?;
-            if !seen.insert(name) {
-                continue;
-            }
-            let bucket = match check.get("state")?.as_str()? {
-                "success" => "pass",
-                "pending" | "expected" => "pending",
-                "failure" | "error" => "fail",
-                _ => return None,
-            };
-            let created = timestamp(check.get("created_at"))?;
-            let updated = timestamp(check.get("updated_at"))?;
-            checks.push(Check {
-                name: name.into(),
-                bucket: bucket.into(),
-                app: None,
-                app_slug: None,
-                conclusion: None,
-                registered: created.max(updated),
-            });
-        }
-    }
-    Some(checks)
 }
 
 // This CLI edge owns the real wait deadline and polling interval.
 #[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
 pub(super) fn checks(
     reader: &Reader<'_>,
+    state: &Path,
     number: u64,
     expected: GitOid,
     repository: &str,
@@ -491,8 +391,27 @@ pub(super) fn checks(
     poll: u64,
     json: bool,
 ) -> Result<()> {
+    let mut observer = super::observer::Observer::open(
+        state,
+        reader.project,
+        repository,
+        reader.deadline.saturating_duration_since(Instant::now()),
+    )
+    .map_err(|error| ci_failure(error, &reader.retry_command))?;
     checks_with(
         &|argv| reader.read(argv),
+        &mut |commit| {
+            // A waiter shares answers younger than its poll; a one-shot
+            // decision revalidates.
+            let max_age = wait.map_or(Duration::ZERO, |_| Duration::from_secs(poll));
+            observer
+                .checks(
+                    &commit.to_string(),
+                    max_age,
+                    reader.deadline.saturating_duration_since(Instant::now()),
+                )
+                .map_err(|error| ci_failure(error, &reader.retry_command))
+        },
         reader.deadline,
         &Instant::now,
         &std::thread::sleep,
@@ -509,6 +428,7 @@ pub(super) fn checks(
 #[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
 fn checks_with(
     read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
+    ci: &mut dyn FnMut(GitOid) -> Result<Vec<Check>>,
     deadline: Instant,
     now: &impl Fn() -> Instant,
     sleep: &impl Fn(Duration),
@@ -572,7 +492,7 @@ fn checks_with(
         let _ = check_head()?;
         // Read the pinned commit, not whichever head the PR has while gh runs.
         // Before/after head reads alone cannot protect against an A-B-A update.
-        let checks = commit_checks(&policy.repository, expected, read)?;
+        let checks = ci(expected)?;
         let mergeable = check_head()?;
         let expired = now() >= deadline;
         match observe(
@@ -651,6 +571,8 @@ mod tests {
             app_slug: None,
             conclusion: None,
             registered: Some(at("2020-01-01T00:00:00Z")),
+            url: None,
+            excerpt: String::new(),
         }
     }
     fn need(name: &str) -> Required {
@@ -755,12 +677,10 @@ mod tests {
                 .unwrap_or(&"");
             let body = if endpoint.contains("/pulls/") {
                 json!({"state":"open", "head":{"sha":oid,"ref":"feat","repo":{"full_name":"owner/repo"}}, "base":{"sha":oid,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"test"})
-            } else if endpoint.contains("/rules/") || endpoint.contains("/statuses?") {
+            } else if endpoint.contains("/rules/") {
                 json!([[]])
-            } else if endpoint.contains("/branches/") {
-                json!({"protected":false})
             } else {
-                json!([{"check_runs":[{"name":"build","head_sha":oid,"status":"in_progress","conclusion":null}]}])
+                json!({"protected":false})
             };
             Ok(ExecOutcome {
                 termination: Termination::Exit(0),
@@ -778,6 +698,10 @@ mod tests {
         };
         let result = checks_with(
             &read,
+            &mut |_| {
+                calls.set(calls.get() + 1);
+                Ok(vec![check("build", "pending")])
+            },
             deadline,
             &|| clock.get(),
             &|delay| clock.set(clock.get() + delay),
@@ -845,50 +769,8 @@ mod tests {
     }
 
     #[test]
-    fn commit_ci_rejects_wrong_heads_and_keeps_latest_legacy_status() {
-        let head = head();
-        let mut runs = json!([{"check_runs":[{"name":"build","head_sha":head,"status":"in_progress","conclusion":"success"}]}]);
-        let statuses = json!([[{"context":"external","state":"success"},{"context":"external","state":"failure"}]]);
-        let checks = parse_commit_checks(&runs, &statuses, head).expect("valid evidence");
-        assert_eq!(
-            checks
-                .iter()
-                .map(|check| check.bucket.as_str())
-                .collect::<Vec<_>>(),
-            ["pending", "pass"]
-        );
-        runs[0]["check_runs"][0]["head_sha"] = json!("2".repeat(40));
-        assert!(parse_commit_checks(&runs, &statuses, head).is_none());
-    }
-    #[test]
-    fn commit_ci_reads_every_page_and_rejects_a_lost_one() {
-        let head = head();
-        let run = |name: &str| json!({"name":name,"head_sha":head,"status":"completed","conclusion":"success","app":{"id":15368}});
-        let runs = json!([
-            {"total_count":3,"check_runs":[run("a"),run("b")]},
-            {"total_count":3,"check_runs":[run("c")]},
-        ]);
-        let statuses =
-            json!([[{"context":"x","state":"success"}], [{"context":"y","state":"failure"}]]);
-        let checks = parse_commit_checks(&runs, &statuses, head).expect("valid");
-        assert_eq!(checks.len(), 5);
-        assert_eq!(checks[0].app, Some(15368));
-        assert!(
-            checks
-                .iter()
-                .any(|check| check.name == "y" && check.bucket == "fail")
-        );
-        let lost = json!([{"total_count":3,"check_runs":[run("a"),run("b")]}]);
-        assert!(parse_commit_checks(&lost, &statuses, head).is_none());
-        let bad_time = json!([{"check_runs":[{"name":"a","head_sha":head,"status":"completed","conclusion":"success","started_at":"yesterday"}]}]);
-        assert!(parse_commit_checks(&bad_time, &json!([[]]), head).is_none());
-    }
-    #[test]
     fn failing_legacy_status_fails_even_with_no_named_requirement() {
-        let head = head();
-        let runs = json!([{"check_runs":[{"name":"build","head_sha":head,"status":"completed","conclusion":"success"}]}]);
-        let statuses = json!([[{"context":"legacy","state":"error"}]]);
-        let checks = parse_commit_checks(&runs, &statuses, head).expect("valid");
+        let checks = [check("build", "pass"), check("legacy", "fail")];
         assert_eq!(state(&checks, &[], at(NOW)), State::Failed);
     }
     #[test]

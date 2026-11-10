@@ -3,6 +3,7 @@ use super::reconcile::{Forge, Response};
 use std::{
     collections::BTreeMap,
     io,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -12,6 +13,8 @@ pub struct Gh {
     next: BTreeMap<String, Instant>,
     retry: Option<Instant>,
     path: Option<String>,
+    cwd: Option<PathBuf>,
+    timeout: Option<Duration>,
 }
 impl Gh {
     /// Explicit launchd/foreground executable search path, without mutating the
@@ -22,6 +25,57 @@ impl Gh {
             ..Self::default()
         }
     }
+    /// Run `gh` in `cwd`, so it reaches that checkout's GitHub host, and
+    /// bound each request by `timeout` rather than the default minute.
+    pub fn in_checkout(cwd: PathBuf, timeout: Duration) -> Self {
+        Self {
+            cwd: Some(cwd),
+            timeout: Some(timeout),
+            ..Self::default()
+        }
+    }
+}
+
+/// Seconds named by a `Retry-After` header, in seconds or as an HTTP date.
+fn retry_after(headers: &BTreeMap<String, String>, now: i64) -> Option<u64> {
+    let value = headers.get("retry-after")?;
+    value.parse::<u64>().ok().or_else(|| {
+        let date = value.strip_suffix(" GMT")?;
+        let at =
+            jiff::Timestamp::strptime("%a, %d %b %Y %H:%M:%S %z", format!("{date} +0000")).ok()?;
+        Some(at.as_second().saturating_sub(now).max(0) as u64)
+    })
+}
+
+/// The reset of an exhausted primary window. A secondary limit may carry the
+/// headers of an unrelated window, which only counts when nothing remains.
+fn exhausted_reset(headers: &BTreeMap<String, String>) -> Option<i64> {
+    if headers.get("x-ratelimit-remaining").map(String::as_str) != Some("0") {
+        return None;
+    }
+    headers.get("x-ratelimit-reset")?.parse::<i64>().ok()
+}
+
+/// The Unix second from which a rate-limited response may be retried, or
+/// `None` when `response`, received at `now`, is not a rate limit.
+pub fn rate_limit_reset(response: &Response, now: i64) -> Option<i64> {
+    let limited = response.status == 429
+        || (response.status == 403
+            && (exhausted_reset(&response.headers).is_some()
+                || response.headers.contains_key("retry-after")
+                || String::from_utf8_lossy(&response.body)
+                    .to_ascii_lowercase()
+                    .contains("rate limit")));
+    if !limited {
+        return None;
+    }
+    Some(
+        retry_after(&response.headers, now)
+            .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)))
+            .or_else(|| exhausted_reset(&response.headers))
+            .unwrap_or(now.saturating_add(60))
+            .max(now),
+    )
 }
 impl Forge for Gh {
     #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
@@ -45,15 +99,15 @@ impl Forge for Gh {
             "api",
             "--include",
             "-H",
-            "Accept: application/vnd.github+json",
+            "Accept:application/vnd.github+json",
             "-H",
-            "X-GitHub-Api-Version: 2022-11-28",
+            "X-GitHub-Api-Version:2022-11-28",
         ]
         .into_iter()
         .map(Into::into)
         .collect();
         if let Some(etag) = etag {
-            argv.extend(["-H".into(), format!("If-None-Match: {etag}").into()]);
+            argv.extend(["-H".into(), format!("If-None-Match:{etag}").into()]);
         }
         argv.push(path.into());
         let mut environment: Vec<_> = std::env::vars_os()
@@ -64,8 +118,12 @@ impl Forge for Gh {
         if let Some(path) = &self.path {
             environment.push(("PATH".into(), path.into()));
         }
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        let cwd = match &self.cwd {
+            Some(cwd) => cwd.clone(),
+            None => std::env::current_dir()?,
+        };
+        let timeout = self.timeout.unwrap_or(Duration::from_secs(60));
+        let mut options = ExecOptions::new(&argv, &cwd, timeout);
         options.env = Some(&environment);
         options.process_group = true;
         options.stop_on_output_limit = true;
@@ -78,46 +136,13 @@ impl Forge for Gh {
             return Err(io::Error::other("gh request did not complete"));
         }
         let response = parse(&output.stdout.bytes)?;
-        let retry = response
-            .headers
-            .get("retry-after")
-            .and_then(|s| {
-                s.parse::<u64>().ok().or_else(|| {
-                    let date = s.strip_suffix(" GMT")?;
-                    let at = jiff::Timestamp::strptime(
-                        "%a, %d %b %Y %H:%M:%S %z",
-                        format!("{date} +0000"),
-                    )
-                    .ok()?;
-                    Some(
-                        at.as_second()
-                            .saturating_sub(jiff::Timestamp::now().as_second())
-                            .max(0) as u64,
-                    )
-                })
+        let now = jiff::Timestamp::now().as_second();
+        let retry = retry_after(&response.headers, now).or_else(|| {
+            matches!(response.status, 403 | 429 | 500..=599).then(|| {
+                exhausted_reset(&response.headers)
+                    .map_or(60, |at| at.saturating_sub(now).max(0) as u64)
             })
-            .or_else(|| {
-                if !matches!(response.status, 403 | 429 | 500..=599) {
-                    return None;
-                }
-                let reset = if response
-                    .headers
-                    .get("x-ratelimit-remaining")
-                    .map(String::as_str)
-                    == Some("0")
-                {
-                    response
-                        .headers
-                        .get("x-ratelimit-reset")
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .map(|at| {
-                            at.saturating_sub(jiff::Timestamp::now().as_second()).max(0) as u64
-                        })
-                } else {
-                    None
-                };
-                Some(reset.unwrap_or(60))
-            });
+        });
         if let Some(seconds) = retry {
             self.retry = Some(
                 Instant::now()
