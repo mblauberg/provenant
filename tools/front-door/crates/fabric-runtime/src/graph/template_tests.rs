@@ -621,8 +621,11 @@ fn delivery_templates_admit_bounded_review_repairs() {
 #[test]
 fn review_cycle_limit_is_configurable_with_no_upper_ceiling() {
     let bundled = library();
-    let error = Compiler::new(&bundled).compile(&json!({"id":"repair", "use":"review-repair",
-        "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":0}})).unwrap_err().to_string();
+    let error = Compiler::new(&bundled)
+        .compile(&json!({"id":"repair", "use":"review-repair",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":0}}))
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("at least 1"), "{error}");
     let node = Compiler::new(&bundled)
         .compile(&json!({"id":"repair", "use":"repair",
