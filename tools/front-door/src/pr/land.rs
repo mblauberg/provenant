@@ -1577,15 +1577,13 @@ pub(crate) fn execute(
     }
     // A merged pull request is a success whatever cleanup remains; the sweep
     // finishes it.
-    if !merged {
-        for step in &steps {
-            text.push_str(&format!(
-                "  {} {} {}\n",
-                step.step,
-                step.status.name(),
-                step.detail
-            ));
-        }
+    for step in &steps {
+        text.push_str(&format!(
+            "  {} {} {}\n",
+            step.step,
+            step.status.name(),
+            step.detail
+        ));
     }
     let next = if !merged {
         format!("provenant pr status {number} --wait")
@@ -1594,7 +1592,10 @@ pub(crate) fn execute(
     };
     // Compact shows the headline, any merge or cleanup note, then the steps
     // that did not simply pass; --full shows every step.
-    let rows: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
+    let mut rows: Vec<String> = text.lines().skip(1).map(str::to_owned).collect();
+    if merged {
+        rows.retain(|row| !row.starts_with("  "));
+    }
     let summary = provenant_cli::Summary::new(
         text.lines().next().unwrap_or_default().to_owned(),
         rows,
