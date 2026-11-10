@@ -1180,8 +1180,8 @@ mod tests {
     /// not block it; a pull request with only a retired receipt is excluded
     /// with the remedy.
     #[test]
-    fn an_accepted_record_lands_despite_a_retired_receipt()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn an_accepted_record_lands_despite_a_retired_receipt() -> Result<(), Box<dyn std::error::Error>>
+    {
         use super::super::{fakes::FakeReviews, ports::ReviewRecord};
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
         forge.approvals_at_head.clear();
