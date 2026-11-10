@@ -1726,16 +1726,19 @@ mod tests {
             .iter()
             .find(|c| c.command == "provenant status")
             .unwrap();
-        for name in ["target", "until", "follow"] {
-            assert_eq!(
-                status
-                    .arguments
-                    .iter()
-                    .find(|a| a.name == name)
-                    .unwrap()
-                    .requires,
-                ["wait"]
-            );
+        let requires = |name: &str| {
+            status
+                .arguments
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap()
+                .requires
+                .clone()
+        };
+        // `--target` alone reports each target's status once (#3124).
+        assert!(requires("target").is_empty());
+        for name in ["until", "follow"] {
+            assert_eq!(requires(name), ["wait"]);
         }
         assert!(
             status

@@ -413,10 +413,9 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                 assert_eq!(new["status"], old["reply"]["status"]);
                 assert_eq!(new["error"], old["reply"]["error"]);
                 if args[0] == "output" {
-                    assert_eq!(
-                        new["data"], old["reply"]["data"],
-                        "output fields: {name} {id}"
-                    );
+                    let mut before = old["reply"]["data"].clone();
+                    drop_resolved_route(&mut before, &format!("{name} {id} output"))?;
+                    assert_eq!(new["data"], before, "output fields: {name} {id}");
                 } else {
                     let mut row = new["data"]["rows"]
                         .as_array()
@@ -464,6 +463,7 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                         Some(json!(settlement_reason))
                     );
                     let mut before = old["reply"]["data"]["lanes"][0].clone();
+                    drop_resolved_route(&mut before, &format!("{name} {id} {}", args[0]))?;
                     if args[0] == "lanes" {
                         assert_eq!(
                             before.as_object_mut().unwrap().remove("handoff"),
@@ -486,6 +486,19 @@ fn generated_cutover_status_and_output_corpus() -> Result {
             serde_json::to_vec(&capture)?,
         )?;
     }
+    Ok(())
+}
+
+/// The pre-cut row carried the route receipt twice; it now carries only
+/// `applied_route` (#3124), so the historical copy must match it exactly.
+fn drop_resolved_route(row: &mut Value, scope: &str) -> Result {
+    let object = row.as_object_mut().ok_or("historical lane row")?;
+    let resolved = object.remove("resolved_route");
+    assert_eq!(
+        resolved.as_ref(),
+        object.get("applied_route"),
+        "historical resolved_route duplicates applied_route: {scope}"
+    );
     Ok(())
 }
 
