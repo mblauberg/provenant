@@ -1,5 +1,39 @@
 use super::*;
 
+/// Called once, as soon as a submitted graph's first checkpoint is saved.
+pub(crate) type Announce<'a> = &'a dyn Fn(
+    &provenant_fabric_runtime::graph::GraphDocument,
+    &provenant_fabric_runtime::graph::GraphCheckpoint,
+);
+
+/// A journal that announces the first saved checkpoint.
+struct AnnouncingJournal<'a, J> {
+    journal: &'a mut J,
+    document: &'a provenant_fabric_runtime::graph::GraphDocument,
+    announce: Option<Announce<'a>>,
+}
+impl<J: provenant_fabric_runtime::graph::GraphJournal> provenant_fabric_runtime::graph::GraphJournal
+    for AnnouncingJournal<'_, J>
+{
+    type Error = J::Error;
+    fn load(
+        &mut self,
+        graph_id: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, Self::Error> {
+        self.journal.load(graph_id)
+    }
+    fn save(
+        &mut self,
+        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<(), Self::Error> {
+        self.journal.save(checkpoint)?;
+        if let Some(announce) = self.announce.take() {
+            announce(self.document, checkpoint);
+        }
+        Ok(())
+    }
+}
+
 /// Discover pending journals and check deadlines under the same lock as explicit advance.
 pub(crate) fn tick_graphs(
     resolved: &crate::roots::Resolved,
@@ -368,7 +402,7 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-        self.graph_with_scratch(input, budget, cancel, None, None)
+        self.graph_with_scratch(input, budget, cancel, None, None, None)
     }
 
     pub(crate) fn graph_with_scratch(
@@ -378,6 +412,7 @@ impl Factory {
         cancel: &CancelToken,
         prepared_scratch: Option<&Path>,
         admission_timeout: Option<WaitBudget>,
+        announce: Option<Announce<'_>>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
@@ -833,6 +868,11 @@ impl Factory {
                 tick: false,
             };
             let graph_config = &owner.factory.context.config.graph;
+            let mut journal = AnnouncingJournal {
+                journal: &mut journal,
+                document,
+                announce,
+            };
             let run = if resume {
                 let extensions = match &input {
                     GraphInput::Resume { extend, .. } => extend.as_slice(),

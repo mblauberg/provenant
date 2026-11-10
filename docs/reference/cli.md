@@ -108,7 +108,7 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
-| `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
+| `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true}` |
 | `--until` | `{"defaults": ["all"], "description": "Return when all targets are terminal (use &#96;any&#96; for the first transition)", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
 | `id` | `{"description": "Show a run, task, attempt or graph ID, or operation:ID for a refusal", "name": "id", "positional": true}` |
@@ -118,6 +118,7 @@ Accepted by every command, before or after the subcommand.
 {
   "constraints": [
     "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
+    "--target without --wait reports each target's current status once",
     "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
     "follow waits for all targets to be terminal; land targets only observe their PR"
   ],

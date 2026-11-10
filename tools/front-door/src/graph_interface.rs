@@ -71,6 +71,86 @@ fn file_error(path: &Path, reason: &str) -> Box<provenant_records::diagnostic::D
     ))
 }
 
+/// `GRAPH STATE model=MODEL worktree=WORKTREE`, naming the handle that
+/// `status` and `output` accept.
+fn run_headline(
+    checkpoint: &Value,
+    state: &str,
+    document: Option<&Value>,
+    input: &Value,
+) -> String {
+    let graph = checkpoint["graph_id"].as_str().unwrap_or_default();
+    let nodes = checkpoint["nodes"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let state = match nodes {
+        [node] => node["state"].as_str().unwrap_or(state),
+        _ => state,
+    };
+    let route_text = |route: &Value| {
+        let adapter = route["adapter"].as_str();
+        match route["model"].as_str() {
+            Some(model) if model.contains('/') => Some(model.to_owned()),
+            Some(model) => {
+                Some(adapter.map_or(model.to_owned(), |adapter| format!("{adapter}/{model}")))
+            }
+            None => route["name"]
+                .as_str()
+                .or_else(|| route["alias"].as_str())
+                .or(adapter)
+                .map(str::to_owned),
+        }
+    };
+    let document_nodes = document
+        .and_then(|document| document["nodes"].as_array())
+        .map_or(&[][..], Vec::as_slice);
+    let model = nodes
+        .iter()
+        .find_map(|node| {
+            node["attempts"]
+                .as_array()?
+                .last()
+                .and_then(|attempt| route_text(&attempt["route"]))
+        })
+        .or_else(|| {
+            document_nodes.iter().find_map(|node| {
+                route_text(&node["route"]).or_else(|| route_text(&node["routes"][0]))
+            })
+        })
+        .or_else(|| input["model"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "-".into());
+    let new_worktree = |branch: &Value| branch.as_str().map(|branch| format!("new:{branch}"));
+    let worktree = document_nodes
+        .iter()
+        .find_map(|node| {
+            node["worktree"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| new_worktree(&node["attempt"]["new_worktree"]["branch"]))
+        })
+        .or_else(|| input["worktree"].as_str().map(str::to_owned))
+        .or_else(|| new_worktree(&input["branch"]))
+        .unwrap_or_else(|| "-".into());
+    format!("{graph} {state} model={model} worktree={worktree}")
+}
+
+/// The compact `run` result: the headline, unless it was already announced,
+/// then the one next command.
+fn run_human(data: &Value, input: &Value, announced: bool) -> String {
+    let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
+    let next = match data["status"].as_str() {
+        Some("complete" | "cancelled") => format!("provenant output {graph}"),
+        Some("paused") => format!("provenant status {graph}"),
+        _ => format!("provenant status {graph} --wait"),
+    };
+    let status = data["status"].as_str().unwrap_or("pending");
+    let document = input.get("document");
+    let headline = (!announced)
+        .then(|| run_headline(&data["checkpoint"], status, document, input) + "\n")
+        .unwrap_or_default();
+    format!("{headline}next: {next}\n")
+}
+
 fn invoke(
     command: &str,
     input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
@@ -94,6 +174,7 @@ fn invoke(
             return crate::emit(&result, globals, "", false);
         }
     };
+    let announced = std::cell::Cell::new(false);
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
         if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
             let factory = fabric::read_factory(globals, workers)?;
@@ -112,7 +193,30 @@ fn invoke(
         let local_branch = (command == "run" && input["host"].is_null())
             .then(|| input["branch"].as_str().map(str::to_owned))
             .flatten();
-        let mut result = factory.graph_document(input, budget, &CancelToken::new())?;
+        // The compact view names the lane as soon as its checkpoint is saved.
+        let announce =
+            |document: &provenant_fabric_runtime::graph::GraphDocument,
+             checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint| {
+                let document = serde_json::to_value(document).unwrap_or_default();
+                let checkpoint = serde_json::to_value(checkpoint).unwrap_or_default();
+                let line = run_headline(&checkpoint, "pending", Some(&document), &input) + "\n";
+                let mut stdout = std::io::stdout().lock();
+                if stdout
+                    .write_all(line.as_bytes())
+                    .and_then(|()| stdout.flush())
+                    .is_ok()
+                {
+                    announced.set(true);
+                }
+            };
+        let announce = (command == "run" && !globals.json && !globals.full)
+            .then(|| &announce as fabric::Announce<'_>);
+        let mut result = factory.graph_document_announcing(
+            input.clone(),
+            budget,
+            &CancelToken::new(),
+            announce,
+        )?;
         if let Some(branch) = local_branch.as_deref()
             && result["checkpoint"]["nodes"]
                 .as_array()
@@ -131,7 +235,14 @@ fn invoke(
     })();
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
+            let human = if command == "run"
+                && !globals.full
+                && data["checkpoint"]["graph_id"].is_string()
+            {
+                run_human(&data, &input, announced.get())
+            } else {
+                serde_json::to_string_pretty(&data).unwrap_or_default() + "\n"
+            };
             let mut result = CommandResult::new(command, response_outcome(command, &data), data);
             if command == "run"
                 && let Some(node) = launch_error_node(&result.data, result.status)
@@ -722,6 +833,51 @@ mod tests {
             launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
             assert!(launch_error_node(&launched, Outcome::Waiting).is_none());
         }
+    }
+
+    #[test]
+    fn run_result_is_a_headline_and_one_next_command() {
+        let data = json!({"status":"pending", "timed_out":false, "checkpoint":{"graph_id":"g-1", "nodes":[
+            {"id":"task", "state":"running", "attempts":[
+                {"route":{"adapter":"claude", "model":"claude-opus-5-5"}, "attempt_ref":"a/b"}
+            ]}
+        ]}});
+        let input = json!({"op":"run", "worktree":"/repo/.worktrees/lane"});
+        let human = run_human(&data, &input, false);
+        assert_eq!(
+            human,
+            "g-1 running model=claude/claude-opus-5-5 worktree=/repo/.worktrees/lane\n\
+             next: provenant status g-1 --wait\n"
+        );
+        assert!(human.lines().count() <= 2);
+        assert_eq!(
+            run_human(&data, &input, true),
+            "next: provenant status g-1 --wait\n"
+        );
+        let mut complete = data.clone();
+        complete["status"] = json!("complete");
+        assert!(run_human(&complete, &input, true).ends_with("next: provenant output g-1\n"));
+    }
+
+    #[test]
+    fn announced_headline_reads_the_document_before_any_attempt() {
+        let checkpoint = json!({"graph_id":"g-2", "nodes":[
+            {"id":"one", "state":"pending", "attempts":[]},
+            {"id":"two", "state":"pending", "attempts":[]}
+        ]});
+        let document = json!({"graph_id":"g-2", "nodes":[
+            {"id":"one", "route":{"alias":"senior"},
+             "attempt":{"new_worktree":{"branch":"batch/work", "base":"main"}}},
+            {"id":"two", "routes":[{"adapter":"codex", "model":"gpt"}]}
+        ]});
+        assert_eq!(
+            run_headline(&checkpoint, "pending", Some(&document), &json!({})),
+            "g-2 pending model=senior worktree=new:batch/work"
+        );
+        assert_eq!(
+            run_headline(&checkpoint, "pending", None, &json!({})),
+            "g-2 pending model=- worktree=-"
+        );
     }
 
     #[test]

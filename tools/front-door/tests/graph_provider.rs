@@ -1405,7 +1405,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
             lane["applied_route"]["pool_selection"]["pool"],
             "secret-fixture"
         );
-        let receipt = serde_json::to_string(&lane["resolved_route"])?;
+        let receipt = serde_json::to_string(&lane["applied_route"])?;
         assert!(!receipt.contains("prompt-sentinel-2719-indigo-owl"));
         assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
     }

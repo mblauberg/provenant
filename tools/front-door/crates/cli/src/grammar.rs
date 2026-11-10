@@ -1583,7 +1583,7 @@ pub struct Status {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
     /// Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)
-    #[arg(long, catalog_requires = "wait")]
+    #[arg(long)]
     pub target: Vec<String>,
     /// Return when all targets are terminal (use `any` for the first transition)
     #[arg(long, catalog_requires = "wait", value_enum, default_value = "all")]
