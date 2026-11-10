@@ -506,8 +506,12 @@ fn design_cannot_hold(outputs: &NodeOutputs) -> bool {
         })
 }
 
+/// Default repair-cycle budget of the review-repair composites.
+pub(super) const DEFAULT_REPAIR_CYCLES: usize = 3;
+
 /// Checked shared flaws and writer design failures take the principal path;
-/// the third review requests design judgement before another writer starts.
+/// within the default budget the third review requests design judgement
+/// before another writer starts.
 pub(super) fn escalation(
     node: &PlannedNode,
     checkpoint: &GraphCheckpoint,
@@ -537,7 +541,12 @@ pub(super) fn escalation(
         return Some("concrete design defect");
     }
     let mut prior = initial;
-    for round in 1..=node.loop_body.as_ref().map_or(0, |spec| spec.max_rounds) {
+    let budget = node.loop_body.as_ref().map_or(0, |spec| spec.max_rounds);
+    // The third-review judgement applies within the default budget; a chair
+    // who raised the budget has already authorised further rounds, and
+    // exhaustion still reaches the principal through `on_fail`.
+    let third_review_judgement = budget <= DEFAULT_REPAIR_CYCLES;
+    for round in 1..=budget {
         let selected = |name: &str| {
             checkpoint.nodes.iter().find(|progress| {
                 progress.round.as_ref().is_some_and(|member| {
@@ -568,7 +577,7 @@ pub(super) fn escalation(
         if shared_flaw(&current) {
             return Some("checked findings share a design flaw");
         }
-        if round >= 2 && !current.is_empty() {
+        if third_review_judgement && round >= 2 && !current.is_empty() {
             return Some("third review round requires design judgement");
         }
         if current.iter().any(|finding| design_defect(finding)) {

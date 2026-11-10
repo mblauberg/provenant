@@ -1213,16 +1213,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let advice = panel
             .slots
             .iter()
-            .map(|slot| {
-                (
-                    slot.lens.clone(),
-                    if slot.lens == "tests" {
-                        include_str!("../../assets/review-tests-advice.txt").to_owned()
-                    } else {
-                        String::new()
-                    },
-                )
-            })
+            .map(|slot| (slot.lens.clone(), panel.lens_advice(&slot.lens, true)))
             .collect();
         let slots = panel
             .slots

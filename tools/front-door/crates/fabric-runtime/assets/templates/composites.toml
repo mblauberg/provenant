@@ -109,7 +109,7 @@ nodes = [
   { id = "repair", use = "review-repair", after = ["review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], with = { worktree = "${worktree}", write_scope = "${write_scope}", integration_branch = "${integration_branch}", max_repair_cycles = "${max_repair_cycles}" } },
 ]
 [batch.parameters]
-max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+max_repair_cycles = { type = "integer", default = 3, min = 1 }
 items = { type = "list", default = ["implementation"], min = 1 }
 min_ok = { type = "integer", default = 1, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
@@ -134,7 +134,7 @@ nodes = [
   { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
 ]
 [deliver.parameters]
-max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+max_repair_cycles = { type = "integer", default = 3, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string" }
 write_scope = { type = "list", min = 1 }
@@ -206,7 +206,7 @@ nodes = [
   { id = "scope-approved", kind = "gate", access = "read_only", after = ["scope"], inputs = [{ node = "scope", outputs = ["verdict"] }], condition = { type = "verdict", expected = "approve", threshold = "all" } },
 ]
 [review-repair.parameters]
-max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+max_repair_cycles = { type = "integer", default = 3, min = 1 }
 worktree = { type = "string", default = "" }
 write_scope = { type = "list", min = 1 }
 writer = { type = "string", default = "" }

@@ -54,3 +54,11 @@ classes require `--apply`. `--dry-run` previews every class. The scheduled
 collector passes `--apply`; configuration controls its schedule and eligibility.
 Deletion implementation belongs to OS, supervisor, confinement and run owners,
 not to a new retention service.
+
+## Amendment: one retention table of artefact classes
+
+One retention table of artefact classes is permitted: a single declarative list
+naming each class, its owner and its default retention. It records policy only.
+Deletion stays with the OS, supervisor, confinement and run owners, and no
+retention service, universal class tagging or general deletion framework is
+introduced. Part of #3078 (wave 1, #3135).
