@@ -710,6 +710,35 @@ pub(super) fn no_fallback_refusal(
     fail
 }
 
+/// Parse `--extend NAME=VALUE` against the limits the prior attempt ran
+/// under. A ceiling refuses; a default is raised for the next launch.
+fn extensions(
+    raw: &[String],
+    mut limits: provenant_records::LaneLimits,
+) -> Result<Vec<(String, u64)>, Fail> {
+    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
+    raw.iter()
+        .map(|item| {
+            let (name, value) = item
+                .split_once('=')
+                .and_then(|(name, value)| Some((name, value.parse::<u64>().ok()?)))
+                .ok_or_else(|| invalid(format!("--extend takes NAME=NUMBER, not {item}")))?;
+            match limits.extend(name, value) {
+                Some(Ok(())) => Ok((name.to_owned(), value)),
+                Some(Err(ceiling)) => Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    format!(
+                        "{name} is a ceiling of {} and cannot be raised",
+                        ceiling.value
+                    ),
+                )),
+                None => Err(invalid(format!("{name} is not a limit this attempt has"))),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod resume_delivery_tests {
     use super::*;
@@ -749,33 +778,4 @@ mod resume_delivery_tests {
         assert!(!pickup("batch/graph", Some(&plain)).fast_forward_only);
         assert!(!pickup("batch/graph", None).fast_forward_only);
     }
-}
-
-/// Parse `--extend NAME=VALUE` against the limits the prior attempt ran
-/// under. A ceiling refuses; a default is raised for the next launch.
-fn extensions(
-    raw: &[String],
-    mut limits: provenant_records::LaneLimits,
-) -> Result<Vec<(String, u64)>, Fail> {
-    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
-    raw.iter()
-        .map(|item| {
-            let (name, value) = item
-                .split_once('=')
-                .and_then(|(name, value)| Some((name, value.parse::<u64>().ok()?)))
-                .ok_or_else(|| invalid(format!("--extend takes NAME=NUMBER, not {item}")))?;
-            match limits.extend(name, value) {
-                Some(Ok(())) => Ok((name.to_owned(), value)),
-                Some(Err(ceiling)) => Err(Fail::new(
-                    Status::Refused,
-                    ErrorKind::Refused,
-                    format!(
-                        "{name} is a ceiling of {} and cannot be raised",
-                        ceiling.value
-                    ),
-                )),
-                None => Err(invalid(format!("{name} is not a limit this attempt has"))),
-            }
-        })
-        .collect()
 }
