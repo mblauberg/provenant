@@ -246,109 +246,113 @@ pub fn enable_wal(db: &Connection) -> Result<(), WalError> {
     Ok(())
 }
 
+/// One store's schema: the file that creates it and the only version it opens.
+#[derive(Clone, Copy, Debug)]
+pub struct Schema {
+    /// Statements that create every table, index and trigger, ending in
+    /// `PRAGMA user_version=<version>;`.
+    pub sql: &'static str,
+    pub version: i64,
+}
+
+/// The refusal code for a store written by another release. The host is
+/// drained with that release before this one opens the state.
+pub const DRAIN_CODE: &str = "UPGRADE_DRAIN_REQUIRED";
+
 #[derive(Debug)]
 pub enum VersionError {
-    Unsupported(i64),
-    Unversioned,
+    /// The store is at another version, or has tables but no version. It is
+    /// left exactly as found.
+    Refused {
+        found: i64,
+        expected: i64,
+    },
     Sqlite(rusqlite::Error),
 }
 
-/// Read the user_version and reject schemas that have no version marker.
-pub fn read_version(db: &Connection, maximum: usize) -> Result<usize, VersionError> {
-    let (version, has_schema): (i64, bool) = db
-        .query_row(
-            "SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(VersionError::Sqlite)?;
-    let version = usize::try_from(version)
-        .ok()
-        .filter(|version| *version <= maximum)
-        .ok_or(VersionError::Unsupported(version))?;
-    if version == 0 && has_schema {
-        return Err(VersionError::Unversioned);
-    }
-    Ok(version)
-}
-
-/// Apply ordered SQL steps on the connection supplied by the caller.
-/// Transaction boundaries stay with the opener: Fabric applies one step per
-/// transaction, while run applies its whole upgrade in one transaction.
-pub fn apply_migrations(
-    db: &Connection,
-    steps: &[&str],
-    start: usize,
-    mut after_step: impl FnMut(usize, &Connection) -> rusqlite::Result<()>,
-) -> rusqlite::Result<()> {
-    for (index, sql) in steps.iter().enumerate().skip(start) {
-        db.execute_batch(sql)?;
-        after_step(index, db)?;
-        db.pragma_update(None, "user_version", (index + 1) as i64)?;
-    }
-    Ok(())
-}
-
-/// Take a snapshot before upgrading an existing schema, then apply its steps.
-/// The caller must hold its write reservation across both operations.
-pub fn migrate<E>(
-    db: &Connection,
-    steps: &[&str],
-    start: usize,
-    snapshot: impl FnOnce() -> Result<(), E>,
-    after_step: impl FnMut(usize, &Connection) -> rusqlite::Result<()>,
-) -> Result<(), E>
-where
-    E: From<rusqlite::Error>,
-{
-    if start > 0 && start < steps.len() {
-        snapshot()?;
-    }
-    apply_migrations(db, steps, start, after_step).map_err(E::from)
-}
-
-/// Failure to create or durably record a pre-migration snapshot.
-#[derive(Debug)]
-pub enum SnapshotError {
-    Filesystem(FsError),
-    Sqlite(rusqlite::Error),
-    PathEncoding,
-    ExhaustedNames,
-}
-
-/// Create a WAL-aware snapshot alongside the database while the caller holds
-/// its write reservation. The directory must already be checked and private.
-pub fn snapshot_database(
-    directory: &Directory,
-    path: &Path,
-    database: &str,
-    stamp: i64,
-) -> Result<(), SnapshotError> {
-    let source = open_connection(&path.join(database), true).map_err(SnapshotError::Sqlite)?;
-    let mut suffix = 0_u32;
-    let name = loop {
-        let candidate = if suffix == 0 {
-            format!("{database}.bak-{stamp}")
-        } else {
-            format!("{database}.bak-{stamp}-{suffix}")
-        };
-        match directory.metadata_at(OsStr::new(&candidate), false) {
-            Err(error) if error.is_not_found() => break candidate,
-            Ok(_) => suffix = suffix.checked_add(1).ok_or(SnapshotError::ExhaustedNames)?,
-            Err(error) => return Err(SnapshotError::Filesystem(error)),
+impl std::fmt::Display for VersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused { found, expected } => write!(
+                f,
+                "store schema version {found} is not {expected}: drain the host with the release that wrote it, then remove the store"
+            ),
+            Self::Sqlite(error) => error.fmt(f),
         }
-    };
-    let target = path.join(&name);
-    let target = target.to_str().ok_or(SnapshotError::PathEncoding)?;
-    source
-        .execute("VACUUM INTO ?1", [target])
-        .map_err(SnapshotError::Sqlite)?;
-    directory
-        .open_read(OsStr::new(&name))
-        .and_then(|file| file.sync())
-        .map_err(SnapshotError::Filesystem)?;
-    directory.sync().map_err(SnapshotError::Filesystem)?;
+    }
+}
+
+impl std::error::Error for VersionError {}
+
+impl From<rusqlite::Error> for VersionError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
+    }
+}
+
+/// Whether the store has not been created yet. Refuses a store at any version
+/// but the schema's, without writing to it.
+fn is_fresh(db: &Connection, schema: Schema) -> Result<bool, VersionError> {
+    let (version, has_schema): (i64, bool) = db.query_row(
+        "SELECT (SELECT user_version FROM pragma_user_version), EXISTS(SELECT 1 FROM sqlite_schema)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    match (version, has_schema) {
+        (0, false) => Ok(true),
+        (found, _) if found == schema.version => Ok(false),
+        (found, _) => Err(VersionError::Refused {
+            found,
+            expected: schema.version,
+        }),
+    }
+}
+
+/// Refuse a store at any version but the schema's. An empty store passes. Reads
+/// only, so a refused store is not modified.
+pub fn check_version(db: &Connection, schema: Schema) -> Result<(), VersionError> {
+    is_fresh(db, schema).map(drop)
+}
+
+/// The version of an existing store, or 0 for one never created. Reads only.
+pub fn stored_version(db: &Connection) -> rusqlite::Result<i64> {
+    db.query_row("SELECT user_version FROM pragma_user_version", [], |row| {
+        row.get(0)
+    })
+}
+
+/// Create an empty store from its schema in one immediate transaction, or
+/// accept one already at the schema's version. Any other store is refused.
+/// Re-checks inside the transaction, so concurrent openers create it once.
+pub fn ensure_schema(db: &Connection, schema: Schema) -> Result<(), VersionError> {
+    if !is_fresh(db, schema)? {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    if is_fresh(&tx, schema)? {
+        tx.execute_batch(schema.sql)?;
+    }
+    tx.commit()?;
     Ok(())
+}
+
+/// Whether the store's `sqlite_schema` text is exactly the schema file's
+/// statements, in order, byte for byte.
+pub fn schema_matches(db: &Connection, schema: Schema) -> rusqlite::Result<bool> {
+    let mut query = db.prepare(
+        "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY rowid",
+    )?;
+    let statements: Vec<String> = query
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut rest = schema.sql;
+    for statement in &statements {
+        match rest.find(statement.as_str()) {
+            Some(at) => rest = &rest[at + statement.len()..],
+            None => return Ok(false),
+        }
+    }
+    Ok(!rest.contains("CREATE "))
 }
 
 #[cfg(test)]
@@ -558,117 +562,47 @@ mod tests {
         Ok(())
     }
 
+    const SCHEMA: Schema = Schema {
+        sql: "CREATE TABLE t (v INTEGER) STRICT;\nCREATE INDEX t_v ON t(v);\nPRAGMA user_version=3;",
+        version: 3,
+    };
+
     #[test]
-    fn migration_runner_applies_ordered_steps_and_versions() -> rusqlite::Result<()> {
+    fn a_fresh_store_is_created_from_the_schema_file() -> Result<(), Box<dyn std::error::Error>> {
         let db = Connection::open_in_memory()?;
-        let steps = [
-            "CREATE TABLE first (id INTEGER);",
-            "CREATE TABLE second (id INTEGER);",
-        ];
-        apply_migrations(&db, &steps, 0, |_, _| Ok(()))?;
-        let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let tables: i64 = db.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('first','second')",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(version, 2);
-        assert_eq!(tables, 2);
+        ensure_schema(&db, SCHEMA)?;
+        ensure_schema(&db, SCHEMA)?;
+        assert_eq!(stored_version(&db)?, 3);
+        assert!(schema_matches(&db, SCHEMA)?);
+        db.execute_batch("CREATE TABLE extra (v INTEGER)")?;
+        assert!(!schema_matches(&db, SCHEMA)?);
         Ok(())
     }
 
     #[test]
-    fn migration_runner_resumes_and_calls_after_step() -> rusqlite::Result<()> {
-        let db = Connection::open_in_memory()?;
-        let steps = [
-            "CREATE TABLE first (id INTEGER);",
-            "CREATE TABLE second (id INTEGER);",
-        ];
-        apply_migrations(&db, &steps[..1], 0, |_, _| Ok(()))?;
-        let mut applied = Vec::new();
-        apply_migrations(&db, &steps, 1, |index, db| {
-            applied.push(index);
-            db.execute("INSERT INTO second VALUES (42)", [])?;
-            Ok(())
-        })?;
-        apply_migrations(&db, &steps, steps.len(), |_, _| panic!("already migrated"))?;
-        assert_eq!(applied, [1]);
-        assert_eq!(read_version(&db, steps.len()).unwrap(), 2);
-        assert_eq!(
-            db.query_row("SELECT id FROM second", [], |row| row.get::<_, i64>(0))?,
-            42
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn snapshot_hook_runs_before_existing_schema_changes() -> rusqlite::Result<()> {
-        let db = Connection::open_in_memory()?;
-        let steps = [
-            "CREATE TABLE first (id INTEGER);",
-            "CREATE TABLE second (id INTEGER);",
-        ];
-        migrate(
-            &db,
-            &steps[..1],
-            0,
-            || -> rusqlite::Result<()> { panic!("a new database needs no snapshot") },
-            |_, _| Ok(()),
-        )?;
-        let mut snapshots = 0;
-        migrate(
-            &db,
-            &steps,
-            1,
-            || {
-                snapshots += 1;
-                let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-                assert_eq!(version, 1);
-                let second: i64 = db.query_row(
-                    "SELECT count(*) FROM sqlite_schema WHERE name='second'",
-                    [],
-                    |row| row.get(0),
-                )?;
-                assert_eq!(second, 0);
-                Ok::<(), rusqlite::Error>(())
-            },
-            |_, _| Ok(()),
-        )?;
-        assert_eq!(snapshots, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn snapshot_hook_keeps_the_write_reservation() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_store_at_another_version_is_refused_unchanged() -> Result<(), Box<dyn std::error::Error>> {
         let temp = std::env::temp_dir().canonicalize()?.join(format!(
-            "provenant-sqlite-migration-{}-{:?}",
+            "provenant-sqlite-version-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&temp)?;
-        let path = temp.join("store.sqlite3");
-        std::fs::File::create(&path)?;
-        let writer = open_connection(&path, false)?;
-        enable_wal(&writer).map_err(|_| "wal")?;
-        writer.execute_batch(
-            "CREATE TABLE first (id INTEGER); PRAGMA user_version=1; BEGIN IMMEDIATE;",
-        )?;
-        let contender = with_busy_timeout(Duration::ZERO, || open_connection(&path, false))?;
-        migrate(
-            &writer,
-            &["", "CREATE TABLE second (id INTEGER);"],
-            1,
-            || {
-                assert!(is_busy(
-                    &contender
-                        .execute_batch("INSERT INTO first VALUES (1)")
-                        .unwrap_err()
-                ));
-                Ok::<(), rusqlite::Error>(())
-            },
-            |_, _| Ok(()),
-        )?;
-        writer.execute_batch("COMMIT")?;
+        for (name, version) in [("older", 2), ("newer", 4), ("unversioned", 0)] {
+            let path = temp.join(name);
+            let db = Connection::open(&path)?;
+            db.execute_batch(&format!(
+                "CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1); PRAGMA user_version={version};"
+            ))?;
+            drop(db);
+            let before = std::fs::read(&path)?;
+            let db = open_connection(&path, false)?;
+            assert!(matches!(
+                ensure_schema(&db, SCHEMA),
+                Err(VersionError::Refused { found, expected: 3 }) if found == version
+            ));
+            drop(db);
+            assert_eq!(std::fs::read(&path)?, before, "{name}");
+        }
         std::fs::remove_dir_all(&temp)?;
         Ok(())
     }
