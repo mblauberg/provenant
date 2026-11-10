@@ -63,7 +63,12 @@ impl GithubPolicy {
 
     /// As `read`, for a caller that holds the state directory as a path.
     pub fn read_at(state: &Path, project_id: ProjectId) -> Result<Self, ConfigError> {
-        let root = Directory::open_anchor(state)?;
+        // A state root that does not exist holds no policy file either.
+        let root = match Directory::open_anchor(state) {
+            Ok(root) => root,
+            Err(e) if e.is_not_found() => return Ok(Self::default()),
+            Err(e) => return Err(e.into()),
+        };
         let projects = match root.open_verified_directory(OsStr::new("projects")) {
             Ok(dir) => dir,
             Err(e) if e.is_not_found() => return Ok(Self::default()),

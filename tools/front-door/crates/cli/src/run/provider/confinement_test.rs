@@ -209,19 +209,25 @@ fn app_key_paths_are_denied_to_every_adapter() -> Result<(), Box<dyn std::error:
     let scratch = state.join("scratch");
     let private_state = state.join("private");
     let assets = base.join("assets");
-    let project = ProjectId::from_bytes([1; 16]);
-    let project_dir = state.join("projects").join(project.to_string());
     for path in [&home, &state, &source, &assets, &scratch, &private_state] {
         provenant_os::fixture::private_state_dir(path)?;
     }
-    std::fs::create_dir_all(&project_dir)?;
-    std::fs::write(
-        project_dir.join("github.json"),
-        r#"{"app":{"app_id":1,"private_key_path":"/fixture/app/key.pem"}}"#,
-    )?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    // A GitHub policy belongs to a registered project, so bind one first.
+    let common = source.join(".git");
+    std::fs::create_dir_all(&common)?;
+    let project =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?
+            .project_id();
+    std::fs::write(
+        state
+            .join("projects")
+            .join(project.to_string())
+            .join("github.json"),
+        r#"{"app":{"app_id":1,"private_key_path":"/fixture/app/key.pem"}}"#,
+    )?;
     for adapter in ["codex", "claude", "cursor", "agy", "opencode", "command"] {
         let request = confinement_request(
             project,
