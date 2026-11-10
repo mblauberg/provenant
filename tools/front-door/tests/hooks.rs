@@ -637,7 +637,16 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<serde_json::Value> {
 #[test]
 fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> Result {
     use serde_json::json;
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
+    // This test asserts what a delivery contains, not how fast it is. Its
+    // final hook scans sixteen oversized rows and marks them in one cold
+    // pass; the hook returns empty stdout when that outruns its deadline,
+    // which a loaded debug runner can do within the fixture default.
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_TEST_ANSWER_BUDGET_MS" {
+            *value = "20000".into();
+        }
+    }
     let checkpoint = rig.root.join("checkpoint.md");
     fs::write(&checkpoint, "chair checkpoint")?;
     json_command(
@@ -824,6 +833,11 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
     let allowed = hook("git status")?;
     assert_eq!(code(&allowed), 0, "{:?}", allowed.stderr.bytes);
     assert!(allowed.stdout.bytes.len() <= provenant_records::inbox::MAX_OFFER_BYTES);
+    assert!(
+        !allowed.stdout.bytes.is_empty(),
+        "hook delivered nothing: {}",
+        String::from_utf8_lossy(&allowed.stderr.bytes)
+    );
     let wire: serde_json::Value = serde_json::from_slice(&allowed.stdout.bytes)?;
     assert!(
         wire["hookSpecificOutput"]["additionalContext"]
