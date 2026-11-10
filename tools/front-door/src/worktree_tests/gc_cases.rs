@@ -1140,3 +1140,228 @@ pub(super) fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() 
     );
     Ok(())
 }
+
+/// Publish `tip` as the origin's default branch, so the sweep can prove landing.
+fn publish_upstream(rig: &TestRig, tip: &str) -> Result {
+    let remote = rig.root.join("upstream.git");
+    let remote = remote.to_str().ok_or("remote")?;
+    git(rig, &["init", "--bare", "--initial-branch=trunk", remote])?;
+    git(rig, &["remote", "add", "origin", remote])?;
+    git(
+        rig,
+        &["push", "-q", "origin", &format!("{tip}:refs/heads/trunk")],
+    )?;
+    Ok(())
+}
+
+/// Merge the lane's tip into the base as a second parent, so it has landed
+/// without being on the target's first-parent line.
+fn merged_upstream(rig: &TestRig, lane: &Path) -> Result<String> {
+    let lane = lane.to_str().ok_or("lane path")?;
+    let base = git(rig, &["rev-parse", "HEAD"])?;
+    let tip = git(rig, &["-C", lane, "rev-parse", "HEAD"])?;
+    let tree = git(rig, &["rev-parse", "HEAD^{tree}"])?;
+    git(
+        rig,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-p",
+            &tip,
+            "-m",
+            "merge lane",
+        ],
+    )
+}
+
+fn settlement_receipt(fixture: &crate::fabric::peer_tests::SettlementFixture) -> Result<Value> {
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let call = writer_call(&clock, &cancel)?;
+    Ok(fixture
+        .store
+        .worktree_settlement(fixture.settled.attempt_id, &call)?
+        .ok_or("settlement receipt")?)
+}
+
+fn files_under(root: &Path) -> Result<std::collections::BTreeSet<PathBuf>> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if fs::symlink_metadata(&path)?.is_dir() {
+                pending.push(path.clone());
+            }
+            files.insert(path.strip_prefix(root)?.to_path_buf());
+        }
+    }
+    Ok(files)
+}
+
+pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Result {
+    use crate::fabric::gc_cleanup::SPAWNED;
+    let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+    let rig = &fixture.rig;
+    let merged = merged_upstream(rig, &fixture.worktree)?;
+    publish_upstream(rig, &merged)?;
+    let before = files_under(&rig.state)?;
+    SPAWNED.set(Err("detached collection could not start".into()));
+    crate::fabric::settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    SPAWNED.set(Ok(Vec::new()));
+    let receipt = settlement_receipt(&fixture)?;
+    assert_eq!(receipt["state"], "retained", "{receipt}");
+    assert_eq!(receipt["cleanup_deferred"], true, "{receipt}");
+    assert!(receipt.get("retryable").is_none(), "{receipt}");
+    assert!(receipt.get("cleanup_warning").is_none(), "{receipt}");
+    // The failed attempt leaves nothing behind outside the attempt's own receipt.
+    let after = files_under(&rig.state)?;
+    let added: Vec<_> = after.difference(&before).collect();
+    assert!(
+        added.iter().all(|path| path.starts_with("runs")),
+        "settlement wrote outside its run record: {added:?}"
+    );
+    assert!(fixture.worktree.exists());
+    ok(rig, &["gc", "--apply", "--json"])?;
+    assert!(
+        !fixture.worktree.exists(),
+        "the sweep must collect a lane its settlement attempt missed"
+    );
+    let receipt = settlement_receipt(&fixture)?;
+    assert_eq!(receipt["state"], "pruned", "{receipt}");
+    Ok(())
+}
+
+/// A lane with its own commits, landed by fast-forward so its head is on the
+/// upstream's first-parent line, whose settlement collection found the
+/// collector busy or never ran. The path-based sweep keeps such a lane; the
+/// owner-bound pass for unsettled receipts collects it.
+pub(super) fn gc_collects_a_fast_forwarded_lane_its_settlement_missed() -> Result {
+    use crate::fabric::gc_cleanup::{COLLECTION_WAIT_SECONDS, SPAWNED};
+    for busy in [true, false] {
+        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+        let rig = &fixture.rig;
+        let lane = fixture.worktree.to_str().ok_or("lane path")?;
+        publish_upstream(rig, &git(rig, &["-C", lane, "rev-parse", "HEAD"])?)?;
+        if busy {
+            SPAWNED.set(Ok(Vec::new()));
+            crate::fabric::settle_owned_worktree(
+                &fixture.settled,
+                &fixture.roots,
+                &FreeWorkers,
+                None,
+            )?;
+            let request = SPAWNED
+                .replace(Ok(Vec::new()))
+                .map_err(|error| error.to_string())?
+                .pop()
+                .ok_or("settlement did not start collection")?;
+            // A sweep in progress holds the collector, so the worker exits.
+            let held = crate::worktrees::collection_lock(&fixture.roots)?;
+            COLLECTION_WAIT_SECONDS.set(1);
+            let outcome = crate::fabric::gc_cleanup::run(&request, &FreeWorkers);
+            COLLECTION_WAIT_SECONDS.set(120);
+            drop(held);
+            outcome?;
+            let receipt = settlement_receipt(&fixture)?;
+            assert_eq!(
+                receipt["reason"],
+                crate::worktrees::COLLECTION_BUSY,
+                "{receipt}"
+            );
+            assert_eq!(receipt["retryable"], true, "{receipt}");
+        } else {
+            SPAWNED.set(Err("detached collection could not start".into()));
+            crate::fabric::settle_owned_worktree(
+                &fixture.settled,
+                &fixture.roots,
+                &FreeWorkers,
+                None,
+            )?;
+            SPAWNED.set(Ok(Vec::new()));
+            assert_eq!(settlement_receipt(&fixture)?["cleanup_deferred"], true);
+        }
+        assert!(fixture.worktree.exists(), "busy={busy}");
+        ok(rig, &["gc", "--apply", "--json"])?;
+        assert!(
+            !fixture.worktree.exists(),
+            "the sweep must collect a fast-forwarded lane its settlement missed (busy={busy})"
+        );
+        let receipt = settlement_receipt(&fixture)?;
+        assert_eq!(receipt["state"], "pruned", "busy={busy}: {receipt}");
+    }
+    Ok(())
+}
+
+pub(super) fn completion_and_sweep_retain_unlanded_or_dirty_lanes() -> Result {
+    use crate::fabric::gc_cleanup::SPAWNED;
+    for dirty in [false, true] {
+        let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+        let rig = &fixture.rig;
+        if dirty {
+            let merged = merged_upstream(rig, &fixture.worktree)?;
+            publish_upstream(rig, &merged)?;
+            fs::write(fixture.worktree.join("edit.txt"), "uncommitted")?;
+        } else {
+            publish_upstream(rig, &git(rig, &["rev-parse", "HEAD"])?)?;
+        }
+        SPAWNED.set(Ok(Vec::new()));
+        crate::fabric::settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let request = SPAWNED
+            .replace(Ok(Vec::new()))
+            .map_err(|error| error.to_string())?
+            .pop()
+            .ok_or("settlement did not start collection")?;
+        crate::fabric::gc_cleanup::run(&request, &FreeWorkers)?;
+        assert!(
+            fixture.worktree.exists(),
+            "settlement collection removed a kept lane (dirty={dirty})"
+        );
+        let receipt = settlement_receipt(&fixture)?;
+        assert_eq!(receipt["state"], "retained", "{receipt}");
+        ok(rig, &["gc", "--apply", "--json"])?;
+        assert!(
+            fixture.worktree.exists(),
+            "the sweep removed a kept lane (dirty={dirty})"
+        );
+        if dirty {
+            // The edit alone kept it: once it is gone the sweep collects.
+            fs::remove_file(fixture.worktree.join("edit.txt"))?;
+            ok(rig, &["gc", "--apply", "--json"])?;
+            assert!(!fixture.worktree.exists());
+        }
+    }
+    Ok(())
+}
+
+/// When the run store cannot be opened or listed during unsettled lane
+/// collection, the sweep warns on stderr and carries on with the path-based pass.
+pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
+    let fixture = crate::fabric::peer_tests::SettlementFixture::resumed_with_lane_commit()?;
+    let rig = &fixture.rig;
+    // Close the fixture's WAL-mode store first. While it is open, the WAL
+    // frames hold page 1 and mask a corrupted main file, so the read-only open
+    // would succeed. Removing the companions makes the corruption visible.
+    drop(fixture.store);
+    let run_db = rig.state.join("run.sqlite3");
+    for companion in ["run.sqlite3-wal", "run.sqlite3-shm"] {
+        match fs::remove_file(rig.state.join(companion)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Corrupt the run database file so open_disk_read_only fails.
+    fs::write(&run_db, b"corrupted sqlite database")?;
+    let output = command(rig, &["gc", "--apply", "--json"])?;
+    // Provider retention reads the same unreadable store and reports it as an
+    // incomplete retention, so the exit status is not asserted here.
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert!(
+        stderr.contains("warning: settled lane collection failed for"),
+        "stderr must contain settled lane collection warning: {stderr}"
+    );
+    Ok(())
+}

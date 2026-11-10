@@ -170,8 +170,12 @@ The named lens counts towards the panel minimum. Configured review shapes can
 set the same `minimum_family_counts` table; a request can raise a shape's
 minimum but cannot lower it.
 
-An impossible requirement refuses the launch with the family, required count
-and candidate exclusion reasons. The explanation and retained template
+A requirement the panel cannot meet is advisory by default: the panel still
+resolves, and the explanation, the retained resolver and each lens's advice
+carry a warning naming the family, required count and candidate exclusion
+reasons. Set `review.diversity = "strict"` in configuration, or
+`diversity = "strict"` in the run document's `[review]` table, to refuse the
+launch instead. A lens's own `required_family` always refuses when unmet. The explanation and retained template
 resolvers include `review-family-resolution`, whose slots record
 `satisfied_family` for the legs assigned to satisfy the constraint. These
 families are adapter registry data used for selection; they do not certify
@@ -220,7 +224,9 @@ work. When previews are clipped, status keeps the full count, reports how many
 entries are shown and points to the complete result; the typed handoff retains
 every concern.
 
-Set `max_repair_cycles` to one, two or three (default three). This counts repairs
+Set `max_repair_cycles` to a positive integer (default three; no ceiling). Within
+the default budget the third review asks the principal for design judgement; a
+raised budget runs every round before the principal. This counts repairs
 after the first review and is separate from CI's `max_iterations`. Each repair
 starts a fresh writer attempt. Prefer a route outside the reviewers' families;
 when none is available, continue on the available route and retain the separation

@@ -399,8 +399,13 @@ fn run_inner(
         .values()
         .find_map(|entry| entry.repository().map(str::to_owned));
     let definition = gate_definition(&effective.gate)?;
-    let (mut forge, mut repo, mut runner, mut alarms) =
-        adapters::connect(&resolved.project, globals, workers, tracking)?;
+    let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(
+        &resolved.project,
+        resolved.roots.state.as_path(),
+        globals,
+        workers,
+        tracking,
+    )?;
     let target = forge.target_branch()?;
     let result = driver::run(
         &mut *forge,

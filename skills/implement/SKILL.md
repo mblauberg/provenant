@@ -60,7 +60,9 @@ worktree. Name the method skill: `test-design` for observable behaviour,
 
 A separate fresh writer attempt repairs qualified review findings; the raising
 lenses re-review the delta. `max_repair_cycles` defaults to three and accepts
-one to three, independently of the CI repair limit. A recurring finding or an
+any positive integer, independently of the CI repair limit. Within the default
+budget the third review asks the principal for design judgement; a raised
+budget runs until it is used up, then goes to the principal. A recurring finding or an
 evidenced design defect escalates early to read-only principal scoping. Proceed
 within approved scope: the principal records `repair_design` booleans
 `within_scope` and `one_way_door` in its findings block. The host notifies the

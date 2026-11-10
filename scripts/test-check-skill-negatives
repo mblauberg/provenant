@@ -13,7 +13,7 @@ SCRIPT = Path(__file__).with_name("check-skill-negatives")
 
 
 class InventoryTests(unittest.TestCase):
-    def test_requires_two_distinct_negatives_that_exclude_the_target(self):
+    def test_reports_a_gap_unless_two_distinct_negatives_exclude_the_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             skill = root / "example"
@@ -37,12 +37,18 @@ class InventoryTests(unittest.TestCase):
                 )
 
             self.assertEqual(check([negative, second]).returncode, 0)
-            self.assertNotEqual(check([negative]).returncode, 0)
-            self.assertNotEqual(check([negative, negative]).returncode, 0)
-            self.assertNotEqual(check([negative, dict(second, expected={
-                "primary_skill": "other", "companion_skills": ["example"],
-            })]).returncode, 0)
-            self.assertNotEqual(check([negative, dict(second, tags=["adjacent"])]).returncode, 0)
+            for short in (
+                [negative],
+                [negative, negative],
+                [negative, dict(second, expected={
+                    "primary_skill": "other", "companion_skills": ["example"],
+                })],
+                [negative, dict(second, tags=["adjacent"])],
+            ):
+                result = check(short)
+                self.assertEqual(result.returncode, 0)
+                self.assertIn("example", result.stdout)
+                self.assertIn("need at least 2", result.stdout)
             fixture.unlink()
             missing = subprocess.run(
                 [sys.executable, str(SCRIPT), str(root)],
@@ -79,8 +85,8 @@ class InventoryTests(unittest.TestCase):
                 )
 
             single = check()
-            self.assertNotEqual(single.returncode, 0)
-            self.assertIn("library/example", single.stderr)
+            self.assertEqual(single.returncode, 0)
+            self.assertIn("library/example", single.stdout)
             cases["library"] = [negative, dict(negative, id="q3", prompt="Third adjacent task")]
             self.assertEqual(check().returncode, 0)
 
