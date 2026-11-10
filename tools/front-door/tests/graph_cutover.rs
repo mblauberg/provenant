@@ -226,6 +226,7 @@ fn seed(rig: &TestRig, name: &str, outcomes: &[provenant_run::Outcome]) -> Resul
             attempt,
             starting.revision,
             &provenant_run::TerminalPublication {
+                stop: None,
                 terminal_cause: None,
                 terminal_note: None,
                 outcome,

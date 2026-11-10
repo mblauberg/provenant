@@ -129,7 +129,7 @@ impl Providers for Confined {
                 "publishing": true,
                 "cargo_cache": {"path": "/fixture/cache", "scope": "subtree"}
             }))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::fixture_refusal(e.to_string()))?;
             AccessMode::WorktreeWrite(Box::new(authority))
         } else {
             AccessMode::ReadOnly
@@ -157,7 +157,7 @@ impl Providers for Confined {
                 nested_confinement: false,
             },
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::fixture_refusal(e.to_string()))?;
         let mut launch = Ready.prepare(task, prompt, paths, resume)?;
         launch.confinement = Some(LaunchConfinement {
             plan,
@@ -261,8 +261,10 @@ impl Providers for Fake {
 
     fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
         if self.policy_task == Some(task.task_id) {
-            let mut refusal =
-                crate::PrepareRefusal::from("insufficient disk space; run `provenant gc`");
+            let mut refusal = crate::PrepareRefusal::new(
+                TerminalCause::DiskFloor,
+                "insufficient disk space; run `provenant gc`",
+            );
             refusal.resource = self.policy_resource;
             return Err(refusal);
         }
@@ -284,7 +286,10 @@ impl Providers for Fake {
         self.prompt.replace(prompt.into());
         self.resumed.set(resume.map(|r| r.attempt_id));
         if self.refuse {
-            return Err("fixture adapter is disabled".into());
+            return Err(crate::PrepareRefusal::new(
+                TerminalCause::RouteResolutionRefused,
+                "fixture adapter is disabled",
+            ));
         }
         unreachable!("these tests never hand off to a guardian")
     }
@@ -1471,7 +1476,7 @@ impl Providers for RefusesAfterAlias {
         _: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         self.0.set(Some(paths.temporary_alias.is_some()));
-        Err("provider unavailable".into())
+        Err(crate::fixture_refusal("provider unavailable"))
     }
     fn decode(
         &self,

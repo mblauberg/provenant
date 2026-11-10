@@ -1610,7 +1610,14 @@ A `stopped_early` or `blocked` stop needs the handoff that declared it, and a
 `done` handoff declares no stop. `blocked` is a stop cause, not a plain
 failure (#3154): the stop carries its handoff, and `status` and `output` show
 the handoff note as the one-line reason it is blocked. A blocked node still
-does not satisfy its dependants. Each record keeps fields it does not know, so
+does not satisfy its dependants. Settlement seals the stop once, from the
+handoff it decoded; the graph reads the sealed fact, never result text. A host
+refusal before launch seals a specific cause, never a generic one, and its
+message, redacted and bounded, is the stop's one-line reason unless a fixed
+note names the cause. `TerminalCause` maps to `StopCause` exhaustively
+(`From<TerminalCause> for StopCause`), and `Stop::declared` returns an error
+for a handoff that cannot be sealed. The `on_stop` entry is owned by the slice
+that reads the stop (W2-I). Each record keeps fields it does not know, so
 a newer writer's additions survive a rewrite; a `WorkKey` and a `NextStep`
 ignore them, because their identity is their known fields.
 
@@ -1683,7 +1690,6 @@ another; everything else returns to the chair.
 | `adapter_unavailable` | `new_route` | no |
 | `permission_denied` | `chair` | no |
 | `identity_unobserved` | `chair` | no |
-| `preparation_refused` | `chair` | no |
 | `source_view_refused` | `chair` | no |
 | `route_refused` | `chair` | no |
 | `access_policy_refused` | `chair` | no |

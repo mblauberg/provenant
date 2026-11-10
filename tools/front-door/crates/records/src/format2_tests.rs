@@ -9,28 +9,15 @@ use provenant_core::{GitOid, ProjectId};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-/// The causes as the enum's own deserializer lists them, so a new variant
-/// is seen here without editing this test.
-fn derived_causes() -> Vec<String> {
-    let error = serde_json::from_value::<StopCause>(json!("\u{0}"))
-        .unwrap_err()
-        .to_string();
-    let (_, expected) = error.split_once("expected one of").unwrap();
-    expected
-        .split('`')
-        .skip(1)
-        .step_by(2)
-        .map(str::to_owned)
-        .collect()
-}
-
 #[test]
 fn every_stop_cause_has_exactly_one_default() {
-    let causes = derived_causes();
-    assert!(causes.len() > 30, "{causes:?}");
-    for name in &causes {
-        let cause: StopCause = serde_json::from_value(json!(name)).unwrap();
-        assert_eq!(cause.as_str(), name);
+    let causes = StopCause::ALL;
+    for cause in causes {
+        let name = cause.as_str();
+        assert_eq!(
+            serde_json::from_value::<StopCause>(json!(name)).unwrap(),
+            cause
+        );
         let rows = STOP_TABLE.iter().filter(|rule| rule.cause == cause).count();
         assert_eq!(rows, 1, "{name} has {rows} rows");
     }
@@ -107,11 +94,15 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
 #[test]
 fn a_declared_stop_needs_the_handoff_that_declared_it() {
     let blocked = handoff(HandoffStatus::Blocked, "Needs the owner to pick a schema.");
-    let stop = Stop::declared(blocked.clone()).unwrap();
+    let stop = Stop::declared(blocked.clone()).unwrap().unwrap();
     assert_eq!(stop.cause(), StopCause::Blocked);
     assert_eq!(stop.note(), Some("Needs the owner to pick a schema."));
     assert_eq!(stop.next_step(None), NextStep::Chair);
-    assert!(Stop::declared(handoff(HandoffStatus::Done, "Finished.")).is_none());
+    assert!(
+        Stop::declared(handoff(HandoffStatus::Done, "Finished."))
+            .unwrap()
+            .is_none()
+    );
     assert!(Stop::new(StopCause::Blocked, None).is_err());
     assert!(Stop::new(StopCause::StoppedEarly, Some(blocked.clone())).is_err());
     assert!(Stop::new(StopCause::TokenBudget, Some(blocked)).is_ok());
@@ -186,7 +177,7 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
     }
     let mut blocked = handoff(HandoffStatus::Blocked, "Needs an owner decision.");
     blocked.extra.insert("future".into(), json!(1));
-    round_trip(&Stop::declared(blocked).unwrap(), true);
+    round_trip(&Stop::declared(blocked).unwrap().unwrap(), true);
     round_trip(&Stop::new(StopCause::Lost, None).unwrap(), true);
     round_trip(
         &Limit::new(3, LimitSource::Launch, LimitStrength::Default),

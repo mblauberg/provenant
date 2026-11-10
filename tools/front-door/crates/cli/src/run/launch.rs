@@ -315,7 +315,10 @@ impl run::Providers for PreparedProvider<'_> {
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
-                return Err("prepared continuation task changed".into());
+                return Err(run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    "prepared continuation task changed",
+                ));
             }
             return Ok(());
         }
@@ -330,13 +333,17 @@ impl run::Providers for PreparedProvider<'_> {
     ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
-                return Err("prepared continuation identity changed".into());
+                return Err(run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    "prepared continuation identity changed",
+                ));
             }
-            return ready
-                .plan
-                .borrow_mut()
-                .take()
-                .ok_or_else(|| "prepared continuation consumed".into());
+            return ready.plan.borrow_mut().take().ok_or_else(|| {
+                run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    "prepared continuation consumed",
+                )
+            });
         }
         self.fallback
             .prepare_with_wait(task, prompt, paths, resume, self.provider_lease_wait)

@@ -581,7 +581,7 @@ impl PrepareError {
             } => run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 resource: None,
-                terminal_cause: Some(cause),
+                terminal_cause: cause,
                 terminal_note: note,
                 message,
                 skipped_routes: Vec::new(),
@@ -620,40 +620,60 @@ impl PrepareError {
                 } else {
                     provenant_records::diagnostic::BoundaryClass::None
                 };
-                run::PrepareRefusal {
+                let mut refusal = run::PrepareRefusal {
                     boundary_class,
                     resource: candidate_resource,
-                    terminal_cause: None,
+                    terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
                     terminal_note: None,
                     message,
                     skipped_routes,
                     fallback_outcome,
+                };
+                if refusal.auth_required() {
+                    refusal.terminal_cause =
+                        provenant_records::run::TerminalCause::AccountLoginRequired;
                 }
+                refusal
             }
             Self::SourceRoots(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal.terminal_note = Some(error.to_string());
                 refusal
             }
             Self::SourceCwd(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = error.boundary_class();
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
             }
             Self::ContinuationRequest(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
             }
             Self::SourceHead(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
             }
@@ -664,12 +684,18 @@ impl PrepareError {
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = boundary_class;
                 refusal
             }
             Self::Prompt(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::StoredPromptUnreadable,
+                    error.to_string(),
+                );
                 refusal.boundary_class = match &error {
                     LaunchPromptError::TooLarge => {
                         provenant_records::diagnostic::BoundaryClass::Integrity
@@ -683,18 +709,27 @@ impl PrepareError {
                 refusal
             }
             error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
                 refusal
             }
             error @ (Self::GraphInputsAuthority(_)
             | Self::SourceAuthority(_)
             | Self::WriterContinuation(_)) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::new(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
             }
-            other => other.to_string().into(),
+            other => run::PrepareRefusal::new(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                other.to_string(),
+            ),
         }
     }
 }
@@ -1008,7 +1043,10 @@ impl PlanCheckError {
 
     fn into_refusal(self) -> run::PrepareRefusal {
         let skipped = self.skipped("preparation");
-        let mut refusal = run::PrepareRefusal::from(skipped.detail.clone());
+        let mut refusal = run::PrepareRefusal::new(
+            provenant_records::run::TerminalCause::AccessPolicyRefused,
+            skipped.detail.clone(),
+        );
         refusal.boundary_class = self.boundary_class();
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped
@@ -4048,7 +4086,7 @@ mod refusal_cause_tests {
         let refusal = route_resolution_refusal(error).into_refusal();
         assert_eq!(
             refusal.terminal_cause,
-            Some(provenant_records::run::TerminalCause::RouteResolutionRefused)
+            provenant_records::run::TerminalCause::RouteResolutionRefused
         );
         assert_eq!(
             refusal.terminal_note.as_deref(),

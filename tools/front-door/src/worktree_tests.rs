@@ -760,104 +760,114 @@ impl provenant_run::Providers for WriterProvider {
         paths: &provenant_run::LaunchPaths,
         resume: Option<&provenant_run::AttemptRecord>,
     ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
-        if resume.is_some() {
-            return Err("writer fixture does not resume".into());
-        }
-        let request = task.writer.as_ref().ok_or("writer request missing")?;
-        let writer = provenant_run::prepare_writer(request, &self.state, self.project)
-            .map_err(|error| error.to_string())?;
-        let git = provenant_os::git::git_executable().ok_or("git")?;
-        if let Some(source) = &task.source_head {
-            writer
-                .require_continuation_source(
-                    &git,
-                    source.parse().map_err(|_| "source")?,
-                    task.head
-                        .as_deref()
-                        .ok_or("predecessor")?
-                        .parse()
-                        .map_err(|_| "head")?,
-                )
+        (|| -> std::result::Result<provenant_run::PreparedLaunch, Box<dyn std::error::Error>> {
+            if resume.is_some() {
+                return Err("writer fixture does not resume".into());
+            }
+            let request = task.writer.as_ref().ok_or("writer request missing")?;
+            let writer = provenant_run::prepare_writer(request, &self.state, self.project)
                 .map_err(|error| error.to_string())?;
-        } else if let Some(head) = &task.head {
-            writer
-                .require_source(head.parse().map_err(|_| "head")?)
-                .map_err(|error| error.to_string())?;
-        }
-        let executable =
-            fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())?;
-        let argv = vec![
-            executable.clone().into_os_string(),
-            OsString::from("--writer-provider"),
-            OsString::from(self.mode),
-            writer.worktree.path().as_os_str().to_owned(),
-        ];
-        // Production lists every other checkout of the repository; the primary
-        // subtree covers each sibling here.
-        let primary = writer
-            .worktree
-            .path()
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("fixture primary")?;
-        let protected = [provenant_confinement::permissions::PathGrant {
-            path: primary.to_owned(),
-            scope: provenant_confinement::permissions::PathScope::Subtree,
-        }];
-        let plan = provenant_cli::run::writer_fixture_plan(
-            self.project,
-            writer.worktree.path(),
-            &self.home,
-            &self.state,
-            &protected,
-            paths,
-            &writer,
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-        )?;
-        let login = self.home.join(".fixture-login");
-        fs::write(&login, b"").map_err(|error| error.to_string())?;
-        let profile = provenant_confinement::permissions::ProviderProfile {
-            spec: provenant_confinement::permissions::ProviderProfileSpec {
-                authentication: vec![provenant_confinement::permissions::AuthenticationProfile {
-                    keychain: None,
-                    mechanism: "login".into(),
-                    // A placeholder stands in for a login file; no live
-                    // credential is read and this adds no write permission.
-                    roots: vec![provenant_confinement::permissions::PathGrant {
-                        path: login,
+            let git = provenant_os::git::git_executable().ok_or("git")?;
+            if let Some(source) = &task.source_head {
+                writer
+                    .require_continuation_source(
+                        &git,
+                        source.parse().map_err(|_| "source")?,
+                        task.head
+                            .as_deref()
+                            .ok_or("predecessor")?
+                            .parse()
+                            .map_err(|_| "head")?,
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else if let Some(head) = &task.head {
+                writer
+                    .require_source(head.parse().map_err(|_| "head")?)
+                    .map_err(|error| error.to_string())?;
+            }
+            let executable =
+                fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
+                    .map_err(|error| error.to_string())?;
+            let argv = vec![
+                executable.clone().into_os_string(),
+                OsString::from("--writer-provider"),
+                OsString::from(self.mode),
+                writer.worktree.path().as_os_str().to_owned(),
+            ];
+            // Production lists every other checkout of the repository; the primary
+            // subtree covers each sibling here.
+            let primary = writer
+                .worktree
+                .path()
+                .parent()
+                .and_then(Path::parent)
+                .ok_or("fixture primary")?;
+            let protected = [provenant_confinement::permissions::PathGrant {
+                path: primary.to_owned(),
+                scope: provenant_confinement::permissions::PathScope::Subtree,
+            }];
+            let plan = provenant_cli::run::writer_fixture_plan(
+                self.project,
+                writer.worktree.path(),
+                &self.home,
+                &self.state,
+                &protected,
+                paths,
+                &writer,
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            )?;
+            let login = self.home.join(".fixture-login");
+            fs::write(&login, b"").map_err(|error| error.to_string())?;
+            let profile = provenant_confinement::permissions::ProviderProfile {
+                spec: provenant_confinement::permissions::ProviderProfileSpec {
+                    authentication: vec![
+                        provenant_confinement::permissions::AuthenticationProfile {
+                            keychain: None,
+                            mechanism: "login".into(),
+                            // A placeholder stands in for a login file; no live
+                            // credential is read and this adds no write permission.
+                            roots: vec![provenant_confinement::permissions::PathGrant {
+                                path: login,
+                                scope: provenant_confinement::permissions::PathScope::Exact,
+                            }],
+                            in_place_writes: Vec::new(),
+                        },
+                    ],
+                    process_executables: vec![provenant_confinement::permissions::PathGrant {
+                        path: executable,
                         scope: provenant_confinement::permissions::PathScope::Exact,
                     }],
-                    in_place_writes: Vec::new(),
-                }],
-                process_executables: vec![provenant_confinement::permissions::PathGrant {
-                    path: executable,
-                    scope: provenant_confinement::permissions::PathScope::Exact,
-                }],
-                ..Default::default()
-            },
-            observations: writer_observations(),
-        };
-        let route = fixture_route();
-        Ok(provenant_run::PreparedLaunch {
-            limits: Default::default(),
-            skipped_routes: Vec::new(),
-            argv,
-            environment: Vec::new(),
-            stdin: Vec::new(),
-            secret_input: None,
-            cwd: writer.worktree.path().to_owned(),
-            route,
-            confinement: Some(provenant_run::LaunchConfinement {
-                plan,
-                profile,
-                writer: Some(writer),
-                home: self.home.clone(),
-                cargo_registry_seed: false,
-                state_root: self.state.clone(),
-            }),
-            observed_head: None,
-            repository: None,
+                    ..Default::default()
+                },
+                observations: writer_observations(),
+            };
+            let route = fixture_route();
+            Ok(provenant_run::PreparedLaunch {
+                limits: Default::default(),
+                skipped_routes: Vec::new(),
+                argv,
+                environment: Vec::new(),
+                stdin: Vec::new(),
+                secret_input: None,
+                cwd: writer.worktree.path().to_owned(),
+                route,
+                confinement: Some(provenant_run::LaunchConfinement {
+                    plan,
+                    profile,
+                    writer: Some(writer),
+                    home: self.home.clone(),
+                    cargo_registry_seed: false,
+                    state_root: self.state.clone(),
+                }),
+                observed_head: None,
+                repository: None,
+            })
+        })()
+        .map_err(|error| {
+            provenant_run::PrepareRefusal::new(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                error.to_string(),
+            )
         })
     }
 

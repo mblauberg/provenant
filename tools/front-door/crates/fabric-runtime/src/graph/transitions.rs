@@ -445,6 +445,10 @@ pub(super) fn apply_attempt_observation(
                     progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
                 }
                 if node.access == AccessMode::WorktreeWrite {
+                    progress.blocked = result.as_ref().is_some_and(|capture| {
+                        matches!(&capture.handoff, Ok(Some(handoff))
+                            if handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
+                    });
                     progress.handoff = result
                         .as_ref()
                         .and_then(|capture| capture.handoff.as_ref().ok())
@@ -591,6 +595,7 @@ pub(super) fn initial_checkpoint(
                     && node.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
+                blocked: false,
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,

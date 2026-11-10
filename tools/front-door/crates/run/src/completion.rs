@@ -338,7 +338,9 @@ mod tests {
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-            Err("holder-only fixture does not launch".into())
+            Err(crate::fixture_refusal(
+                "holder-only fixture does not launch",
+            ))
         }
         fn decode(
             &self,

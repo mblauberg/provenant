@@ -52,13 +52,6 @@ pub(super) fn restart_routes(node: &PlannedNode, progress: &NodeProgress) -> Vec
         .collect()
 }
 
-pub(super) fn handoff_requires_chair(note: &str) -> bool {
-    provenant_records::handoff::Handoff::from_result(note)
-        .ok()
-        .flatten()
-        .is_some_and(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
-}
-
 /// The checkpoint that settles a stopped writer: its restart patch and reset,
 /// or a chair pause. Admission is pure and never fails; the advance saves the
 /// result in the same transition as the stop, so no reader sees the stop
@@ -76,11 +69,7 @@ pub(super) fn continue_stopped(
         .enumerate()
         .find(|(_, (node, progress))| eligible(node, progress, checkpoint))?;
     let routes = restart_routes(node, progress);
-    let chair_reason = if progress
-        .handoff
-        .as_deref()
-        .is_some_and(handoff_requires_chair)
-    {
+    let chair_reason = if progress.blocked {
         Some(format!(
             "writer {} needs an owner decision, capability or external change; inspect its handoff",
             node.id

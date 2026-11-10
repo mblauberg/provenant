@@ -678,7 +678,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
             route.set_guard_facts(None, Some(self.0)).unwrap();
-            let mut refusal = provenant_run::PrepareRefusal::from("PRIVATE_PACING_SENTINEL");
+            let mut refusal = provenant_run::PrepareRefusal::new(provenant_records::run::TerminalCause::RouteResolutionRefused, "PRIVATE_PACING_SENTINEL");
             refusal.skipped_routes.push(route);
             Err(refusal)
         }

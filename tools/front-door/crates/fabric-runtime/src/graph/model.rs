@@ -1195,6 +1195,9 @@ pub struct NodeProgress {
     pub fragment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// The stopped writer's handoff says `blocked`, read once at settlement.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub blocked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
