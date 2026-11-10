@@ -916,7 +916,7 @@ mod tests {
         let row = report(
             crate::source::TEST_POLICIES,
             &[repaired],
-            &[detection.clone()],
+            std::slice::from_ref(&detection),
             &QuotaQuery { adapter: None },
             180,
             "report.json".into(),
