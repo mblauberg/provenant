@@ -2,26 +2,13 @@
 //!
 //! The caller owns scheduling and serialises access to this state. A failed
 //! request never advances the sweep watermark or completes a delivery.
-use super::{Intake, Target};
+use super::{Intake, Target, gh::Forge};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
 };
-
-/// A response from an authenticated conditional REST request.
-#[derive(Debug)]
-pub struct Response {
-    pub status: u16,
-    pub headers: BTreeMap<String, String>,
-    pub body: Vec<u8>,
-}
-
-/// A serial REST adapter. Header names in responses must be lowercase.
-pub trait Forge {
-    fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response>;
-}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Cached {
@@ -438,6 +425,7 @@ impl Reconciler {
 mod tests {
     use super::*;
     use crate::event_intake::Admission;
+    use crate::event_intake::gh::Response;
 
     #[derive(Default)]
     struct Fake {
