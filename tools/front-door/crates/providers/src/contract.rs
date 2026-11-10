@@ -163,10 +163,11 @@ fn model_matches_single(requested: &str, offered: &str) -> bool {
         .copied()
         .filter(|&t| off_lower.contains(t))
         .collect();
-    if !req_tiers.is_empty() && !off_tiers.is_empty() {
-        if !req_tiers.iter().any(|t| off_tiers.contains(t)) {
-            return false;
-        }
+    if !req_tiers.is_empty()
+        && !off_tiers.is_empty()
+        && !req_tiers.iter().any(|t| off_tiers.contains(t))
+    {
+        return false;
     }
 
     // Distinct families must never cross (e.g. Gemini vs Claude vs GPT).
@@ -181,10 +182,11 @@ fn model_matches_single(requested: &str, offered: &str) -> bool {
         .copied()
         .filter(|&f| off_lower.contains(f))
         .collect();
-    if !req_fams.is_empty() && !off_fams.is_empty() {
-        if !req_fams.iter().any(|f| off_fams.contains(f)) {
-            return false;
-        }
+    if !req_fams.is_empty()
+        && !off_fams.is_empty()
+        && !req_fams.iter().any(|f| off_fams.contains(f))
+    {
+        return false;
     }
 
     // If both have family and tier and they agree, they match.
