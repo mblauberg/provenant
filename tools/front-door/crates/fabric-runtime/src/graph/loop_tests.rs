@@ -2054,7 +2054,7 @@ fn writer_design_cannot_hold_stops_round_before_delta_review() {
 }
 
 #[test]
-fn repair_cycle_budget_cannot_exceed_three_or_be_accepted_without_review() {
+fn raised_repair_cycle_budget_runs_every_round_and_refuses_extension() {
     let mut document = review_repair_document();
     assert!(
         loops::validate_extension(&document, "loop.repair.rounds=4", &Default::default()).is_err()
@@ -2067,8 +2067,29 @@ fn repair_cycle_budget_cannot_exceed_three_or_be_accepted_without_review() {
         )
         .is_err()
     );
-    document.nodes[1].loop_body.as_mut().unwrap().max_rounds = 4;
-    assert!(loops::expanded_node_count(&document, &[]).is_err());
+    document.nodes[1].loop_body.as_mut().unwrap().max_rounds = 5;
+    assert!(loops::expanded_node_count(&document, &[]).is_ok());
+    let findings: Vec<String> = (1..=6)
+        .map(|index| repair_finding(false).replace("F1", &format!("F{index}")))
+        .collect();
+    let mut reports: Vec<&str> = vec![&findings[0]];
+    for finding in &findings[1..] {
+        reports.extend(["fix", finding.as_str()]);
+    }
+    reports.push("principal options");
+    let mut owner = repair_reviews(&reports);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    let calls: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    let mut expected = vec!["initial".to_owned()];
+    for round in 1..=5 {
+        expected.push(format!("repair--r{round}--fix"));
+        expected.push(format!("repair--r{round}--check"));
+    }
+    expected.push("design".to_owned());
+    assert_eq!(calls, expected);
+    let repair = run.checkpoint.nodes.iter().find(|node| node.id == "repair").unwrap();
+    assert_eq!(repair.state, NodeState::Failed);
 }
 
 #[test]

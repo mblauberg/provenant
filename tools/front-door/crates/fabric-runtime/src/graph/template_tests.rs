@@ -619,20 +619,23 @@ fn delivery_templates_admit_bounded_review_repairs() {
 }
 
 #[test]
-fn review_cycle_limit_is_configurable_but_never_above_three() {
+fn review_cycle_limit_is_configurable_with_no_upper_ceiling() {
     let bundled = library();
-    for cycles in [0, 4] {
-        let error = Compiler::new(&bundled).compile(&json!({"id":"repair", "use":"review-repair",
-            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":cycles}})).unwrap_err().to_string();
-        assert!(error.contains("1 to 3"), "{error}");
-    }
     let error = Compiler::new(&bundled)
-        .compile(&json!({"id":"repair", "use":"repair",
-        "with":{"worktree":"/fixture/writer", "write_scope":["src"]},
-        "repeat":{"until":"accepted", "max_rounds":4}}))
+        .compile(&json!({"id":"repair", "use":"review-repair",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":0}}))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("between 1 and 3"), "{error}");
+    assert!(error.contains("at least 1"), "{error}");
+    let node = Compiler::new(&bundled)
+        .compile(&json!({"id":"repair", "use":"repair",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"]},
+        "repeat":{"until":"accepted", "max_rounds":5}}))
+        .unwrap();
+    assert_eq!(node.loop_body.as_ref().unwrap().max_rounds, 5);
+    let node = Compiler::new(&bundled).compile(&json!({"id":"repair", "use":"review-repair",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":5}}));
+    assert!(node.is_ok(), "{:?}", node.err());
 }
 
 #[test]

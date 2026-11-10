@@ -105,9 +105,6 @@ pub(super) fn expanded_node_count(
         let Some(spec) = &node.loop_body else {
             continue;
         };
-        if repair::spec_is_repair(spec) && !(1..=3).contains(&spec.max_rounds) {
-            return Err("review repair max_rounds must be between one and three".into());
-        }
         if spec.max_rounds == 0 {
             return Err(format!(
                 "node {}: loop.max_rounds must be positive",
