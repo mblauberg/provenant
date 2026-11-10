@@ -978,7 +978,15 @@ fn launch_resolvers_with(
         } else {
             ""
         };
-        resolvers.insert(format!("review-advice-{lens}"), vec![advice.into()]);
+        let mut advice = advice.to_owned();
+        for warning in &panel.warnings {
+            if !advice.is_empty() {
+                advice.push('\n');
+            }
+            advice.push_str("Panel warning: ");
+            advice.push_str(warning);
+        }
+        resolvers.insert(format!("review-advice-{lens}"), vec![advice]);
     }
     if !panel.minimum_family_counts.is_empty()
         || panel

@@ -12,6 +12,18 @@ pub struct ReviewConfig {
     pub lenses: ReviewLenses,
     /// Configurable path classes and their minimum review coverage.
     pub floors: BTreeMap<String, ReviewFloor>,
+    /// Whether an unmet panel family minimum refuses the review.
+    pub diversity: FamilyDiversity,
+}
+
+/// How a shortfall against a panel's `minimum_family_counts` is handled.
+/// Advisory resolves the panel and records a warning; strict refuses it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyDiversity {
+    #[default]
+    Advisory,
+    Strict,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -143,6 +155,9 @@ pub struct ReviewRequest {
     pub risk_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lenses: Vec<ReviewLens>,
+    /// Overrides the configured `review.diversity` for this review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diversity: Option<FamilyDiversity>,
 }
 
 /// One resolved reviewer slot in the panel.
@@ -184,6 +199,15 @@ pub struct PanelResolution {
     pub synthesis: ReviewSynthesis,
     pub slots: Vec<ResolvedSlot>,
     pub omitted: Vec<OmittedLens>,
+    #[serde(default, skip_serializing_if = "is_advisory")]
+    pub diversity: FamilyDiversity,
+    /// Family minimums the panel could not meet under advisory diversity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+fn is_advisory(diversity: &FamilyDiversity) -> bool {
+    *diversity == FamilyDiversity::Advisory
 }
 
 impl PanelResolution {
@@ -202,6 +226,9 @@ impl PanelResolution {
         for slot in &mut self.slots {
             slot.satisfied_family = None;
         }
+        self.warnings.clear();
+        let strict = self.diversity == FamilyDiversity::Strict;
+        let mut warnings = Vec::new();
         let mut selected = vec![None; self.slots.len()];
         let mut fixed_counts = BTreeMap::<String, usize>::new();
         for (index, slot) in self.slots.iter().enumerate() {
@@ -242,14 +269,19 @@ impl PanelResolution {
                     Err(reason) => reasons.push(format!("{}: {reason}", slot.lens)),
                 }
             }
-            if demands.len().saturating_add(remaining) > self.slots.len() {
-                return Err(format!(
+            let room = self.slots.len().saturating_sub(demands.len());
+            if remaining > room {
+                let message = format!(
                     "required provider family {family}: count {count} cannot be met by {} lenses; exclusions: {}",
                     self.slots.len(),
                     reasons.join("; ")
-                ));
+                );
+                if strict {
+                    return Err(message);
+                }
+                warnings.push(message);
             }
-            for _ in 0..remaining {
+            for _ in 0..remaining.min(room) {
                 demands.push(family.clone());
                 edges.push(candidates.clone());
                 exclusions.push(reasons.clone());
@@ -287,9 +319,13 @@ impl PanelResolution {
                 } else {
                     exclusions[demand].join("; ")
                 };
-                return Err(format!(
+                let message = format!(
                     "required provider family {family}: count {count} cannot be met; exclusions: {reasons}"
-                ));
+                );
+                if strict {
+                    return Err(message);
+                }
+                warnings.push(message);
             }
         }
         for (index, owner) in owners.iter().enumerate() {
@@ -300,6 +336,7 @@ impl PanelResolution {
         for (slot, family) in self.slots.iter_mut().zip(selected) {
             slot.satisfied_family = family;
         }
+        self.warnings = warnings;
         Ok(())
     }
 }
@@ -559,6 +596,7 @@ fn parse_bundled() -> ReviewConfig {
     ReviewConfig {
         shapes: asset.review.shapes,
         floors: asset.review.floors,
+        diversity: FamilyDiversity::default(),
         size: asset.review.size,
         lenses: ReviewLenses {
             order: asset.review.lenses.order,
@@ -1143,6 +1181,8 @@ impl ReviewConfig {
             synthesis: selected.shape.synthesis,
             slots,
             omitted,
+            diversity: request.diversity.unwrap_or(self.diversity),
+            warnings: Vec::new(),
         })
     }
     pub(crate) fn validate(
@@ -2572,23 +2612,33 @@ mod tests {
     }
 
     #[test]
-    fn unsatisfied_panel_family_reports_count_and_candidate_exclusions() {
-        let mut panel = resolve(&ReviewRequest {
+    fn unsatisfied_panel_family_warns_by_default_and_refuses_when_strict() {
+        let mut request = ReviewRequest {
             minimum_family_counts: BTreeMap::from([("alpha".into(), 2)]),
             ..Default::default()
-        });
-        let error = panel
+        };
+        let mut panel = resolve(&request);
+        panel
             .resolve_families(|slot, _| Err(format!("{} account unavailable", slot.lens)))
-            .unwrap_err();
-        assert!(error.contains("family alpha"));
-        assert!(error.contains("count 2"));
-        assert!(error.contains("account unavailable"));
+            .unwrap();
+        assert_eq!(panel.warnings.len(), 1);
+        assert!(panel.warnings[0].contains("family alpha"));
+        assert!(panel.warnings[0].contains("count 2"));
+        assert!(panel.warnings[0].contains("account unavailable"));
         assert!(
             panel
                 .slots
                 .iter()
                 .all(|slot| slot.satisfied_family.is_none())
         );
+        request.diversity = Some(FamilyDiversity::Strict);
+        let mut panel = resolve(&request);
+        let error = panel
+            .resolve_families(|slot, _| Err(format!("{} account unavailable", slot.lens)))
+            .unwrap_err();
+        assert!(error.contains("family alpha"));
+        assert!(error.contains("count 2"));
+        assert!(error.contains("account unavailable"));
     }
 
     #[test]
