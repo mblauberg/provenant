@@ -310,6 +310,45 @@ read and execute access, but never write access. This makes an installed
 `cargo install cargo-nextest --locked`. `provenant hosts doctor` reports
 whether `~/.cargo/bin/cargo-nextest` is executable for lanes.
 
+## Claude lane tokens
+
+By default a Claude lane gets a copy of its account's login access token. When
+the host renews that login (a launch within 15 minutes of expiry, a quota
+probe, or any `claude` run on the account's config directory), the server can
+revoke every copy outstanding, and live lanes fail with `authentication_failed`.
+Such a lane settles with terminal cause `lane_token_lost`, naming the account;
+a writer continues from its handoff on a fresh token, bounded by
+`lane.max_continuations`. A login that really lapsed refuses the successor at
+launch as `account_login_required`. If the registered lane token itself is
+rejected, the lane settles as a token problem without continuation, naming the
+account and directing the owner to recreate it with `claude setup-token`.
+
+To remove the cause, register a long-lived lane token per account. It comes
+from its own grant, so renewing the login never revokes it, and the host stops
+refreshing the login for lanes on that account:
+
+1. Sign in to the same account the directory is registered for and create the
+   token: `CLAUDE_CONFIG_DIR=<account config dir> claude setup-token`. Use the
+   directory that `provenant accounts list` shows; omit the variable for
+   `~/.claude`.
+2. Store it in that directory as `provenant-lane-token`, readable only by you,
+   without putting it on argv or in shell history:
+
+   ```sh
+   cd <account config dir>
+   ( umask 077; read -rs token; printf '%s\n' "$token" > provenant-lane-token )
+   ```
+
+   Paste the token and press Return.
+3. Launch a Claude lane on the account. A file that is a link, has more than
+   one hard link or is group- or world-readable refuses the launch.
+
+Provenant cannot check that the token belongs to the registered account; the
+account's login probe still runs at each launch. The token lasts about a year
+rather than hours, so a leak from a lane is usable for longer. To revoke it, open
+your Claude account settings on claude.ai and revoke the token there. To revert the host to the login token, delete the file.
+To renew it, repeat these steps. Never copy the file between account directories.
+
 ## Agy accounts
 
 For lane keychain permissions, failure diagnostics and post-install checks, see

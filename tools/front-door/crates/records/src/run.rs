@@ -884,6 +884,9 @@ pub enum TerminalCause {
     /// The host stopped a writer at its context handoff threshold so a fresh
     /// attempt continues from its handoff on the same worktree.
     ContextHandoff,
+    /// The lane's launch-time access token was revoked or expired mid-run
+    /// while the account login stayed usable.
+    LaneTokenLost,
 }
 
 impl TerminalCause {
@@ -920,6 +923,7 @@ impl TerminalCause {
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
+            Self::LaneTokenLost => "lane token lost; provenant output ID",
         }
     }
 
@@ -1005,6 +1009,9 @@ impl TerminalCause {
             }
             Self::ContextHandoff => {
                 "the host stopped the writer at lanes.context_handoff_tokens; a fresh attempt continues from its handoff on the same worktree"
+            }
+            Self::LaneTokenLost => {
+                "the lane's access token was revoked or expired mid-run while the account login stayed usable; a writer continues from its handoff on a new token"
             }
         }
     }
