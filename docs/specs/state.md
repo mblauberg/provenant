@@ -175,6 +175,20 @@ run ([ADR 0031](../adr/0031-retain-provider-history-and-expire-resume-state.md))
   `crates/run/src/retention.rs::gc_retries_only_authorised_tombstones_and_never_follows_links`
 - Owner: `crates/run/src/retention.rs`
 
+## Format break
+
+`STATE_FORMAT_VERSION` is 2. A 2.0.0 install reads nothing of format 1: it
+learns the old format from the install receipt's `state_format_version` and from
+which store files exist, never by opening a store. Without `--reset-state` it is
+blocked with `STATE_FORMAT_BREAK` and changes no file, with or without `--yes`;
+a live lane process (a held `custody.lock`) blocks it regardless. With the
+acknowledgement it deletes the run store and run files, attempt tmp, graph
+journals, mail, claims, the work index and PR contributions, and leaves every
+other path, and every Git worktree and branch, untouched.
+
+- Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`
+- Owner: `src/state_reset.rs`, `src/install.rs`, `install.sh`
+
 ## Release identity
 
 ### Source digest preimage

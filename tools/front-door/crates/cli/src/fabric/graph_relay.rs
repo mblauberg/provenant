@@ -72,14 +72,6 @@ fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> S
     }
 }
 
-fn cutover_refusal(findings: String) -> ServiceError {
-    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-    ServiceError::Facade(FacadeError::GraphRelayRefused {
-        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
-        detail: Some(InvalidInputDetail::CutoverFindings(findings)),
-    })
-}
-
 fn journal_error<E>(_: E) -> ServiceError {
     ServiceError::Facade(FacadeError::io("access graph journal"))
 }
@@ -233,8 +225,6 @@ pub fn serve_with_read(
             {
                 return Ok(serde_json::to_value(receipt)?);
             }
-            provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                .map_err(cutover_refusal)?;
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
             let config =
@@ -428,10 +418,6 @@ pub fn serve_with_read(
                 },
             )
             .map_err(patch_refused)?;
-            if !admitted.replayed {
-                provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                    .map_err(cutover_refusal)?;
-            }
             // Leave time to persist a refusal and deliver it to the caller.
             // The relay's transport reserve alone does not cover journal I/O.
             let now = clock.mono_now();
@@ -2434,117 +2420,6 @@ mod provisioning_tests {
             assert!(
                 matches!(serve(&context, "caller", fresh, budget, &cancel, &clock),
                 Err(error) if error.code() == "graph_relay_unavailable")
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn mixed_legacy_state_allows_receipt_replay_but_refuses_new_child_admission()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution};
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        let project = home.join("project");
-        std::fs::create_dir_all(&project)?;
-        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let context = Context::open(roots, &home, &project)?;
-        let cancel = CancelToken::new();
-        let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-        let reference = format!("{}/caller", context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1,"graph_id":"current","plan_digest":"fixture",
-            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                "launched":true,"key":{"graph_id":"current","node_id":"parent","route_index":0},
-                "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
-                "outcome":null,"launch_actor":"fixture"
-            }]}]
-        }))?;
-        {
-            let mut journal = FileJournal::open(
-                &context.roots.state,
-                context.identity.project,
-                "current",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                review_base: None, extra: Default::default(), integration_base: None,
-                directory: project.clone(),
-                document: serde_json::from_value(json!({
-                    "schema_version":1,"graph_id":"current","template_library":{},
-                    "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
-                }))?,
-            })?;
-            journal.save(&checkpoint)?;
-        }
-        let request = json!({"op":"add","id":"child","use":"task","brief":"Read","idempotency_key":"receipt"});
-        let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
-        std::fs::remove_file(
-            context
-                .roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete"),
-        )?;
-        {
-            let mut journal = FileJournal::open(
-                &context.roots.state,
-                context.identity.project,
-                "legacy",
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            journal.bind(GraphExecution {
-                review_base: None, extra: Default::default(), integration_base: None,
-                directory: project.clone(),
-                document: serde_json::from_value(json!({"schema_version":1,"graph_id":"legacy","nodes":[{"id":"old","access":"read_only","prompt":"Old","route":{"alias":"senior"}}]}))?,
-            })?;
-            journal.save(&serde_json::from_value(json!({"schema_version":1,"graph_id":"legacy","plan_digest":"fixture","nodes":[{"id":"old","state":"pending","worktree":null,"attempts":[]}]}))?)?;
-        }
-        assert!(
-            provenant_fabric_runtime::graph::cutover::pending_guard(&context.roots.state).is_err()
-        );
-        let before = FileJournal::read_checkpoint(
-            &context.roots.state,
-            context.identity.project,
-            "current",
-        )?;
-        let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
-        assert_eq!(replay["node"], receipt["node"]);
-        assert_eq!(replay["revision"], receipt["revision"]);
-        assert_eq!(replay["replayed"], true);
-        let mut fresh = request;
-        fresh["idempotency_key"] = json!("new-child");
-        for request in [
-            fresh,
-            json!({"op":"edit","id":"current","patch":{"schema_version":1,"idempotency_key":"new-edit","nodes":[{"id":"another","use":"task","brief":"More"}]}}),
-        ] {
-            let error = serve(&context, "caller", request, budget, &cancel, &clock)
-                .expect_err("new relay work must be refused");
-            assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
-            let ServiceError::Facade(error) = error else {
-                return Err("expected a facade refusal".into());
-            };
-            assert!(
-                error
-                    .diagnostic()
-                    .detail
-                    .unwrap_or_default()
-                    .contains("/legacy")
-            );
-            assert_eq!(
-                FileJournal::read_checkpoint(
-                    &context.roots.state,
-                    context.identity.project,
-                    "current"
-                )?,
-                before
             );
         }
         Ok(())

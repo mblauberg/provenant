@@ -890,37 +890,9 @@ struct SyncOptions {
 
 pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
     if args.upgrade_preflight {
-        return match upgrade_preflight(globals) {
-            Ok(outcome) if outcome.is_empty() => 0,
-            Ok(outcome) => {
-                let mut output = io::stdout().lock();
-                for warning in &outcome.warnings {
-                    if writeln!(output, "Warning: {warning}").is_err() {
-                        return 1;
-                    }
-                }
-                if outcome.blocking.is_empty() {
-                    return 0;
-                }
-                for finding in &outcome.blocking {
-                    if writeln!(output, "{finding}").is_err() {
-                        return 1;
-                    }
-                }
-                if writeln!(
-                    output,
-                    "Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."
-                )
-                .is_err()
-                {
-                    return 1;
-                }
-                2
-            }
-            Err(error) => {
-                let _ = writeln!(io::stderr().lock(), "Upgrade preflight failed: {error}");
-                1
-            }
+        return match upgrade_preflight(globals, args.reset_state) {
+            Ok(()) => 0,
+            Err(refused) => refused.emit("install", globals),
         };
     }
     match apply_install(args, globals, true, SyncOptions::default()) {
@@ -944,6 +916,17 @@ fn apply_install(
     agents: bool,
     options: SyncOptions,
 ) -> Result<Applied, Refused> {
+    if !args.dry_run
+        && let Some(plan) = reset_gate(globals, args.reset_state)?
+    {
+        crate::state_reset::remove(&plan).map_err(|error| {
+            Refused::Fail(
+                Outcome::Error,
+                "STATE_RESET_FAILED",
+                format!("Cannot remove dropped state: {error}"),
+            )
+        })?;
+    }
     args.source = provenant_core::PathResolver::resolve_existing_ancestor(
         &provenant_os::fs::SystemPathResolver,
         &args.source,
@@ -1308,6 +1291,7 @@ fn sync_accounts(
         adopt_existing: false,
         dry_run,
         upgrade_preflight: false,
+        reset_state: false,
     };
     apply_install(args, globals, false, options).map(Some)
 }
@@ -1537,13 +1521,6 @@ struct UpgradeRunner {
     cwd: PathBuf,
 }
 
-fn pending_upgrade_findings(
-    state: &provenant_core::StateRoot,
-    legacy_only: bool,
-) -> Result<provenant_fabric_runtime::graph::cutover::ClassifiedFindings, String> {
-    provenant_fabric_runtime::graph::cutover::classified_pending_findings(state, legacy_only)
-}
-
 fn installed_state_format_version(targets: &Targets) -> Option<u64> {
     match read_install_receipt(targets) {
         Ok(Some(receipt)) => Some(receipt.state_format_version),
@@ -1551,116 +1528,86 @@ fn installed_state_format_version(targets: &Targets) -> Option<u64> {
     }
 }
 
-#[derive(Debug, Default)]
-struct PreflightOutcome {
-    blocking: Vec<String>,
-    warnings: Vec<String>,
+/// Decide the format break for this host. `Ok(None)` means nothing to reset;
+/// `Ok(Some(plan))` means the reset may proceed and is already described on
+/// stdout. A refusal carries the one typed code and changes nothing.
+fn reset_gate(
+    globals: &cli::Globals,
+    reset_state: bool,
+) -> Result<Option<crate::state_reset::Plan>, Refused> {
+    let (environment, targets) = selected_targets(globals, &[])?;
+    let state = targets.roots.state.as_path();
+    let receipt = installed_state_format_version(&targets);
+    let Some(plan) = crate::state_reset::plan(state, receipt) else {
+        return Ok(None);
+    };
+    let blocked =
+        |message: String| Refused::Fail(Outcome::Refused, crate::state_reset::BLOCKED, message);
+    if let Some(lane) = crate::state_reset::live_lane(state) {
+        return Err(blocked(format!(
+            "A Provenant lane process is live ({}); let it finish or stop it, then rerun",
+            lane.display()
+        )));
+    }
+    let unlanded = unlanded_worktrees(&environment.project);
+    let description = crate::state_reset::describe(&plan, state, &unlanded);
+    if !reset_state {
+        return Err(blocked(format!(
+            "{description}Rerun with --reset-state to delete the dropped state. --yes does not acknowledge it. To keep an archive, copy the state directory first."
+        )));
+    }
+    let _ = write!(io::stderr().lock(), "{description}");
+    Ok(Some(plan))
 }
 
-impl PreflightOutcome {
-    fn is_empty(&self) -> bool {
-        self.blocking.is_empty() && self.warnings.is_empty()
-    }
+/// Linked worktrees holding commits the main checkout does not have, read from
+/// Git. Informational: the reset never touches a worktree or branch.
+fn unlanded_worktrees(project: &Path) -> Vec<String> {
+    let Some(git) = provenant_os::git::git_executable() else {
+        return Vec::new();
+    };
+    let runner = UpgradeRunner {
+        executor: match provenant_os::exec::SystemExecutor::new(1) {
+            Ok(executor) => executor,
+            Err(_) => return Vec::new(),
+        },
+        environment: std::env::vars_os().collect(),
+        cwd: project.to_path_buf(),
+    };
+    let git_output = |directory: &Path, args: &[&str]| {
+        let mut argv = vec![git.as_os_str().to_owned(), "-C".into(), directory.into()];
+        argv.extend(args.iter().map(std::ffi::OsString::from));
+        runner
+            .execute(&argv, None, 65_536, 30)
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+    };
+    // Main checkout first: it is the base the others are compared with.
+    let repositories = crate::graph_support::project_worktrees(project);
+    let Some(main) = repositories.first().cloned() else {
+        return Vec::new();
+    };
+    let Some(base) = git_output(&main, &["rev-parse", "HEAD"]) else {
+        return Vec::new();
+    };
+    repositories
+        .iter()
+        .skip(1)
+        .filter_map(|worktree| {
+            let count = git_output(
+                worktree,
+                &["rev-list", "--count", "HEAD", &format!("^{base}")],
+            )?;
+            (count.parse::<u64>().ok()? > 0).then(|| format!("{} ({count})", worktree.display()))
+        })
+        .collect()
 }
 
-/// Carry the cutover guard's bounded findings into admission diagnostics.
-pub(crate) fn cutover_admission_guard(
-    state: &provenant_core::StateRoot,
-) -> Result<(), provenant_fabric_runtime::coordination::facade::FacadeError> {
-    use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
-    cutover_pending_guard(state).map_err(|error| FacadeError::GraphRelayRefused {
-        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
-        detail: Some(InvalidInputDetail::CutoverFindings(error)),
-    })
+/// Run the gate for the staged binary before it replaces the installed one.
+fn upgrade_preflight(globals: &cli::Globals, reset_state: bool) -> Result<(), Refused> {
+    reset_gate(globals, reset_state).map(|_| ())
 }
 
-pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
-    provenant_fabric_runtime::graph::cutover::pending_guard(state)
-}
-
-/// Inspect the old state with the staged release before it replaces the binary.
-fn upgrade_preflight(globals: &cli::Globals) -> Result<PreflightOutcome, String> {
-    let (environment, targets) = selected_targets(globals, &[]).map_err(|e| format!("{e:?}"))?;
-    let classified = pending_upgrade_findings(&targets.roots.state, false)?;
-    let mut outcome = PreflightOutcome::default();
-
-    outcome.blocking.extend(classified.unreadable);
-
-    // A host without a receipt predates format declarations and gets baseline 1.
-    let installed_version = installed_state_format_version(&targets)
-        .unwrap_or(provenant_records::BASELINE_STATE_FORMAT_VERSION);
-    let legacy = pending_upgrade_findings(&targets.roots.state, true)?;
-    let legacy_graphs: std::collections::BTreeSet<_> = legacy.pending_graphs.into_iter().collect();
-    let legacy_lanes: std::collections::BTreeSet<_> = legacy.live_lanes.into_iter().collect();
-    let declared_break = installed_version != provenant_records::STATE_FORMAT_VERSION;
-
-    for (project, id) in classified.pending_graphs {
-        if declared_break || legacy_graphs.contains(&(project.clone(), id.clone())) {
-            outcome.blocking.push(format!(
-                "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
-            ));
-        } else {
-            outcome
-                .warnings
-                .push(format!("Pending graph {project}/{id} in flight"));
-        }
-    }
-    for lane in classified.live_lanes {
-        if declared_break || legacy_lanes.contains(&lane) {
-            outcome.blocking.push(lane);
-        } else {
-            outcome.warnings.push(lane);
-        }
-    }
-
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| environment.home.join(".config"));
-    if !config.is_absolute() {
-        return Err("XDG_CONFIG_HOME must be absolute".into());
-    }
-    let mut repositories = crate::graph_support::project_worktrees(&environment.project);
-    for binding in
-        provenant_config::registered_projects(&targets.roots).map_err(|e| e.to_string())?
-    {
-        // Bindings name the canonical Git common directory, including bare repos.
-        if let Some(repository) = binding.common_dir().parent().filter(|_| {
-            binding
-                .common_dir()
-                .file_name()
-                .is_some_and(|name| name == ".git")
-        }) {
-            repositories.extend(crate::graph_support::project_worktrees(repository));
-        }
-    }
-    repositories.sort();
-    repositories.dedup();
-    let mut directories = vec![("User", config.join("provenant/presets"))];
-    directories.extend(
-        repositories
-            .into_iter()
-            .map(|repository| ("Repository", repository.join(".provenant/presets"))),
-    );
-    for (kind, presets) in directories {
-        match std::fs::read_dir(&presets) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry.map_err(|e| e.to_string())?;
-                    if entry.path().extension().is_some_and(|ext| ext == "toml") {
-                        outcome
-                            .blocking
-                            .push(format!("{kind} preset to port: {}", entry.path().display()));
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", presets.display())),
-        }
-    }
-    outcome.blocking.sort();
-    outcome.warnings.sort();
-    Ok(outcome)
-}
 impl UpgradeRunner {
     fn execute(
         &self,
@@ -1740,6 +1687,9 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         let mut install_args: Vec<std::ffi::OsString> = vec!["--upgrade".into()];
         if args.yes {
             install_args.push("--yes".into());
+        }
+        if args.reset_state {
+            install_args.push("--reset-state".into());
         }
         let mut source_archive = None;
         let script;
@@ -1855,8 +1805,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             let (command, input) = if let Some(archive) = &source_archive {
                 (
                     format!(
-                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade {} --from-source \"$scratch\" </dev/null",
-                        if args.yes { "--yes" } else { "" }
+                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade {} {} --from-source \"$scratch\" </dev/null",
+                        if args.yes { "--yes" } else { "" },
+                        if args.reset_state {
+                            "--reset-state"
+                        } else {
+                            ""
+                        }
                     ),
                     archive.as_slice(),
                 )
@@ -1977,249 +1932,8 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     // The worktree driver includes this module without registering these tests.
     #[allow(dead_code)]
-    fn cutover_roots(base: &Path) -> Result<provenant_core::Roots, Box<dyn std::error::Error>> {
-        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        Ok(inputs.resolve(&provenant_os::fs::SystemPathResolver)?)
-    }
-
-    #[test]
-    fn cutover_empty_state_is_marked() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let roots = cutover_roots(temp.path())?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert!(
-            roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete")
-                .is_file()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cutover_reads_wal_and_closed_databases_without_mutation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        const CHILD: &str = "PROVENANT_TEST_CUTOVER_READ";
-        if let Some(path) = std::env::var_os(CHILD) {
-            let reader =
-                provenant_fabric_runtime::graph::cutover::read_connection(Path::new(&path))?;
-            assert_eq!(
-                reader.query_row(
-                    "SELECT COUNT(*) FROM attempts WHERE terminal=0",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )?,
-                1
-            );
-            return Ok(());
-        }
-        let observe = |path: &Path| -> Result<(), Box<dyn std::error::Error>> {
-            use provenant_os::exec::{
-                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-            };
-            let argv = [
-                std::env::current_exe()?.into_os_string(),
-                "--exact".into(),
-                "install::tests::cutover_reads_wal_and_closed_databases_without_mutation".into(),
-            ];
-            let mut environment: Vec<_> = std::env::vars_os()
-                .filter(|(key, _)| key != CHILD)
-                .collect();
-            environment.push((CHILD.into(), path.as_os_str().to_owned()));
-            let cwd = std::env::current_dir()?;
-            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
-            options.env = Some(&environment);
-            options.stdout = StreamPolicy::Capture { limit: 65536 };
-            options.stderr = StreamPolicy::Capture { limit: 65536 };
-            let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(
-                output.termination,
-                Termination::Exit(0),
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout.bytes),
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            assert!(!output.timed_out && !output.cancelled);
-            Ok(())
-        };
-        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
-        let path = temp.path().join("run.sqlite3");
-        let writer = rusqlite::Connection::open(&path)?;
-        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project','run','attempt',X'7b7d',0);")?;
-        let snapshot = || -> Result<std::collections::BTreeMap<std::ffi::OsString, Vec<u8>>, std::io::Error> {
-            std::fs::read_dir(temp.path())?.map(|entry| {
-                let entry = entry?;
-                Ok((entry.file_name(), std::fs::read(entry.path())?))
-            }).collect()
-        };
-        let before = snapshot()?;
-        observe(&path)?;
-        assert_eq!(snapshot()?, before);
-        drop(writer);
-        assert!(!path.with_extension("sqlite3-wal").exists());
-        assert!(!path.with_extension("sqlite3-shm").exists());
-        let before = snapshot()?;
-        observe(&path)?;
-        assert_eq!(snapshot()?, before);
-        std::fs::write(&path, b"not a database")?;
-        assert!(provenant_fabric_runtime::graph::cutover::read_connection(&path).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn cutover_remote_template_provenance_is_current_but_upgrade_still_drains()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let roots = cutover_roots(temp.path())?;
-        std::fs::create_dir_all(roots.state.as_path())?;
-        let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
-        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
-        let record = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task", "graph_template_launch":true}});
-        db.execute(
-            "INSERT INTO attempts VALUES ('project','run','attempt',?1,0)",
-            [serde_json::to_vec(&record)?],
-        )?;
-        let attempt = roots.state.as_path().join("runs/run/attempts/attempt");
-        std::fs::create_dir_all(&attempt)?;
-        let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-        let _lock = directory.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert_eq!(
-            super::pending_upgrade_findings(&roots.state, false)?.len(),
-            1
-        );
-        let legacy = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task"}});
-        db.execute(
-            "UPDATE attempts SET record=?1",
-            [serde_json::to_vec(&legacy)?],
-        )?;
-        std::fs::remove_file(
-            roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete"),
-        )?;
-        let error =
-            super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
-        assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
-        assert!(!format!("{error:?}").contains(temp.path().to_str().ok_or("path")?));
-        assert!(
-            error
-                .diagnostic()
-                .detail
-                .unwrap_or_default()
-                .contains("Live lane project/run/attempt")
-        );
-        assert_eq!(
-            super::pending_upgrade_findings(&roots.state, true)?.len(),
-            1
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cutover_distinguishes_template_runs_and_preserves_child_stores()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let roots = cutover_roots(temp.path())?;
-        let project = "11111111111111111111111111111111";
-        let directory = roots
-            .state
-            .as_path()
-            .join(format!("fabric/graphs/{project}"));
-        std::fs::create_dir_all(&directory)?;
-        for path in [
-            roots.state.as_path().to_path_buf(),
-            roots.state.as_path().join("fabric"),
-            roots.state.as_path().join("fabric/graphs"),
-            directory.clone(),
-        ] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let path = directory.join("graph-old-pending-fixture.json");
-        let original = include_bytes!("../tests/fixtures/install/old-pending-checkpoint.json");
-        std::fs::write(&path, original)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        assert!(super::cutover_pending_guard(&roots.state).is_err());
-        assert_eq!(std::fs::read(&path)?, original);
-        let mut record: serde_json::Value = serde_json::from_slice(original)?;
-        record["execution"]["document"]["template_library"] = serde_json::json!({});
-        record["digest"] = serde_json::json!(
-            provenant_records::CanonicalV1::record_digest(
-                "fabric-graph-checkpoint",
-                2,
-                &(&record["checkpoint"], &record["execution"])
-            )?
-            .to_string()
-        );
-        std::fs::write(&path, serde_json::to_vec(&record)?)?;
-        super::cutover_pending_guard(&roots.state)?;
-        let database = roots.state.as_path().join("run.sqlite3");
-        let db = rusqlite::Connection::open(&database)?;
-        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
-        let current =
-            serde_json::to_vec(&serde_json::json!({"context":{"graph_id":"old-pending-fixture"}}))?;
-        db.execute(
-            "INSERT INTO attempts VALUES (?1, 'run', 'attempt', ?2, 0)",
-            rusqlite::params![project, current],
-        )?;
-        let attempt = roots.state.as_path().join("runs/run/attempts/attempt");
-        std::fs::create_dir_all(&attempt)?;
-        let root_directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-        let _root_lock = root_directory.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        super::cutover_pending_guard(&roots.state)?;
-        // A completed parent can still have a detached live attempt. Its
-        // retained template snapshot remains authoritative after settlement.
-        record["checkpoint"]["nodes"][0]["state"] = serde_json::json!("succeeded");
-        record["digest"] = serde_json::json!(
-            provenant_records::CanonicalV1::record_digest(
-                "fabric-graph-checkpoint",
-                2,
-                &(&record["checkpoint"], &record["execution"])
-            )?
-            .to_string()
-        );
-        std::fs::write(&path, serde_json::to_vec(&record)?)?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert!(!directory.join("pending").exists());
-        let child = roots.state.as_path().join("children/legacy");
-        std::fs::create_dir_all(&child)?;
-        let child_attempt = child.join("runs/run/attempts/attempt");
-        std::fs::create_dir_all(&child_attempt)?;
-        let child_directory = provenant_os::fs::Directory::open_anchor(&child_attempt)?;
-        let _child_lock = child_directory.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let child_database = child.join("run.sqlite3");
-        let db = rusqlite::Connection::open(&child_database)?;
-        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project', 'run', 'attempt', X'7b7d', 0);")?;
-        std::fs::remove_file(
-            roots
-                .state
-                .as_path()
-                .join("graph-template-cutover-complete"),
-        )?;
-        assert!(super::cutover_pending_guard(&roots.state).is_err());
-        assert!(child_database.exists());
-        db.execute("UPDATE attempts SET terminal=1", [])?;
-        super::cutover_pending_guard(&roots.state)?;
-        assert!(child_database.exists());
-        Ok(())
-    }
-
     #[test]
     fn home_refusal_has_install_repair() {
         let result = super::home_error_result("install", "HOME must be absolute");

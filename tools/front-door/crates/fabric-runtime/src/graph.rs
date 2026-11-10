@@ -22,7 +22,6 @@ mod budget;
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
 mod composites;
-pub mod cutover;
 mod envelope;
 #[cfg(test)]
 #[path = "graph/forward_compatibility.rs"]

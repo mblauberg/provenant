@@ -427,7 +427,7 @@ fn older_install_receipt_defaults_state_format_version() -> TestResult {
         "asset_digest":source_digest(),"target":"target","toolchain":"toolchain","bin_dir":absolute_path(),
         "harnesses":["codex"],"harness_targets":[harness_target()],"entries":[owned_entry()]});
     let receipt: InstallReceipt = serde_json::from_value(old)?;
-    assert_eq!(receipt.state_format_version, STATE_FORMAT_VERSION);
+    assert_eq!(receipt.state_format_version, BASELINE_STATE_FORMAT_VERSION);
     Ok(())
 }
 
