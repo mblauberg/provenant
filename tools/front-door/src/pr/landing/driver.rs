@@ -977,7 +977,8 @@ mod tests {
         forge.approvals_at_head.clear();
         let target = repo.target.clone();
         let reviewed_base = "b".repeat(40);
-        repo.parents.insert(target.clone(), vec![reviewed_base.clone()]);
+        repo.parents
+            .insert(target.clone(), vec![reviewed_base.clone()]);
         let reviewed = |n: u64| format!("{:040x}", 0xa0 + n);
         for n in [2, 3] {
             let head = format!("{n:040x}");

@@ -256,8 +256,16 @@ mod tests {
     fn unapproved_pull_request_reports_why_it_was_excluded() {
         let mut forge = FakeForge::default();
         forge.pull_requests.insert(7, info(7, "author", "main"));
-        let (selected, reasons) =
-            select_batch_with_reasons(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &[7], &[7], "main", 1, 0).unwrap();
+        let (selected, reasons) = select_batch_with_reasons(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[7],
+            &[7],
+            "main",
+            1,
+            0,
+        )
+        .unwrap();
         assert!(selected.is_empty());
         assert!(reasons[&7].contains("no independent approval"));
     }
@@ -287,7 +295,15 @@ mod tests {
                 },
             ],
         );
-        let error = select_batch(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &[2], "main", 1, 0).unwrap_err();
+        let error = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[2],
+            "main",
+            1,
+            0,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("#1"));
         assert!(forge.merge_attempts.is_empty());
     }
@@ -312,8 +328,16 @@ mod tests {
                 })
                 .collect(),
         );
-        let error =
-            select_batch_with_dependencies(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &[3], &[1, 3], "main", 1, 0).unwrap_err();
+        let error = select_batch_with_dependencies(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[3],
+            &[1, 3],
+            "main",
+            1,
+            0,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("#2"));
     }
     #[test]
@@ -343,7 +367,14 @@ mod tests {
                 }],
             );
         }
-        let selected = select_batch(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &[4, 2, 1, 3], "main", 4, 0)?;
+        let selected = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[4, 2, 1, 3],
+            "main",
+            4,
+            0,
+        )?;
         assert_eq!(
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2]
@@ -369,12 +400,26 @@ mod tests {
             );
             forge.pull_requests.insert(number, pr);
         }
-        let selected = select_batch(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &[3, 2, 1], "main", 1, 0)?;
+        let selected = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[3, 2, 1],
+            "main",
+            1,
+            0,
+        )?;
         assert_eq!(
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2]
         );
-        let selected = select_batch(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &[3, 2, 1], "main", 3, 0)?;
+        let selected = select_batch(
+            &mut forge,
+            &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+            &[3, 2, 1],
+            "main",
+            3,
+            0,
+        )?;
         assert_eq!(
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2, 1]

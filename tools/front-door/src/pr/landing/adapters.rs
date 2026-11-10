@@ -1067,8 +1067,7 @@ impl Repo for GitRepo<'_> {
     fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError> {
         self.ensure(left)?;
         self.ensure(right)?;
-        let (code, out, error) =
-            self.exit(&["merge-base", object_id(left)?, object_id(right)?])?;
+        let (code, out, error) = self.exit(&["merge-base", object_id(left)?, object_id(right)?])?;
         match code {
             0 => object_id(out.trim()).map(|base| Some(base.to_owned())),
             1 => Ok(None),
@@ -1101,7 +1100,10 @@ pub struct DeliveryReviews {
     project: Option<provenant_core::ProjectId>,
 }
 impl DeliveryReviews {
-    pub fn new(root: provenant_core::StateRoot, project: Option<provenant_core::ProjectId>) -> Self {
+    pub fn new(
+        root: provenant_core::StateRoot,
+        project: Option<provenant_core::ProjectId>,
+    ) -> Self {
         Self { root, project }
     }
 }

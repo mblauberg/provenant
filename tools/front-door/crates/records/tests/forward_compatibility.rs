@@ -434,7 +434,8 @@ fn older_install_receipt_defaults_state_format_version() -> TestResult {
 #[test]
 fn receipt_without_changed_paths_and_with_repo_id_loads() -> TestResult {
     let mut value = receipt();
-    value["subject"] = json!({"kind":"pr","repository":ID,"number":1,"head":GIT_OID,"base":GIT_OID});
+    value["subject"] =
+        json!({"kind":"pr","repository":ID,"number":1,"head":GIT_OID,"base":GIT_OID});
     let decoded: workflow::DeliveryReceipt = serde_json::from_value(value.clone())?;
     assert!(decoded.risk().changed_paths().is_empty());
     assert!(

@@ -388,7 +388,11 @@ mod tests {
         forge.heads.insert(2, "head-2".into());
         let c = candidate();
         assert_eq!(
-            revalidate(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &c)?,
+            revalidate(
+                &mut forge,
+                &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+                &c
+            )?,
             vec![c.steps[0].pr.clone(), c.steps[1].pr.clone()]
         );
         forge.heads.insert(1, "head-1".into());
@@ -401,13 +405,27 @@ mod tests {
                 }],
             );
         }
-        assert!(revalidate(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &c)?.is_empty());
+        assert!(
+            revalidate(
+                &mut forge,
+                &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+                &c
+            )?
+            .is_empty()
+        );
         forge
             .pull_requests
             .get_mut(&1)
             .expect("fixture")
             .base_branch = "other".into();
-        assert_eq!(revalidate(&mut forge, &mut Approvals::forge().at(&mut FakeRepo::default(), ""), &c)?, vec![c.steps[0].pr.clone()]);
+        assert_eq!(
+            revalidate(
+                &mut forge,
+                &mut Approvals::forge().at(&mut FakeRepo::default(), ""),
+                &c
+            )?,
+            vec![c.steps[0].pr.clone()]
+        );
         Ok(())
     }
     #[test]

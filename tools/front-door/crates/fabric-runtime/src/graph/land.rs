@@ -8,8 +8,8 @@
 //! asks the chair, who lands by hand; the record keeps who or what authorised it.
 use super::*;
 use crate::config::{LandChoice, LandPolicy, LandSource};
-use provenant_records::run::DeliveryMode;
 use provenant_core::review_cover::Reviewed;
+use provenant_records::run::DeliveryMode;
 use provenant_records::workflow::{ReviewVerdict, RiskTier};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -329,7 +329,9 @@ fn reviewed_head(
                     None => Some(reviewed),
                     Some(prior) if prior.head != reviewed.head => return None,
                     Some(prior) => Some(ReviewedSubject {
-                        base: prior.base.filter(|base| reviewed.base.as_ref() == Some(base)),
+                        base: prior
+                            .base
+                            .filter(|base| reviewed.base.as_ref() == Some(base)),
                         head: prior.head,
                     }),
                 };
@@ -658,9 +660,10 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 journal,
             );
         };
-        if let Some(reason) =
-            acceptance_error(plan, checkpoint, positions, owner, &node.id, &spec.node, &head)
-                .map_err(GraphError::Run)?
+        if let Some(reason) = acceptance_error(
+            plan, checkpoint, positions, owner, &node.id, &spec.node, &head,
+        )
+        .map_err(GraphError::Run)?
         {
             return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
         }

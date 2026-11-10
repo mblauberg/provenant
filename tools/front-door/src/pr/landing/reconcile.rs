@@ -165,7 +165,8 @@ pub fn finish_settled(
         for alarm in &settled.record.alarms {
             alarms.post(alarm)?;
         }
-        let followed = postmerge::follow(forge, repo, approvals, runner, alarms, &mut settled.record);
+        let followed =
+            postmerge::follow(forge, repo, approvals, runner, alarms, &mut settled.record);
         if followed.is_ok() {
             settled.follow_pending = false;
         }
@@ -374,7 +375,16 @@ pub(crate) fn recover_pending_with(
                     s.refusal.clone()
                 }
             });
-            finish_recovery(forge, repo, approvals, runner, alarms, state, &mut attempt, recovered)?;
+            finish_recovery(
+                forge,
+                repo,
+                approvals,
+                runner,
+                alarms,
+                state,
+                &mut attempt,
+                recovered,
+            )?;
             if let Some(reason) = refusal {
                 return Err(LandingError::Refused(reason));
             }
@@ -466,7 +476,16 @@ pub(crate) fn recover_pending_with(
                     record,
                     Some("publication retry refused".into()),
                 )?;
-                finish_recovery(forge, repo, approvals, runner, alarms, state, &mut attempt, recovered)?;
+                finish_recovery(
+                    forge,
+                    repo,
+                    approvals,
+                    runner,
+                    alarms,
+                    state,
+                    &mut attempt,
+                    recovered,
+                )?;
                 return Err(LandingError::Refused("publication retry refused".into()));
             }
             if retry.is_err() {
@@ -652,7 +671,16 @@ pub(crate) fn recover_pending_with(
             record,
             refused.then(|| "publication retry refused".into()),
         )?;
-        finish_recovery(forge, repo, approvals, runner, alarms, state, &mut attempt, recovered)?;
+        finish_recovery(
+            forge,
+            repo,
+            approvals,
+            runner,
+            alarms,
+            state,
+            &mut attempt,
+            recovered,
+        )?;
         if refused {
             return Err(LandingError::Refused("publication retry refused".into()));
         }

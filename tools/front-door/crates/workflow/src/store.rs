@@ -136,10 +136,7 @@ pub fn pull_request_receipts(
     };
     let mut receipts = Vec::new();
     for name in deliveries.entries()? {
-        let Some(delivery) = name?
-            .to_str()
-            .and_then(|name| DeliveryId::parse(name).ok())
-        else {
+        let Some(delivery) = name?.to_str().and_then(|name| DeliveryId::parse(name).ok()) else {
             continue;
         };
         let receipt = match ReceiptStore::new(root.clone(), project, delivery).read() {
