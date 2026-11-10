@@ -44,6 +44,11 @@ and otherwise says how many lines it omitted. `next` is the only source of the
 next command: when a command has none, none is printed. Errors keep their
 repair command and are never compacted.
 
+The default `status` listing never omits an active or needs-attention lane;
+only settled lanes are left out, with their count. The `run` receipt prints one
+`lane: GRAPH/NODE/ATTEMPT` line per launched node (`--json`: `lane_ids`). A
+launch refused before admission prints its recorded route and reason.
+
 Global `--full` means complete detail for the command and nothing else; it
 does not widen `status` to `--all`. `--json` keeps the machine envelope and
 takes precedence over human presentation flags. Explicit help and protocol

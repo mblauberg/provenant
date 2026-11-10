@@ -134,6 +134,55 @@ fn run_headline(
     format!("{graph} {state} model={model} worktree={worktree}")
 }
 
+/// The full `GRAPH/NODE/ATTEMPT` ID of each node's newest launched attempt.
+fn lane_ids(checkpoint: &Value) -> Vec<String> {
+    let graph = checkpoint["graph_id"].as_str().unwrap_or_default();
+    checkpoint["nodes"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(|node| {
+            let attempt = node["attempts"]
+                .as_array()?
+                .iter()
+                .rev()
+                .find_map(|attempt| attempt["attempt_ref"].as_str())?;
+            Some(format!(
+                "{graph}/{}/{}",
+                node["id"].as_str()?,
+                attempt.rsplit('/').next()?
+            ))
+        })
+        .collect()
+}
+
+/// One line per launched lane, within the receipt's row budget.
+fn lane_lines(checkpoint: &Value) -> String {
+    let ids = lane_ids(checkpoint);
+    let mut text: String = ids
+        .iter()
+        .take(provenant_cli::limits::SUMMARY_ROWS)
+        .map(|id| format!("lane: {id}\n"))
+        .collect();
+    if ids.len() > provenant_cli::limits::SUMMARY_ROWS {
+        text += &format!(
+            "{} more lanes in --json\n",
+            ids.len() - provenant_cli::limits::SUMMARY_ROWS
+        );
+    }
+    for node in checkpoint["nodes"].as_array().map_or(&[][..], Vec::as_slice) {
+        if node["advance_error_code"] == "preparation_refused"
+            && let Some(message) = node["advance_error"].as_str()
+        {
+            text += &format!(
+                "refused {}: {message}\n",
+                node["id"].as_str().unwrap_or_default()
+            );
+        }
+    }
+    text
+}
+
 /// The compact `run` result: the headline, unless it was already announced,
 /// then the one next command.
 fn run_human(data: &Value, input: &Value, announced: bool) -> String {
@@ -145,11 +194,12 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     };
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
+    let lanes = lane_lines(&data["checkpoint"]);
     if announced {
-        format!("next: {next}\n")
+        format!("{lanes}next: {next}\n")
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        format!("{headline}\nnext: {next}\n")
+        format!("{headline}\n{lanes}next: {next}\n")
     }
 }
 
@@ -232,6 +282,10 @@ fn invoke(
             && let Some(action) = local_branch_action(&factory, branch)
         {
             result["local_worktree_remedy"] = json!(action);
+        }
+        factory.name_refusal_causes(&mut result);
+        if command == "run" && result["checkpoint"]["graph_id"].is_string() {
+            result["lane_ids"] = json!(lane_ids(&result["checkpoint"]));
         }
         Ok(result)
     })();
@@ -849,16 +903,33 @@ mod tests {
         assert_eq!(
             human,
             "g-1 running model=claude/claude-opus-5-5 worktree=/repo/.worktrees/lane\n\
+             lane: g-1/task/b\n\
              next: provenant status g-1 --wait\n"
         );
-        assert!(human.lines().count() <= 2);
+        assert!(human.lines().count() <= 3);
         assert_eq!(
             run_human(&data, &input, true),
-            "next: provenant status g-1 --wait\n"
+            "lane: g-1/task/b\nnext: provenant status g-1 --wait\n"
         );
+        assert_eq!(lane_ids(&data["checkpoint"]), ["g-1/task/b"]);
         let mut complete = data.clone();
         complete["status"] = json!("complete");
         assert!(run_human(&complete, &input, true).ends_with("next: provenant output g-1\n"));
+    }
+
+    #[test]
+    fn receipt_lists_refused_cause_and_bounds_lane_lines() {
+        let nodes: Vec<_> = (0..15)
+            .map(|n| json!({"id":format!("n{n}"), "state":"running", "attempts":[{"attempt_ref":format!("h/a{n}")}]}))
+            .collect();
+        let text = lane_lines(&json!({"graph_id":"g", "nodes":nodes}));
+        assert_eq!(text.lines().count(), 13, "{text}");
+        assert!(text.contains("lane: g/n0/a0\n"));
+        let refused = json!({"graph_id":"g", "nodes":[
+            {"id":"r", "state":"failed", "advance_error_code":"preparation_refused",
+             "advance_error":"refused. Refused: codex/gpt: allowance spent", "attempts":[]}
+        ]});
+        assert!(lane_lines(&refused).contains("allowance spent"));
     }
 
     #[test]
