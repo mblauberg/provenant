@@ -501,6 +501,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower stops paying for very large contexts sooner but restarts more often, and a restart may lose working state that the handoff does not record; off until a trial shows restart does not lower completion."` |
 | `type` | `"int"` |
 
+## `lanes.github_request_budget`
+
+| Field | Value |
+|---|---|
+| `default` | `100` |
+| `effect` | `"Maximum GitHub requests a lane may make through gh. When the lane makes more requests than this budget, the host stops it with a cause naming the budget. 0 turns the limit off."` |
+| `max` | `10000` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Lower stops a runaway or looping lane before it exhausts the repository's REST quota; higher accommodates lanes with legitimate extensive GitHub interactions."` |
+| `type` | `"int"` |
+
 ## `lanes.isolation`
 
 | Field | Value |

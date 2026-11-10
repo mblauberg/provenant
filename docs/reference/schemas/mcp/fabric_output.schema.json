@@ -668,6 +668,16 @@
             {
               "additionalProperties": false,
               "properties": {
+                "github_requests": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "reason": {
                   "anyOf": [
                     {
@@ -1810,6 +1820,16 @@
             {
               "additionalProperties": false,
               "properties": {
+                "github_requests": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "reason": {
                   "anyOf": [
                     {
