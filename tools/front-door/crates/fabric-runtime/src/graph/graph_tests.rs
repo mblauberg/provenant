@@ -465,6 +465,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        when: Vec::new(),
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,

@@ -3651,7 +3651,8 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
         ("review-panel".into(), vec!["correctness".into()]),
-        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-frame".into(), vec!["false".into()]), ("review-verify".into(), vec!["false".into()]), ("review-synthesis".into(), vec!["false".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
         ("review-advice-correctness".into(), vec![String::new()]),
     ]);
     let compiler = template::Compiler {
@@ -3834,7 +3835,8 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
         ("review-panel".into(), vec!["correctness".into()]),
-        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-frame".into(), vec!["false".into()]), ("review-verify".into(), vec!["false".into()]), ("review-synthesis".into(), vec!["false".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
         ("review-advice-correctness".into(), vec![String::new()]),
     ]);
     let limits = plans::generous();

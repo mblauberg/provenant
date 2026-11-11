@@ -934,15 +934,11 @@ fn launch_resolvers_with(
     let frame = !single && panel.frame;
     let verifiers = if single { 0 } else { panel.verifiers };
     let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
-    resolvers.insert(
-        "review-topology".into(),
-        vec![format!(
-            "f{}-v{}-s{}",
-            u8::from(frame),
-            u8::from(verifiers > 0),
-            u8::from(synthesis)
-        )],
-    );
+    resolvers.extend(provenant_fabric_runtime::graph::when::review_stages(
+        frame,
+        verifiers > 0,
+        synthesis,
+    ));
     resolvers.insert(
         "review-verifiers".into(),
         (1..=verifiers.max(1))

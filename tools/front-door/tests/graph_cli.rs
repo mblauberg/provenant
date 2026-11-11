@@ -816,7 +816,16 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
     fn ids(value: &Value, out: &mut Vec<String>) {
         match value {
             Value::Object(map) => {
-                if let Some(id) = map.get("id").and_then(Value::as_str) {
+                // A stage whose condition does not hold is a skipped row.
+                let skipped = map
+                    .get("when")
+                    .and_then(Value::as_array)
+                    .is_some_and(|terms| {
+                        terms.iter().any(|term| term["expected"] != term["actual"])
+                    });
+                if let Some(id) = map.get("id").and_then(Value::as_str)
+                    && !skipped
+                {
                     out.push(id.to_owned());
                     if matches!(id, "lenses" | "verify") && map.contains_key("composite") {
                         assert_eq!(map["composite"]["min_successful"], 1);
@@ -859,6 +868,15 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
                 expected,
                 "{risk}: {stage}"
             );
+            // Each stage that is off is listed as skipped, with its condition.
+            let listed = result["data"]["skipped"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["node"]
+                        .as_str()
+                        .is_some_and(|id| id.ends_with(&format!("--{stage}")))
+                })
+            });
+            assert_eq!(listed, !expected, "{risk}: {stage} skipped listing");
         }
     }
     Ok(())

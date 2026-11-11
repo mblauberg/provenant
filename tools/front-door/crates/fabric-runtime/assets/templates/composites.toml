@@ -5,77 +5,25 @@ composite_behaviour = "panel"
 doc = "Review through a host-selected topology and lenses."
 exports = [{ node = "selected", outputs = ["result", "findings", "verdict"] }]
 nodes = [
-  { id = "selected", use = "review-shape-${item}", over = "@review-topology", reduce_verdict = true },
+  { id = "selected", use = "review-shape", reduce_verdict = true },
 ]
 
-[review-shape-f0-v0-s0]
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-]
-
-[review-shape-f0-v0-s1]
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-]
-
-[review-shape-f0-v1-s0]
+# One shape serves every topology. The host binds `review-frame`, `review-verify`
+# and `review-synthesis` at launch; a stage whose condition does not hold stays
+# in the graph as a skipped row, and the stages around it ignore it.
+[review-shape]
 reduce_verdict = true
 doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", min_ok = 1, reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+exports = [
+  { node = "lenses", outputs = ["result", "findings", "verdict"], when = { review-synthesis = false } },
+  { node = "verify", outputs = ["result", "findings", "verdict"], when = { review-synthesis = false } },
+  { node = "synthesis", outputs = ["result", "findings", "verdict"], when = { review-synthesis = true } },
 ]
-
-[review-shape-f0-v1-s1]
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", min_ok = 1, reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-  { id = "synthesis", use = "review.synthesis", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }] },
-]
-
-[review-shape-f1-v0-s0]
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
+  { id = "frame", use = "task", when = { review-frame = true }, brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
   { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-]
-
-[review-shape-f1-v0-s1]
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-]
-
-[review-shape-f1-v1-s0]
-reduce_verdict = true
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", min_ok = 1, reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-]
-
-[review-shape-f1-v1-s1]
-doc = "Review with a host-selected framing, verification and synthesis topology."
-exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
-nodes = [
-  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", min_ok = 1, reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-  { id = "synthesis", use = "review.synthesis", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }] },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = 1, reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }] },
 ]
 
 [research-swarm]

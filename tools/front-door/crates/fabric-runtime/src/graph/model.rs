@@ -346,6 +346,9 @@ pub struct GraphNode {
     pub attempt: Option<AttemptSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_group: Option<String>,
+    /// Launch conditions resolved at submission; the node is skipped unless every term holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<WhenTerm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]

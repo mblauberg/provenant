@@ -93,6 +93,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        when: Vec::new(),
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,

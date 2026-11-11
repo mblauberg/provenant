@@ -1481,7 +1481,15 @@ impl Factory {
         patch::scan_for_secrets(&bound_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if input["explain"] == true {
-            return Ok(json!({"document":document}));
+            let skipped = provenant_fabric_runtime::graph::when::skipped_rows(
+                &document,
+                &self.context.config.graph.limits,
+            );
+            return Ok(if skipped.is_empty() {
+                json!({"document":document})
+            } else {
+                json!({"document":document, "skipped":skipped})
+            });
         }
         self.launch_submission(document, input, budget, cancel, announce)
     }

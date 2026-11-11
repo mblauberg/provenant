@@ -51,9 +51,11 @@ mod template_tests;
 mod transitions;
 mod validation;
 mod wait_view;
+pub mod when;
 #[doc(hidden)]
 pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
+pub use when::WhenTerm;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
@@ -795,6 +797,8 @@ struct PlannedNode {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deadline_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    when: Vec<WhenTerm>,
     prompt: String,
     depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "model::is_false")]
@@ -1866,18 +1870,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let single = panel.slots.len() == 1;
                                     // Repair input needs checked dispositions even for
                                     // a single lens. Reuse the existing synthesis step.
-                                    let topology = format!(
-                                        "f{}-v{}-s1",
-                                        u8::from(panel.frame && !single),
-                                        u8::from(panel.verifiers > 0 && !single),
+                                    let verifiers = if single { 0 } else { panel.verifiers };
+                                    let stages = when::review_stages(
+                                        panel.frame && !single,
+                                        verifiers > 0,
+                                        true,
                                     );
-                                    let verifier_ids = if single {
-                                        Vec::new()
-                                    } else {
-                                        (1..=panel.verifiers)
-                                            .map(|index| index.to_string())
-                                            .collect()
-                                    };
+                                    let verifier_ids: Vec<String> = (1..=verifiers.max(1))
+                                        .map(|index| index.to_string())
+                                        .collect();
                                     let slots = panel.slots;
                                     let mut routes = Vec::with_capacity(slots.len());
                                     let mut lenses = Vec::with_capacity(slots.len());
@@ -1909,9 +1910,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let mut resolvers = std::collections::BTreeMap::from([
                                         ("review-panel".into(), lenses.clone()),
                                         ("review-panel-routes".into(), routes),
-                                        ("review-topology".into(), vec![topology]),
                                         ("review-verifiers".into(), verifier_ids),
                                     ]);
+                                    resolvers.extend(stages);
                                     for lens in lenses {
                                         resolvers.insert(
                                             format!("review-advice-{lens}"),

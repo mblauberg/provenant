@@ -293,6 +293,8 @@ pub(super) fn validate_flat_plan(
     if !matches!(document.schema_version, 1 | 2) {
         return Err(AdmissionError::Plan("schema version".into()));
     }
+    let pruned = when::prune(document)?;
+    let document = pruned.as_ref().unwrap_or(document);
     if document
         .context
         .as_ref()
@@ -774,6 +776,7 @@ pub(super) fn validate_flat_plan(
             routes,
             required_verdict: node.required_verdict.clone(),
             deadline_seconds: node.deadline_seconds,
+            when: node.when.clone(),
             require_findings: node.require_findings,
             skip_without_findings: node.skip_without_findings,
         });
@@ -1513,6 +1516,19 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             }
         } else if progress.gate.is_some() && !repair::is_repair(node) || progress.ci.is_some() {
             return Err(bad("only gate nodes may carry gate or CI evidence"));
+        }
+        if !when::holds(&node.when) {
+            // A node its own condition skips is a leaf of the live graph: it
+            // never runs, whatever its former parents do.
+            if progress.state != NodeState::Skipped
+                || !progress.attempts.is_empty()
+                || progress.outputs.is_some()
+            {
+                return Err(bad(
+                    "a node skipped by its when condition has no attempts or outputs",
+                ));
+            }
+            continue;
         }
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
