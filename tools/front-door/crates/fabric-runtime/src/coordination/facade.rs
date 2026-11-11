@@ -200,6 +200,7 @@ pub enum GraphRelayCause {
     RetryUnknownNode,
     RetryUnsettled,
     RetryContainerBrief,
+    RetryBriefNeedsNode,
     RetryInvalidConfiguration,
     ChildDepth,
     WriterParentRequired,
@@ -232,6 +233,9 @@ impl GraphRelayCause {
             Self::RetryUnknownNode => "the selected node does not exist in the graph",
             Self::RetryUnsettled => "the selected node or its subtree has unsettled attempts",
             Self::RetryContainerBrief => "a container retry requires per-leaf brief edits",
+            Self::RetryBriefNeedsNode => {
+                "a graph with several nodes needs --node to say which node's brief to replace"
+            }
             Self::ParentSettled => "the parent node has settled; launch from a running node",
             Self::ChildDepth => {
                 "the child exceeds limits.child_depth; raise the graph's child depth limit"

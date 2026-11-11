@@ -1681,3 +1681,106 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
     }
     Ok(())
 }
+
+/// The newest stored prompt of a graph node, read from its checkpoint.
+fn stored_prompt(rig: &GraphProject, graph: &str, node: &str) -> Result<(String, usize)> {
+    use provenant_core::{RootInputs, StateRoot};
+    use provenant_fabric_runtime::graph::FileJournal;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| *name == *format!("graph-{graph}.json"))
+        })
+        .ok_or("checkpoint file")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let checkpoint = FileJournal::read_checkpoint(&state, project, graph)?.ok_or("checkpoint")?;
+    let prompt = checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .flat_map(|patch| &patch.replaced)
+        .rfind(|candidate| candidate.id == node)
+        .map(|candidate| candidate.prompt.clone())
+        .ok_or("replacement node")?;
+    let previous = checkpoint
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == node)
+        .map_or(0, |candidate| candidate.previous_attempts.len());
+    Ok((prompt, previous))
+}
+
+fn settled_task_graph(rig: &GraphProject) -> Result<String> {
+    let (_, started) = rig.run(&[
+        "run",
+        "old brief",
+        "--use",
+        "task",
+        "--model",
+        "fixture/model",
+        "--wait=10s",
+    ])?;
+    let id = started["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("graph id: {started}"))?;
+    assert_eq!(
+        started["data"]["checkpoint"]["nodes"][0]["state"], "failed",
+        "{started}"
+    );
+    Ok(id.to_owned())
+}
+
+#[test]
+fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
+    for qualified in [true, false] {
+        let rig = GraphProject::new()?;
+        let id = settled_task_graph(&rig)?;
+        let target = if qualified {
+            format!("{id}/task")
+        } else {
+            id.clone()
+        };
+        let brief = "line one\nline two: corrected scope\n";
+        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
+        assert!(output.status.success(), "{target}: {retried}");
+        let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
+        assert_eq!(prompt, brief, "{target}");
+        assert!(previous > 0, "started attempts are kept: {target}");
+    }
+    Ok(())
+}
+
+#[test]
+fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":1,"graph_id":"two-nodes","nodes":[
+        {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--wait=10s")
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let (output, refusal) = rig.run(&["retry", "two-nodes", "--brief", "corrected"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--node")),
+        "{refusal}"
+    );
+    Ok(())
+}
