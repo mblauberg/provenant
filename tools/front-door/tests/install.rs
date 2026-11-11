@@ -1141,11 +1141,7 @@ esac
     let codex = rig.root.join("codex/AGENTS.md");
     fs::write(&codex, "keep my instructions\n")?;
     let guided_args = [args[0].clone(), "--tag".into(), "v1.2.3".into()];
-    let cancelled = rig.execute_os(
-        Path::new("/bin/sh"),
-        &guided_args,
-        Some(b"n\ny\nn\nn\nn\nreplace\n"),
-    )?;
+    let cancelled = rig.execute_os(Path::new("/bin/sh"), &guided_args, Some(b"n\ny\nn\nn\nn\n"))?;
     assert_eq!(code(&cancelled), 2);
     assert_eq!(fs::read_to_string(&codex)?, "keep my instructions\n");
     let guided = rig.execute_os(
