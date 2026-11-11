@@ -31,6 +31,8 @@ Modeling = "Modeling"
 "uncatalogued" = "uncatalogued"
 "unparseable" = "unparseable"
 "URE" = "URE"
+# A deliberately misspelt knob name in the config tolerance tests.
+"concurency" = "concurency"
 # Foundation's String.capitalized, used by the Swift console.
 "capitalized" = "capitalized"
 # Foundation's localized* string APIs and AppKit's Window menu (performMiniaturize, "Minimize").
