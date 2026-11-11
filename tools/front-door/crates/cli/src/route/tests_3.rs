@@ -481,16 +481,12 @@
         )?;
         let error = super::effective_exclusion_rules(&[], &roots).unwrap_err();
         assert!(error.to_string().contains("valid forms"), "{error}");
-        // A malformed list warns and recovers to empty; the flag still applies.
+        // A malformed list is refused rather than recovered to empty.
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.exclude'=['claude', 5]\n",
         )?;
-        assert!(super::effective_exclusion_rules(&[], &roots)?.is_empty());
-        assert_eq!(
-            super::effective_exclusion_rules(&["codex".to_owned()], &roots)?.len(),
-            1
-        );
+        assert!(super::effective_exclusion_rules(&[], &roots).is_err());
         Ok(())
     }
 

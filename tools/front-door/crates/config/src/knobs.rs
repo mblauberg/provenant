@@ -41,11 +41,12 @@ pub(crate) struct Spec {
     pub(crate) values: Vec<String>,
     pub(crate) default: Value,
     /// Grants or bounds capability or authority, so an invalid value takes
-    /// `safe` (else the default) and never a permissive reading of the entry.
+    /// `safe`, never a permissive reading of the entry.
     #[serde(default)]
     strict: bool,
     /// The restrictive value a strict knob takes when its entry is invalid.
-    /// Absent means the registry default is already the restrictive one.
+    /// A strict knob with none has no safe reading, so an invalid entry
+    /// refuses the file.
     #[serde(default)]
     safe: Option<Value>,
     #[serde(default)]
@@ -302,12 +303,45 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     Ok(Value::from(text))
 }
 
-/// What an invalid entry for `name` resolves to: the restrictive value for a
-/// knob that grants or bounds authority, else `None` (the profile or default).
+/// The restrictive value an invalid entry for the strict knob `name` takes.
 pub(crate) fn safe_value(name: &str) -> Option<Value> {
     let spec = registry().ok()?.knobs.get(name)?;
-    spec.strict
-        .then(|| spec.safe.clone().unwrap_or_else(|| spec.default.clone()))
+    spec.strict.then(|| spec.safe.clone()).flatten()
+}
+/// Whether an invalid entry for `name` refuses the file: a strict knob with
+/// no restrictive value, where any fallback could drop what the user set.
+pub(crate) fn refuses_when_invalid(name: &str) -> bool {
+    registry().is_ok_and(|registry| {
+        registry
+            .knobs
+            .get(name)
+            .is_some_and(|spec| spec.strict && spec.safe.is_none())
+    })
+}
+/// Whether some strict knob has no restrictive value, so a malformed `[knobs]`
+/// table cannot be ignored safely.
+pub(crate) fn any_refuses_when_invalid() -> bool {
+    registry().is_ok_and(|registry| {
+        registry
+            .knobs
+            .values()
+            .any(|spec| spec.strict && spec.safe.is_none())
+    })
+}
+/// Every leaf under `[knobs]` by dotted name, so an unquoted `lanes.publish =
+/// false`, which TOML reads as a nested table, is the knob `lanes.publish`.
+fn flatten<'a>(table: &'a dyn TableLike, prefix: &str, out: &mut Vec<(String, &'a Item)>) {
+    for (key, item) in table.iter() {
+        let name = if prefix.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match item.as_table_like() {
+            Some(nested) => flatten(nested, &name, out),
+            None => out.push((name, item)),
+        }
+    }
 }
 
 /// One `[knobs]` entry the resolver ignored; the knob keeps a default.
@@ -348,7 +382,12 @@ pub(crate) fn resolve(
         knobs.insert(name.clone(), value);
     }
     let mut problems = Vec::new();
-    for (name, item) in overrides.into_iter().flat_map(|table| table.iter()) {
+    let mut entries = Vec::new();
+    if let Some(table) = overrides {
+        flatten(table, "", &mut entries);
+    }
+    for (name, item) in entries {
+        let name = name.as_str();
         let Some(spec) = registry.knobs.get(name) else {
             problems.push(KnobProblem {
                 name: name.into(),

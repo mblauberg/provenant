@@ -291,21 +291,34 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
         assert!(inspection.error.is_none());
         assert_eq!(inspection.check.count, 1);
     }
-    // A malformed knobs container holds authority knobs, so every one of them
-    // takes its restrictive value while the container is ignored.
+    // A malformed knobs container holds strict knobs with no restrictive value
+    // (the exclusion lists), so it refuses rather than dropping them.
     for text in [
         "schema_version=1\nknobs=false\n",
         "schema_version=1\nknobs='strict'\n",
     ] {
-        let config = load(&roots, Some(text.as_bytes())).unwrap();
-        assert_eq!(config.warnings.len(), 1, "{text}");
-        assert_eq!(config.warnings[0].rule, "type", "{text}");
-        assert_eq!(config.knobs["lanes.publish"].value, false, "{text}");
-        assert_eq!(config.knobs["lanes.max_depth"].value, 1, "{text}");
-        assert_eq!(
-            config.knobs["lanes.max_concurrency"].source,
-            KnobSource::Default
+        let error = load(&roots, Some(text.as_bytes())).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Schema { location, rule: "type" } if location.key_path == "knobs" && location.line == 2),
+            "{text}: {error:?}"
         );
+    }
+    // A strict knob with no restrictive value refuses an invalid entry,
+    // naming the key and line, so an exclusion is never silently dropped.
+    for name in [
+        "routing.exclude",
+        "routing.flag_exclude",
+        "routing.graph_exclude",
+    ] {
+        for value in ["['claude', 5]", "'claude'", "7"] {
+            let text = format!("schema_version=1\n[knobs]\n'{name}'={value}\n");
+            let error = load(&roots, Some(text.as_bytes())).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Schema { location, rule: "type" }
+                    if location.key_path == format!("knobs.{name}") && location.line == 3),
+                "{text}: {error:?}"
+            );
+        }
     }
     let config = load(
         &roots,
@@ -364,5 +377,42 @@ fn a_misspelt_knob_warns_once_with_the_nearest_name_and_keeps_defaults() {
             .warnings
             .len(),
         1
+    );
+}
+
+#[test]
+fn unquoted_dotted_knob_names_are_the_knob() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    // TOML reads `lanes.publish = false` as `lanes = { publish = false }`; the
+    // restriction must still apply, not be dropped as an unknown key.
+    let text = "schema_version=1\n[knobs]\nlanes.publish = false\nlanes.max_depth = 3\nchair.auto_switch = true\n";
+    let config = load(&roots, Some(text.as_bytes())).unwrap();
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert_eq!(config.knobs["lanes.publish"].value, false);
+    assert_eq!(config.knobs["lanes.publish"].source, KnobSource::Override);
+    assert_eq!(config.knobs["lanes.max_depth"].value, 3);
+    assert_eq!(config.knobs["chair.auto_switch"].value, true);
+    // Each flattened name gets the normal validation.
+    let config = load(
+        &roots,
+        Some(&b"schema_version=1\n[knobs]\nlanes.publish = 'no'\n"[..]),
+    )
+    .unwrap();
+    assert_eq!(config.knobs["lanes.publish"].value, false);
+    assert_eq!(config.warnings.len(), 1);
+    assert_eq!(config.warnings[0].rule, "type");
+    // An unknown nested name warns once, and the nearest valid name is known.
+    let config = load(
+        &roots,
+        Some(&b"schema_version=1\n[knobs]\nlanes.max_concurency = 4\n"[..]),
+    )
+    .unwrap();
+    assert_eq!(config.warnings.len(), 1);
+    assert_eq!(config.warnings[0].rule, "unknown_key");
+    assert_eq!(config.warnings[0].line, 3);
+    assert_eq!(
+        crate::knobs::nearest_knobs("lanes.max_concurency"),
+        ["lanes.max_concurrency"]
     );
 }
