@@ -443,11 +443,7 @@ impl Factory {
                 let scratch = match prepared_scratch {
                     Some(scratch) => scratch.to_path_buf(),
                     None => self
-                        .prepare_scratch(
-                            cancel,
-                            WaitBudget::cli(self.clock.mono_now(), 30)
-                                .map_err(|_| FacadeError::InvalidInput { detail: None })?,
-                        )
+                        .prepare_scratch(cancel)
                         .map_err(scratch_prepare_error)?,
                 };
                 let mut document = if resume {
@@ -1042,11 +1038,16 @@ impl Factory {
         )
     }
 
+    /// Create and exclude project scratch. The exclude lock guards a short
+    /// read-modify-write, so it has its own bounded wait: a caller's `--wait`
+    /// bounds the result, and may already be spent when parallel launches
+    /// queue here (#3232).
     pub(crate) fn prepare_scratch(
         &self,
         cancel: &CancelToken,
-        budget: WaitBudget,
     ) -> Result<PathBuf, provenant_confinement::worktrees::WorktreeError> {
+        let budget = WaitBudget::cli(self.clock.mono_now(), 30)
+            .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidRequest)?;
         // Scratch belongs to the selected checkout, even when the command was
         // invoked from one of its subdirectories. Keep self.cwd unchanged for
         // relative launch arguments and the persisted execution directory.
