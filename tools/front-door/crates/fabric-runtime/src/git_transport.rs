@@ -1,4 +1,4 @@
-//! Bounded Git transport for committed writer results and fenced landing.
+//! Bounded Git transport for committed writer results.
 //!
 //! Every Git child uses bounded OS execution with a fixed executable,
 //! explicit environment, disabled hooks and bounded capture. Transport refs
@@ -6,11 +6,8 @@
 //! ref or command string reaches Git. Peer objects arrive only through `git
 //! fetch` with `fsckObjects` and a forced `index-pack`, so Git's own receive
 //! path refuses corrupt, missing, duplicate or malformed objects.
-use provenant_core::{CancelToken, GitOid, OperationId, ProjectId};
-use provenant_fabric_store::{
-    ClaimFence, Error as StoreError, LandingGuard, PushAction, PushOperation, PushPhase,
-    Request as StoreRequest, Store,
-};
+use provenant_core::{CancelToken, GitOid, OperationId};
+use provenant_fabric_store::Error as StoreError;
 use provenant_os::{
     exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{self, Directory, FsError, LockGuard},
@@ -30,7 +27,6 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_HOME: &str = "/nonexistent";
 const PATH_VALUE: &str = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin";
-const LANDING_REMOTE: &str = "origin";
 
 #[derive(Debug, Error)]
 pub enum GitTransportError {
@@ -60,12 +56,6 @@ pub enum GitTransportError {
     RemoteMoved,
     #[error("configured push URL is unsupported or contains user information")]
     InvalidRemote,
-    #[error("push operation {operation} is unresolved and must be reconciled")]
-    PushUnresolved { operation: OperationId },
-    #[error("push operation {operation} has no durable operation record")]
-    PushNotFound { operation: OperationId },
-    #[error("push reply was not conclusive; operation {operation} remains fenced")]
-    PushUnknown { operation: OperationId },
     #[error("filesystem operation failed")]
     Filesystem(#[from] FsError),
     #[error("Fabric store operation failed")]
@@ -78,11 +68,9 @@ impl GitTransportError {
     /// The existing landing refusal code, independent of its displayed explanation.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::PushUnknown { .. } | Self::PushUnresolved { .. } => "LAUNCH_UNKNOWN",
             Self::Store(error) => {
                 crate::coordination::facade::FacadeError::from(error).static_code()
             }
-            Self::PushNotFound { .. } => "not_found",
             Self::Invalid(_) | Self::InvalidRemote => "invalid_input",
             Self::DirtyWorktree
             | Self::IncompleteRepository
@@ -98,10 +86,6 @@ impl GitTransportError {
             | Self::Filesystem(_)
             | Self::Execution(_) => "io",
         }
-    }
-
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, Self::PushUnknown { .. } | Self::PushUnresolved { .. })
     }
 }
 
@@ -325,128 +309,6 @@ impl<'a> GitTransport<'a> {
                 Ok(())
             }
         }
-    }
-
-    /// Push the acquired landing candidate through the durable store phases.
-    /// The operation's resolved `origin` URL is frozen in the store request.
-    // Keep the held custody proof explicit at this I/O boundary.
-    #[allow(clippy::too_many_arguments)]
-    pub fn push_landing(
-        &self,
-        store: &Store,
-        guard: &LandingGuard,
-        fence: &ClaimFence,
-        repository: &Path,
-        operation: &OperationId,
-        request: &StoreRequest<'_>,
-        cancel: &CancelToken,
-    ) -> Result<PushOperation> {
-        let prior = match store.push_operation(guard.project(), operation, request) {
-            Ok(value) => {
-                if value.request.actor != fence.actor
-                    || value.request.claim != fence.id
-                    || value.request.generation != fence.generation
-                    || value.request.reference != guard.reference()
-                {
-                    return Err(StoreError::StaleFence.into());
-                }
-                if value.phase == PushPhase::Committed {
-                    return Ok(value);
-                }
-                Some(value)
-            }
-            Err(StoreError::NotFound) => None,
-            Err(error) => return Err(error.into()),
-        };
-        let landing = store.verify_landing(guard, fence, request)?;
-        validate_branch_ref(&landing.reference)?;
-        let repository = self.ensure_clean_worktree(repository, cancel)?;
-        self.ensure_commit(&repository, landing.expected, cancel)?;
-        self.ensure_commit(&repository, landing.candidate, cancel)?;
-        if !self.is_ancestor(&repository, landing.expected, landing.candidate, cancel)? {
-            return Err(GitTransportError::NonFastForward);
-        }
-
-        let remote = match &prior {
-            Some(value) => value.request.remote.clone(),
-            None => self.resolve_origin_url(&repository, cancel)?,
-        };
-        validate_remote_url(&remote)?;
-        let current = store.prepare_push(guard, fence, operation, &remote, request)?;
-        if current.phase == PushPhase::Committed {
-            return Ok(current);
-        }
-        if matches!(current.phase, PushPhase::Pushing | PushPhase::Unknown) {
-            return Err(GitTransportError::PushUnresolved {
-                operation: operation.clone(),
-            });
-        }
-        let remote_oid = self.remote_oid(&repository, &remote, &landing.reference, cancel)?;
-        if remote_oid != Some(landing.expected) {
-            return Err(GitTransportError::RemoteMoved);
-        }
-        store.verify_landing(guard, fence, request)?;
-        store.change_push(guard, fence, operation, PushAction::Begin, request)?;
-        self.refuse_url_rewrites(&repository, cancel)?;
-        let lease = format!(
-            "--force-with-lease={}:{}",
-            landing.reference, landing.expected
-        );
-        let refspec = format!("{}:{}", landing.candidate, landing.reference);
-        let args = vec![
-            OsString::from("push"),
-            OsString::from("--porcelain"),
-            OsString::from("--no-verify"),
-            OsString::from("--no-follow-tags"),
-            lease.into(),
-            OsString::from("--"),
-            remote.into(),
-            refspec.into(),
-        ];
-        match self.run_git("push", &repository, &args, None, MAX_TEXT_BYTES, cancel) {
-            Ok(outcome) if outcome.termination == Termination::Exit(0) => {
-                Ok(store.change_push(guard, fence, operation, PushAction::Confirmed, request)?)
-            }
-            _ => {
-                // Once Begin is durable, any process or reply failure is
-                // uncertain. Never release or start a successor from here.
-                let _ = store.change_push(guard, fence, operation, PushAction::Uncertain, request);
-                Err(GitTransportError::PushUnknown {
-                    operation: operation.clone(),
-                })
-            }
-        }
-    }
-
-    /// Reconcile only a durable in-flight/unknown push. No retry is attempted
-    /// when the remote still equals the expected OID; the caller must request it.
-    // Keep the held custody proof explicit at this I/O boundary.
-    #[allow(clippy::too_many_arguments)]
-    pub fn reconcile_landing(
-        &self,
-        store: &Store,
-        guard: &LandingGuard,
-        fence: &ClaimFence,
-        project: ProjectId,
-        operation: &OperationId,
-        request: &StoreRequest<'_>,
-        repository: &Path,
-        cancel: &CancelToken,
-    ) -> Result<PushOperation> {
-        let value = store.push_operation(project, operation, request)?;
-        if !matches!(value.phase, PushPhase::Pushing | PushPhase::Unknown) {
-            return Ok(value);
-        }
-        let remote = value.request.remote.clone();
-        validate_remote_url(&remote)?;
-        let observed = self.remote_oid(repository, &remote, &value.request.reference, cancel)?;
-        Ok(store.change_push(
-            guard,
-            fence,
-            operation,
-            PushAction::Reconcile { remote: observed },
-            request,
-        )?)
     }
 
     fn run_git(
@@ -829,84 +691,6 @@ impl<'a> GitTransport<'a> {
             Err(GitTransportError::InvalidRemote)
         }
     }
-    fn resolve_origin_url(&self, repository: &Path, cancel: &CancelToken) -> Result<String> {
-        self.refuse_url_rewrites(repository, cancel)?;
-        let args = strings(&["remote", "get-url", "--push", "--all", LANDING_REMOTE]);
-        let output = self.require_success(
-            "resolve origin push URL",
-            repository,
-            &args,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
-        let value = one_line(&output.stdout.bytes, "resolve origin push URL")?;
-        let remote = std::str::from_utf8(value)
-            .map_err(|_| GitTransportError::InvalidRemote)?
-            .to_owned();
-        validate_remote_url(&remote)?;
-        if Path::new(&remote).is_absolute() {
-            let canonical = fs::canonicalize(Path::new(&remote))?;
-            return Ok(canonical
-                .to_str()
-                .ok_or(GitTransportError::InvalidRemote)?
-                .to_owned());
-        }
-        Ok(remote)
-    }
-
-    fn remote_oid(
-        &self,
-        repository: &Path,
-        remote: &str,
-        reference: &str,
-        cancel: &CancelToken,
-    ) -> Result<Option<GitOid>> {
-        validate_remote_url(remote)?;
-        self.refuse_url_rewrites(repository, cancel)?;
-        validate_branch_ref(reference)?;
-        let args = vec![
-            OsString::from("ls-remote"),
-            OsString::from("--refs"),
-            OsString::from("--"),
-            remote.into(),
-            reference.into(),
-        ];
-        let output = self.require_success(
-            "remote OID observation",
-            repository,
-            &args,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
-        if output.stdout.bytes.is_empty() {
-            return Ok(None);
-        }
-        let line = one_line(&output.stdout.bytes, "remote OID observation")?;
-        let mut fields = line
-            .split(|byte| byte.is_ascii_whitespace())
-            .filter(|part| !part.is_empty());
-        let oid_text = fields.next().ok_or(GitTransportError::InvalidOutput {
-            command: "remote OID observation",
-        })?;
-        let ref_text = fields.next().ok_or(GitTransportError::InvalidOutput {
-            command: "remote OID observation",
-        })?;
-        if fields.next().is_some() || ref_text != reference.as_bytes() {
-            return Err(GitTransportError::InvalidOutput {
-                command: "remote OID observation",
-            });
-        }
-        let text = std::str::from_utf8(oid_text).map_err(|_| GitTransportError::InvalidOutput {
-            command: "remote OID observation",
-        })?;
-        Ok(Some(GitOid::parse(text).map_err(|_| {
-            GitTransportError::InvalidOutput {
-                command: "remote OID observation",
-            }
-        })?))
-    }
 }
 
 fn strings(values: &[&str]) -> Vec<OsString> {
@@ -936,25 +720,6 @@ fn isolated_ref(operation: &OperationId, leaf: &str) -> Result<String> {
         return Err(GitTransportError::Invalid("transport ref"));
     }
     Ok(value)
-}
-
-fn validate_branch_ref(reference: &str) -> Result<()> {
-    if !reference.starts_with("refs/heads/")
-        || reference.len() > 1024
-        || !reference.is_ascii()
-        || reference
-            .bytes()
-            .any(|byte| byte <= 32 || byte == 127 || b"~^:?*[\\".contains(&byte))
-        || reference.contains("..")
-        || reference.contains("@{")
-        || reference.ends_with('.')
-        || reference
-            .split('/')
-            .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
-    {
-        return Err(GitTransportError::Invalid("landing branch ref"));
-    }
-    Ok(())
 }
 
 fn validate_remote_url(remote: &str) -> Result<()> {
@@ -1609,7 +1374,3 @@ mod tests {
         assert!(validate_remote_url("git@example.test:org/repo.git").is_ok());
     }
 }
-
-#[cfg(test)]
-#[path = "landing_tests.rs"]
-mod landing_tests;

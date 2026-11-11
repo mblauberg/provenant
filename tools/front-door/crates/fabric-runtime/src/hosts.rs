@@ -169,11 +169,6 @@ pub enum CoordinationInput {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
-    Landing {
-        input: LandingInput,
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-    },
 }
 impl CoordinationInput {
     pub fn mutation(&self) -> Option<Mutation> {
@@ -189,15 +184,10 @@ impl CoordinationInput {
             | Self::Claim {
                 input: ClaimInput::Verify { .. } | ClaimInput::List { .. },
                 ..
-            }
-            | Self::Landing {
-                input: LandingInput::Verify { .. } | LandingInput::Wait { .. },
-                ..
             } => None,
             Self::Mail { input: v, .. } => Some(Mutation::Mail(v.clone())),
             Self::Events { input: v, .. } => Some(Mutation::Events(v.clone())),
             Self::Claim { input: v, .. } => Some(Mutation::Claim(v.clone())),
-            Self::Landing { input: v, .. } => Some(Mutation::Landing(v.clone())),
         }
     }
     pub fn execute(
@@ -243,14 +233,6 @@ impl CoordinationInput {
                         extra: Default::default(),
                     })
             }
-            Self::Landing { input: v, .. } => {
-                service
-                    .landing(v.clone(), budget, cancel)
-                    .map(|data| CoordinationResult::Landing {
-                        result: data,
-                        extra: Default::default(),
-                    })
-            }
         }
     }
 }
@@ -270,11 +252,6 @@ pub enum CoordinationResult {
     },
     Claim {
         result: ClaimResult,
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-    },
-    Landing {
-        result: LandingResult,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
@@ -298,7 +275,6 @@ impl CoordinationResult {
             Mutation::Mail(_) => decode!(Mail),
             Mutation::Events(_) => decode!(Events),
             Mutation::Claim(_) => decode!(Claim),
-            Mutation::Landing(_) => decode!(Landing),
         }
     }
 }
@@ -314,10 +290,6 @@ impl From<MutationResult> for CoordinationResult {
                 extra: Default::default(),
             },
             MutationResult::Claim(v) => Self::Claim {
-                result: v,
-                extra: Default::default(),
-            },
-            MutationResult::Landing(v) => Self::Landing {
                 result: v,
                 extra: Default::default(),
             },
@@ -407,13 +379,6 @@ pub enum PeerAction {
         submission: OperationId,
         operation_id: OperationId,
         stop: bool,
-    },
-    LandingPush {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        proof: LandingProof,
-        operation_id: OperationId,
-        reconcile: bool,
     },
     Coordination {
         #[serde(flatten)]
@@ -514,8 +479,7 @@ impl PeerRequest {
         match &self.action {
             PeerAction::Inbox { input, .. } => input.operation_id().cloned(),
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
-            PeerAction::LandingPush { operation_id, .. }
-            | PeerAction::CancelSubmission { operation_id, .. } => Some(operation_id.clone()),
+            PeerAction::CancelSubmission { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
                 input: facade::SubmitInput::Submit { operation_id, .. },
@@ -722,11 +686,6 @@ pub enum PeerResult {
     },
     RunEvents {
         data: crate::runs::RunEventsPage,
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-    },
-    Push {
-        data: provenant_fabric_store::PushOperation,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },

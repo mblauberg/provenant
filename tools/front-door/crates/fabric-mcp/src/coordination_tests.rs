@@ -386,23 +386,6 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
         "fabric_lease",
         json!({"op":"claim_release","proof":work["proof"]}),
     )?;
-    let oid = "a".repeat(40);
-    let landing = call(
-        &mut service,
-        "fabric_lease",
-        json!({"op":"landing_acquire","reference":"refs/heads/main","expected":oid,"candidate":"b".repeat(40),"lease_seconds":1}),
-    )?;
-    let verified = call(
-        &mut service,
-        "fabric_lease",
-        json!({"op":"landing_verify","proof":landing["proof"]}),
-    )?;
-    assert_eq!(verified["landing"]["holder"], json!(actor));
-    call(
-        &mut service,
-        "fabric_lease",
-        json!({"op":"landing_release","proof":landing["proof"]}),
-    )?;
     // F3 is explicitly injected, with no production placeholder.
     assert_eq!(
         call(&mut service, "fabric_context", json!({"op":"inspect"}))?["state"],
@@ -682,20 +665,21 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
     assert_eq!(messages[0]["message"]["sender"], json!(actor));
     assert_eq!(messages[0]["message"]["id"], sent["id"]);
     let held = serde_json::to_value(host.mutate(
-        Mutation::Landing(LandingInput::Acquire {
+        Mutation::Claim(ClaimInput::Acquire {
             extra: Default::default(),
-            reference: "refs/heads/main".into(),
-            expected: provenant_core::GitOid::parse(&"a".repeat(40))?,
-            candidate: provenant_core::GitOid::parse(&"b".repeat(40))?,
+            scope: provenant_fabric_store::WorkScope::Issue {
+                extra: Default::default(),
+                key: "host-claim".into(),
+            },
             lease_seconds: 10,
         }),
-        &provenant_core::OperationId::parse("host-landing")?,
+        &provenant_core::OperationId::parse("host-claim")?,
         budget,
         &CancelToken::new(),
     )?)?;
     let verified = relay_call(
         "fabric_lease",
-        json!({"op":"landing_verify","proof":held["proof"]}),
+        json!({"op":"claim_verify","proof":held["proof"]}),
     )?;
     assert_eq!(verified["result"], "verified");
     let relayed_read = relay_call("fabric_mail", json!({"op":"read","after":0,"limit":10}))?;
@@ -714,14 +698,14 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
             .code(),
         "invalid_input"
     );
-    let landing = crate::lane::Request {
+    let claim = crate::lane::Request {
         tool: "fabric_lease".into(),
-        arguments: json!({"op":"landing_acquire","reference":"refs/heads/main","expected":"a".repeat(40),"candidate":"b".repeat(40),"lease_seconds":1}),
+        arguments: json!({"op":"claim_acquire","scope":{"kind":"issue","key":"lane"},"lease_seconds":1}),
     };
     assert_eq!(
-        relay_call(&landing.tool, landing.arguments)
+        relay_call(&claim.tool, claim.arguments)
             .err()
-            .ok_or("landing accepted")?
+            .ok_or("lane claim accepted")?
             .code(),
         "lane_coordination_refused"
     );

@@ -6,7 +6,7 @@ Anchor: `crates/fabric-store/src/tests.rs`, `crates/fabric-runtime/src/graph.rs`
 `crates/fabric-mcp/src/stdio_tests.rs`
 
 Fabric is the daemonless coordination layer for agents on one user's hosts:
-mail, an event log, advisory claims, fenced landing, bounded graphs,
+mail, an event log, advisory claims, bounded graphs,
 peer hosts over SSH and the stdio MCP server. It grants no authority to
 install, land or run a live provider, and keeps no second run status
 ([run](run.md)). ADRs [0020](../adr/0020-retire-the-daemon-fabric.md),
@@ -45,15 +45,14 @@ directory. The host captures the project and `lane-<attempt>` actor from the
 custody context; request fields and lane environment labels cannot select the
 sender. Mail, event notes and advisory claims use the existing atomic
 operation receipts. Observations of a configured remote home also use this
-relay, preserving the sole owner rather than reading a local mirror. Landing
-verification also uses the host because it requires an OS lock.
+relay, preserving the sole owner rather than reading a local mirror.
 
 Relay frames obey configured input byte/depth limits, absolute I/O deadlines
 and cancellation. After admission the caller confirms its remaining budget
 before the host executes; an abandoned queued request cannot mutate later.
 Graph frames also admit children and read the calling attempt's graph through
 host-owned services; the lane never opens graph journals. The relay excludes
-landing mutations, inbox writes and chair writes. CLI coordination mutations, including `fabric ... send`, still refuse inside lanes. Peer ingress
+inbox writes and chair writes. CLI coordination mutations, including `fabric ... send`, still refuse inside lanes. Peer ingress
 and `peer-agent` remain unavailable to lanes. The socket is removed on normal
 teardown; on restart, a stale socket directory is removed only if it is a real directory owned by the current user with mode 0700.
 - Why (default): a lane must not forge records that the host or another agent trusts.
@@ -1293,32 +1292,6 @@ Pending graphs remain protected from checkpoint retention.
   `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
-## Landing
-
-### Fenced fast-forward push
-
-Landing runs on the home host under a per-ref OS lock, binding a generation
-and token to the expected and candidate OIDs. The operation is marked
-`pushing` first, and expiry cannot admit a successor while it is
-unresolved. The push proves a fast-forward and uses
-`--force-with-lease=<ref>:<expected>`. Landing refuses origin URLs with credentials or
-options. After a lost reply it reconciles the remote OID; without proof, the
-outcome stays unknown and keeps the fence.
-- Why (default): two landers must never overwrite each other's push.
-- Test: `crates/fabric-runtime/src/landing_tests.rs::lost_push_reply_keeps_successor_fenced_until_remote_reconciliation`;
-  `crates/fabric-runtime/src/landing_tests.rs::local_url_rewrite_is_refused_before_it_can_push_to_another_repository`
-- Owner: `crates/fabric-runtime/src/coordination.rs`
-
-### Fence tokens stay secret
-
-The landing fence token comes from `PROVENANT_LANDING_TOKEN`, never an
-argument, and no token reaches an error renderer. `landing wait` never
-acquires the fence.
-- Why (default): argv is visible to every process on the host.
-- Test: `tests/fabric.rs::landing_fence_reads_secret_from_environment_without_a_token_argument`;
-  `tests/fabric.rs::malformed_fence_tokens_never_reach_either_error_renderer`
-- Owner: `src/fabric.rs`
-
 ## Peer hosts
 
 Fabric works across the user's own Macs over SSH; each host keeps running
@@ -1329,7 +1302,7 @@ its own lanes when others sleep.
 Each host is authoritative for the records it created and accepts writes only
 through its own ingress. Only the owner reports liveness, so an unreachable
 peer is `Unknown`, never dead. Each project has one home host for mail,
-tasks, events, claims and landing, with no outbox or election; an
+tasks, events and claims, with no outbox or election; an
 unreachable home is `HomeUnavailable` while local runs continue. A selector
 matching several hosts is refused.
 - Why (default): remote guesses or split-brain state could free a live lane.

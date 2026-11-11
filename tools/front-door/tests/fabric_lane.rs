@@ -216,24 +216,6 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
             .ok_or("remote CLI mail")?
             .is_empty()
     );
-    // A CLI wait above the MCP cap still reaches the owner. Generation zero
-    // advances immediately when no landing exists, keeping this check fast.
-    let waited = host(
-        &rig,
-        &[
-            "fabric",
-            "landing",
-            "wait",
-            "--reference",
-            "refs/heads/main",
-            "--generation",
-            "0",
-            "--wait",
-            "300",
-            "--json",
-        ],
-    )?;
-    assert_eq!(waited["data"]["timed_out"], false);
     drop(relay);
     assert!(!socket.exists());
     assert!(!socket.parent().ok_or("socket parent")?.exists());

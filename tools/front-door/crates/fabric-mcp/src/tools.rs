@@ -7,8 +7,8 @@ use provenant_fabric_runtime::config::Limits;
 pub use provenant_fabric_runtime::coordination::facade::*;
 use provenant_fabric_runtime::coordination::input::{InputError, ValidateInput};
 pub use provenant_fabric_runtime::coordination::{
-    ClaimInput, CoordinationApi, CoordinationError, CoordinationService, EventsInput, LandingInput,
-    MailInput, Mutation,
+    ClaimInput, CoordinationApi, CoordinationError, CoordinationService, EventsInput, MailInput,
+    Mutation,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
 use provenant_fabric_runtime::runs::RunResult;
@@ -255,7 +255,6 @@ pub enum ToolCall {
     Mail(MailInput, Option<OperationId>),
     Events(EventsInput, Option<OperationId>),
     Claim(ClaimInput, Option<OperationId>),
-    Landing(LandingInput, Option<OperationId>),
     RunDetailed(RunInput),
     Run(RunInput),
     Output(OutputInput),
@@ -289,7 +288,6 @@ impl ToolCall {
             Self::Mail(..) => schema::ToolKind::Mail,
             Self::Events(..) => schema::ToolKind::Events,
             Self::Claim(..) => schema::ToolKind::Claim,
-            Self::Landing(..) => schema::ToolKind::Claim,
             Self::RunDetailed(_) => schema::ToolKind::Run,
             Self::Run(_) => schema::ToolKind::Run,
             Self::Output(_) => schema::ToolKind::Output,
@@ -356,8 +354,6 @@ impl ToolCall {
             Self::Claim(ClaimInput::List { limit, .. }, _) => page(*limit),
             Self::Claim(ClaimInput::Acquire { lease_seconds, .. }, _)
             | Self::Claim(ClaimInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
-            Self::Landing(LandingInput::Acquire { lease_seconds, .. }, _)
-            | Self::Landing(LandingInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Run(RunInput::List { limit, .. })
             | Self::RunDetailed(RunInput::List { limit, .. }) => page(u64::from(*limit)),
             Self::GraphDocument(input) | Self::GraphTrace(input) => {
@@ -392,12 +388,6 @@ impl ToolCall {
                         | ClaimInput::Release { .. },
                     _
                 )
-                | Self::Landing(
-                    LandingInput::Acquire { .. }
-                        | LandingInput::Renew { .. }
-                        | LandingInput::Release { .. },
-                    _
-                )
                 | Self::Chair(ChairInput::SummaryUpdate { .. } | ChairInput::LogAppend { .. })
                 | Self::Run(RunInput::Cancel { .. } | RunInput::Resume { .. })
                 | Self::RunDetailed(RunInput::Cancel { .. } | RunInput::Resume { .. })
@@ -422,7 +412,6 @@ impl ToolCall {
             Self::Mail(MailInput::Read { .. }, _)
                 | Self::Events(EventsInput::Read { .. }, _)
                 | Self::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. }, _)
-                | Self::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }, _)
         )
     }
 
@@ -434,13 +423,10 @@ impl ToolCall {
             Self::Mail(input, _) => serde_json::to_value(input)?,
             Self::Events(input, _) => serde_json::to_value(input)?,
             Self::Claim(input, _) => serde_json::to_value(input)?,
-            Self::Landing(input, _) => serde_json::to_value(input)?,
             _ => return Err(CoordinationError::LaneMutation.into()),
         };
         let id = match self {
-            Self::Mail(_, id) | Self::Events(_, id) | Self::Claim(_, id) | Self::Landing(_, id) => {
-                id
-            }
+            Self::Mail(_, id) | Self::Events(_, id) | Self::Claim(_, id) => id,
             _ => return Err(CoordinationError::LaneMutation.into()),
         };
         if let Some(id) = id {
@@ -465,13 +451,6 @@ impl ToolCall {
                     ..
                 },
                 _,
-            )
-            | Self::Landing(
-                LandingInput::Wait {
-                    wait_seconds: seconds,
-                    ..
-                },
-                _,
             ) => *seconds,
             _ => crate::MAX_WAIT_SECONDS,
         };
@@ -489,7 +468,7 @@ impl ToolCall {
     }
 
     /// Host-only entry. The caller binds the service to its sealed attempt;
-    /// parsing remains strict and landing mutations, inbox and execution are excluded.
+    /// parsing remains strict and inbox and execution are excluded.
     pub fn execute_lane_coordination(
         self,
         coordination: &CoordinationService<'_>,
@@ -520,9 +499,6 @@ impl ToolCall {
             )?),
             Self::Claim(input, _) => Ok(serde_json::to_value(
                 coordination.claim(input, budget, cancel)?,
-            )?),
-            Self::Landing(input, _) => Ok(serde_json::to_value(
-                coordination.landing(input, budget, cancel)?,
             )?),
             _ => Err(CoordinationError::LaneMutation.into()),
         }
@@ -681,9 +657,6 @@ impl ToolCall {
             Some(schema::ToolKind::Identity) => parse!(IdentityInput, Identity),
             Some(schema::ToolKind::Mail) => parse!(MailInput, Mail, operation_id.clone()),
             Some(schema::ToolKind::Events) => parse!(EventsInput, Events, operation_id.clone()),
-            Some(schema::ToolKind::Claim) if operation.starts_with("landing_") => {
-                parse!(LandingInput, Landing, operation_id.clone())
-            }
             Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
             Some(schema::ToolKind::Run)
                 if matches!(
@@ -820,7 +793,6 @@ impl ToolCall {
             Self::Mail(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Events(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Claim(input, _) => input.validate_input(WaitTransport::Mcp),
-            Self::Landing(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Run(input) | Self::RunDetailed(input) => input.validate_input(WaitTransport::Mcp),
             Self::Output(input) => input.validate_input(WaitTransport::Mcp),
             Self::Hosts(input) => input.validate_input(WaitTransport::Mcp),
@@ -861,9 +833,7 @@ impl ToolCall {
         }
         if service.in_lane
             && (self.lane_mutation().is_some()
-                || ((service.lane_relay_reads
-                    || matches!(&self, Self::Landing(LandingInput::Verify { .. }, _)))
-                    && self.lane_observation()))
+                || (service.lane_relay_reads && self.lane_observation()))
             && let Some(path) = &service.lane_relay
         {
             let value = self.relay(path, cancel)?;
@@ -878,7 +848,6 @@ impl ToolCall {
                     | Self::Mail(..)
                     | Self::Events(..)
                     | Self::Claim(..)
-                    | Self::Landing(..)
             )
         {
             return Err(CoordinationError::LaneMutation.into());
@@ -1054,28 +1023,6 @@ impl ToolCall {
                         CoordinationApi::mutate(
                             &service.coordination,
                             Mutation::Claim(input),
-                            operation_id,
-                            budget,
-                            cancel,
-                        )?,
-                    )
-                }
-            }
-            Self::Landing(input, operation_id) => {
-                if matches!(
-                    &input,
-                    LandingInput::Verify { .. } | LandingInput::Wait { .. }
-                ) {
-                    response(
-                        tool_name,
-                        service.coordination.landing(input, budget, cancel)?,
-                    )
-                } else {
-                    response(
-                        tool_name,
-                        CoordinationApi::mutate(
-                            &service.coordination,
-                            Mutation::Landing(input),
                             operation_id,
                             budget,
                             cancel,

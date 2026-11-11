@@ -78,17 +78,12 @@ impl<'a> CoordinationService<'a> {
                         input: v,
                         extra: Default::default(),
                     },
-                    Mutation::Landing(v) => CoordinationInput::Landing {
-                        input: v,
-                        extra: Default::default(),
-                    },
                 };
                 Ok(
                     match remote.call(input, Some(id.clone()), budget, cancel)? {
                         CoordinationResult::Mail { result: v, .. } => MutationResult::Mail(v),
                         CoordinationResult::Events { result: v, .. } => MutationResult::Events(v),
                         CoordinationResult::Claim { result: v, .. } => MutationResult::Claim(v),
-                        CoordinationResult::Landing { result: v, .. } => MutationResult::Landing(v),
                     },
                 )
             }
@@ -392,7 +387,6 @@ impl CoordinationApi for CoordinationService<'_> {
     route!(mail, MailInput, MailResult, Mail);
     route!(events, EventsInput, EventsResult, Events);
     route!(claim, ClaimInput, ClaimResult, Claim);
-    route!(landing, LandingInput, LandingResult, Landing);
 }
 
 impl<'a> CoordinationService<'a> {

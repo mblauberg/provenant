@@ -182,17 +182,7 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
             "bad/id",
         ],
         vec!["fabric", "events", "read", "--wait", "14401"],
-        vec![
-            "fabric",
-            "landing",
-            "wait",
-            "--reference",
-            "refs/heads/main",
-            "--generation",
-            "1",
-            "--wait",
-            "0",
-        ],
+        vec!["fabric", "events", "read", "--wait", "0"],
     ] {
         assert_eq!(call(&rig, &args, 2)?["status"], "invalid");
         assert!(!rig.state.exists());
@@ -202,130 +192,11 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
     assert!(
         commands
             .iter()
-            .any(|v| v["command"] == "provenant fabric landing wait")
+            .any(|v| v["command"] == "provenant fabric claim list")
     );
     assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
 }
-#[test]
-fn landing_fence_reads_secret_from_environment_without_a_token_argument() -> Result {
-    let mut rig = TestRig::new()?;
-    let acquired = call(
-        &rig,
-        &[
-            "fabric",
-            "landing",
-            "acquire",
-            "--reference",
-            "refs/heads/main",
-            "--expected",
-            &"a".repeat(40),
-            "--candidate",
-            &"b".repeat(40),
-            "--operation-id",
-            "env-land",
-        ],
-        0,
-    )?;
-    let proof = &acquired["data"]["proof"];
-    let secret = token(proof)?;
-    rig.env
-        .push(("PROVENANT_LANDING_TOKEN".into(), secret.clone().into()));
-    call(
-        &rig,
-        &[
-            "fabric",
-            "landing",
-            "verify",
-            "--reference",
-            "refs/heads/main",
-            "--id",
-            proof["id"].as_str().ok_or("claim")?,
-            "--generation",
-            &proof["generation"].to_string(),
-        ],
-        0,
-    )?;
-    let rejected = call(
-        &rig,
-        &[
-            "fabric",
-            "landing",
-            "verify",
-            "--reference",
-            "refs/heads/main",
-            "--id",
-            proof["id"].as_str().ok_or("claim")?,
-            "--generation",
-            &proof["generation"].to_string(),
-            "--token",
-            &secret,
-        ],
-        2,
-    )?;
-    assert!(!serde_json::to_string(&rejected)?.contains(&secret));
-    Ok(())
-}
-
-#[test]
-fn landing_observation_never_acquires_and_release_is_replayable() -> Result {
-    let mut rig = TestRig::new()?;
-    let acquired = call(
-        &rig,
-        &[
-            "fabric",
-            "landing",
-            "acquire",
-            "--reference",
-            "refs/heads/main",
-            "--expected",
-            &"a".repeat(40),
-            "--candidate",
-            &"b".repeat(40),
-            "--operation-id",
-            "land-1",
-        ],
-        0,
-    )?;
-    let proof = &acquired["data"]["proof"];
-    let id = proof["id"].as_str().ok_or("claim ID")?;
-    let generation = proof["generation"].to_string();
-    let token = token(proof)?;
-    rig.env
-        .push(("PROVENANT_LANDING_TOKEN".into(), token.into()));
-    let released = [
-        "fabric",
-        "landing",
-        "release",
-        "--reference",
-        "refs/heads/main",
-        "--id",
-        id,
-        "--generation",
-        &generation,
-        "--operation-id",
-        "release-1",
-    ];
-    assert_eq!(call(&rig, &released, 0)?, call(&rig, &released, 0)?);
-    let waited = call(
-        &rig,
-        &[
-            "fabric",
-            "landing",
-            "wait",
-            "--reference",
-            "refs/heads/main",
-            "--generation",
-            &generation,
-            "--wait",
-            "14400",
-        ],
-        0,
-    )?;
-    assert_eq!(waited["data"]["timed_out"], false);
-    rig.assert_legacy_unchanged()
-}
-
 #[test]
 fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
     let rig = TestRig::new()?;

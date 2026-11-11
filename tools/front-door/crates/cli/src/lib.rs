@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 use provenant_core::edit_distance;
 pub mod accounts;
-pub mod bench;
 pub mod check;
 pub mod console;
 pub mod domains;
@@ -14,7 +13,6 @@ pub mod run;
 pub mod tracker;
 pub mod wait;
 pub mod workflow;
-pub use bench::Bench;
 pub use fabric::Fabric;
 pub use quota::Quota;
 pub use route::Route;

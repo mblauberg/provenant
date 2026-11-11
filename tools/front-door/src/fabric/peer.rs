@@ -641,51 +641,6 @@ pub fn peer(
                     },
                 }
             }
-            PeerAction::LandingPush {
-                proof,
-                operation_id,
-                reconcile,
-                ..
-            } => {
-                if context
-                    .config
-                    .home_hosts
-                    .get(request.project.key.as_str())
-                    .is_some_and(|h| *h != context.identity.host)
-                {
-                    PeerResult::Error {
-                        data: provenant_fabric_runtime::hosts::PeerResultError {
-                            extra: Default::default(),
-                            error: FacadeError::HomeUnavailable,
-                        },
-                        extra: Default::default(),
-                    }
-                } else {
-                    let executor = SystemExecutor::new(1)?;
-                    match landing_local(
-                        context,
-                        &executor,
-                        proof.clone(),
-                        operation_id,
-                        *reconcile,
-                        request.actor()?,
-                        &clock,
-                        &cancel,
-                    ) {
-                        Ok(value) => PeerResult::Push {
-                            data: value,
-                            extra: Default::default(),
-                        },
-                        Err(error) => PeerResult::Error {
-                            data: provenant_fabric_runtime::hosts::PeerResultError {
-                                extra: Default::default(),
-                                error: landing_error(error.as_ref()),
-                            },
-                            extra: Default::default(),
-                        },
-                    }
-                }
-            }
             PeerAction::Receipt { operation_id, .. } => peer_result(
                 (|| {
                     let store_request = provenant_fabric_store::Request {

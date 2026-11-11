@@ -393,10 +393,6 @@ fn every_mcp_observation_wait_uses_the_transport_cap() {
             json!({"op":"read","limit":1,"wait_seconds":crate::MAX_WAIT_SECONDS}),
         ),
         (
-            "fabric_lease",
-            json!({"op":"landing_wait","reference":"main","generation":1,"wait_seconds":crate::MAX_WAIT_SECONDS}),
-        ),
-        (
             "fabric_run",
             json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"any","wait_seconds":crate::MAX_WAIT_SECONDS}),
         ),
@@ -661,15 +657,9 @@ fn removed_tools_are_unknown_and_merged_operations_are_typed() {
         ToolCall::parse("fabric_context", json!({"op":"hosts","limit":1})),
         Ok(ToolCall::Hosts(_))
     ));
-    for operation in ["claim_acquire", "landing_acquire"] {
-        let input = if operation == "claim_acquire" {
-            json!({"op":operation,"scope":{"kind":"issue","key":"1571"},"lease_seconds":1})
-        } else {
-            json!({"op":operation,"reference":"refs/heads/main","expected":"a".repeat(40),"candidate":"b".repeat(40),"lease_seconds":1})
-        };
-        let call = ToolCall::parse("fabric_lease", input).unwrap();
-        assert_eq!(call.name(), "fabric_lease");
-    }
+    let input = json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1571"},"lease_seconds":1});
+    let call = ToolCall::parse("fabric_lease", input).unwrap();
+    assert_eq!(call.name(), "fabric_lease");
 }
 
 #[test]
