@@ -1,5 +1,0 @@
-## Behaviour changes
-### Commands
-
-- `provenant land` sets the approval a pull request needs by tier: `land.approval_tier` is `none` (CI only), `carry`, `delta` (every change after a review needs a review of that delta) or `auto`, the default, which is `none` for a pull request touching only tests, docs or review-exempt paths and `carry` otherwise. With `land.approval = "receipt"`, a change after a review that touches only tests, docs or review-exempt paths keeps the approval and the landing receipt lists the paths; any other change needs a review of only that delta (`workflow receipt save` takes `delta_from`, the reviewed head, in a `pr` subject). `land --accept-delta REASON` lands a delta no review covers, warns, and records the reason and your forge login in the receipt. (#3196)
-- `provenant land N` now decides approval the way `land A B` does; it used to land without checking. A pull request with no approval that its tier needs is refused, so set `land.approval_tier = "none"` to land on CI alone. (#3196)

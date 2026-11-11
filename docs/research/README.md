@@ -16,9 +16,6 @@ links and verify volatile provider or model claims at the live runtime.
 - [OpenCode Go model admission, 28 October 2026](opencode-go-models.md): provisional MiMo Flash pool membership and catalogue-only MiMo Pro and GLM trials
 - [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md): descriptive provenance snapshot, not implementation authority
 
-The frozen lifecycle routing dataset used by the comparative eval procedure lives at
-[`../evals/lifecycle-routing-2026-07/`](../evals/lifecycle-routing-2026-07/README.md).
-
 ## Acceptance wording
 
 Historical human-acceptance wording in research and eval baselines records the
@@ -34,5 +31,4 @@ policy at the time. Current acceptance is owned by
 | Skill names | `skills/*/SKILL.md` |
 | Fabric | [Fabric Rust design](../specs/fabric.md) |
 | Provider launch and replay coverage | [Provider recordings](../../tools/front-door/tests/fixtures/providers/README.md) |
-| Current skill-portfolio evaluation | [Evaluation appendix](../evals/skill-portfolio-2026/README.md) |
 | Live work, dependencies and user gates | [GitHub issues and Project Status](https://github.com/mblauberg/provenant/issues) |

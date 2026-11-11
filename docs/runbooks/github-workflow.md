@@ -254,8 +254,7 @@ land each pull request on its own green head. Do not merge `main` into a branch
 to land it; update a branch only to resolve a conflict. Each update costs a CI
 run and moves the reviewed head. Batch landing (`provenant land A B`) tests the
 combination when several pull requests overlap. A combined break that shows on
-`main` is fixed forward as a hotfix. For status-check rollup traps, see
-[shell pitfalls](shell-pitfalls.md#shell-pitfalls).
+`main` is fixed forward as a hotfix.
 
 The user review or merge gate applies only when an agent is stuck: split
 verdicts it cannot settle with primary evidence, or a decision outside its
@@ -288,8 +287,7 @@ at runtime. A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
 `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them, though Git
 credential helpers and keychains stay available. `post_merge.revert_forward`
 needs `post_merge.bisect` to name a culprit. Unknown cost never refuses;
-`budget.cap_micros` refuses only priced spend. For a migration from a bespoke lander, see
-[landing migration](landing-migration.md).
+`budget.cap_micros` refuses only priced spend.
 
 `approval_tier` sets how much approval a pull request needs: `none` is CI
 only, `carry` is the receipt rules below, and `delta` also wants a review of
