@@ -167,7 +167,8 @@ succeeds only once the chair merges at the pinned head.
 
 Settled nodes record bounded outputs: a digest of the full stored result, a
 redacted excerpt, and optional verdict, findings, branch and commit. A verdict
-is valid only as one final `VERDICT: TOKEN` line, and invalid evidence fails a
+is valid only as exactly one `VERDICT: TOKEN` line outside fenced blocks,
+wherever it sits; a rejection names what was seen. Invalid evidence fails a
 consuming gate; a matched `required_verdict` cannot override it. Selected
 outputs reach dependants as delimited untrusted data that must fit the prompt
 budget, or the node fails before launch.
