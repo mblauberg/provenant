@@ -126,7 +126,7 @@ def path_reference(word):
         return None
     word = word.split("#", 1)[0].split("::", 1)[0].rstrip(":")
     if not word or re.search(r"\b[A-Z][A-Z_]+\b", word.replace(".md", "")):
-        # Uppercase Markdown filenames (AGENTS.md, HARNESS.md) are literal.
+        # Uppercase Markdown filenames (AGENTS.md, CLAUDE.md) are literal.
         if "/" in word or not word.endswith(".md"):
             return None
     if "/" not in word and not re.search(r"\.(?:md|rs|py|sh|toml|json|jsonl|ya?ml|sql|sb)$", word):

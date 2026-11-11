@@ -1,9 +1,9 @@
 # Provenant repository instructions
 
 This repository is the source of Provenant's global agent rules. They live in
-`GLOBAL-AGENTS.md`, with their depth in `HARNESS.md` beside it, and install as
-the user-level instruction file for each harness. If your harness did not
-already load them, read `GLOBAL-AGENTS.md` now; they apply here unchanged.
+`GLOBAL-AGENTS.md` and install as the user-level instruction file for each
+harness. If your harness did not already load them, read `GLOBAL-AGENTS.md`
+now; they apply here unchanged.
 
 Repository process (tracker, merge policy, verify and release, what a test may
 pin, ambient doctrine rules) is in `MAINTAINING.md`. Task procedures are in

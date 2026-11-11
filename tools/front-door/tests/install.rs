@@ -978,10 +978,6 @@ fn bootstrap_verifies_release_checksum() -> Result {
         release.join("instructions/AGENTS.md"),
         "fixture instructions\n",
     )?;
-    fs::write(
-        release.join("instructions/HARNESS.md"),
-        "fixture constitution\n",
-    )?;
     let recorded = rig.root.join("installed-args");
     let executable = release.join("bin/provenant");
     fs::write(
@@ -1155,7 +1151,7 @@ esac
     let guided = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(
         code(&guided),
@@ -1167,7 +1163,6 @@ esac
         fs::read_to_string(&codex)?,
         "keep my instructions\n\nfixture instructions\n"
     );
-    assert!(fs::read(rig.root.join("codex/HARNESS.md"))?.is_empty());
     assert!(fs::read_to_string(&recorded)?.contains("--harness\ncodex\n"));
     fs::remove_file(&recorded)?;
     fs::create_dir_all(rig.state.join("install"))?;
@@ -1196,7 +1191,7 @@ esac
     let account_setup = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"y\nn\nn\nn\nn\nskip\nskip\nn\nn\n"),
+        Some(b"y\nn\nn\nn\nn\nskip\nn\nn\n"),
     )?;
     assert_eq!(
         code(&account_setup),
@@ -1222,7 +1217,7 @@ esac
     let failed_account = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"y\nn\nn\nn\nn\nreplace\nskip\nreplace\nskip\nn\nn\n"),
+        Some(b"y\nn\nn\nn\nn\nreplace\nreplace\nn\nn\n"),
     )?;
     assert_eq!(code(&failed_account), 17, "{failed_account:?}");
     assert_eq!(
@@ -1256,7 +1251,7 @@ esac
     let failed_app_swap = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&failed_app_swap), 4, "{failed_app_swap:?}");
     assert!(installed_app.join("old-build").exists());
@@ -1301,7 +1296,7 @@ esac
     let failed_restart = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&failed_restart), 4, "{failed_restart:?}");
     assert!(installed_app.join("old-build").exists());
@@ -1322,7 +1317,7 @@ esac
     let failed_copy = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&failed_copy), 4, "{failed_copy:?}");
     assert_eq!(fs::read_to_string(&agent)?, "fake LaunchAgent");
@@ -1335,7 +1330,7 @@ esac
     let failed_restore = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&failed_restore), 4, "{failed_restore:?}");
     assert!(!installed_app.join("old-build").exists());
@@ -1387,7 +1382,7 @@ esac
     let retained_backup = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&retained_backup), 0, "{retained_backup:?}");
     assert!(String::from_utf8_lossy(&retained_backup.stderr.bytes).contains("staging remains"));
@@ -1414,7 +1409,7 @@ esac
     let next_upgrade = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&next_upgrade), 0, "{next_upgrade:?}");
     assert!(fs::read_to_string(&agent)?.contains("Contents/Library/LoginItems/Provenant Menu.app"));
@@ -1453,7 +1448,7 @@ esac
     let unquarantined = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&unquarantined), 4, "{unquarantined:?}");
     let message = String::from_utf8_lossy(&unquarantined.stderr.bytes);
@@ -1520,7 +1515,7 @@ esac
     let no_backup = rig.execute_os(
         Path::new("/bin/sh"),
         &guided_args,
-        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+        Some(b"n\ny\nn\nn\nn\nn\nappend\n"),
     )?;
     assert_eq!(code(&no_backup), 4, "{no_backup:?}");
     let message = String::from_utf8_lossy(&no_backup.stderr.bytes);

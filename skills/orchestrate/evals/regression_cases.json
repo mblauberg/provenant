@@ -18,7 +18,7 @@
     {
       "id": "r102",
       "relation": "positive",
-      "prompt": "A requested second family is unavailable: inspect actual separation and record the independent replacement required by HARNESS.",
+      "prompt": "A requested second family is unavailable: inspect actual separation and record the independent same-family replacement for the same lens.",
       "tags": [
         "degradation"
       ],

@@ -318,7 +318,6 @@ instruction() {
 }
 instructions() {
     instruction "$1/$2" "$release/instructions/AGENTS.md"
-    instruction "$1/HARNESS.md" "$release/instructions/HARNESS.md"
 }
 if "$guided"; then
     for provider in claude codex cursor agy opencode; do

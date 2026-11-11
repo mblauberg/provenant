@@ -19,7 +19,7 @@ cost per template and raise the tier when the task needs it.
 Add `explore` when evidence is thin. End a wave with another `plan` when its
 results could change the shape. Add light independent review per slice and
 full review of the integrated head. Choose lens breadth before provider family,
-meet HARNESS floors and count reviewers at the required author tier. Add
+meet the configured path floors and count reviewers at the required author tier. Add
 `verify` for claims needing falsification and a bounded `repair` plus delta
 review when findings need fixes. Scouting and refactoring are added for a
 concrete need, rather than compulsory phases.

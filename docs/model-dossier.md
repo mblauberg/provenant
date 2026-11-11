@@ -34,7 +34,7 @@ dispatch a leg.
 |---|---|
 | Tiers, roles, efforts, degradation policy | `orchestrate` skill, routing reference |
 | Route catalogue, resolution and receipt behaviour | `provenant route list` and `provenant route resolve` |
-| Review-pressure ladder and risk tiers | `HARNESS.md` |
+| Review-pressure ladder and risk tiers | `provenant run --use review` path floors; `crates/workflow` |
 | Correlated-error caveat on cross-family review | `orchestrate` skill, routing reference |
 
 Nothing above is restated here. If you want to know what a route *must* be, read

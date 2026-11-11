@@ -23,13 +23,13 @@ The frozen lifecycle routing dataset used by the comparative eval procedure live
 
 Historical human-acceptance wording in research and eval baselines records the
 policy at the time. Current acceptance is owned by
-[`HARNESS.md`](../../HARNESS.md).
+[`GLOBAL-AGENTS.md`](../../GLOBAL-AGENTS.md).
 
 ## Current owners
 
 | Subject | Owner |
 |---|---|
-| Harness policy and topology | [`HARNESS.md`](../../HARNESS.md) |
+| Harness policy and topology | [`GLOBAL-AGENTS.md`](../../GLOBAL-AGENTS.md) |
 | Current architecture | [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | Skill names | `skills/*/SKILL.md` |
 | Fabric | [Fabric Rust design](../specs/fabric.md) |

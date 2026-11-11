@@ -11,8 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const OPENCODE_INSTRUCTION_ASSETS: [&str; 2] =
-    ["instructions/AGENTS.md", "instructions/HARNESS.md"];
+const OPENCODE_INSTRUCTION_ASSETS: [&str; 1] = [managed::INSTRUCTION_ASSET];
 
 pub(crate) const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 
@@ -829,14 +828,17 @@ fn rewrite_instruction_array(
             if array.iter().filter(|candidate| *candidate == value).count() > 1 {
                 return Err(InstallError::InvalidConfig("duplicate owned instruction"));
             }
-            for candidate in &assets {
-                if Path::new(text) == old_root.join(candidate) {
-                    asset = Some(candidate.clone());
-                }
-            }
+            // Any owned instructions asset is recognised, including one a
+            // later release retired, so an upgrade can remove it.
+            asset = Path::new(text)
+                .strip_prefix(old_root)
+                .ok()
+                .filter(|relative| relative.parent() == Some(Path::new("instructions")))
+                .map(Path::to_path_buf);
         }
         if let Some(asset) = asset {
-            if !release.files.contains_key(&asset) {
+            let retired = !release.files.contains_key(&asset);
+            if retired && assets.contains(&asset) {
                 return Err(InstallError::Manifest("missing instruction asset"));
             }
             let new_path = root.join(&asset);
@@ -848,7 +850,7 @@ fn rewrite_instruction_array(
                 .enumerate()
                 .any(|(index, candidate)| index != i && candidate.as_str() == Some(new_text));
             let index = i.to_string();
-            if duplicate_new {
+            if duplicate_new || retired {
                 out = crate::splice::set(&out, &["instructions", &index], None)?;
                 plan.changes
                     .entry(path.into())

@@ -210,7 +210,7 @@ flowchart LR
    verifies the final commit and pushes it with its own Git authority.
    `provenant lane deliver ATTEMPT --deliver pr` opens a pull request.
    `provenant pr status` watches CI, and `provenant land` checks CI and merges
-   the verified head. The [review ladder](HARNESS.md) sets review coverage.
+   the verified head. `provenant run --use review` plans review coverage from configurable path floors.
 
 Fabric runs alongside this path. Sessions on one machine, or on peer hosts,
 exchange messages, share tasks and claim work, so two harnesses can split a job
@@ -269,7 +269,7 @@ find into process changes and repeatable evaluations.
 | Document | Covers |
 | --- | --- |
 | [Architecture](docs/ARCHITECTURE.md) | Components, crate map, state root and lifecycle |
-| [`HARNESS.md`](HARNESS.md) | The runtime rules agents follow, including the review ladder |
+| [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) | The standing rules every harness loads |
 | [Specifications](docs/specs/README.md) | Contracts for each subsystem |
 | [Install](docs/runbooks/install.md) | Build, package, install, uninstall and Fabric MCP |
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |

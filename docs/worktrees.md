@@ -2,7 +2,7 @@
 Owner: confinement worktree lifecycle and supervisor custody
 Anchor: [`lifecycle.rs`](../tools/front-door/crates/confinement/src/worktrees/lifecycle.rs), [`custody.rs#Recovery`](../tools/front-door/crates/supervisor/src/custody.rs)
 
-The [constitution](../HARNESS.md) pre-authorises implementation branches and
+The [constitution](../GLOBAL-AGENTS.md) pre-authorises implementation branches and
 linked worktrees. Each worktree has one writer. Worktrees isolate changes;
 they do not expand authority. The [repository workflow](runbooks/github-workflow.md)
 owns integration and landing.

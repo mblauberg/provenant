@@ -144,8 +144,8 @@ model is always excluded from its own alternatives.
 
 ## Councils and retained evidence
 
-`orchestrate` owns when to pair primaries or convene a council; HARNESS owns
-which independent review legs count. The bundled pools include `utility`,
+`orchestrate` owns when to pair primaries or convene a council; the review path
+floors and coverage checker own which independent review legs count. The bundled pools include `utility`,
 `junior`, `senior`, `principal`, `writing` and `design`. A named pool is a
 weighted choice, not an ordered model list. Explicit route lists and
 zero-weight fallbacks have their own ordering semantics.
@@ -302,7 +302,7 @@ provenant output GRAPH
 Use dotted templates such as `review.security` for one lens. A composite uses
 `over = "@review-panel"` for the host-resolved panel. Light slice review precedes
 full review of the integrated head. Lens breadth comes before family spread;
-the chair checks HARNESS floors and records actual routes and substitutions.
+the chair checks the path floors and records actual routes and substitutions.
 A changed head needs delta review. Qualified findings take bounded repair and
 independent re-review; a synthesis cannot waive a failed gate.
 

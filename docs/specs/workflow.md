@@ -62,9 +62,10 @@ measured against all authors.
 
 ### Required coverage by risk
 
-[HARNESS.md](../../HARNESS.md#review-ladder) owns the review ladder. This
-spec describes the current checker counts, which are below the policy floors
-for routine, substantial and terminal work:
+The review planner's path floors and shapes
+(`tools/front-door/crates/routing/assets/review-defaults.toml`) set the review
+a change is planned with. This spec describes the current checker counts,
+which are a minimum beneath that plan:
 
 | Risk | Counted independent passing reviews | Enforced beyond the count |
 |---|---:|---|

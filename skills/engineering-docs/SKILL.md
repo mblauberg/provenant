@@ -53,7 +53,7 @@ Keep only what code cannot say, and link code, schemas and tests.
 Record the decision, its forces and consequences, for architecture alone. Add
 `Overturn when: <fact>` only for a checkable fact that would end the decision;
 never invent one.
-Process goes to its skill or `HARNESS.md`; deferrals and product calls to their
+Process goes to its skill or the global rules; deferrals and product calls to their
 issues. Amend an accepted ADR in place to the current decision, keeping one
 `Changed: YYYY-MM-DD, #issue` line that each amendment replaces. Merge or delete
 superseded ADRs, fix inbound links, index live decisions only, and leave no

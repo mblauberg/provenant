@@ -7,4 +7,4 @@ and record actual routes and terminal outcomes before drawing conclusions.
 The [predecessor dataset and results](predecessor/) cover an earlier catalogue;
 `summary.json` retains its historical evidence. These synthetic cases do not
 measure production task success. Current acceptance is owned by
-[HARNESS](../../../HARNESS.md).
+the [global rules](../../../GLOBAL-AGENTS.md).
