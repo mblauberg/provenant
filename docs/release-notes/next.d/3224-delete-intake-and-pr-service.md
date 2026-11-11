@@ -1,3 +1,0 @@
-## Breaking changes
-### CLI and install
-- Removed the `event-intake` and `pr-reconciler` binaries, the unattended PR service with its settings and launchd unit, and the `PROVENANT_INTAKE_*` variables. Release archives no longer carry `bin/pr-reconciler`, and `package-release` no longer takes `--pr-worker`. `provenant pr watch`, `pr status` and `provenant land` are unchanged, and old intake or service state directories are ignored. If you loaded the PR service unit, unload it once with `launchctl bootout gui/$(id -u)/<its label>` (labels start `dev.provenant.pr.`), or it keeps relaunching the missing worker (#3224)
