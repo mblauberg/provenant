@@ -881,7 +881,7 @@ impl TerminalCause {
             Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
             Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
             Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
-            Self::CloudPlacementRemoved => "cloud placement removed; provenant cloud launch",
+            Self::CloudPlacementRemoved => "cloud placement removed; provenant output ID",
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
             Self::HandoffRefused => "launch handoff refused; provenant output ID",
