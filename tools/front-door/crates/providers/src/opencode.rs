@@ -86,6 +86,9 @@ crate::adapter!(OpenCode, "opencode", prepare, failure_diagnostic);
 const MODEL_ON_WIRE: bool = false;
 
 /// Confirm that the retained database contains the exact session identity.
+/// OpenCode 2.x records a session in `session_v2` and no longer writes the
+/// older `session` table, so either table names it; a table the installed
+/// OpenCode does not have records nothing.
 pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), ProviderError> {
     use rusqlite::{Connection, OpenFlags};
     let db = Connection::open_with_flags(
@@ -95,18 +98,18 @@ pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), Provi
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    let found: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM session WHERE id=?)",
-            [session],
-            |row| row.get(0),
-        )
-        .map_err(|_| ProviderError::UnknownIdentity)?;
-    if found {
-        Ok(())
-    } else {
-        Err(ProviderError::UnknownIdentity)
+    for sql in [
+        "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?)",
+        "SELECT EXISTS(SELECT 1 FROM session WHERE id=?)",
+    ] {
+        let Ok(found) = db.query_row(sql, [session], |row| row.get::<_, bool>(0)) else {
+            continue;
+        };
+        if found {
+            return Ok(());
+        }
     }
+    Err(ProviderError::UnknownIdentity)
 }
 
 /// The answering model from OpenCode's own session record, keyed by the
@@ -1108,6 +1111,67 @@ mod tests {
         assert_eq!(
             observe_model(dir.path(), "ses_z").unwrap(),
             "opencode/opencode-go/mimo-v2.6-flash"
+        );
+    }
+
+    /// OpenCode 2.x keeps a session only in `session_v2`, with its assistant
+    /// turns in `session_message`; the older `session` table is not written.
+    fn seed_v2_only(dir: &std::path::Path, session: &str, provider: &str, model: &str) {
+        let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY); \
+             CREATE TABLE IF NOT EXISTS session_message (session_id TEXT, type TEXT, data TEXT)",
+        )
+        .unwrap();
+        db.execute("INSERT INTO session_v2 VALUES (?)", [session])
+            .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+            (
+                session,
+                format!(
+                    r#"{{"model":{{"id":"{model}","providerID":"{provider}","variant":"default"}}}}"#
+                ),
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn zen_session_recorded_only_in_session_v2_is_found_and_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_v2_only(
+            dir.path(),
+            "ses_zen",
+            "opencode",
+            "deepseek-v4.1-flash-free",
+        );
+        session_exists(dir.path(), "ses_zen").unwrap();
+        assert_eq!(
+            observe_model(dir.path(), "ses_zen").unwrap(),
+            "opencode/opencode/deepseek-v4.1-flash-free"
+        );
+        assert!(matches!(
+            session_exists(dir.path(), "ses_other"),
+            Err(ProviderError::UnknownIdentity)
+        ));
+    }
+
+    #[test]
+    fn go_session_recorded_only_in_session_v2_names_the_go_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_v2_only(dir.path(), "ses_go", "opencode-go", "mimo-v2.6-flash");
+        session_exists(dir.path(), "ses_go").unwrap();
+        // The route requested a Go model: the session must name the Go provider,
+        // so a session that ran on the free provider cannot stand in for it.
+        assert_eq!(
+            observe_model(dir.path(), "ses_go").unwrap(),
+            "opencode/opencode-go/mimo-v2.6-flash"
+        );
+        seed_v2_only(dir.path(), "ses_free", "opencode", "mimo-v2.6-flash");
+        assert_ne!(
+            observe_model(dir.path(), "ses_free").unwrap(),
+            observe_model(dir.path(), "ses_go").unwrap()
         );
     }
 
