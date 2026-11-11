@@ -78,8 +78,9 @@ top-level `windows`) block every configuration write until
 `max_context`, `max_turns` and cache keys are guidance, not kills.
 A graph node's `on_stop` and the graph-wide `limits.continuations` (default 2)
 bound restarts of a stopped writer; `blocked` returns to the chair.
-`lanes.context_handoff_tokens` (off; 200000 suggested) continues a Claude writer
-in a fresh attempt on the same worktree when one call's context reaches it.
+`lanes.context_handoff_tokens` (off; 200000 suggested) stops a Claude writer when
+one call's context reaches it; the graph restarts it on a new route in the same
+worktree, or returns to the chair when the node has no other route.
 
 ## Review panels
 

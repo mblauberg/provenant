@@ -152,6 +152,8 @@ const HOST_NATIVE: &str = "host-native";
 struct Successor {
     routes: Vec<GraphRoute>,
     wake: Option<provenant_core::WallTime>,
+    /// What the ladder chose, when it handed the work off.
+    choice: Option<patch::LadderChoice>,
 }
 
 /// The ladder key of a route the graph itself ran, when the route names one.
@@ -214,14 +216,15 @@ fn depletion_successor(
     ladder_facts: &mut Ladder<'_>,
 ) -> Successor {
     debug_assert!(cause.depleted());
-    let chair = Successor {
-        routes: Vec::new(),
-        wake: None,
-    };
     let declared = || Successor {
         routes: restart_routes(node, progress),
         wake: None,
+        choice: None,
     };
+    // The ladder reads readiness only for the adapters the stopped attempt
+    // probed, so a chair answer may only mean it could not see another route:
+    // the node's own untried routes go first, and the chair is the last resort.
+    let chair = declared;
     // Without a recorded attempt the host has nothing to read facts for, so
     // the declared routes stand in, as for a host that keeps no facts.
     let (Some(attempt), Some(depletion)) = (
@@ -250,7 +253,13 @@ fn depletion_successor(
     }) {
         Ok(Some(facts)) => facts,
         Ok(None) => return declared(),
-        Err(_) => return chair,
+        Err(_) => {
+            return Successor {
+                routes: Vec::new(),
+                wake: None,
+                choice: None,
+            };
+        }
     };
     let mut tried = facts.tried.clone();
     for target in launched
@@ -276,10 +285,48 @@ fn depletion_successor(
         wait_bound_seconds: facts.wait_bound_seconds,
     });
     match step {
-        ladder::DepletionStep::Handoff(handoff) => Successor {
-            routes: vec![target_route(&handoff.target, handoff.effort)],
-            wake: None,
-        },
+        ladder::DepletionStep::Handoff(handoff) => {
+            let choice = patch::LadderChoice {
+                rung: handoff.rung,
+                target: match &handoff.target {
+                    ladder::Target::Route { model, account } => match account {
+                        Some(account) => {
+                            format!("{}/{} ({account})", model.adapter(), model.model())
+                        }
+                        None => format!("{}/{}", model.adapter(), model.model()),
+                    },
+                    ladder::Target::HostNative { name } => format!("{HOST_NATIVE}/{name}"),
+                },
+                tier: handoff.tier.clone(),
+            };
+            // The ladder route first; the node's untried routes stay behind it
+            // as fallbacks, and a host-native route keeps a launchable one
+            // after it, as the plan requires of every host-native route.
+            let first = target_route(&handoff.target, handoff.effort);
+            let mut routes = vec![first.clone()];
+            routes.extend(
+                restart_routes(node, progress)
+                    .into_iter()
+                    .filter(|route| *route != first),
+            );
+            let native = |route: &GraphRoute| route.adapter.as_deref() == Some(HOST_NATIVE);
+            if routes
+                .iter()
+                .enumerate()
+                .any(|(index, route)| native(route) && routes[index + 1..].iter().all(native))
+            {
+                let stopped = ladder::Target::Route {
+                    model: facts.stopped.model.clone(),
+                    account: facts.stopped.account.clone(),
+                };
+                routes.push(target_route(&stopped, facts.stopped.effort.clone()));
+            }
+            Successor {
+                routes,
+                wake: None,
+                choice: Some(choice),
+            }
+        }
         ladder::DepletionStep::WaitUntil { unix_seconds } if facts.wait_bound_seconds.is_some() => {
             let stopped = ladder::Target::Route {
                 model: facts.stopped.model.clone(),
@@ -290,9 +337,10 @@ fn depletion_successor(
                 wake: unix_seconds
                     .checked_mul(1_000_000)
                     .and_then(|micros| provenant_core::WallTime::from_micros(micros).ok()),
+                choice: None,
             }
         }
-        ladder::DepletionStep::WaitUntil { .. } | ladder::DepletionStep::Chair => chair,
+        ladder::DepletionStep::WaitUntil { .. } | ladder::DepletionStep::Chair => chair(),
     }
 }
 
@@ -326,6 +374,7 @@ fn decide(
     let pause = |reason: String| declared(progress).then_some(Settle::Pause(reason));
     let step = cause.next_step(&node.on_stop, facts(&node.id, cause, checkpoint));
     let mut wake = None;
+    let mut ladder = None;
     let routes = match step {
         NextStep::Chair => {
             return pause(if cause == StopCause::Blocked {
@@ -355,6 +404,7 @@ fn decide(
         NextStep::NewRoute if cause.depleted() => {
             let successor = depletion_successor(node, progress, cause, ladder_facts);
             wake = successor.wake;
+            ladder = successor.choice;
             successor.routes
         }
         NextStep::NewRoute => restart_routes(node, progress),
@@ -396,6 +446,7 @@ fn decide(
             node: node.id.clone(),
             cause,
             step,
+            ladder,
         },
     })
 }

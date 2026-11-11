@@ -281,7 +281,7 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(HostNativeUnconfigured, CHAIR),
         once(SpawnFailure, NEW),
         rule(SettlementFailed, CHAIR),
-        once(Lost, CHAIR),
+        rule(Lost, CHAIR),
         rule(Unsettled, CHAIR),
         rule(Quarantined, CHAIR),
     ]
