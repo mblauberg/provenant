@@ -218,14 +218,20 @@ fn depletion_successor(
         routes: Vec::new(),
         wake: None,
     };
+    let declared = || Successor {
+        routes: restart_routes(node, progress),
+        wake: None,
+    };
+    // Without a recorded attempt the host has nothing to read facts for, so
+    // the declared routes stand in, as for a host that keeps no facts.
     let (Some(attempt), Some(depletion)) = (
         progress.attempts.last(),
         ladder::DepletionCause::from_stop(cause),
     ) else {
-        return chair;
+        return declared();
     };
     let Some(reference) = attempt.attempt_ref.as_deref() else {
-        return chair;
+        return declared();
     };
     let launched: Vec<&GraphAttempt> = progress
         .recorded_attempts()
@@ -243,12 +249,7 @@ fn depletion_successor(
         access: node.access,
     }) {
         Ok(Some(facts)) => facts,
-        Ok(None) => {
-            return Successor {
-                routes: restart_routes(node, progress),
-                wake: None,
-            };
-        }
+        Ok(None) => return declared(),
         Err(_) => return chair,
     };
     let mut tried = facts.tried.clone();
