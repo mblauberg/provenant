@@ -1,6 +1,6 @@
 # Providers
 Owner: provenant-providers
-Anchor: [`providers tests`](../../tools/front-door/crates/providers/src/tests.rs); [`cloud.rs`](../../tools/front-door/crates/providers/src/cloud.rs)
+Anchor: [`providers tests`](../../tools/front-door/crates/providers/src/tests.rs)
 
 Owner-side setup that a provider's launch refusal points here for. Adapters,
 capabilities and routes are listed by `provenant route list`; confinement and
@@ -125,43 +125,9 @@ directories from `exec_roots` in the same project table (ignored entries warn);
 neither changes PATH. For host-wide write grants use `[domains.run]
 writer_writes` with real paths (`/private/tmp`, not `/tmp`).
 
-## Cloud placement
+## Cloud sessions
 
-Cloud jobs run verification or a remote writer. Install and log in to the
-provider CLI and make sure the local `origin` is the intended repository; never
-put credentials in prompts or placement settings. Pass the placement as a `--set`
-on the default task template, with `--explain` first:
-
-```sh
-provenant run --file brief.md --mode read-only --explain \
-  --set "attempt.cloud={target='codex-cloud',provider='codex',environment='ENV',repository='OWNER/REPO',branch='main',model='MODEL',deadline_seconds=1800}"
-```
-
-For hosted Claude use `target='claude-hosted',provider='claude'` and omit
-`environment` (a `ccpool_...` ID selects a self-hosted pool). A writer takes
-`--mode worktree-write`, a named `work_branch` that is not the base branch
-(dispatch refuses otherwise), and a longer deadline. The job runs at the current
-checkout's commit, so push that commit to `origin` first. Deliver a writer with
-`provenant lane deliver ATTEMPT --deliver push`.
-
-A writer job pushes to `work_branch`, never with force and never to the default
-branch, and settles only after the reported head is verified on the remote and
-descends from the starting commit (else `cloud writer push not verified`).
-Required CI on that head still decides; a cloud result never replaces it. After
-a restart `provenant reconcile --id ATTEMPT` observes saved jobs.
-
-- Claude has no status CLI. The job's result commit message ends with
-  `Provenant-Cloud-Result: <one-line JSON>` and a finished job settles at the
-  next `reconcile`. Hosted Claude may allow only `claude/*` branch names. An
-  unfinished job past its deadline becomes `cloud_unknown`; open the session URL
-  it prints. A setup script tied to another repository stops the session before
-  Claude Code starts and shows only as `cloud_unknown`.
-- Codex returns its result in `.provenant-cloud-result.json`. If `codex cloud`
-  lists no environments, set `[providers.codex.cloud] transport = "thread"` (and
-  optional `command`, default `codex-cloud-task`) in the state-root `config.toml`.
-- Neither provider confirms cancellation. Compare `observed_model_status` before
-  relying on a requested model.
-
-The job runs `scripts/cloud-verify` to record its result;
-`scripts/cloud-environment [REPOSITORY]` prints a checklist for creating the
-provider environment in the provider's interface.
+Provenant does not place lanes or graph nodes in a provider's cloud. To hand a
+brief to a cloud session and later take its branch back, use
+`provenant cloud launch` and `provenant cloud collect`; per-repository setup is
+in [Cloud launch](cloud-launch.md).

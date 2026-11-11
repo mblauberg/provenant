@@ -231,9 +231,6 @@ impl WorkContext {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
-    /// Cloud custody is sealed with the request before an attempt can launch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud: Option<CloudPlacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
     #[serde(flatten)]
@@ -276,26 +273,6 @@ pub struct TaskRequest {
     /// Dispatch-time access beyond the mode's defaults.
     #[serde(default, skip_serializing_if = "LaneAccess::is_default")]
     pub access: LaneAccess,
-}
-
-/// Provider-independent cloud target snapshot used for restart recovery.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloudPlacement {
-    pub target: String,
-    pub provider: String,
-    #[serde(default)]
-    pub environment: String,
-    pub repository: String,
-    /// Base branch the job starts from and may merge.
-    pub branch: String,
-    pub model: String,
-    pub effort: Option<String>,
-    pub deadline_seconds: u64,
-    /// Named branch a writer job commits to and pushes without force. Dispatch
-    /// fills it from the delivery branch or the writer's branch; a platform
-    /// that restricts names may push elsewhere, and the result says where.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_branch: Option<String>,
 }
 
 /// Network reach for a lane's provider and the tools it runs.
@@ -1417,12 +1394,6 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
-    /// Cloud evidence projected by the host; never a local process observation.
-    #[serde(skip)]
-    pub cloud_observation: Transient<Option<CloudObservation>>,
-    /// Redacted cloud job details observed by the host.
-    #[serde(skip)]
-    pub cloud_view: Transient<Option<serde_json::Value>>,
     /// Transient guardian observation. It is carried over live peer reads but
     /// is never stored in the durable attempt record.
     #[serde(skip)]
@@ -1499,41 +1470,6 @@ impl AttemptRecord {
         self.applied_route.as_ref()?.extra.get("user_skills")
     }
 }
-/// A host view of an advisory cloud job, never a local supervisor exit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloudObservation {
-    Submitting,
-    Running,
-    Passed,
-    Failed,
-    SetupFailed,
-    Cancelled,
-    Abandoned,
-    CancellationUnconfirmed,
-    Unknown,
-}
-impl CloudObservation {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Passed | Self::Failed | Self::SetupFailed | Self::Cancelled | Self::Abandoned
-        )
-    }
-    pub fn state(self) -> &'static str {
-        match self {
-            Self::Submitting => "cloud_submitting",
-            Self::Running => "cloud_running",
-            Self::Passed => "cloud_passed",
-            Self::Failed => "cloud_failed",
-            Self::SetupFailed => "cloud_setup_failed",
-            Self::Cancelled => "cloud_cancelled",
-            Self::Abandoned => "cloud_abandoned",
-            Self::CancellationUnconfirmed => "cloud_cancellation_unconfirmed",
-            Self::Unknown => "cloud_unknown",
-        }
-    }
-}
-
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
 /// record compare differently.
@@ -1757,7 +1693,6 @@ mod tests {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
-                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,

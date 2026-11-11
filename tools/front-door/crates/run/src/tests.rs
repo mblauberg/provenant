@@ -105,56 +105,6 @@ fn host_facts_can_override_resource_and_process_observations() {
 }
 
 #[test]
-fn cloud_storage_is_attempt_scoped_and_locked() -> TestResult {
-    use provenant_os::fs::{LockMode, PublishMode};
-    use std::ffi::OsStr;
-
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context, &call)?;
-    let input = input();
-    store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
-    assert!(store.with_cloud_storage(id, false, &call, |_| ()).is_err());
-    assert!(
-        attempt
-            .metadata_at(OsStr::new("cloud.lock"), false)
-            .unwrap_err()
-            .is_not_found()
-    );
-    store.with_cloud_storage(id, true, &call, |cloud| {
-        assert!(matches!(
-            attempt.try_lock(OsStr::new("cloud.lock"), LockMode::Exclusive),
-            Err(provenant_os::fs::FsError::LockTimeout { .. })
-        ));
-        cloud
-            .atomic_write(
-                OsStr::new("cloud-job.json"),
-                ".tmp-",
-                b"job",
-                PublishMode::NoReplace,
-            )
-            .unwrap()
-            .require_durable()
-            .unwrap();
-    })?;
-    let saved = store.with_cloud_storage(id, false, &call, |cloud| {
-        cloud.read_stable(OsStr::new("cloud-job.json"), 1024)
-    })??;
-    assert_eq!(saved, b"job");
-    assert!(
-        store
-            .with_cloud_storage(AttemptId::from_bytes([9; 16]), false, &call, |_| ())
-            .is_err()
-    );
-    Ok(())
-}
-
-#[test]
 fn command_identity_is_verified_without_manufacturing_model_evidence() {
     let route = RouteRecord {
         provider: Some("command".into()),
@@ -421,7 +371,6 @@ pub(super) fn input() -> PreparedRun {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
-                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,

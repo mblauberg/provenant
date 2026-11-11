@@ -26,8 +26,6 @@ use std::{
 };
 
 mod cancel;
-pub mod cloud_owner;
-pub mod cloud_store;
 mod holder;
 mod launch;
 mod output;

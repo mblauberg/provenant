@@ -780,7 +780,6 @@ fn submit_with_launcher(
                 ));
             }
             Ok(run::DispatchTask {
-                cloud: attempt.placement,
                 context: task.context,
                 build_heavy: attempt.build_heavy,
                 profile: task_profile,

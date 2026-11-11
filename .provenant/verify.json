@@ -49,15 +49,6 @@
       ],
       "package": "provenant",
       "binary": "graph_provider"
-    },
-    {
-      "paths": [
-        "tools/front-door/crates/cli/src/run/cloud*",
-        "tools/front-door/crates/providers/src/cloud*",
-        "tools/front-door/tests/cloud_adapter.rs"
-      ],
-      "package": "provenant",
-      "binary": "cloud_adapter"
     }
   ],
   "runners": {

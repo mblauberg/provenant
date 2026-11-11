@@ -108,7 +108,6 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
-                    cloud: None,
                     context: None,
                     extra: Default::default(),
                     build_heavy: false,

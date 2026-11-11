@@ -7,6 +7,7 @@ mod graph_support;
 mod build_slot;
 mod chair;
 mod checks;
+mod cloud;
 #[cfg(test)]
 mod compose_tests;
 mod console;
@@ -1247,7 +1248,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 &inv.leaf,
                 Outcome::Refused,
                 "GRAPH_REQUIRED",
-                "retained non-graph lanes are read-only; use reconcile --id <attempt> for a retained cloud submission",
+                "retained non-graph lanes are read-only; use `provenant reconcile --id <attempt>` to recover one",
                 globals,
             )
         }
@@ -1530,6 +1531,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Tick => tick::run(globals, process.workers()),
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
+        Command::Cloud(command) => cloud::run(command, globals),
         Command::Tracker(command) => tracker::run(command, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),

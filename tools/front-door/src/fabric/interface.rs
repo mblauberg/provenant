@@ -182,6 +182,11 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     }
     let typed: provenant_fabric_runtime::graph::AttemptSpec =
         decode_input(attempt.clone(), "attempt")?;
+    if typed.names_cloud_placement() {
+        return Err(FacadeError::invalid(
+            InvalidInputDetail::CloudPlacementRemoved,
+        ));
+    }
     for (field, invalid_value) in [
         (
             "attempt.provider_timeout",
@@ -497,9 +502,10 @@ impl Factory {
             if host != local
                 && (node.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     || node.worktree.is_some()
-                    || node.attempt.as_ref().is_some_and(|attempt| {
-                        attempt.placement.is_some() || attempt.new_worktree.is_some()
-                    }))
+                    || node
+                        .attempt
+                        .as_ref()
+                        .is_some_and(|attempt| attempt.new_worktree.is_some()))
             {
                 return Err(FacadeError::WorktreeNotApplicable);
             }

@@ -42,50 +42,6 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     Ok(())
 }
 #[test]
-fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut input = two_tasks(2);
-    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
-        target: "target".into(),
-        provider: "fake".into(),
-        environment: "env".into(),
-        repository: "owner/repo".into(),
-        branch: "main".into(),
-        model: "model".into(),
-        effort: None,
-        deadline_seconds: 3600,
-        work_branch: None,
-    });
-    store.create(&input, &call)?;
-    let fake = Fake {
-        refuse: true,
-        ..Fake::default()
-    };
-    let started = store.start_checked(
-        input.run_id,
-        &input.request,
-        &fake,
-        &|_, _| unreachable!(),
-        &call,
-    )?;
-    assert!(
-        matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == input.attempts[1].attempt_id)
-    );
-    assert_eq!(fake.prepared.get(), 1);
-    assert!(matches!(
-        store.cancel(input.attempts[0].attempt_id, "stop", &call)?,
-        CancelReceipt::Unobservable { .. }
-    ));
-    assert!(matches!(
-        store.record(input.attempts[0].attempt_id, &call)?.state,
-        AttemptState::Queued { .. }
-    ));
-    Ok(())
-}
-#[test]
 fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

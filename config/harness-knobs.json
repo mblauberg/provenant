@@ -74,13 +74,6 @@
       "min_monthly_allowance_usd": {"type": "int", "allowed": "0 or more; 0 disables the floor", "default": "60", "effect": "Lowest documented monthly allowance an OpenCode Go model needs to be routed or selected; a model with an unknown allowance is refused while the floor is on"}
     }
   },
-  "host_codex_cloud_settings": {
-    "path": "providers.codex.cloud",
-    "settings": {
-      "transport": {"type": "string", "allowed": "official or thread", "default": "official", "effect": "official uses codex cloud exec, status and list; thread uses a client for the cloud thread API"},
-      "command": {"type": "string", "allowed": "one executable name or path; no arguments", "default": "codex for official, codex-cloud-task for thread", "effect": "Cloud client executable, resolved through the host PATH"}
-    }
-  },
   "provider_updates": {
     "path": "providers.<id>",
     "provider_ids": ["claude", "codex", "cursor", "agy", "opencode"],

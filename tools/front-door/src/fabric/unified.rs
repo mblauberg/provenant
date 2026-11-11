@@ -1570,7 +1570,7 @@ fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value])
         let Some(attempt) = node
             .attempt
             .as_ref()
-            .filter(|attempt| attempt.host.is_none() && attempt.placement.is_none())
+            .filter(|attempt| attempt.host.is_none())
         else {
             continue;
         };

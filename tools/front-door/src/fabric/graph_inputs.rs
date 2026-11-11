@@ -267,31 +267,7 @@ pub(super) fn materialise(
                 continue;
             };
             if owner_host == host.to_string() {
-                let cloud = session
-                    .store
-                    .record(attempt, &call)
-                    .map_err(super::run_error)
-                    .and_then(|record| {
-                        provenant_cli::run::cloud_owner::placement(&session.store, &record, &call)
-                            .map_err(|_| FacadeError::InvalidInput { detail: None })
-                    });
-                match cloud {
-                    Ok(Some(_)) => read_remote(
-                        &mut owner,
-                        AttemptTarget {
-                            extra: Default::default(),
-                            host: Some(host),
-                            attempt,
-                        },
-                        budget,
-                        cancel,
-                        remaining,
-                    ),
-                    Ok(None) => {
-                        read_result(session, &call, attempt, remaining).map_err(super::run_error)
-                    }
-                    Err(error) => Err(error),
-                }
+                read_result(session, &call, attempt, remaining).map_err(super::run_error)
             } else {
                 match owner_host.parse() {
                     Ok(remote_host) => read_remote(

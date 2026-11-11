@@ -3,6 +3,7 @@
 use provenant_core::edit_distance;
 pub mod accounts;
 pub mod check;
+pub mod cloud;
 pub mod console;
 pub mod domains;
 pub mod fabric;
@@ -13,6 +14,7 @@ pub mod run;
 pub mod tracker;
 pub mod wait;
 pub mod workflow;
+pub use cloud::Cloud;
 pub use fabric::Fabric;
 pub use quota::Quota;
 pub use route::Route;

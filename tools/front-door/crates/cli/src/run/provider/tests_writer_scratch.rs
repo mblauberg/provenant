@@ -147,7 +147,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     let prompt = "é".repeat(75_000);
     let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
     let task = run::TaskRequest {
-        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,
