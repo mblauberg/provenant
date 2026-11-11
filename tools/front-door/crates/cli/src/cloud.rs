@@ -3,7 +3,10 @@
 //! lifecycle for the session; the provider owns it.
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Subcommand)]
 pub enum Cloud {
@@ -247,6 +250,16 @@ pub fn parse_session(output: &str) -> Option<(String, Option<String>)> {
     Some((id, url))
 }
 
+/// The absolute worktree `collect` adds. An explicit path resolves against
+/// the project root, not the process directory, so every Git call agrees.
+/// The default sits under the main checkout's `.worktrees`.
+pub fn collect_path(project: &Path, main: &Path, path: Option<&Path>, branch: &str) -> PathBuf {
+    match path {
+        Some(path) => project.join(path),
+        None => main.join(".worktrees").join(branch.replace('/', "-")),
+    }
+}
+
 /// A file-name-safe key for a session identity, which may be a URL.
 pub fn record_key(id: &str) -> String {
     let tail = id.split(['?', '#']).next().unwrap_or(id);
@@ -327,6 +340,19 @@ mod tests {
         assert_eq!(
             record_key("https://chatgpt.com/codex/tasks/task_e_1?x=1"),
             "task_e_1"
+        );
+        let (project, main) = (Path::new("/repo/sub"), Path::new("/repo"));
+        assert_eq!(
+            collect_path(project, main, Some(Path::new("wt")), "cloud/abc"),
+            Path::new("/repo/sub/wt")
+        );
+        assert_eq!(
+            collect_path(project, main, Some(Path::new("/elsewhere/wt")), "x"),
+            Path::new("/elsewhere/wt")
+        );
+        assert_eq!(
+            collect_path(project, main, None, "cloud/abc"),
+            Path::new("/repo/.worktrees/cloud-abc")
         );
     }
 }

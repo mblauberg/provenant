@@ -157,6 +157,41 @@ fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestRes
     })
 }
 #[test]
+fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    // A 1.8.0 request kept its placement here; it now lands in `extra`.
+    run.request.tasks[0].extra.insert(
+        "cloud".into(),
+        serde_json::json!({"target": "t", "provider": "claude"}),
+    );
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    let fake = Fake::default();
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    assert!(matches!(
+        &started[..],
+        [Started::Refused { attempt, kind: RefusalKind::CloudPlacementRemoved, .. }]
+            if *attempt == id
+    ));
+    assert_eq!(fake.prepared.get(), 0);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    let AttemptState::Terminal { extra, .. } = store.record(id, &call)?.state else {
+        return Err("attempt is not terminal".into());
+    };
+    assert_eq!(extra["terminal_cause"], "cloud_placement_removed");
+    assert!(
+        store
+            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .is_empty()
+    );
+    Ok(())
+}
+#[test]
 fn holder_release_defers_temporary_reclamation_after_verified_settlement() -> TestResult {
     holder_release_temporary_fixture(true)
 }

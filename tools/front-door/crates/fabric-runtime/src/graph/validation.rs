@@ -323,13 +323,6 @@ pub(super) fn validate_flat_plan(
     if !valid_identifier(&document.graph_id) {
         return Err(AdmissionError::Plan("graph id".into()));
     }
-    if document.nodes.iter().any(|node| {
-        node.attempt
-            .as_ref()
-            .is_some_and(AttemptSpec::names_cloud_placement)
-    }) {
-        return Err(AdmissionError::Plan(CLOUD_PLACEMENT_REMOVED.into()));
-    }
     if document
         .decision_session
         .as_ref()

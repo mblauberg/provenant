@@ -187,18 +187,13 @@ fn collect_result(project: &Path, collect: &cloud::Collect) -> Result<(Value, St
         .branch
         .clone()
         .unwrap_or_else(|| record.branch.clone());
-    let worktree = match &collect.path {
-        Some(path) => path.clone(),
-        None => {
-            let common = PathBuf::from(git(
-                project,
-                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-                None,
-            )?);
-            let main = common.parent().map(Path::to_path_buf).unwrap_or(common);
-            main.join(".worktrees").join(branch.replace('/', "-"))
-        }
-    };
+    let common = PathBuf::from(git(
+        project,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        None,
+    )?);
+    let main = common.parent().map(Path::to_path_buf).unwrap_or(common);
+    let worktree = cloud::collect_path(project, &main, collect.path.as_deref(), &branch);
     let target = worktree.display().to_string();
     match record.provider {
         Provider::Claude => {
