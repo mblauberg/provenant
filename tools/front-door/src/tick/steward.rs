@@ -446,6 +446,7 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 })
             }
         }

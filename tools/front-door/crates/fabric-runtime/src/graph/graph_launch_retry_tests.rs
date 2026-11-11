@@ -590,6 +590,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         },
         route: route("first"),
         state: AttemptState::Starting,
+        stop: None,
         attempt_ref: None,
         outcome: None,
         launched: true,

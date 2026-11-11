@@ -623,7 +623,6 @@ mod tests {
         after.expansions.push(Expansion {
             extra: Default::default(),
             source: "planner".into(),
-            continuation: false,
             nodes: Vec::new(),
             uses: Vec::new(),
             patch: Some(super::super::patch::PatchRecord {
@@ -636,6 +635,7 @@ mod tests {
                 skipped: Vec::new(),
                 replaced: Vec::new(),
                 journaled: false,
+                restart: None,
             }),
         });
         append_changes(&directory, "g", Some(&before), &after, None).unwrap();
@@ -664,6 +664,7 @@ mod tests {
             skipped: Vec::new(),
             replaced: Vec::new(),
             journaled: true,
+            restart: None,
         };
         append_patch(&directory, "g", &record).unwrap();
         let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
@@ -674,7 +675,6 @@ mod tests {
         after.expansions.push(Expansion {
             extra: Default::default(),
             source: "host".into(),
-            continuation: false,
             nodes: Vec::new(),
             uses: Vec::new(),
             patch: Some(record),

@@ -337,10 +337,10 @@ impl AttemptSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
-    /// Continue once automatically when this writer stops without a new commit.
-    /// Omission enables continuation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_continue_no_work: Option<bool>,
+    /// The step to take after a stop with a given cause instead of the stop
+    /// table's default (`docs/specs/run.md#what-follows-a-stop`).
+    #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
     /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptSpec>,
@@ -1316,6 +1316,9 @@ pub struct GraphAttempt {
     /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub settled: u64,
+    /// The stop cause the run sealed for this attempt, read at settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<provenant_records::StopCause>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

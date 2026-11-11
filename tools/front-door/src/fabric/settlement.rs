@@ -46,32 +46,6 @@ pub(crate) fn settlement_reactions(
     live: Option<provenant_run::HolderContext>,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let launch = match live.as_ref().and_then(|live| live.launch.as_ref()) {
-        Some(launch) => launch.clone(),
-        None => recovery_launch(&subject.state_root, &subject.checkout)?,
-    };
-    let roots = crate::roots::child(
-        &subject.home,
-        &subject.checkout,
-        launch.configuration_root.clone(),
-    )?;
-    let execution_roots =
-        crate::roots::child(&subject.home, &subject.checkout, subject.state_root.clone())?;
-    provenant_cli::run::launch_successors(
-        provenant_run::ExecutionContext {
-            state_root: execution_roots.state,
-            project_id: subject.project,
-            actor_id: subject.actor,
-            read_prompts: true,
-        },
-        &roots,
-        &subject.home,
-        &subject.checkout,
-        &launch,
-        subject.run,
-        live.as_ref().and_then(|live| live.sealed.as_ref()),
-    )
-    .map_err(|error| error.message)?;
     crate::settlement::drain_run(subject, &mut |reaction| {
         let launch = match live.as_ref().and_then(|live| live.launch.as_ref()) {
             Some(launch) => launch.clone(),

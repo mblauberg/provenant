@@ -714,11 +714,12 @@ pub(super) fn validate_flat_plan(
                 required.push(*kind);
             }
         }
+        next_step::validate_on_stop(node).map_err(AdmissionError::Plan)?;
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
             review_launch: is_review_node(node),
-            auto_continue_no_work: node.auto_continue_no_work,
+            on_stop: node.on_stop.clone(),
             family_group: node.family_group.clone(),
             context: node.context.clone(),
             extra: node.extra.clone(),

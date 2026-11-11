@@ -208,39 +208,16 @@ fn writer_worktree(graph: &str, node: &str, request: &ChildRequest) -> Option<St
     })
 }
 
-/// Honest-stop nodes continue their source's logical work. Follow recorded
-/// lineage rather than stripping a suffix that a user may legitimately name.
-fn logical_parent(checkpoint: &GraphCheckpoint, parent: &str) -> String {
-    let mut current = parent;
-    for _ in 0..checkpoint.expansions.len() {
-        let Some(expansion) = checkpoint.expansions.iter().find(|expansion| {
-            expansion.continuation && expansion.nodes.iter().any(|node| node.id == current)
-        }) else {
-            break;
-        };
-        current = &expansion.source;
-    }
-    current.to_owned()
-}
-
-fn request_key(
-    checkpoint: &GraphCheckpoint,
-    parent: &str,
-    request: &ChildRequest,
-) -> Result<String, PatchError> {
-    CanonicalV1::record_digest(
-        "graph-child-key",
-        1,
-        &(logical_parent(checkpoint, parent), &request.idempotency_key),
-    )
-    .map(|digest| format!("child:{}", digest))
-    .map_err(|error| PatchError {
-        cause: None,
-        admission: None,
-        parameter: None,
-        code: "invalid",
-        message: error.to_string(),
-    })
+fn request_key(parent: &str, request: &ChildRequest) -> Result<String, PatchError> {
+    CanonicalV1::record_digest("graph-child-key", 1, &(parent, &request.idempotency_key))
+        .map(|digest| format!("child:{}", digest))
+        .map_err(|error| PatchError {
+            cause: None,
+            admission: None,
+            parameter: None,
+            code: "invalid",
+            message: error.to_string(),
+        })
 }
 
 /// The earlier receipt for this request's idempotency key, if any. It compares
@@ -264,7 +241,7 @@ pub fn replay_child(
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
-    let key = request_key(checkpoint, parent, request)?;
+    let key = request_key(parent, request)?;
     let Some(record) = checkpoint
         .expansions
         .iter()
@@ -274,9 +251,7 @@ pub fn replay_child(
         return Ok(None);
     };
     let original_parent = record.parent.as_deref().unwrap_or_default();
-    let same_parent =
-        logical_parent(checkpoint, original_parent) == logical_parent(checkpoint, parent);
-    if !same_parent
+    if original_parent != parent
         || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
     {
         return Err(PatchError {
@@ -408,7 +383,7 @@ pub fn admit_child_bound(
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
-    patch.idempotency_key = Some(request_key(graph.checkpoint, parent, request)?);
+    patch.idempotency_key = Some(request_key(parent, request)?);
     if let Some((branch, commit)) = writer_base {
         fn bind_writers(node: &mut Value, branch: &str, commit: &str, provision_root: bool) {
             let mut boundary = false;
@@ -758,8 +733,7 @@ pub fn cancel_subtree(
         .filter(|node| node.extra.get(DETACHED) == Some(&Value::Bool(true)))
         .map(|node| node.id.as_str())
         .collect();
-    let logical = logical_parent(checkpoint, parent);
-    let prefix = format!("{logical}{SEPARATOR}");
+    let prefix = format!("{parent}{SEPARATOR}");
     let mut result = SubtreeCancel::default();
     let mut changed = false;
     for progress in &mut checkpoint.nodes {
@@ -770,7 +744,7 @@ pub fn cancel_subtree(
             continue;
         };
         // `parent--a--b` is protected if `parent--a` or `parent--a--b` is detached.
-        let mut ancestor = logical.clone();
+        let mut ancestor = parent.to_owned();
         let protected = rest.split(SEPARATOR).any(|part| {
             ancestor.push_str(SEPARATOR);
             ancestor.push_str(part);
@@ -780,7 +754,7 @@ pub fn cancel_subtree(
             result.detached.push(progress.id.clone());
             continue;
         }
-        no_work::fence_stopped(progress);
+        next_step::fence_stopped(progress);
         let live = progress
             .attempts
             .iter()
@@ -831,41 +805,31 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .nodes
                 .iter()
                 .any(|node| node.id == parent && node.state == NodeState::Succeeded);
-            let logical = logical_parent(checkpoint, &parent);
-            if succeeded
-                && checkpoint.nodes.iter().any(|node| {
-                    node.id != parent
-                        && !node.state.settled()
-                        && logical_parent(checkpoint, &node.id) == logical
-                })
-            {
-                // An honest-stop continuation owns the same logical children.
-                // Its predecessor settling must not cancel inherited work.
-                continue;
-            }
             if succeeded {
                 // Final patches deliberately schedule work after their producer
                 // completes. Only live relay children share the process lifetime.
-                let children: Vec<String> =
-                    checkpoint
-                        .expansions
-                        .iter()
-                        .filter(|expansion| {
-                            expansion.patch.as_ref().is_some_and(|record| {
-                                record.parent.as_deref().is_some_and(|source| {
-                                    logical_parent(checkpoint, source) == logical
-                                }) && record.extra.contains_key(REQUEST_DIGEST)
-                            })
+                let children: Vec<String> = checkpoint
+                    .expansions
+                    .iter()
+                    .filter(|expansion| {
+                        expansion.patch.as_ref().is_some_and(|record| {
+                            record
+                                .parent
+                                .as_deref()
+                                .is_some_and(|source| source == parent)
+                                && record.extra.contains_key(REQUEST_DIGEST)
                         })
-                        .flat_map(|expansion| expansion.nodes.iter())
-                        .filter(|node| {
-                            node.extra.get(DETACHED) != Some(&Value::Bool(true))
-                                && checkpoint.nodes.iter().any(|progress| {
-                                    progress.id == node.id && !progress.state.settled()
-                                })
-                        })
-                        .map(|node| node.id.clone())
-                        .collect();
+                    })
+                    .flat_map(|expansion| expansion.nodes.iter())
+                    .filter(|node| {
+                        node.extra.get(DETACHED) != Some(&Value::Bool(true))
+                            && checkpoint
+                                .nodes
+                                .iter()
+                                .any(|progress| progress.id == node.id && !progress.state.settled())
+                    })
+                    .map(|node| node.id.clone())
+                    .collect();
                 for child in children {
                     super::cancel_node_subtree(
                         document,
@@ -942,7 +906,6 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
 
 /// Child states visible to their parent, including terminal delivery outcomes.
 pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
-    let logical = logical_parent(checkpoint, parent);
     let roots: Vec<_> = checkpoint
         .expansions
         .iter()
@@ -951,7 +914,7 @@ pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
                 .patch
                 .as_ref()
                 .and_then(|record| record.parent.as_deref())
-                .is_some_and(|source| logical_parent(checkpoint, source) == logical)
+                .is_some_and(|source| source == parent)
         })
         .flat_map(|expansion| expansion.nodes.iter().map(|node| &node.id))
         .collect();

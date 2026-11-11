@@ -216,6 +216,10 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
                 terminal(AttemptOutcome::OtherFailure),
                 terminal(AttemptOutcome::UsageLimited),
                 terminal(AttemptOutcome::UsageLimited),
+                // A usage limit hands the slice to another agent until the
+                // graph-wide restart budget is spent.
+                terminal(AttemptOutcome::UsageLimited),
+                terminal(AttemptOutcome::UsageLimited),
             ]
             .into(),
             ..Default::default()
@@ -912,7 +916,11 @@ fn fenced_handoff_examples_do_not_control_continuations() {
                 let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
                 assert_eq!(run.status, GraphStatus::Complete);
                 assert_eq!(run.checkpoint.expansions.len(), usize::from(genuine));
-                assert_eq!(run.checkpoint.nodes[0].handoff.is_some(), genuine);
+                // Only a genuine handoff reaches the in-place restart's brief.
+                assert_eq!(
+                    owner.prompts.get(1).is_some_and(|prompt| prompt.contains("First half committed")),
+                    genuine
+                );
             }
         }
     }
@@ -1189,25 +1197,6 @@ fn planner_requires_write_scope_only_for_writers() {
     let mut owner = fixture_owner(&[&result(vec![writer])]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
-    );
-    assert!(run.checkpoint.expansions.is_empty());
-}
-
-#[test]
-fn continuation_rejects_original_pr_delivery_before_integration_rewrite() {
-    let mut doc = writer_graph();
-    doc.integration_branch = Some("integration".into());
-    doc.nodes[0].delivery = Some(provenant_records::run::DeliveryMode::Pr);
-    let run = advance(
-        &doc,
-        &mut fixture_owner(&[STOP]),
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
@@ -1856,7 +1845,7 @@ fn writer_graph() -> GraphDocument {
 }
 
 #[test]
-fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract() {
+fn honest_stop_restarts_in_place_on_the_same_checkout_with_handoff_and_verdict_contract() {
     let mut doc = writer_graph();
     doc.nodes[1].inputs = vec![GraphInput {
         required_outputs: Vec::new(),
@@ -1870,18 +1859,10 @@ fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(run.checkpoint.expansions.len(), 1);
     assert_eq!(owner.permissions[0], owner.permissions[1]);
-    assert_eq!(owner.calls[1].0.node_id, "write--continue");
+    assert_eq!(owner.calls[1].0.node_id, "write");
     assert_eq!(owner.calls[2].0.node_id, "after");
-    assert!(owner.prompts[2].contains("write--continue result:"));
+    assert!(owner.prompts[2].contains("write result:"));
     assert!(owner.prompts[1].contains("First half committed"));
-    assert!(
-        run.checkpoint.nodes[0]
-            .handoff
-            .as_ref()
-            .unwrap()
-            .fenced()
-            .contains("First half committed")
-    );
     assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 1);
     assert_eq!(
         advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
@@ -3948,9 +3929,7 @@ fn pending_writer_continuation_reopens_and_excludes_its_predecessor_model() {
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.prior_attempts[1], ["codex/previous"]);
     assert_eq!(owner.stored_refs[1], None);
-    assert_eq!(owner.calls[1].0.node_id, "write--continue");
-    // This is the existing checkpoint wire shape: the expansion journal itself
-    // supplies lineage, with no new required continuation metadata.
+    assert_eq!(owner.calls[1].0.node_id, "write");
     let saved = serde_json::to_vec(&run.checkpoint).unwrap();
     journal.0 = Some(serde_json::from_slice(&saved).unwrap());
     owner.observations.extend([terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"), terminal_with_result(AttemptOutcome::Succeeded, "checked")]);

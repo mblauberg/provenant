@@ -458,7 +458,7 @@ fn pool_route(alias: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
-        auto_continue_no_work: None,
+        on_stop: Default::default(),
         attempt: None,
         attachments: Vec::new(),
         family_group: None,
@@ -545,6 +545,7 @@ fn done_as(reference: &str) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     }
 }
 
@@ -697,6 +698,7 @@ fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     }
 }
 
@@ -710,6 +712,7 @@ fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObser
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     }
 }
 
@@ -723,6 +726,7 @@ fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObserva
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     }
 }
 
@@ -793,6 +797,7 @@ fn check_fallback(
                 result_path: None,
                 branch: None,
                 commit: None,
+                stop: None,
             },
             terminal(AttemptOutcome::Succeeded),
         ]),
@@ -800,7 +805,22 @@ fn check_fallback(
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), if expected { 2 } else { 1 }, "{case}");
+    // A launched writer that met a depleted route is restarted on the next
+    // route by the stop decision; a reader's route fallback already decided.
+    let restarted = !expected
+        && launched
+        && access == AccessMode::WorktreeWrite
+        && matches!(
+            outcome,
+            AttemptOutcome::AuthRequired
+                | AttemptOutcome::UsageLimited
+                | AttemptOutcome::AdapterUnavailable
+        );
+    assert_eq!(
+        owner.calls.len(),
+        if expected || restarted { 2 } else { 1 },
+        "{case}"
+    );
     assert_eq!(
         run.checkpoint.nodes[0].attempts.len(),
         if expected { 2 } else { 1 },
@@ -818,26 +838,25 @@ fn check_fallback(
 
     assert_eq!(
         run.checkpoint.nodes[0].state,
-        if expected {
+        if expected || restarted {
             NodeState::Succeeded
         } else {
             NodeState::Failed
         },
         "{case}"
     );
-    if access == AccessMode::WorktreeWrite
-        && launched
-        && matches!(
-            outcome,
-            AttemptOutcome::AuthRequired | AttemptOutcome::UsageLimited
-        )
-    {
-        assert_eq!(
-            run.checkpoint.nodes[0].advance_error_code.as_deref(),
-            Some("fallback_launched_writer"),
-            "{case}"
-        );
-    }
+    assert_eq!(
+        run.checkpoint
+            .expansions
+            .iter()
+            .filter(|expansion| expansion
+                .patch
+                .as_ref()
+                .is_some_and(|record| record.restart.is_some()))
+            .count(),
+        usize::from(restarted),
+        "{case}"
+    );
     assert_eq!(
         run.checkpoint.nodes[0].worktree.as_deref(),
         (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer"),

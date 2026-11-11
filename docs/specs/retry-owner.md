@@ -37,8 +37,9 @@ reopens selected consumers without restarting unrelated work.
 - Why: a retry must neither discard useful work nor erase the cost of failure.
 - Test: `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source`;
   `crates/fabric-runtime/src/graph/retry_tests.rs::node_redo_retains_spent_budget_and_unknown_usage_across_attempt_generations`;
-  `crates/fabric-runtime/src/graph/retry_tests.rs::retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work`
+  `crates/fabric-runtime/src/graph/retry_tests.rs::retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work`;
+  `crates/fabric-runtime/src/graph/plan_tests.rs::continuation_budget_pauses_then_extends_without_duplicating_prior_work`
 
-Test: none (gap) for atomic terminal publication and successor insertion across
-all owners, and for every real-provider custody failure. Those requirements
+Test: none (gap) for atomic terminal publication across all owners, and for
+every real-provider custody failure. Those requirements
 remain review gates; unit recovery evidence does not prove native enforcement.

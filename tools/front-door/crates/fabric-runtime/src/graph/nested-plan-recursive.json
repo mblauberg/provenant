@@ -2,7 +2,6 @@
   "expansions": [
     {
       "source": "plan",
-      "continuation": false,
       "nodes": [
         {
           "plan": {
@@ -33,7 +32,6 @@
     },
     {
       "source": "plan--nested",
-      "continuation": false,
       "nodes": [
         {
           "write_scope": [

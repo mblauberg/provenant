@@ -13,8 +13,8 @@ By default a Claude lane gets a copy of its account's login access token. When
 the host renews that login (a launch within 15 minutes of expiry, a quota probe,
 or any `claude` run on the account's config directory), the server can revoke
 every copy and live lanes fail with `authentication_failed`. The lane settles
-with cause `lane_token_lost`; a writer continues from its handoff on a fresh
-token, bounded by `lane.max_continuations`. If the registered lane token itself
+with cause `lane_token_lost`; a graph writer restarts from its handoff on a new
+route in the same worktree, bounded by the graph's `limits.continuations`. If the registered lane token itself
 is rejected, the lane settles without continuation and names the account.
 
 To remove the cause, register a long-lived lane token per account. It comes

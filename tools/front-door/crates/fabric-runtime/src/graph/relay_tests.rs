@@ -553,6 +553,7 @@ fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
                 launched: true,
                 result: None,
                 attempt_ref: Some("attempt-a".into()),
+                stop: None,
             },
             AttemptObservation::Pending {
                 attempt_ref: Some("attempt-keep".into()),
@@ -1225,19 +1226,22 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
             attempt_ref:Some("first-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
             result:Some(Box::new(capture("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Continue checking\"}\n```"))),
             result_warning:None, result_path:None, branch:Some("parent".into()), commit:Some("a".repeat(40)),
+            stop: None,
         },
+        // The parent restarts in place, ahead of its child in plan order.
+        AttemptObservation::Pending { attempt_ref:Some("continuation-attempt".into()) },
         AttemptObservation::Terminal {
             attempt_ref:Some("child-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
             result:Some(Box::new(capture("Child completed"))), result_warning:None, result_path:None,
             branch:Some("child".into()), commit:Some("a".repeat(40)),
+            stop: None,
         },
-        AttemptObservation::Pending { attempt_ref:Some("continuation-attempt".into()) },
     ]);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     let mut checkpoint: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap();
     let parent = parent_of_attempt(&checkpoint, "continuation-attempt").unwrap_or_else(|| panic!("missing live continuation: {checkpoint:?}; launches={:?}", owner.calls)).to_owned();
-    assert_eq!(parent, "parent--continue");
-    assert!(checkpoint.expansions.iter().any(|expansion| expansion.continuation && expansion.source == "parent"));
+    assert_eq!(parent, "parent");
+    assert!(checkpoint.expansions.iter().any(|expansion| expansion.patch.as_ref().and_then(|record| record.restart.as_ref()).is_some_and(|restart| restart.node == "parent")));
     let before = checkpoint.clone();
     let replay = add(&document, &mut checkpoint, &parent, &request).unwrap();
     assert_eq!(replay, relay::ChildReceipt { replayed:true, ..first });

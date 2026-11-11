@@ -99,7 +99,7 @@ fn admission_recovery_capability() {
     let mut expansion = seed();
     expansion.checkpoint.expansions.push(
         serde_json::from_value(json!({
-            "source":"planner","continuation":false,
+            "source":"planner",
             "nodes":[{"id":"added","access":"read_only","family_group":"group"}]
         }))
         .unwrap(),

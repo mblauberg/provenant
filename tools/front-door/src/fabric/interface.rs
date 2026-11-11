@@ -2555,6 +2555,7 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 })
             }
         }
@@ -2655,6 +2656,7 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 })
             }
         }
@@ -4135,6 +4137,7 @@ mod tests {
                     result_path: None,
                     branch: writer.then(|| "slice".into()),
                     commit: writer.then(|| self.commit.clone()),
+                    stop: None,
                 })
             }
         }

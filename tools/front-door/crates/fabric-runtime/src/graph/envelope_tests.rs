@@ -374,6 +374,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         },
                         route: route.clone(),
                         state: AttemptState::Unresolved,
+                        stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
                         attempt_ref: Some(worst(HOST_ID_BYTES)),
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
@@ -1138,7 +1139,7 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
     let plan = planned(&document);
     let before = envelope::checkpoint_bound(&document, &[], &[], &plan);
     let live: Expansion = serde_json::from_value(json!({
-        "source":"plan", "continuation":false, "nodes":[],
+        "source":"plan",  "nodes":[],
         "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
     })).unwrap();
     let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);

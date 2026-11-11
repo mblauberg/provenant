@@ -63,7 +63,6 @@ pub(super) fn dynamic_subtree(
             *expansion = Expansion {
                 extra: [(RETIRED.to_owned(), record)].into_iter().collect(),
                 source: String::new(),
-                continuation: false,
                 nodes: Vec::new(),
                 uses: Vec::new(),
                 patch: None,

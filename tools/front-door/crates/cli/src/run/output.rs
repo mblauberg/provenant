@@ -1224,7 +1224,7 @@ mod tests {
                 {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
                 {"id":"synthesis", "state":"succeeded", "attempts":[]}
             ],
-            "expansions":[{"source":"planner","continuation":false,"nodes":[{
+            "expansions":[{"source":"planner","nodes":[{
                 "id":"planner--fallback--static","access":"read_only","prompt":"Static stage","route":{"alias":"junior"}
             }]}]
         }))

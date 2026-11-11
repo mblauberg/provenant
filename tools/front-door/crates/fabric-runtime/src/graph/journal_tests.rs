@@ -1645,6 +1645,7 @@ mod launch_recovery {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 })
             } else {
                 Ok(AttemptObservation::Pending {

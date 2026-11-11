@@ -2617,6 +2617,7 @@ impl BoundGraphOwner<'_> {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 });
             }
             // Preserve the specific detached-writer refusal in node status.
@@ -3394,6 +3395,32 @@ impl BoundGraphOwner<'_> {
                     }
                     _ => None,
                 };
+                // The sealed stop, else the cause the outcome names.
+                let stop = match &attempt.state {
+                    AttemptState::Terminal { extra, .. } => extra
+                        .get("stop")
+                        .cloned()
+                        .and_then(|value| {
+                            serde_json::from_value::<provenant_records::Stop>(value).ok()
+                        })
+                        .map(|stop| stop.cause()),
+                    _ => None,
+                }
+                .or_else(|| {
+                    attempt.preparation_failure.map(|failure| match failure {
+                        provenant_records::run::PreparationFailure::AuthRequired => {
+                            provenant_records::StopCause::AuthRequired
+                        }
+                        provenant_records::run::PreparationFailure::UsageLimited => {
+                            provenant_records::StopCause::UsageLimited
+                        }
+                        provenant_records::run::PreparationFailure::AdapterUnavailable => {
+                            provenant_records::StopCause::AdapterUnavailable
+                        }
+                    })
+                })
+                .or_else(|| preparation_cause.map(provenant_records::StopCause::from))
+                .or(provenant_records::StopCause::of_outcome(outcome));
                 let (result, result_warning) = if attempt.result.is_some()
                     || outcome == Outcome::Succeeded
                 {
@@ -3541,6 +3568,7 @@ impl BoundGraphOwner<'_> {
                     } else {
                         node.source_commit.map(str::to_owned)
                     },
+                    stop,
                 })
             }
             _ => Ok(AttemptObservation::Pending {

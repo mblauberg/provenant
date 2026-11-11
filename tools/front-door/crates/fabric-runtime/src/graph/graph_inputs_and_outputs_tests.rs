@@ -1105,6 +1105,7 @@ fn required_verdict_checks_exact_lines_and_missing_results() {
                 result_path: None,
                 branch: None,
                 commit: None,
+                stop: None,
             }]),
             ..Default::default()
         };

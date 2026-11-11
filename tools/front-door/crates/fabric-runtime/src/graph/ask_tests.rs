@@ -515,6 +515,7 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     };
     let owner = FakeOwner {
         observations: [observation(), observation()].into(),

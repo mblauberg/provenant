@@ -93,6 +93,7 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch: self.branch.clone(),
             commit: self.commit.clone(),
+            stop: None,
         })
     }
 }

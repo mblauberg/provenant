@@ -15,6 +15,7 @@ fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     };
     for policy in [
         crate::config::UnknownUsage::Warn,
@@ -74,6 +75,7 @@ fn cost_unknown_reason_is_recorded() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         usage: AttemptUsage {
             cost_unknown_reason: Some("config/telemetry-prices.toml: missing".into()),
@@ -298,6 +300,7 @@ fn final_budget_exhaustion_still_delivers() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         usage: AttemptUsage {
             tokens: Some(10),
@@ -347,6 +350,7 @@ fn budget_pause_stops_admission_and_extension_resumes() {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([observation(), observation()]),
@@ -395,6 +399,7 @@ fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     };
     for policy in [
         crate::config::UnknownUsage::Warn,
@@ -471,6 +476,7 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         usage: AttemptUsage {
             tokens: Some(12),
