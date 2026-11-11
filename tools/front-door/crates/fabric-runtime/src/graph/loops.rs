@@ -681,9 +681,15 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
                 worktree: n.worktree.clone(),
                 id: n.id.clone(),
-                state: NodeState::Pending,
+                // A node a patch adds is skipped by its own condition, as at
+                // submission.
+                state: if when::holds(&n.when) {
+                    NodeState::Pending
+                } else {
+                    NodeState::Skipped
+                },
                 cancelled_from: None,
-                skip_reason: None,
+                skip_reason: when::skip_reason(&n.when),
                 advance_error: None,
                 advance_error_code: None,
                 advance_owner_code: None,
