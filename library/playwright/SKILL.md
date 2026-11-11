@@ -1,6 +1,6 @@
 ---
 name: playwright
-description: "Use for shell-driven browser work with playwright-cli: open, click, fill, screenshot, scrape."
+description: "Use for shell-driven browser work with playwright-cli: click, fill, screenshot, scrape."
 ---
 
 # Playwright CLI
