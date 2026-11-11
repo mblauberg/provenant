@@ -12,6 +12,7 @@ struct Owner {
     routes: Vec<GraphRoute>,
     prompts: Vec<String>,
     worktrees: Vec<Option<String>>,
+    facts: Option<DepletionFacts>,
 }
 
 impl AttemptOwner for Owner {
@@ -19,6 +20,13 @@ impl AttemptOwner for Owner {
 
     fn actor(&self) -> String {
         "chair".into()
+    }
+
+    fn depletion_facts(
+        &mut self,
+        _request: DepletionRequest<'_>,
+    ) -> Result<Option<DepletionFacts>, Self::Error> {
+        Ok(self.facts.clone())
     }
 
     fn observe_or_start(
@@ -47,6 +55,7 @@ struct Settled {
     limits: crate::config::GraphLimits,
     saved: Option<GraphCheckpoint>,
     saves: usize,
+    facts: Option<DepletionFacts>,
 }
 
 impl GraphJournal for Settled {
@@ -66,8 +75,12 @@ impl GraphJournal for Settled {
         )
         .unwrap();
         let (plan, _) = validate_flat_plan(&expanded, limits).unwrap();
+        let facts = self.facts.clone();
         assert!(
-            next_step::settle_stop(&self.document, &plan, checkpoint, limits).is_none(),
+            next_step::settle_stop(&self.document, &plan, checkpoint, limits, &mut |_| Ok(
+                facts.clone()
+            ))
+            .is_none(),
             "a saved stop still owes its next step"
         );
         self.saves += 1;
@@ -82,6 +95,7 @@ fn journal(document: &GraphDocument) -> Settled {
         limits: Default::default(),
         saved: None,
         saves: 0,
+        facts: None,
     }
 }
 
@@ -334,4 +348,68 @@ fn on_stop_cannot_ask_a_graph_restart_to_resume() {
         json!({"provider_stop": {"step": "same_route", "continuation": "fresh"}}),
     );
     assert!(validate_flat_plan(&fresh, &limits).is_ok());
+}
+
+/// Ladder facts with one other ready account for the first declared model.
+fn ladder_facts() -> DepletionFacts {
+    use provenant_routing::{Readiness, ReadinessFact, Stopped};
+    let model = provenant_routing::ModelId::parse("first/model").unwrap();
+    DepletionFacts {
+        catalogue: provenant_routing::Catalogue::bundled().unwrap(),
+        config: Default::default(),
+        stopped: Stopped {
+            model: model.clone(),
+            account: None,
+            effort: None,
+            tier: None,
+            family: None,
+        },
+        readiness: vec![ReadinessFact {
+            model,
+            account: Some("spare".into()),
+            state: Readiness::Ready,
+        }],
+        tried: Vec::new(),
+        host_native: Vec::new(),
+        exclusions: Vec::new(),
+        intent: Default::default(),
+        confidential: false,
+        now: provenant_core::WallTime::from_micros(1_000_000).unwrap(),
+        wait_bound_seconds: None,
+    }
+}
+
+#[test]
+fn a_usage_limited_writer_restarts_on_the_ladder_route_then_reaches_the_chair() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let limited = |reference| {
+        terminal(
+            reference,
+            AttemptOutcome::OtherFailure,
+            Some(StopCause::UsageLimited),
+            None,
+        )
+    };
+    let mut owner = Owner {
+        observations: [limited("a/1"), limited("a/2"), done("b/1")].into(),
+        facts: Some(ladder_facts()),
+        ..Default::default()
+    };
+    let mut journal = Settled {
+        facts: Some(ladder_facts()),
+        ..journal(&document)
+    };
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    // The ladder, not the declared route list, chose the restart: the same
+    // model on the spare account, in the same worktree.
+    assert_eq!(adapters(&owner), ["first", "first"]);
+    assert_eq!(owner.routes[1].account.as_deref(), Some("spare"));
+    assert_eq!(owner.worktrees[0], owner.worktrees[1]);
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(StopCause::UsageLimited, NextStep::NewRoute)]
+    );
+    // Every ladder route has run, so the second stop goes to the chair even
+    // though the node declares an untried route.
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
 }

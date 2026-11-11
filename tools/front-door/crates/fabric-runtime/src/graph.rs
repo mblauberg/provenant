@@ -53,6 +53,7 @@ mod validation;
 mod wait_view;
 pub mod when;
 #[doc(hidden)]
+pub use next_step::{DepletionFacts, DepletionRequest};
 pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
 pub use when::WhenTerm;
@@ -377,6 +378,16 @@ pub trait AttemptOwner {
         _reference: &str,
     ) -> Result<bool, Self::Error> {
         Ok(false)
+    }
+
+    /// The routing facts the depletion ladder reads for a writer stopped by a
+    /// spent quota, a missing model or a lost login. `None` means this host
+    /// keeps no routing facts, and the node's own declared routes stand in.
+    fn depletion_facts(
+        &mut self,
+        _request: DepletionRequest<'_>,
+    ) -> Result<Option<DepletionFacts>, Self::Error> {
+        Ok(None)
     }
 
     /// Resolve a fresh panel for a repair whose risk or scope has grown.
@@ -1058,7 +1069,14 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
     )>,
     GraphError<R::Error, J::Error>,
 > {
-    let Some(next) = next_step::settle_stop(document, plan, checkpoint, limits) else {
+    let mut ladder = |request: DepletionRequest<'_>| {
+        owner
+            .depletion_facts(request)
+            .map_err(|error| error.to_string())
+    };
+    let Some((index, next)) =
+        next_step::settle_stop(document, plan, checkpoint, limits, &mut ladder)
+    else {
         return Ok(None);
     };
     let planned =
@@ -1074,7 +1092,7 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
         Ok(planned) => (next, planned),
         Err(reason) => {
             // The pause keeps the saved expansions, which already planned.
-            let paused = next_step::refused(plan, checkpoint, limits, &reason);
+            let paused = next_step::refused(plan, checkpoint, index, &reason);
             let expanded = plans::expand(document, &paused.extensions, &paused.expansions, limits)
                 .map_err(GraphError::Invalid)?;
             let (plan, positions) = validate_flat_plan(&expanded, limits)

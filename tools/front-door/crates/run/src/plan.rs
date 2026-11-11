@@ -23,6 +23,28 @@ impl RunStore {
             .join("tmp"))
     }
 
+    /// The provider availability this attempt's preparation published, as
+    /// stored; `None` when preparation published none.
+    pub fn published_availability(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<Vec<u8>>> {
+        const NAME: &str = "availability.json";
+        const LIMIT: u64 = 1024 * 1024;
+        let record = self.record(id, call)?;
+        let directory = self.attempt_dir(record.run_id, id, false)?;
+        let metadata = match directory.metadata_at(OsStr::new(NAME), false) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(check) = PathCheck::file(metadata) {
+            return Err(RunError::unsafe_entry(&directory, OsStr::new(NAME), check));
+        }
+        Ok(Some(directory.read_bounded(OsStr::new(NAME), LIMIT)?))
+    }
+
     /// The run-plan edge reads policy from host state and resolves all grants
     /// against a host-verified repository before any provider is handed off.
     pub fn read_only_plan(

@@ -1610,6 +1610,74 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn depletion_facts(
+        &mut self,
+        request: provenant_fabric_runtime::graph::DepletionRequest<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::DepletionFacts>, Self::Error> {
+        let host = self.factory.context.identity.host.to_string();
+        let (stopped_host, attempt) = request
+            .reference
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        // Only the owning host holds the stopped attempt's probed availability.
+        if stopped_host != host {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let id = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let record = store.record(id, &call).map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", request.key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(request.key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(request.key.node_id.as_str())
+            })
+        {
+            return Err(FacadeError::StateCorrupt);
+        }
+        let availability: Vec<provenant_providers::AvailabilityRecord> = store
+            .published_availability(id, &call)
+            .map_err(run_error)?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|_| FacadeError::StateCorrupt)?
+            .unwrap_or_default();
+        let mut tried = Vec::new();
+        for reference in request.tried {
+            if let Some((tried_host, attempt)) = reference.split_once('/')
+                && tried_host == host
+                && reference != request.reference
+            {
+                tried.push(
+                    store
+                        .record(
+                            attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                            &call,
+                        )
+                        .map_err(run_error)?,
+                );
+            }
+        }
+        provenant_cli::route::depletion_facts(
+            &self.factory.context.roots,
+            &record,
+            &tried,
+            &availability,
+        )
+        .map(Some)
+        .map_err(|reason| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason,
+        })
+    }
+
     fn preparation_refusal_cause(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,

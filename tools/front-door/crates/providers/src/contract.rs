@@ -2,7 +2,7 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -112,13 +112,15 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Published per attempt as `availability.json`, which the depletion ladder
+/// reads back as the stopped attempt's observed readiness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvailabilityRecord {
     pub schema_version: u64,
     pub adapter: String,
     pub executable: String,
     pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update: Option<crate::update::UpdateRecord>,
     pub fixture_ref: String,
     pub catalogue_revision: String,

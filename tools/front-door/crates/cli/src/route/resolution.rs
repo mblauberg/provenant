@@ -1140,3 +1140,147 @@ pub fn resolve_review_family(
     }
     Err(refusals.join("; "))
 }
+
+/// What the depletion ladder reads for a stopped attempt. Readiness comes from
+/// the availability the stopped attempt's preparation probed; every adapter
+/// there is offered under the stopped task's authority digest, because the
+/// ladder only proposes a route and preparation establishes confinement again
+/// before any launch. `tried` are the node's other attempts.
+pub fn depletion_facts(
+    roots: &Roots,
+    stopped: &provenant_records::run::AttemptRecord,
+    tried: &[provenant_records::run::AttemptRecord],
+    availability: &[AvailabilityRecord],
+) -> Result<provenant_fabric_runtime::graph::DepletionFacts, String> {
+    use provenant_routing::{HostNativeRoute, Stopped, Target};
+    let text = |error: &dyn std::fmt::Display| error.to_string();
+    let resolved = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|error| text(&error))?;
+    let catalogue = Catalogue::bundled().map_err(|error| text(&error))?;
+    let route = stopped
+        .applied_route
+        .as_ref()
+        .ok_or("the stopped attempt has no applied route")?;
+    let model = ModelId::parse(
+        route
+            .model
+            .as_deref()
+            .ok_or("the stopped route has no model")?,
+    )
+    .map_err(|error| text(&error))?;
+    let stopped_route = Stopped {
+        family: catalogue
+            .model(&model)
+            .and_then(|entry| entry.family.clone()),
+        model: model.clone(),
+        account: route.account_key.clone(),
+        effort: route.effort.clone(),
+        tier: route
+            .pool_selection
+            .as_ref()
+            .map(|selection| selection.pool.clone()),
+    };
+    let tried = std::iter::once(stopped)
+        .chain(tried)
+        .filter_map(|record| record.applied_route.as_ref())
+        .filter_map(|route| match route.extra.get("host_native") {
+            Some(name) => Some(Target::HostNative {
+                name: name.as_str()?.to_owned(),
+            }),
+            None => Some(Target::Route {
+                model: ModelId::parse(route.model.as_deref()?).ok()?,
+                account: route.account_key.clone(),
+            }),
+        })
+        .collect();
+    let host_native = resolved
+        .domains
+        .fabric
+        .host_native
+        .iter()
+        .map(|(name, native)| match native {
+            provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent { model, .. } => {
+                HostNativeRoute {
+                    name: name.clone(),
+                    model: ModelId::parse(model)
+                        .or_else(|_| ModelId::parse(&format!("claude/{model}")))
+                        .ok(),
+                }
+            }
+        })
+        .collect();
+    let profile = &stopped.profile;
+    let intent = provenant_routing::RouteIntent {
+        workload: if matches!(
+            stopped.requested_route,
+            provenant_records::run::RequestedRoute::Review { .. }
+        ) {
+            provenant_routing::Workload::Review
+        } else {
+            match profile
+                .knobs
+                .get("routing.workload")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
+                Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
+                Some("review") => provenant_routing::Workload::Review,
+                _ => provenant_routing::Workload::General,
+            }
+        },
+        writes: !stopped.write_grants.is_empty(),
+        network: None,
+        image_input: false,
+        skill_location: profile.require_skill_location,
+    };
+    let exclusions = task_exclusion_rules(profile, roots).map_err(|error| text(&error))?;
+    let digest = stopped.authority_digest.to_string();
+    let adapters: BTreeSet<&str> = availability
+        .iter()
+        .map(|record| record.adapter.as_str())
+        .collect();
+    let access: Vec<_> = adapters
+        .into_iter()
+        .map(|adapter| AccessContext {
+            adapter,
+            disclosure_ref: &digest,
+            confinement_ref: &digest,
+        })
+        .collect();
+    let host = provenant_config::bind_host(roots)
+        .map_err(|error| text(&error))?
+        .to_string();
+    let (readiness, now) = with_context(
+        roots,
+        REGISTRY,
+        availability,
+        &access,
+        &host,
+        std::slice::from_ref(&model),
+        true,
+        |context, _, _, _| {
+            Ok((
+                provenant_routing::depletion_facts(context, intent, std::slice::from_ref(&model))?,
+                context.now,
+            ))
+        },
+    )
+    .map_err(|error| text(&error))?;
+    Ok(provenant_fabric_runtime::graph::DepletionFacts {
+        wait_bound_seconds: provenant_routing::depletion_wait_bound(&resolved.knobs),
+        config: resolved.domains.routing,
+        catalogue,
+        stopped: stopped_route,
+        readiness,
+        tried,
+        host_native,
+        exclusions,
+        intent,
+        confidential: profile
+            .extra
+            .get("confidential")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        now,
+    })
+}
