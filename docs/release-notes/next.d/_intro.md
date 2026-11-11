@@ -1,1 +1,1 @@
-This release removes the unattended PR service, the `provenant bench` verb, the `provenant fabric landing` verbs and cloud job tracking, and replaces them with a thin `provenant cloud launch` and `collect`. It also folds the global agent instructions into one file, merges the process skills, and fixes OpenCode 2.x settlement and several launch, retry and telemetry failures; read Breaking changes before upgrading.
+This patch release fixes `--route` pool launches being refused when a provider model list contains display names.
