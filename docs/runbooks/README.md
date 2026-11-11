@@ -9,4 +9,4 @@ Procedures the tool cannot make obvious. Command syntax is `provenant help --all
 - [routing-and-templates](routing-and-templates.md), [providers](providers.md), [fabric-hosts](fabric-hosts.md), [configuration](configuration.md)
 - [gc](gc.md), [telemetry](telemetry.md), [human-inbox](human-inbox.md), [session-checkpoints](session-checkpoints.md), [claude-hooks](claude-hooks.md)
 - [ci](ci.md), [test-tiers](test-tiers.md), [bench](bench.md)
-- Owner setup: [install](install.md), [pr-reconciler](pr-reconciler.md), [event-intake-configuration](event-intake-configuration.md), [landing-lease](landing-lease.md)
+- Owner setup: [install](install.md), [landing-lease](landing-lease.md)

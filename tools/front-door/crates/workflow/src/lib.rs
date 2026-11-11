@@ -7,7 +7,6 @@ pub mod coverage;
 pub mod log;
 mod persistence;
 pub mod receipt;
-pub mod reconciler;
 pub mod review;
 pub mod risk;
 pub mod session;

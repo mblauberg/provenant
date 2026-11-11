@@ -282,7 +282,6 @@ find into process changes and repeatable evaluations.
 | [Claude hooks](docs/runbooks/claude-hooks.md) | Managed Claude Code session and worktree hooks |
 | [Disk and garbage collection](docs/runbooks/gc.md) | Inspecting storage; collecting caches and expired provider state |
 | [CI](docs/runbooks/ci.md) | Checks, test inventory and reproducing failures |
-| [PR reconciler](docs/runbooks/pr-reconciler.md) | Pull request work records |
 | [Replay bench](docs/runbooks/bench.md) | Mining, verifying and running replay tasks |
 | [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |

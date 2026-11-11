@@ -26,19 +26,10 @@ pub trait Forge {
 pub struct Gh {
     next: BTreeMap<String, Instant>,
     retry: Option<Instant>,
-    path: Option<String>,
     cwd: Option<PathBuf>,
     timeout: Option<Duration>,
 }
 impl Gh {
-    /// Explicit launchd/foreground executable search path, without mutating the
-    /// process environment after the webhook thread starts.
-    pub fn with_path(path: String) -> Self {
-        Self {
-            path: Some(path),
-            ..Self::default()
-        }
-    }
     /// Run `gh` in `cwd`, so it reaches that checkout's GitHub host, and
     /// bound each request by `timeout` rather than the default minute.
     pub fn in_checkout(cwd: PathBuf, timeout: Duration) -> Self {
@@ -124,21 +115,12 @@ impl Forge for Gh {
             argv.extend(["-H".into(), format!("If-None-Match:{etag}").into()]);
         }
         argv.push(path.into());
-        let mut environment: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| {
-                key != "PROVENANT_INTAKE_SECRET" && !(self.path.is_some() && key == "PATH")
-            })
-            .collect();
-        if let Some(path) = &self.path {
-            environment.push(("PATH".into(), path.into()));
-        }
         let cwd = match &self.cwd {
             Some(cwd) => cwd.clone(),
             None => std::env::current_dir()?,
         };
         let timeout = self.timeout.unwrap_or(Duration::from_secs(60));
         let mut options = ExecOptions::new(&argv, &cwd, timeout);
-        options.env = Some(&environment);
         options.process_group = true;
         options.stop_on_output_limit = true;
         let output = SystemExecutor::new(1)

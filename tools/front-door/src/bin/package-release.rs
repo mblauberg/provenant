@@ -1,4 +1,4 @@
-//! Build-only release staging with an optional unattended PR worker.
+//! Build-only release staging.
 #[path = "../release_smoke.rs"]
 mod release_smoke;
 
@@ -67,7 +67,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let mut output = None;
     let mut binary = None;
-    let mut pr_worker = None;
     while let Some(arg) = args.next() {
         match arg.as_os_str() {
             value if value == OsStr::new("--out") => {
@@ -78,27 +77,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             value if value == OsStr::new("--binary") => {
                 binary = Some(PathBuf::from(args.next().ok_or("--binary needs a path")?));
             }
-            value if value == OsStr::new("--pr-worker") => {
-                let worker =
-                    PathBuf::from(args.next().ok_or("--pr-worker needs an absolute path")?);
-                if !worker.is_absolute()
-                    || worker.components().any(|part| part == Component::ParentDir)
-                {
-                    return Err("--pr-worker must be an absolute path without ..".into());
-                }
-                pr_worker = Some(worker.canonicalize()?);
-            }
             value if value == OsStr::new("--help") => {
                 writeln!(
                     io::stdout().lock(),
-                    "cargo run --bin package-release -- --out ABS [--binary PATH] [--pr-worker ABS]"
+                    "cargo run --bin package-release -- --out ABS [--binary PATH]"
                 )?;
                 return Ok(());
             }
             _ => {
-                return Err(
-                    "usage: package-release --out ABS [--binary PATH] [--pr-worker ABS]".into(),
-                );
+                return Err("usage: package-release --out ABS [--binary PATH]".into());
             }
         }
     }
@@ -116,17 +103,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = smoke.identity(&binary, &cancel)?;
     let current_source = SourceDigest::parse(env!("PROVENANT_SOURCE_DIGEST"))?;
     require_current_source(&identity, &current_source)?;
-    if let Some(worker) = &pr_worker {
-        smoke.require_matching_identity(worker, &identity, &cancel)?;
-    }
     // Never overwrite a previous stage. A failed stage has no completion marker;
     // preserve it for inspection and ask the caller to choose a fresh directory.
     fs::create_dir(&output)?;
     fs::create_dir(output.join("bin"))?;
     fs::copy(binary, output.join("bin/provenant"))?;
-    if let Some(worker) = &pr_worker {
-        fs::copy(worker, output.join("bin/pr-reconciler"))?;
-    }
     for &(source, name) in RELEASE_ASSETS {
         let destination = output.join(name);
         fs::create_dir_all(destination.parent().ok_or("release asset has no parent")?)?;
@@ -183,52 +164,6 @@ mod tests {
         let fresh = root.join("release");
         assert_eq!(output_directory(&fresh)?, fresh);
         assert!(!fresh.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn worker_smoke_requires_both_build_identity_and_worker_role()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temporary = tempfile::tempdir()?;
-        let executable = temporary.path().join("worker");
-        let expected = VersionInfo {
-            extra: Default::default(),
-            source_digest: SourceDigest::parse(&format!("sha256:{}", "0".repeat(64)))?,
-            asset_digest: SourceDigest::parse(&format!("sha256:{}", "1".repeat(64)))?,
-            target: "test-target".into(),
-            toolchain: "test-toolchain".into(),
-            record_schema_version: 1,
-            config_schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
-        };
-        let smoke = release_smoke::SystemSmoke::new(None)?;
-        for (role, same_build, passes) in [
-            (None, true, false), // A same-build main CLI is not a worker.
-            (Some("provenant"), true, false),
-            (Some("pr-reconciler"), false, false),
-            (Some("pr-reconciler"), true, true),
-        ] {
-            let mut data = serde_json::to_value(&expected)?;
-            data["package_version"] = env!("CARGO_PKG_VERSION").into();
-            if let Some(role) = role {
-                data["binary"] = role.into();
-            }
-            if !same_build {
-                data["toolchain"] = "other-toolchain".into();
-            }
-            let envelope = serde_json::json!({"schema_version":1,"command":"version","status":"ok","data":data,"error":null});
-            fs::write(
-                &executable,
-                format!("#!/bin/sh\nprintf '%s\\n' '{envelope}'\n"),
-            )?;
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
-            assert_eq!(
-                smoke
-                    .require_matching_identity(&executable, &expected, &CancelToken::new())
-                    .is_ok(),
-                passes
-            );
-        }
         Ok(())
     }
 }

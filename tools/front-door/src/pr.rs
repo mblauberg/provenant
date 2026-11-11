@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 pub(super) mod contributions;
+mod gh;
 mod git;
 pub(crate) mod land;
 pub(crate) mod landing;
