@@ -125,6 +125,9 @@ pub enum Command {
         /// Show the resolved landing policy without landing
         #[arg(long)]
         explain: bool,
+        /// Land a delta no review covers, recording this reason and who accepted it
+        #[arg(long, value_name = "REASON")]
+        accept_delta: Option<String>,
     },
     /// Read graph, node or attempt output
     #[command(add = crate::metadata::CoreCommand(2, "provenant output ID"))]
@@ -185,9 +188,9 @@ pub enum Command {
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
-    /// Mine, verify and run benchmark tasks
+    /// Hand a brief to a provider cloud session and collect its branch
     #[command(subcommand)]
-    Bench(crate::bench::Bench),
+    Cloud(crate::cloud::Cloud),
     /// Check reviews and keep receipts and session checkpoints
     #[command(subcommand)]
     Workflow(crate::workflow::Workflow),
@@ -646,7 +649,7 @@ impl FromStr for Target {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let parts: Vec<_> = text.split('/').collect();
         // Graph and node names are resolved by the graph owner before lane IDs.
-        if parts.len() <= 2
+        if parts.len() <= 3
             && parts.iter().all(|part| {
                 !part.is_empty()
                     && part.len() <= 200
@@ -771,15 +774,6 @@ pub enum Condition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum LaneState {
-    CloudSubmitting,
-    CloudRunning,
-    CloudPassed,
-    CloudFailed,
-    CloudSetupFailed,
-    CloudCancelled,
-    CloudCancellationUnconfirmed,
-    CloudUnknown,
-    CloudAbandoned,
     Queued,
     Starting,
     Running,
@@ -803,15 +797,6 @@ pub enum LaneState {
 impl LaneState {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::CloudSubmitting => "cloud_submitting",
-            Self::CloudRunning => "cloud_running",
-            Self::CloudPassed => "cloud_passed",
-            Self::CloudFailed => "cloud_failed",
-            Self::CloudSetupFailed => "cloud_setup_failed",
-            Self::CloudCancelled => "cloud_cancelled",
-            Self::CloudCancellationUnconfirmed => "cloud_cancellation_unconfirmed",
-            Self::CloudUnknown => "cloud_unknown",
-            Self::CloudAbandoned => "cloud_abandoned",
             Self::Queued => "queued",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -1046,7 +1031,7 @@ pub enum NativeSettlement {
 
 #[derive(Debug, Subcommand)]
 pub enum Telemetry {
-    /// Summarise local attempts, usage and cost
+    /// Summarise local attempts and usage
     Stats(Stats),
     /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
     Trace(Trace),
@@ -1057,8 +1042,12 @@ pub enum Telemetry {
     },
     /// Record native chair and sub-agent token usage per account
     Ingest(Ingest),
-    /// Report quota mileage and effective token rates from quota history and ingested usage
+    /// Report quota mileage from quota history and ingested usage
     Mileage(Mileage),
+    /// Compare each account's API-equivalent lane usage with its plan price and quota readings
+    Value(crate::telemetry_args::TelemetryValue),
+    /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
+    Cost(crate::telemetry_args::TelemetryCost),
     /// Copy every terminal attempt in the run store into the usage ledger; run once after installing 1.8.0
     Backfill,
     /// Compare experiment arms using offline pipeline outcomes
@@ -1506,6 +1495,12 @@ mod target_tests {
         assert!(!bare.is_qualified_pair());
         assert!(format!("{run}/").parse::<Attempt>().is_err());
         assert!(format!("/{attempt}").parse::<Attempt>().is_err());
+        // A graph lane ID names its graph and node, which need not be hexadecimal.
+        let lane: Attempt = format!("g/parent--child/{attempt}").parse().unwrap();
+        assert_eq!(
+            lane.0.selection.as_deref(),
+            Some(format!("g/parent--child/{attempt}").as_str())
+        );
         for invalid in [
             "",
             &format!("{run}//{attempt}"),

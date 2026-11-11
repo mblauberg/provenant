@@ -200,6 +200,7 @@ pub enum GraphRelayCause {
     RetryUnknownNode,
     RetryUnsettled,
     RetryContainerBrief,
+    RetryBriefNeedsNode,
     RetryInvalidConfiguration,
     ChildDepth,
     WriterParentRequired,
@@ -232,6 +233,9 @@ impl GraphRelayCause {
             Self::RetryUnknownNode => "the selected node does not exist in the graph",
             Self::RetryUnsettled => "the selected node or its subtree has unsettled attempts",
             Self::RetryContainerBrief => "a container retry requires per-leaf brief edits",
+            Self::RetryBriefNeedsNode => {
+                "a graph with several nodes needs --node to say which node's brief to replace"
+            }
             Self::ParentSettled => "the parent node has settled; launch from a running node",
             Self::ChildDepth => {
                 "the child exceeds limits.child_depth; raise the graph's child depth limit"
@@ -295,7 +299,8 @@ impl GraphRelayCause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
-    CloudPlacement(CloudPlacementIssue),
+    /// `attempt.cloud` or `attempt.placement`: cloud placement was removed.
+    CloudPlacementRemoved,
     GraphReason(String),
     OperationFailed,
     GraphRelayCause(GraphRelayCause),
@@ -305,7 +310,6 @@ pub enum InvalidInputDetail {
     UpgradeDrainRequired,
     CutoverFindings(String),
     Schema,
-    LandingLock,
     UnresolvableBase(String),
     Field(String),
     FieldDecode {
@@ -321,19 +325,6 @@ pub enum InvalidInputDetail {
     InputTooLarge,
     InputInvalidUtf8,
     GraphDocumentTooLarge,
-}
-
-/// Fixed diagnostics: neither field values nor provider output cross the facade.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CloudPlacementIssue {
-    Target,
-    Provider,
-    Environment,
-    Repository,
-    Branch,
-    Model,
-    Deadline,
 }
 
 impl InvalidInputDetail {
@@ -362,15 +353,7 @@ impl InvalidInputDetail {
 
     fn safe_text(&self) -> Option<String> {
         match self {
-            Self::CloudPlacement(issue) => Some(match issue {
-                CloudPlacementIssue::Target => "invalid input field `attempt.cloud.target`: must not be empty",
-                CloudPlacementIssue::Provider => "invalid input field `attempt.cloud.provider`: must name a supported cloud provider",
-                CloudPlacementIssue::Environment => "invalid input field `attempt.cloud.environment`: Codex requires an environment",
-                CloudPlacementIssue::Repository => "invalid input field `attempt.cloud.repository`: must not be empty",
-                CloudPlacementIssue::Branch => "invalid input field `attempt.cloud.branch`: must not be empty",
-                CloudPlacementIssue::Model => "invalid input field `attempt.cloud.model`: must not be empty",
-                CloudPlacementIssue::Deadline => "invalid input field `attempt.cloud.deadline_seconds`: must be greater than zero",
-            }.into()),
+            Self::CloudPlacementRemoved => Some(crate::graph::CLOUD_PLACEMENT_REMOVED.into()),
             // Parser and transport errors may contain input, prompts or source
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
@@ -382,7 +365,6 @@ impl InvalidInputDetail {
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
-            Self::LandingLock => Some("landing lock required".into()),
             Self::UnresolvableBase(name) => safe_base_ref(name)
                 .map(|name| format!("unresolvable base `{name}`")),
             Self::InputUnreadable => {
@@ -563,6 +545,9 @@ pub enum FacadeError {
         resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_failure: Option<provenant_records::diagnostic::IoFact>,
+        /// The source error's fixed text, kept in-process for local edges.
+        #[serde(skip)]
+        cause: Option<&'static str>,
     },
 }
 
@@ -859,6 +844,9 @@ impl FacadeError {
             Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
                 projected = projected.detail("repository fact output exceeded its capture limit");
             }
+            // Only the in-process fixed cause is disclosed: operation text can
+            // arrive from a peer and the path is unanchored.
+            Self::Io { cause: Some(cause), .. } => projected = projected.detail(*cause),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
@@ -1207,8 +1195,26 @@ impl FacadeError {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
             operation: operation.into(),
             path: None,
+        }
+    }
+
+    /// A local I/O failure whose source error has the fixed text `cause`.
+    pub fn io_caused(operation: impl Into<String>, cause: Option<&'static str>) -> Self {
+        let mut error = Self::io(operation);
+        if let Self::Io { cause: slot, .. } = &mut error {
+            *slot = cause;
+        }
+        error
+    }
+
+    /// The source error's fixed text, when this failure kept one.
+    pub fn cause(&self) -> Option<&'static str> {
+        match self {
+            Self::Io { cause, .. } => *cause,
+            _ => None,
         }
     }
 
@@ -1240,6 +1246,7 @@ impl FacadeError {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
             operation: operation.into(),
             path: path
                 .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
@@ -1285,9 +1292,6 @@ impl From<&super::CoordinationError> for FacadeError {
             CoordinationError::LaneMutation => Self::LaneCoordinationRefused,
             CoordinationError::Peer(error) => Self::from(error),
             CoordinationError::InvalidInput(_) => Self::InvalidInput { detail: None },
-            CoordinationError::LandingLockRequired => {
-                Self::invalid(InvalidInputDetail::LandingLock)
-            }
             CoordinationError::Input(error) => Self::InvalidInput {
                 detail: error.diagnostic_detail(),
             },
@@ -1311,10 +1315,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
-            Error::Conflict
-            | Error::PushUnresolved { .. }
-            | Error::PushTransition { .. }
-            | Error::Overlap { .. } => Self::Conflict,
+            Error::Conflict | Error::Overlap { .. } => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
@@ -1357,6 +1358,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "access Fabric store".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -1366,6 +1368,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "verify Fabric store path".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -1524,6 +1527,7 @@ mod diagnostic_tests {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
         };
         let diagnostic = error.diagnostic();
         assert_eq!(diagnostic.code, "io");
@@ -1532,6 +1536,21 @@ mod diagnostic_tests {
         let wire = serde_json::to_string(&diagnostic).unwrap();
         assert!(!wire.contains("TOKEN_SENTINEL"));
         assert!(!wire.contains("/private/host"));
+    }
+
+    #[test]
+    fn generic_io_discloses_its_fixed_cause_only_in_process() {
+        let cause = "verified repository path or Git metadata changed";
+        let error = FacadeError::io_caused("locate writer project", Some(cause));
+        assert_eq!(error.cause(), Some(cause));
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "io");
+        assert_eq!(diagnostic.detail.as_deref(), Some(cause));
+        let wire = serde_json::to_value(&error).unwrap();
+        assert!(!wire.to_string().contains(cause), "{wire}");
+        let received: FacadeError = serde_json::from_value(wire).unwrap();
+        assert_eq!(received.cause(), None);
+        assert!(received.diagnostic().detail.is_none());
     }
 
     #[test]
@@ -1626,6 +1645,7 @@ mod diagnostic_tests {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "openat read".into(),
                 path: None,
             }
@@ -1895,37 +1915,6 @@ mod diagnostic_tests {
         let received: FacadeError =
             serde_json::from_value(serde_json::to_value(&from_field).unwrap()).unwrap();
         assert_eq!(received.diagnostic(), from_field.diagnostic());
-        assert_eq!(
-            FacadeError::from(&super::super::CoordinationError::LandingLockRequired).to_string(),
-            "invalid input: landing lock required"
-        );
-    }
-
-    #[test]
-    fn cloud_placement_diagnostics_survive_transport_without_values() {
-        use super::{CloudPlacementIssue as Issue, InvalidInputDetail};
-        for (issue, field, reason) in [
-            (Issue::Target, "attempt.cloud.target", "empty"),
-            (Issue::Provider, "attempt.cloud.provider", "supported"),
-            (Issue::Environment, "attempt.cloud.environment", "requires"),
-            (Issue::Repository, "attempt.cloud.repository", "empty"),
-            (Issue::Branch, "attempt.cloud.branch", "empty"),
-            (Issue::Model, "attempt.cloud.model", "empty"),
-            (
-                Issue::Deadline,
-                "attempt.cloud.deadline_seconds",
-                "greater than zero",
-            ),
-        ] {
-            let error = FacadeError::invalid(InvalidInputDetail::CloudPlacement(issue));
-            let received: FacadeError =
-                serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
-            let message = received.to_string();
-            assert!(
-                message.contains(field) && message.contains(reason),
-                "{message}"
-            );
-        }
     }
 
     #[test]

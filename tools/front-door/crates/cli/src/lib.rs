@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 use provenant_core::edit_distance;
 pub mod accounts;
-pub mod bench;
 pub mod check;
+pub mod cloud;
 pub mod console;
 pub mod domains;
 pub mod fabric;
@@ -14,7 +14,7 @@ pub mod run;
 pub mod tracker;
 pub mod wait;
 pub mod workflow;
-pub use bench::Bench;
+pub use cloud::Cloud;
 pub use fabric::Fabric;
 pub use quota::Quota;
 pub use route::Route;
@@ -28,11 +28,14 @@ pub mod mileage;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
+pub mod telemetry_args;
+pub mod telemetry_value;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
+pub use telemetry_args::CostBy;
 
 use thiserror::Error;
 

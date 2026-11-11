@@ -62,6 +62,9 @@ impl Forge for FakeForge {
     fn target_branch(&mut self) -> Result<String, LandingError> {
         Ok(self.target_branch.clone())
     }
+    fn actor(&mut self) -> Result<String, LandingError> {
+        Ok("chair".into())
+    }
     fn head(&mut self, number: u64) -> Result<String, LandingError> {
         if let Some(head) = self
             .head_reads
@@ -197,6 +200,33 @@ impl Forge for FakeForge {
         Ok(9000 + number)
     }
 }
+/// Accepted Provenant review records by pull request, the receipts that
+/// cannot be read as one, and an optional store-wide read failure.
+#[derive(Default)]
+pub struct FakeReviews {
+    pub records: BTreeMap<u64, Vec<ReviewRecord>>,
+    pub unusable: BTreeMap<u64, Vec<String>>,
+    pub failure: Option<String>,
+}
+impl FakeReviews {
+    pub fn of(records: BTreeMap<u64, Vec<ReviewRecord>>) -> Self {
+        Self {
+            records,
+            ..Self::default()
+        }
+    }
+}
+impl ReviewRecords for FakeReviews {
+    fn reviews(&self, number: u64) -> Result<Reviews, LandingError> {
+        if let Some(failure) = &self.failure {
+            return Err(LandingError::Failed(failure.clone()));
+        }
+        Ok(Reviews {
+            records: self.records.get(&number).cloned().unwrap_or_default(),
+            unusable: self.unusable.get(&number).cloned().unwrap_or_default(),
+        })
+    }
+}
 #[derive(Default)]
 pub struct FakeRepo {
     pub target: String,
@@ -208,6 +238,8 @@ pub struct FakeRepo {
     pub conflicts: BTreeSet<(String, String)>,
     pub refs: BTreeMap<String, String>,
     pub trees: BTreeMap<String, String>,
+    /// Paths between two commits or trees; any other pair changes `src/lib.rs`.
+    pub paths: BTreeMap<(String, String), Vec<String>>,
     pub parents: BTreeMap<String, Vec<String>>,
     pub pushes: Vec<(String, String, Option<String>)>,
     pub push_attempts: Vec<String>,
@@ -339,11 +371,31 @@ impl Repo for FakeRepo {
         }
         Ok(false)
     }
+    fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError> {
+        Ok(self
+            .paths
+            .get(&(from.to_owned(), to.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| vec!["src/lib.rs".into()]))
+    }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.trees
             .get(commit)
             .cloned()
             .ok_or_else(|| LandingError::Failed("missing tree".into()))
+    }
+    fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError> {
+        let mut pending = vec![left.to_owned()];
+        let mut seen = BTreeSet::new();
+        while let Some(commit) = pending.pop() {
+            if self.is_ancestor(&commit, right)? {
+                return Ok(Some(commit));
+            }
+            if seen.insert(commit.clone()) {
+                pending.extend(self.parents.get(&commit).cloned().unwrap_or_default());
+            }
+        }
+        Ok(None)
     }
 }
 #[derive(Default)]

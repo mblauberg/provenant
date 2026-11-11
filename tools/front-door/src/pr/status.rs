@@ -19,8 +19,8 @@ struct View {
     review: Option<String>,
     #[serde(rename = "isDraft", default)]
     draft: bool,
-    #[serde(rename = "statusCheckRollup", default)]
-    checks: Option<Vec<serde_json::Value>>,
+    /// The pull request URL names the base repository, whose CI it runs.
+    url: String,
 }
 #[derive(Deserialize)]
 struct Check {
@@ -100,6 +100,7 @@ impl Line {
 
 /// Graph gates read checks for an exact head and recheck the target afterwards.
 pub(crate) fn observe_ci(
+    state: &Path,
     project: &Path,
     target: &str,
     names: &[String],
@@ -107,6 +108,7 @@ pub(crate) fn observe_ci(
     max_failed_checks: usize,
 ) -> provenant_fabric_runtime::graph::CiObservation {
     ci::observe(
+        state,
         project,
         target,
         names,
@@ -178,7 +180,6 @@ impl Required {
     }
 }
 pub(super) struct Policy {
-    pub repository: String,
     pub checks: Vec<Required>,
 }
 
@@ -250,7 +251,6 @@ pub(super) fn required_policy_for(
     )?)
     .ok()?;
     Some(Policy {
-        repository: repo.to_owned(),
         checks: parse_required_checks(protection.as_ref(), &pages)?,
     })
 }
@@ -425,21 +425,22 @@ fn open_numbers(project: &Path) -> Result<Vec<u64>> {
             "gh", "pr", "list", "--author", "@me", "--state", "open", "--limit", "50", "--json",
             "number",
         ],
-        false,
     )?)?;
     let mut listed: Vec<Listed> = serde_json::from_slice(&bytes)?;
     listed.sort_by_key(|entry| entry.number);
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
-fn line(project: &Path, number: u64, timeout: std::time::Duration) -> Result<Line> {
-    wait_line(project, number, timeout, None)
-}
+/// `max_age` is how old an observed CI answer may be: a waiter's poll, or
+/// zero for a one-shot read.
 pub(crate) fn wait_line(
     project: &Path,
+    state: &Path,
     number: u64,
     timeout: std::time::Duration,
+    max_age: std::time::Duration,
     cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<Line> {
+    use super::observer::{ObserveError, Observer};
     let text = number.to_string();
     let bytes = successful(super::execute_cancellable(
         project,
@@ -449,7 +450,7 @@ pub(crate) fn wait_line(
             "view",
             &text,
             "--json",
-            "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup",
+            "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,url",
         ],
         timeout,
         false,
@@ -457,29 +458,34 @@ pub(crate) fn wait_line(
         cancel,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
-    let checks = view
-        .checks
-        .as_deref()
-        .and_then(rollup_checks)
-        .filter(|checks| !checks.is_empty());
-    let passed = checks.as_ref().map(|checks| {
-        checks
-            .iter()
-            .filter(|check| matches!(check.bucket.as_str(), "pass" | "skipping"))
-            .count()
-    });
-    let failed = checks.as_ref().map(|checks| {
-        checks
-            .iter()
-            .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
-            .count()
-    });
-    let pending = checks.as_ref().map(|checks| {
-        checks
-            .iter()
-            .filter(|check| check.bucket == "pending")
-            .count()
-    });
+    let segments: Vec<&str> = view.url.trim_end_matches('/').split('/').collect();
+    let repository = match segments.as_slice() {
+        [.., owner, name, "pull", _] => format!("{owner}/{name}"),
+        _ => return Err(format!("pull request URL names no repository: {}", view.url).into()),
+    };
+    // Unreadable or incomplete checks leave the row readable, as before; a
+    // rate limit or an expired read is a failed row naming why.
+    let checks = match Observer::open(state, project, &repository, timeout)
+        .and_then(|mut observer| observer.checks(&view.head, max_age, timeout))
+    {
+        Ok(checks) => Some(checks),
+        Err(ObserveError::Unavailable(_)) => None,
+        Err(error) => return Err(error.to_string().into()),
+    };
+    Ok(status_line(number, view, checks.as_deref()))
+}
+
+/// One row from the pull request view and its observed checks.
+fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]>) -> Line {
+    let checks = checks.filter(|checks| !checks.is_empty());
+    let count = |buckets: &[&str]| {
+        checks.map(|checks| {
+            checks
+                .iter()
+                .filter(|check| buckets.contains(&check.bucket.as_str()))
+                .count()
+        })
+    };
     let word = |text: &str| {
         if text.is_empty() {
             "none".to_owned()
@@ -487,62 +493,35 @@ pub(crate) fn wait_line(
             text.to_lowercase()
         }
     };
-    Ok(Line {
+    Line {
         number,
+        checks_passed: count(&["pass", "skipping"]),
+        checks_total: checks.map(<[_]>::len),
+        checks_failed: count(&["fail", "cancel"]),
+        checks_pending: count(&["pending"]),
+        merge: word(&view.merge),
+        review: word(view.review.as_deref().unwrap_or_default()),
         state: view.state,
         head: view.head,
         draft: view.draft,
-        checks_passed: passed,
-        checks_total: checks.as_ref().map(Vec::len),
-        checks_failed: failed,
-        checks_pending: pending,
-        merge: word(&view.merge),
-        review: word(view.review.as_deref().unwrap_or_default()),
         error: None,
-    })
+    }
 }
 
-/// Head and check states come from the same GitHub snapshot. A completed
-/// conclusion is never trusted while the check is still running.
-fn rollup_checks(values: &[serde_json::Value]) -> Option<Vec<Check>> {
-    values
-        .iter()
-        .map(|value| {
-            let kind = value.get("__typename")?.as_str()?;
-            let (name, bucket) = match kind {
-                "CheckRun" => {
-                    let status = value.get("status")?.as_str()?;
-                    let bucket = match status {
-                        "COMPLETED" => match value.get("conclusion")?.as_str()? {
-                            "SUCCESS" => "pass",
-                            "SKIPPED" | "NEUTRAL" => "skipping",
-                            "CANCELLED" => "cancel",
-                            "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
-                            | "STALE" => "fail",
-                            _ => return None,
-                        },
-                        "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" => "pending",
-                        _ => return None,
-                    };
-                    (value.get("name")?.as_str()?, bucket)
-                }
-                "StatusContext" => {
-                    let bucket = match value.get("state")?.as_str()? {
-                        "SUCCESS" => "pass",
-                        "PENDING" | "EXPECTED" => "pending",
-                        "ERROR" | "FAILURE" => "fail",
-                        _ => return None,
-                    };
-                    (value.get("context")?.as_str()?, bucket)
-                }
-                _ => return None,
-            };
-            Some(Check {
-                name: name.into(),
-                bucket: bucket.into(),
-            })
-        })
-        .collect()
+/// The `pr status` class of an open, approved pull request whose head has
+/// `checks`.
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
+pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'static str {
+    let view = View {
+        state: "OPEN".into(),
+        head: head.into(),
+        merge: "CLEAN".into(),
+        review: Some("APPROVED".into()),
+        draft: false,
+        url: "https://github.com/owner/repo/pull/1".into(),
+    };
+    status_line(1, view, Some(checks)).class()
 }
 
 /// A change is a row that was readable both times and differs. An error row
@@ -568,7 +547,14 @@ fn keep_good(previous: &[Line], current: Vec<Line>) -> Vec<Line> {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn snapshot(project: &Path, numbers: &[u64], deadline: Option<std::time::Instant>) -> Vec<Line> {
+fn snapshot(
+    project: &Path,
+    state: &Path,
+    numbers: &[u64],
+    deadline: Option<std::time::Instant>,
+) -> Vec<Line> {
+    // A waiting snapshot shares answers younger than the wait's poll.
+    let max_age = deadline.map_or(std::time::Duration::ZERO, |_| super::observer::POLL);
     numbers
         .iter()
         .map(|&number| {
@@ -579,7 +565,7 @@ fn snapshot(project: &Path, numbers: &[u64], deadline: Option<std::time::Instant
             let observed = if timeout.is_zero() {
                 Err("status wait expired".into())
             } else {
-                line(project, number, timeout)
+                wait_line(project, state, number, timeout, max_age, None)
             };
             observed.unwrap_or_else(|error| Line {
                 number,
@@ -604,6 +590,10 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
     const LEAF: &str = "pr status";
     let result = (|| -> Result<(Vec<Line>, bool)> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
+        let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
+            .roots
+            .state;
+        let state = state.as_path();
         let numbers = if numbers.is_empty() {
             open_numbers(&project)?
         } else {
@@ -611,7 +601,7 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
         };
         let deadline =
             wait.map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs(seconds));
-        let initial = snapshot(&project, &numbers, deadline);
+        let initial = snapshot(&project, state, &numbers, deadline);
         let Some(deadline) = deadline else {
             return Ok((initial, false));
         };
@@ -634,7 +624,7 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
             if std::time::Instant::now() >= deadline {
                 return Ok((latest, true));
             }
-            let current = snapshot(&project, &numbers, Some(deadline));
+            let current = snapshot(&project, state, &numbers, Some(deadline));
             latest = keep_good(&latest, current.clone());
             if std::time::Instant::now() >= deadline {
                 return Ok((latest, true));
@@ -813,29 +803,6 @@ mod tests {
             ),
             None
         );
-    }
-    #[test]
-    fn rollup_distinguishes_running_completed_and_legacy_contexts() {
-        use serde_json::json;
-        let checks = super::rollup_checks(&[
-            json!({"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":"SUCCESS"}),
-            json!({"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"}),
-            json!({"__typename":"StatusContext","context":"external","state":"SUCCESS"}),
-        ]).expect("valid rollup");
-        assert_eq!(
-            checks
-                .iter()
-                .map(|check| check.bucket.as_str())
-                .collect::<Vec<_>>(),
-            ["pending", "fail", "pass"]
-        );
-        assert!(
-            super::rollup_checks(&[
-                json!({"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":""})
-            ])
-            .is_none()
-        );
-        assert!(super::rollup_checks(&[json!({"__typename":"CheckRun","name":"build","status":"UNKNOWN","conclusion":"SUCCESS"})]).is_none());
     }
     #[test]
     fn failed_policy_lookup_uses_all_reported_checks() {

@@ -11,10 +11,6 @@ pub enum EventKind {
     ClaimAcquired,
     ClaimRenewed,
     ClaimReleased,
-    LandingAcquired,
-    LandingRenewed,
-    LandingReleased,
-    PushChanged,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {

@@ -274,7 +274,7 @@ pub(super) fn apply_attempt_observation(
                     outputs.warnings.extend(marker_warnings);
                 }
                 let review_contract_error =
-                    review::contract_error(node, &upstream_findings, &outputs);
+                    review::contract_error(node, &upstream_findings, &outputs, result.as_deref());
                 if node.access == AccessMode::ReadOnly
                     && template::review_node(node)
                     && attempt.attempt_ref.is_some()

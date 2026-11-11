@@ -31,6 +31,11 @@ fn rig() -> Result<TestRig> {
         rig.project.join("checks.json"),
         r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#,
     )?;
+    // The fake forge has no reviews or target to read, so land on CI alone.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\napproval_tier = 'none'\n",
+    )?;
     Ok(rig)
 }
 #[path = "support/rest_calls.rs"]
@@ -51,7 +56,7 @@ fn no_merge(rig: &TestRig) -> Result {
     Ok(())
 }
 
-fn pr_watch_reports_the_verified_head_and_waits_via_gh() -> Result {
+fn pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer() -> Result {
     let rig = self::rig()?;
     let output = rig.command(&["pr", "watch", "1668", "--full"])?;
     assert_eq!(code(&output), 0, "{:?}", output);
@@ -59,14 +64,23 @@ fn pr_watch_reports_the_verified_head_and_waits_via_gh() -> Result {
         String::from_utf8(output.stdout.bytes)?,
         format!("pass #1668 {HEAD}\n")
     );
-    assert!(rig.project.join("watched").exists());
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert!(
+        calls.contains(&format!("commits/{HEAD}/check-runs")),
+        "{calls}"
+    );
+    assert!(!calls.contains("pr checks"), "{calls}");
     no_merge(&rig)
 }
 
 fn pr_watch_failure_and_head_changes_report_fail_with_head() -> Result {
     for flag in ["watch-fail", "move-head"] {
         let rig = self::rig()?;
-        fs::write(rig.project.join(flag), "")?;
+        if flag == "watch-fail" {
+            fs::write(rig.project.join("checks.json"), r#"[{"bucket":"fail"}]"#)?;
+        } else {
+            fs::write(rig.project.join(flag), "")?;
+        }
         let output = rig.command(&["pr", "watch", "1668"])?;
         assert_ne!(code(&output), 0, "{flag}");
         let error = String::from_utf8(output.stderr.bytes)?;
@@ -464,7 +478,7 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
     );
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.pr.land]\nbatch_wait_seconds = 0\n",
+        "schema_version = 1\n[domains.pr.land]\napproval_tier = 'carry'\nbatch_wait_seconds = 0\n",
     )?;
     let output = rig.command(&["land", "1668", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -828,7 +842,6 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 "number",
                 "reviewDecision",
                 "state",
-                "statusCheckRollup",
                 "title",
                 "url",
             ],
@@ -869,7 +882,11 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = call
         .replace("api --include ", "api ")
-        .replace(" -H X-GitHub-Api-Version:2026-03-10", "");
+        .replace(" -H X-GitHub-Api-Version:2026-03-10", "")
+        .replace(
+            "api -H Accept:application/vnd.github+json -H X-GitHub-Api-Version:2022-11-28 ",
+            "api ",
+        );
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
@@ -888,14 +905,22 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 let mut lines = seq.lines();
                 let next = lines.next().unwrap_or(HEAD).to_owned();
                 let rest: Vec<&str> = lines.collect();
-                if !rest.is_empty() { fs::write("head-seq", rest.join("\n"))?; }
+                if !rest.is_empty() {
+                    fs::write("head-seq", rest.join("\n"))?;
+                }
                 next
             } else if Path::new("head-read").exists() && Path::new("move-head").exists() {
                 OTHER.to_owned()
-            } else { head_value["headRefOid"].as_str().unwrap_or(HEAD).to_owned() };
+            } else {
+                head_value["headRefOid"].as_str().unwrap_or(HEAD).to_owned()
+            };
             fs::write("head-read", "")?;
             let merged = Path::new("merged").exists();
-            let mergeable = match head_value["mergeable"].as_str() { Some("CONFLICTING") => Some(false), Some("UNKNOWN") => None, _ => Some(true) };
+            let mergeable = match head_value["mergeable"].as_str() {
+                Some("CONFLICTING") => Some(false),
+                Some("UNKNOWN") => None,
+                _ => Some(true),
+            };
             let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":HEAD,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture"});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
@@ -917,18 +942,22 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             }
             fs::write("head-read", "")?;
         }
-        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt" => {
-            let state = if Path::new("merged").exists() { "MERGED" } else { "OPEN" };
-            write!(io::stdout(), r#"{{"state":"{state}","baseRefName":"main","headRefName":"feature","isCrossRepository":false}}"#)?;
-        }
-        "pr checks 1668 --watch" => {
-            fs::write("watched", "")?;
-            if Path::new("watch-fail").exists() {
-                return Ok(1);
-            }
+        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt" =>
+        {
+            let state = if Path::new("merged").exists() {
+                "MERGED"
+            } else {
+                "OPEN"
+            };
+            write!(
+                io::stdout(),
+                r#"{{"state":"{state}","baseRefName":"main","headRefName":"feature","isCrossRepository":false}}"#
+            )?;
         }
         "pr view 1668 --json baseRefName,url" => {
-            io::stdout().write_all(br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#)?;
+            io::stdout().write_all(
+                br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
+            )?;
         }
         "api repos/owner/repo/branches/main" => {
             if Path::new("rate-read-once").exists() {
@@ -937,8 +966,11 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 writeln!(io::stderr(), "HTTP 429")?;
                 return Ok(1);
             }
-            if Path::new("ruleset-only").exists() { io::stdout().write_all(br#"{"protected":true}"#)?; }
-            else { io::stdout().write_all(br#"{"protected":false}"#)?; }
+            if Path::new("ruleset-only").exists() {
+                io::stdout().write_all(br#"{"protected":true}"#)?;
+            } else {
+                io::stdout().write_all(br#"{"protected":false}"#)?;
+            }
         }
         "api repos/owner/repo/branches/main/protection" => {
             if Path::new("protection-404").exists() {
@@ -949,34 +981,72 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             return Ok(1);
         }
         "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
-            if Path::new("rules-fail").exists() { return Ok(1); }
-            if Path::new("required.json").exists() { io::stdout().write_all(&fs::read("required.json")?)?; }
-            else { io::stdout().write_all(b"[[]]")?; }
-        }
-        value if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
-            && value.ends_with("/statuses?per_page=100") => {
-            assert!(value.contains(HEAD));
-            if Path::new("statuses.json").exists() {
-                io::stdout().write_all(&fs::read("statuses.json")?)?;
+            if Path::new("rules-fail").exists() {
+                return Ok(1);
+            }
+            if Path::new("required.json").exists() {
+                io::stdout().write_all(&fs::read("required.json")?)?;
             } else {
                 io::stdout().write_all(b"[[]]")?;
             }
         }
-        value if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
-            && value.ends_with("/check-runs?per_page=100&filter=latest") => {
-            assert!(value.contains(HEAD));
-            if Path::new("checks-fail").exists() { return Ok(1); }
+        // The CI observer reads one page per request, with response headers.
+        value
+            if value.starts_with("api repos/owner/repo/commits/")
+                && value.contains("/statuses?per_page=100&page=") =>
+        {
+            let page: usize = value.rsplit("&page=").next().ok_or("page")?.parse()?;
+            let pages: Vec<serde_json::Value> = if Path::new("statuses.json").exists() {
+                serde_json::from_slice(&fs::read("statuses.json")?)?
+            } else {
+                Vec::new()
+            };
+            io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+            let body = pages
+                .get(page - 1)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
+        value
+            if value.starts_with("api repos/owner/repo/commits/")
+                && value.contains("/check-runs?per_page=100&filter=latest&page=") =>
+        {
+            let commit = value
+                .split("/commits/")
+                .nth(1)
+                .and_then(|part| part.split('/').next())
+                .ok_or("check commit")?;
+            assert!(commit == HEAD || commit == OTHER, "{value}");
+            let page: usize = value.rsplit("&page=").next().ok_or("page")?.parse()?;
+            if Path::new("checks-fail").exists() {
+                io::stdout().write_all(b"HTTP/2.0 404 Not Found\r\n\r\n{}")?;
+                return Ok(1);
+            }
             if Path::new("flaky").exists() {
                 fs::remove_file("flaky")?;
+                io::stdout().write_all(b"HTTP/2.0 502 Bad Gateway\r\n\r\n{}")?;
                 writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
                 return Ok(1);
             }
-            let raw = fs::read("checks.json")?;
+            io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+            let file = if commit == OTHER && Path::new("checks-1669.json").exists() {
+                "checks-1669.json"
+            } else {
+                "checks.json"
+            };
+            let raw = fs::read(file)?;
             let Some(checks) = serde_json::from_slice::<Vec<serde_json::Value>>(&raw)
                 .ok()
                 .filter(|checks| checks.iter().all(|check| check.get("check_runs").is_none()))
             else {
-                io::stdout().write_all(&raw)?;
+                // Literal pages, served one per request.
+                let pages: Vec<serde_json::Value> = serde_json::from_slice(&raw)?;
+                let body = pages
+                    .get(page - 1)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"check_runs":[]}));
+                io::stdout().write_all(&serde_json::to_vec(&body)?)?;
                 return Ok(0);
             };
             let runs: Vec<_> = checks.iter().enumerate().map(|(index, check)| {
@@ -988,12 +1058,16 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 let name = check["name"].as_str().map(str::to_owned).unwrap_or_else(|| format!("check-{index}"));
                 // A far-future registration is a check that has only just appeared.
                 let started = if Path::new("fresh-checks").exists() { "2999-01-01T00:00:00Z" } else { "2020-01-01T00:00:00Z" };
-                let mut run = serde_json::json!({"name":name,"head_sha":HEAD,"status":status,"conclusion":conclusion,"started_at":started});
+                let mut run = serde_json::json!({"name":name,"head_sha":commit,"status":status,"conclusion":conclusion,"started_at":started});
                 if let Some(app) = check["app"].as_u64() { run["app"] = serde_json::json!({"id":app}); }
                 run
             }).collect();
-            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":runs}]))?)?;
-            if Path::new("checks-next.json").exists() { fs::rename("checks-next.json", "checks.json")?; }
+            io::stdout().write_all(&serde_json::to_vec(
+                &serde_json::json!({"check_runs":runs}),
+            )?)?;
+            if file == "checks.json" && Path::new("checks-next.json").exists() {
+                fs::rename("checks-next.json", "checks.json")?;
+            }
         }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if Path::new("checks-fail").exists() {
@@ -1004,7 +1078,9 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new("checks-next.json").exists() {
                 fs::rename("checks-next.json", "checks.json")?;
             }
-            if String::from_utf8_lossy(&checks).contains("pending") { return Ok(8); }
+            if String::from_utf8_lossy(&checks).contains("pending") {
+                return Ok(8);
+            }
         }
         "pr checks 1669 --json name,bucket" => {
             // Like gh: the JSON still prints, and pending or failing checks exit non-zero.
@@ -1015,35 +1091,26 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         value
             if value.starts_with("pr view ")
                 && value.ends_with(
-                    "--json state,headRefOid,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup",
+                    "--json state,headRefOid,mergeStateStatus,reviewDecision,isDraft,url",
                 ) =>
         {
             let path = format!("status-{}.json", args[2]);
             let mut view: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
-            if view.get("statusCheckRollup").is_none() {
-                let checks_path = if args[2] == "1668" { "checks.json".into() } else { format!("checks-{}.json", args[2]) };
-                view["statusCheckRollup"] = if Path::new("checks-fail").exists() { serde_json::Value::Null } else {
-                    let checks: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(checks_path)?)?;
-                    serde_json::Value::Array(checks.into_iter().map(|check| {
-                        let (status, conclusion) = match check["bucket"].as_str().unwrap_or_default() {
-                            "pass" => ("COMPLETED", "SUCCESS"), "skipping" => ("COMPLETED", "SKIPPED"),
-                            "pending" => ("IN_PROGRESS", ""), _ => ("COMPLETED", "FAILURE")
-                        };
-                        serde_json::json!({"__typename":"CheckRun","name":"build","status":status,"conclusion":conclusion})
-                    }).collect())
-                };
-            }
+            view["url"] = format!("https://github.com/owner/repo/pull/{}", args[2]).into();
             io::stdout().write_all(&serde_json::to_vec(&view)?)?;
             let next = format!("status-{}.next.json", args[2]);
-            if Path::new(&next).exists() { fs::rename(next, path)?; }
+            if Path::new(&next).exists() {
+                fs::rename(next, path)?;
+            }
         }
-        value
-            if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/1668/merge ") =>
-        {
+        value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/1668/merge ") => {
             fs::write("merge-args", args.join("\n") + "\n")?;
             for (flag, status) in [("merge-conflict", 409), ("merge-not-allowed", 405)] {
                 if Path::new(flag).exists() {
-                    writeln!(io::stdout(), "HTTP/2 {status}\r\nX-RateLimit-Remaining: 0\r\n\r\n{{}}")?;
+                    writeln!(
+                        io::stdout(),
+                        "HTTP/2 {status}\r\nX-RateLimit-Remaining: 0\r\n\r\n{{}}"
+                    )?;
                     writeln!(io::stderr(), "HTTP {status}")?;
                     return Ok(1);
                 }
@@ -1071,14 +1138,18 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new("merge-delay").exists() {
                 // GitHub merged, but the response consumes the remaining budget.
                 #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
-            std::thread::park_timeout(std::time::Duration::from_secs(120));
+                std::thread::park_timeout(std::time::Duration::from_secs(120));
             }
             if Path::new("merge-timeout").exists() {
                 // The merge took effect, but the reply was lost.
                 writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
                 return Ok(1);
             }
-            write!(io::stdout(), "{{\"merged\":{}}}", !Path::new("merge-queue").exists())?;
+            write!(
+                io::stdout(),
+                "{{\"merged\":{}}}",
+                !Path::new("merge-queue").exists()
+            )?;
         }
         _ => return Err(format!("unexpected gh arguments: {call}").into()),
     }
@@ -1108,8 +1179,8 @@ fn main() -> ExitCode {
                 pr_status_waits_for_change_and_preserves_partial_results,
             ),
             (
-                "pr_watch_reports_the_verified_head_and_waits_via_gh",
-                pr_watch_reports_the_verified_head_and_waits_via_gh,
+                "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer",
+                pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer,
             ),
             (
                 "pr_watch_failure_and_head_changes_report_fail_with_head",

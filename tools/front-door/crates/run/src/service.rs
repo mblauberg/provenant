@@ -219,7 +219,6 @@ impl<'a> Service<'a> {
             {
                 writer = Some(saved.clone());
             }
-            let mut writer_branch = None;
             if input.parent_attempt.is_none() {
                 let branch = match &writer {
                     Some(writer) => Some(
@@ -242,11 +241,6 @@ impl<'a> Service<'a> {
                         self.store.repo_facts(),
                     )?,
                 };
-                if writer.is_some() {
-                    writer_branch = branch
-                        .as_ref()
-                        .map(|branch| branch.as_str().trim_start_matches("refs/heads/").to_owned());
-                }
                 if let Some(branch) = branch {
                     contribution_branches.insert(
                         task.task_id,
@@ -365,44 +359,7 @@ impl<'a> Service<'a> {
             )
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
-            // A cloud writer pushes to a named branch: an explicit one, else the
-            // delivery branch, else the writer's own branch. Only a writer has one.
-            let cloud = task
-                .cloud
-                .map(|mut cloud| {
-                    if writer.is_none() {
-                        if cloud.work_branch.is_some() {
-                            return Err(input_error(
-                                ErrorKind::Invalid,
-                                "attempt.cloud.work_branch requires a writer",
-                            ));
-                        }
-                    } else if cloud.work_branch.is_none() {
-                        cloud.work_branch = task
-                            .deliver
-                            .as_ref()
-                            .map(|deliver| deliver.branch.clone())
-                            .or_else(|| writer_branch.clone());
-                    }
-                    if let Some(work) = &cloud.work_branch
-                        && (work.trim().is_empty() || *work == cloud.branch)
-                    {
-                        return Err(input_error(
-                            ErrorKind::Invalid,
-                            "a cloud writer needs a named branch other than its base branch",
-                        ));
-                    }
-                    if writer.is_some() && cloud.work_branch.is_none() {
-                        return Err(input_error(
-                            ErrorKind::Invalid,
-                            "a cloud writer needs a named branch",
-                        ));
-                    }
-                    Ok(cloud)
-                })
-                .transpose()?;
             requests.push(TaskRequest {
-                cloud,
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
@@ -795,7 +752,7 @@ impl<'a> Service<'a> {
 }
 
 /// One declaration per kind keeps the enum, its stable code and its catalogue
-/// summary together; the CLI help catalogue and generated reference read them.
+/// summary together; the CLI help catalogue reads them.
 macro_rules! error_kinds {
     ($($kind:ident => $code:literal, $summary:literal;)*) => {
         /// Refusal categories stay typed until an edge renders its stable code.
@@ -1045,7 +1002,6 @@ impl From<&RunError> for ErrorKind {
 /// Prepared transport-independent dispatch input.
 #[derive(serde::Serialize)]
 pub struct DispatchTask {
-    pub cloud: Option<provenant_records::run::CloudPlacement>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
@@ -1104,9 +1060,6 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// before any writer is prepared or any run, reservation or receipt exists.
 /// Named routes resolve their adapter later, where routing checks effort.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
-    if task.cloud.is_some() {
-        return Ok(());
-    }
     let write = Service::has_writes(task.worktree.is_some(), &task.access.write_roots);
     let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {

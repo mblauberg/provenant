@@ -1,4 +1,0 @@
-interface:
-  display_name: "Retrospect"
-  short_description: "Turn cycle evidence into durable improvements"
-  default_prompt: "Use $retrospect to review this completed cycle, identify evidence-backed harness and process improvements, promote durable learning, and propose gated changes without creating log clutter."

@@ -56,6 +56,10 @@ pub enum StopCause {
     AdapterUnavailable,
     PermissionDenied,
     IdentityUnobserved,
+    /// The lane's launch-time access token was revoked or expired mid-run
+    /// while the account login stayed usable. A writer continues from its
+    /// handoff on a new token; the successor's launch re-probes the account.
+    LaneTokenLost,
 
     // The host refused before the provider started.
     SourceViewRefused,
@@ -64,6 +68,9 @@ pub enum StopCause {
     DiskFloor,
     DiskUnobserved,
     PromptUnreadable,
+    /// The attempt asked for cloud placement, which was removed; cloud
+    /// sessions launch with `provenant cloud launch`.
+    CloudPlacementRemoved,
     WriteGrantsRefused,
     WorktreeBusy,
     LaunchHandoffRefused,
@@ -167,12 +174,14 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(AdapterUnavailable, NEW),
         rule(PermissionDenied, CHAIR),
         rule(IdentityUnobserved, CHAIR),
+        rule(LaneTokenLost, NEW),
         rule(SourceViewRefused, CHAIR),
         rule(RouteRefused, CHAIR),
         rule(AccessPolicyRefused, CHAIR),
         rule(DiskFloor, CHAIR),
         rule(DiskUnobserved, CHAIR),
         rule(PromptUnreadable, CHAIR),
+        rule(CloudPlacementRemoved, CHAIR),
         rule(WriteGrantsRefused, CHAIR),
         rule(WorktreeBusy, CHAIR),
         rule(LaunchHandoffRefused, CHAIR),
@@ -194,7 +203,7 @@ pub const STOP_TABLE: &[StopRule] = {
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 39] = {
+    pub const ALL: [StopCause; 41] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -215,12 +224,14 @@ impl StopCause {
             AdapterUnavailable,
             PermissionDenied,
             IdentityUnobserved,
+            LaneTokenLost,
             SourceViewRefused,
             RouteRefused,
             AccessPolicyRefused,
             DiskFloor,
             DiskUnobserved,
             PromptUnreadable,
+            CloudPlacementRemoved,
             WriteGrantsRefused,
             WorktreeBusy,
             LaunchHandoffRefused,
@@ -260,27 +271,29 @@ impl StopCause {
             AdapterUnavailable => 15,
             PermissionDenied => 16,
             IdentityUnobserved => 17,
-            SourceViewRefused => 18,
-            RouteRefused => 19,
-            AccessPolicyRefused => 20,
-            DiskFloor => 21,
-            DiskUnobserved => 22,
-            PromptUnreadable => 23,
-            WriteGrantsRefused => 24,
-            WorktreeBusy => 25,
-            LaunchHandoffRefused => 26,
-            RetainedWriterImport => 27,
-            UnsupportedPlatform => 28,
-            UnknownPacingAccount => 29,
-            UnregisteredAccount => 30,
-            CredentialHelperFailed => 31,
-            CommandUnavailable => 32,
-            HostNativeUnconfigured => 33,
-            SpawnFailure => 34,
-            SettlementFailed => 35,
-            Lost => 36,
-            Unsettled => 37,
-            Quarantined => 38,
+            LaneTokenLost => 18,
+            SourceViewRefused => 19,
+            RouteRefused => 20,
+            AccessPolicyRefused => 21,
+            DiskFloor => 22,
+            DiskUnobserved => 23,
+            PromptUnreadable => 24,
+            CloudPlacementRemoved => 25,
+            WriteGrantsRefused => 26,
+            WorktreeBusy => 27,
+            LaunchHandoffRefused => 28,
+            RetainedWriterImport => 29,
+            UnsupportedPlatform => 30,
+            UnknownPacingAccount => 31,
+            UnregisteredAccount => 32,
+            CredentialHelperFailed => 33,
+            CommandUnavailable => 34,
+            HostNativeUnconfigured => 35,
+            SpawnFailure => 36,
+            SettlementFailed => 37,
+            Lost => 38,
+            Unsettled => 39,
+            Quarantined => 40,
         }
     }
 
@@ -342,12 +355,14 @@ impl StopCause {
             AdapterUnavailable => "adapter_unavailable",
             PermissionDenied => "permission_denied",
             IdentityUnobserved => "identity_unobserved",
+            LaneTokenLost => "lane_token_lost",
             SourceViewRefused => "source_view_refused",
             RouteRefused => "route_refused",
             AccessPolicyRefused => "access_policy_refused",
             DiskFloor => "disk_floor",
             DiskUnobserved => "disk_unobserved",
             PromptUnreadable => "prompt_unreadable",
+            CloudPlacementRemoved => "cloud_placement_removed",
             WriteGrantsRefused => "write_grants_refused",
             WorktreeBusy => "worktree_busy",
             LaunchHandoffRefused => "launch_handoff_refused",
@@ -389,6 +404,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::DiskFloor => Self::DiskFloor,
             T::DiskObservationUnavailable => Self::DiskUnobserved,
             T::StoredPromptUnreadable => Self::PromptUnreadable,
+            T::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
             T::HandoffRefused => Self::LaunchHandoffRefused,
@@ -410,6 +426,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::EmptyWriterResult => Self::EmptyResult,
             T::ContextHandoff => Self::ContextHandoff,
             T::Blocked => Self::Blocked,
+            T::LaneTokenLost => Self::LaneTokenLost,
         }
     }
 }

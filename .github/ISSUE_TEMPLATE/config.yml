@@ -10,7 +10,7 @@ contact_links:
       draft security-advisory flow. Never put exploit details, credentials,
       private prompts or personal data in a public issue.
   - name: Harness constitution
-    url: https://github.com/mblauberg/provenant/blob/main/HARNESS.md
+    url: https://github.com/mblauberg/provenant/blob/main/GLOBAL-AGENTS.md
     about: >-
       Topology, lifecycle, risk tiers, routing and memory policy. Read this
       before proposing a change to authority or to a gate.

@@ -1,7 +1,6 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 use crate::metadata::CatalogueArg;
 mod context;
-pub mod graph_cloud;
 pub mod graph_relay;
 
 pub(crate) use context::private_dir;
@@ -24,7 +23,7 @@ pub(crate) fn identity(
 
 use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{ActorId, CancelToken, ClaimId, Clock, GitOid, OperationId, WaitBudget};
+use provenant_core::{ActorId, CancelToken, ClaimId, Clock, OperationId, WaitBudget};
 use provenant_fabric_runtime::coordination::*;
 use provenant_records::{CommandError, CommandResult, Outcome};
 use serde::Serialize;
@@ -59,9 +58,6 @@ pub enum Fabric {
     /// Claim issues, paths and worktrees
     #[command(subcommand)]
     Claim(Claim),
-    /// Fence and land pushes to a shared reference
-    #[command(subcommand)]
-    Landing(Landing),
 }
 #[derive(Debug, Args)]
 pub struct Operation {
@@ -268,107 +264,6 @@ pub enum Claim {
         limit: u64,
     },
 }
-#[derive(Debug, Args)]
-pub struct LandingFence {
-    /// Git reference being landed
-    #[arg(long)]
-    reference: String,
-    /// Landing lease ID
-    #[arg(long)]
-    id: ClaimId,
-    /// Lease generation
-    #[arg(long, catalog_u64_range = 1..)]
-    generation: u64,
-}
-#[derive(Debug, thiserror::Error)]
-#[error("invalid landing token")]
-pub struct LandingTokenError;
-
-impl From<LandingTokenError> for EdgeError {
-    fn from(_: LandingTokenError) -> Self {
-        Self::Invalid
-    }
-}
-
-impl LandingFence {
-    /// The fence secret never enters argv or clap's diagnostics.
-    pub fn proof(self) -> Result<LandingProof, LandingTokenError> {
-        let token = std::env::var("PROVENANT_LANDING_TOKEN")
-            .ok()
-            .and_then(|value| value.parse::<Token>().ok())
-            .ok_or(LandingTokenError)?;
-        Ok(LandingProof {
-            extra: Default::default(),
-            reference: self.reference,
-            id: self.id,
-            generation: self.generation,
-            token: token.0,
-        })
-    }
-}
-#[derive(Debug, Subcommand)]
-pub enum Landing {
-    /// Push the candidate under a landing lease
-    Push {
-        #[command(flatten)]
-        fence: LandingFence,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Settle an interrupted landing push
-    Reconcile {
-        #[command(flatten)]
-        fence: LandingFence,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Acquire a landing lease on a reference
-    Acquire {
-        #[arg(long)]
-        reference: String,
-        /// Commit the reference must currently point to
-        #[arg(long)]
-        expected: GitOid,
-        /// Commit to land
-        #[arg(long)]
-        candidate: GitOid,
-        #[command(flatten)]
-        lease: Lease,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Renew a landing lease
-    Renew {
-        #[command(flatten)]
-        fence: LandingFence,
-        #[command(flatten)]
-        lease: Lease,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Verify a landing lease is still held
-    Verify(LandingFence),
-    /// Release a landing lease
-    Release {
-        #[command(flatten)]
-        fence: LandingFence,
-        #[command(flatten)]
-        operation: Operation,
-    },
-    /// Wait for a reference's landing generation to advance
-    Wait {
-        /// Git reference to watch
-        #[arg(long)]
-        reference: String,
-        /// Generation to wait beyond
-        #[arg(long)]
-        generation: u64,
-        /// Seconds to wait (1 to 14400)
-        #[arg(long, catalog_duration())]
-        wait: u64,
-    },
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
@@ -468,25 +363,12 @@ impl Fabric {
                     Claim::List { .. } => "list",
                 },
             ),
-            Self::Landing(v) => (
-                "landing",
-                match v {
-                    Landing::Push { .. } => "push",
-                    Landing::Reconcile { .. } => "reconcile",
-                    Landing::Acquire { .. } => "acquire",
-                    Landing::Renew { .. } => "renew",
-                    Landing::Verify(_) => "verify",
-                    Landing::Release { .. } => "release",
-                    Landing::Wait { .. } => "wait",
-                },
-            ),
         };
         format!("fabric {domain} {verb}")
     }
     fn wait(&self) -> u64 {
         match self {
-            Self::Events(Events::Read { wait: Some(s), .. })
-            | Self::Landing(Landing::Wait { wait: s, .. }) => *s,
+            Self::Events(Events::Read { wait: Some(s), .. }) => *s,
             _ => 55,
         }
     }
@@ -497,7 +379,6 @@ impl Fabric {
                 | Self::Mail(Mail::Read { .. })
                 | Self::Events(Events::Read { .. })
                 | Self::Claim(Claim::Verify(_) | Claim::List { .. })
-                | Self::Landing(Landing::Verify(_) | Landing::Wait { .. })
         )
     }
 }
@@ -559,38 +440,30 @@ fn execute(
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
     };
     let observe = |input: Mutation| -> Result<Value, EdgeError> {
-        if ctx.in_lane
-            && (ctx.remote_home()
-                || matches!(&input, Mutation::Landing(LandingInput::Verify { .. })))
-        {
+        if ctx.in_lane && ctx.remote_home() {
             use provenant_fabric_mcp::tools::ToolCall;
             let waiting = matches!(
                 &input,
-                Mutation::Landing(LandingInput::Wait { .. })
-                    | Mutation::Events(EventsInput::Read {
-                        wait_seconds: Some(_),
-                        ..
-                    })
+                Mutation::Events(EventsInput::Read {
+                    wait_seconds: Some(_),
+                    ..
+                })
             );
             loop {
                 let mut observation = input.clone();
                 let seconds =
                     (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55);
-                match &mut observation {
-                    Mutation::Landing(LandingInput::Wait { wait_seconds, .. }) => {
-                        *wait_seconds = seconds
-                    }
-                    Mutation::Events(EventsInput::Read {
-                        wait_seconds: Some(wait_seconds),
-                        ..
-                    }) => *wait_seconds = seconds,
-                    _ => {}
+                if let Mutation::Events(EventsInput::Read {
+                    wait_seconds: Some(wait_seconds),
+                    ..
+                }) = &mut observation
+                {
+                    *wait_seconds = seconds;
                 }
                 let call = match observation {
                     Mutation::Mail(input) => ToolCall::Mail(input, None),
                     Mutation::Events(input) => ToolCall::Events(input, None),
                     Mutation::Claim(input) => ToolCall::Claim(input, None),
-                    Mutation::Landing(input) => ToolCall::Landing(input, None),
                 };
                 let value = call.relay_within(
                     &ctx.lane_relay_socket()?,
@@ -611,15 +484,10 @@ fn execute(
             Mutation::Mail(input) => json(service.mail(input, budget, &cancel)?),
             Mutation::Events(input) => json(service.events(input, budget, &cancel)?),
             Mutation::Claim(input) => json(service.claim(input, budget, &cancel)?),
-            Mutation::Landing(input) => json(service.landing(input, budget, &cancel)?),
         }
     };
     let value = match cmd {
-        Fabric::Identity
-        | Fabric::Mcp { .. }
-        | Fabric::Peer { .. }
-        | Fabric::PeerAgent
-        | Fabric::Landing(Landing::Push { .. } | Landing::Reconcile { .. }) => {
+        Fabric::Identity | Fabric::Mcp { .. } | Fabric::Peer { .. } | Fabric::PeerAgent => {
             return Err(EdgeError::InvalidField("command"));
         }
         Fabric::Mail(Mail::Send {
@@ -739,61 +607,6 @@ fn execute(
                 after,
                 limit,
             }))?
-        }
-        Fabric::Landing(Landing::Acquire {
-            reference,
-            expected,
-            candidate,
-            lease,
-            operation,
-        }) => mutate(
-            Mutation::Landing(LandingInput::Acquire {
-                extra: Default::default(),
-                reference,
-                expected,
-                candidate,
-                lease_seconds: ctx.lease(lease)?,
-            }),
-            operation,
-        )?,
-        Fabric::Landing(Landing::Renew {
-            fence,
-            lease,
-            operation,
-        }) => mutate(
-            Mutation::Landing(LandingInput::Renew {
-                extra: Default::default(),
-                proof: fence.proof()?,
-                lease_seconds: ctx.lease(lease)?,
-            }),
-            operation,
-        )?,
-        Fabric::Landing(Landing::Verify(fence)) => {
-            observe(Mutation::Landing(LandingInput::Verify {
-                extra: Default::default(),
-                proof: fence.proof()?,
-            }))?
-        }
-        Fabric::Landing(Landing::Release { fence, operation }) => mutate(
-            Mutation::Landing(LandingInput::Release {
-                extra: Default::default(),
-                proof: fence.proof()?,
-            }),
-            operation,
-        )?,
-        Fabric::Landing(Landing::Wait {
-            reference,
-            generation,
-            wait,
-        }) => {
-            let result = observe(Mutation::Landing(LandingInput::Wait {
-                extra: Default::default(),
-                reference,
-                generation,
-                wait_seconds: wait,
-            }))?;
-            let timed_out = result["timed_out"].as_bool().unwrap_or(false);
-            return Ok((result, timed_out));
         }
     };
     Ok((value, false))

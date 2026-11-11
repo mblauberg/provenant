@@ -233,6 +233,8 @@ pub(super) struct Fake {
     prompt: RefCell<String>,
     /// The outcome a decode reports; success when unset.
     pub(super) outcome: Option<Outcome>,
+    /// The terminal cause a decode reports.
+    pub(super) terminal_cause: Option<TerminalCause>,
     /// The answer a decode reports, instead of the captured stdout.
     pub(super) answer: Option<String>,
     /// Partial-finish signals a decode reports.
@@ -312,7 +314,7 @@ impl Providers for Fake {
         assert_eq!(applied.effort, route().effort);
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
-            terminal_cause: None,
+            terminal_cause: self.terminal_cause,
             outcome: self.outcome.unwrap_or(Outcome::Succeeded),
             result: self
                 .answer

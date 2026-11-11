@@ -821,7 +821,7 @@ impl RunStore {
                 return Ok(());
             }
             let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
-            let local_tasks = input.request.tasks.iter().filter(|task| task.cloud.is_none()).count();
+            let local_tasks = input.request.tasks.len();
             if queued + local_tasks as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
             tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
@@ -849,7 +849,7 @@ impl RunStore {
                     limits: None,
                     schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
-                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, cloud_observation: provenant_records::run::Transient(None), cloud_view: provenant_records::run::Transient(None), provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                     terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                     prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {extra: telemetry_contexts[index].clone(),
@@ -864,12 +864,9 @@ impl RunStore {
                 };
                 tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, crate::db::attempt_bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
-                let local_index = input.request.tasks[..index].iter().filter(|task| task.cloud.is_none()).count() as u64;
-                let waves = local_index / input.request.concurrency.max(1);
+                let waves = index as u64 / input.request.concurrency.max(1);
                 let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
-                if task.cloud.is_none() {
-                    self.queue_ticket(tx, &attempt, class, input.request.concurrency, crate::admission::Allowance { queue_seconds: waves.saturating_mul(task.provider_timeout_seconds), runtime_seconds: task.provider_timeout_seconds }, disk_floor_bytes)?;
-                }
+                self.queue_ticket(tx, &attempt, class, input.request.concurrency, crate::admission::Allowance { queue_seconds: waves.saturating_mul(task.provider_timeout_seconds), runtime_seconds: task.provider_timeout_seconds }, disk_floor_bytes)?;
             }
             Ok(())
         })?;
@@ -911,83 +908,6 @@ impl RunStore {
         })?;
         self.run(input.run_id, call)
     }
-    /// Publish a host-observed cloud state change as an advisory run event.
-    /// The digest identifies the separately durable cloud record; it is not
-    /// process-exit evidence or authority to land a change.
-    pub fn record_cloud_observation(
-        &self,
-        id: AttemptId,
-        digest: &str,
-        state: &str,
-        call: &Request<'_>,
-    ) -> Result<()> {
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(RunError::Validation("cloud observation digest"));
-        }
-        if ![
-            "submitting",
-            "running",
-            "finished",
-            "failed",
-            "setup_failed",
-            "cancelled",
-            "abandoned",
-            "cancellation_unconfirmed",
-            "unknown",
-        ]
-        .contains(&state)
-        {
-            return Err(RunError::Validation("cloud observation state"));
-        }
-        for _ in 0..3 {
-            let old = self.record(id, call)?;
-            let request = self.request(old.run_id, call)?;
-            if !request
-                .tasks
-                .iter()
-                .any(|task| task.task_id == old.task_id && task.cloud.is_some())
-            {
-                return Err(RunError::Validation("attempt is not cloud placed"));
-            }
-            if old
-                .extra
-                .get("cloud_observation_digest")
-                .and_then(serde_json::Value::as_str)
-                == Some(digest)
-            {
-                return Ok(());
-            }
-            let mut next = old.clone();
-            next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
-            next.extra
-                .insert("cloud_observation_digest".into(), serde_json::json!(digest));
-            next.extra
-                .insert("cloud_state".into(), serde_json::json!(state));
-            next.extra.insert(
-                "cloud_observed_at".into(),
-                serde_json::json!(
-                    call.clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?
-                ),
-            );
-            match self.write(call, |tx| {
-                let changed = tx.execute("UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND project=?4 AND revision=?5 AND terminal=0", params![sql_int(next.revision)?, crate::db::attempt_bytes(&next)?, id.to_string(), self.context.project_id.to_string(), sql_int(old.revision)?])?;
-                if changed != 1 { return Err(RunError::Conflict); }
-                insert_event(tx, &next)?;
-                Ok(())
-            }) {
-                Err(RunError::Conflict) => continue,
-                Ok(()) => {
-                    provenant_os::changes::hint(self.context.state_root.as_path(), &[provenant_os::changes::Scope::Board]);
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Err(RunError::Conflict)
-    }
-
     pub fn publish_terminal(
         &self,
         id: AttemptId,
@@ -2017,9 +1937,6 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
         change: attempt.state.clone(),
         trace: attempt.trace.clone(),
     };
-    if let Some(state) = attempt.extra.get("cloud_state") {
-        event.extra.insert("cloud_state".into(), state.clone());
-    }
     db.execute(
         "INSERT INTO events(project,attempt,revision,record) VALUES (?1,?2,?3,?4)",
         params![

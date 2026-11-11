@@ -16,6 +16,7 @@
       "routing.exclude",
       "routing.graph_exclude",
       "fabric.accept_handoff",
+      "fabric.mcp_server",
       "usage.project_attribution",
       "domains.run.writer_token_budget",
       "domains.pr.land.integration",
@@ -42,7 +43,7 @@
       "free_floor": {"type": "size", "allowed": "whole B, K, M, G, T or KiB to TiB; a plain number means GiB", "default": "10% of the state volume, at least 50 GiB", "effect": "Free-space floor for admission, build pauses and pressure collection; below it GC removes further eligible caches oldest first"},
       "lane_cargo_cache_max": {"type": "size", "allowed": "same syntax as free_floor", "default": "32G", "effect": "Cap all marked lane Cargo caches; evict oldest eligible caches first while retaining live, foreign and unobserved custody"},
       "alert_below": {"type": "size", "allowed": "same syntax as free_floor", "default": "free_floor", "effect": "Free space below which an applied collection emits one gc.low_disk note per dip"},
-      "projects.{project}.regenerable": {"type": "string_list", "allowed": "directory names; not .git, .worktrees, absolute or parent paths", "default": "[\"target\"] with a root Cargo.toml, otherwise []", "effect": "Git-ignored directory names collected at any depth in the project's linked worktrees"},
+      "projects.{project}.regenerable": {"type": "string_list", "allowed": "directory names; not .git, .worktrees, absolute or parent paths", "default": "[\"target\"] with a root Cargo.toml, otherwise []", "effect": "Git-ignored directory names collected at any depth in the project's linked worktrees; `.provenant/scratch` is collected in addition without a declaration"},
       "projects.{project}.keep": {"type": "string_list", "allowed": "worktree-relative paths", "default": "[]", "effect": "Paths, their descendants and any matching directory containing them that collection preserves"},
       "projects.{project}.foreign_worktrees": {"type": "string", "allowed": "keep or merged-clean", "default": "keep", "effect": "merged-clean removes clean, merged linked worktrees with no known writer after a complete free census"}
     }
@@ -71,13 +72,6 @@
     "path": "domains.routing.opencode_go",
     "settings": {
       "min_monthly_allowance_usd": {"type": "int", "allowed": "0 or more; 0 disables the floor", "default": "60", "effect": "Lowest documented monthly allowance an OpenCode Go model needs to be routed or selected; a model with an unknown allowance is refused while the floor is on"}
-    }
-  },
-  "host_codex_cloud_settings": {
-    "path": "providers.codex.cloud",
-    "settings": {
-      "transport": {"type": "string", "allowed": "official or thread", "default": "official", "effect": "official uses codex cloud exec, status and list; thread uses a client for the cloud thread API"},
-      "command": {"type": "string", "allowed": "one executable name or path; no arguments", "default": "codex for official, codex-cloud-task for thread", "effect": "Cloud client executable, resolved through the host PATH"}
     }
   },
   "provider_updates": {
@@ -136,6 +130,8 @@
       "integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "batch", "effect": "Integration strategy."},
       "batch_size": {"type": "int", "allowed": "1 or more", "default": "8", "effect": "Maximum pull requests in a batch."},
       "batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "30", "effect": "Maximum batch collection time."},
+      "approval": {"type": "enum", "allowed": "forge or receipt", "default": "forge", "effect": "What approves a pull request for batch landing: an independent forge review of its head, or an accepted Provenant delivery receipt whose review covers the head, carried over a merge-in or an unchanged rebase. Forge rules still apply at merge."},
+      "approval_tier": {"type": "enum", "allowed": "auto, none, carry or delta", "default": "auto", "effect": "What approval a pull request needs. none: CI only. carry: a review that still covers the head, a change after it that touches only tests, docs or review-exempt paths, or a review of the delta since. delta: as carry, but every change after the review needs its own review. auto is none for a pull request that touches only tests, docs or review-exempt paths, and carry otherwise."},
       "candidate_ref_prefix": {"type": "string", "allowed": "valid Git ref prefix", "default": "land/", "effect": "Prefix for temporary candidate refs."},
       "publish_settle_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "30", "effect": "Time to wait before observing an unresolved publication again."},
       "publish_unknown_warn_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "3600", "effect": "Warn when a publication remains unknown for this long."},
@@ -168,6 +164,8 @@
       "projects.{project}.integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "inherited", "effect": "Override integration for this project; omitted fields inherit lower layers."},
       "projects.{project}.batch_size": {"type": "int", "allowed": "1 or more", "default": "inherited", "effect": "Override batch_size for this project; omitted fields inherit lower layers."},
       "projects.{project}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this project; omitted fields inherit lower layers."},
+      "projects.{project}.approval": {"type": "enum", "allowed": "forge or receipt", "default": "inherited", "effect": "Override approval for this project; omitted fields inherit lower layers."},
+      "projects.{project}.approval_tier": {"type": "enum", "allowed": "auto, none, carry or delta", "default": "inherited", "effect": "Override approval_tier for this project; omitted fields inherit lower layers."},
       "projects.{project}.candidate_ref_prefix": {"type": "string", "allowed": "valid Git ref prefix", "default": "inherited", "effect": "Override candidate_ref_prefix for this project; omitted fields inherit lower layers."},
       "projects.{project}.publish_settle_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_settle_seconds for this project; omitted fields inherit lower layers."},
       "projects.{project}.publish_unknown_warn_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_unknown_warn_seconds for this project; omitted fields inherit lower layers."},
@@ -200,6 +198,8 @@
       "tiers.{tier}.integration": {"type": "enum", "allowed": "batch, single or forge_queue", "default": "inherited", "effect": "Override integration for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.batch_size": {"type": "int", "allowed": "1 or more", "default": "inherited", "effect": "Override batch_size for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers."},
+      "tiers.{tier}.approval": {"type": "enum", "allowed": "forge or receipt", "default": "inherited", "effect": "Override approval for this risk tier; omitted fields inherit lower layers."},
+      "tiers.{tier}.approval_tier": {"type": "enum", "allowed": "auto, none, carry or delta", "default": "inherited", "effect": "Override approval_tier for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.candidate_ref_prefix": {"type": "string", "allowed": "valid Git ref prefix", "default": "inherited", "effect": "Override candidate_ref_prefix for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.publish_settle_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_settle_seconds for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.publish_unknown_warn_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_unknown_warn_seconds for this risk tier; omitted fields inherit lower layers."},
@@ -383,7 +383,7 @@
     "confinement.census_exclude_ancestors": {
         "type": "bool",
         "default": true,
-        "strict": true,
+        "strict": true, "safe": false,
         "status": "wired",
         "reader": "tools/front-door/crates/confinement/src/worktrees/census.rs",
         "effect": "Exclude the invoking process's ancestor chain from live-writer detection at run admission. When false, only the invoking process itself is excluded, so an ancestor shell with its working directory inside the worktree is treated as a live writer."
@@ -391,13 +391,13 @@
     "confinement.census_ignore_unreadable": {
         "type": "census_ignore_list",
         "default": [],
-        "strict": true,
+        "strict": true, "safe": [],
         "host_only": true,
         "status": "wired",
         "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."
     },
     "routing.allow_unknown_partial_headroom": {
-      "type": "bool", "default": false, "strict": true, "host_only": true, "status": "wired",
+      "type": "bool", "default": false, "strict": true, "safe": false, "host_only": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
       "effect": "Allow uncalibrated partial quota headroom below the limit.",
       "trade_off": "Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."
@@ -433,11 +433,17 @@
       "trade_off": "Off keeps project identity out of usage logs; on makes project-level usage visible to anyone who can read them."
     },
     "fabric.accept_handoff": {
-      "strict": true,
+      "strict": true, "safe": false,
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
       "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
+    },
+    "fabric.mcp_server": {
+      "type": "bool", "default": false, "status": "wired",
+      "reader": "tools/front-door/crates/config/src/harness.rs",
+      "effect": "Register the Fabric MCP server (`provenant fabric mcp`) in installed harness configurations and launch lanes with it, for clients without a shell.",
+      "trade_off": "Off keeps every default session and lane free of the MCP tool surface, since the `provenant fabric` CLI covers each tool; on adds the server and its tool schemas to every session context."
     },
     "config.history_max_entries": {
       "type": "int",
@@ -476,7 +482,7 @@
       "trade_off": "Off keeps the inbox quiet; inbox makes refusals visible to the chair."
     },
     "chair.auto_switch": {
-      "strict": true,
+      "strict": true, "safe": false,
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Allow the Claude UserPromptSubmit hook to checkpoint and switch accounts at the quota threshold.",
@@ -489,7 +495,7 @@
       "trade_off": "Lower switches sooner; higher leaves less headroom for the handoff."
     },
     "chair.switch_accounts": {
-      "strict": true,
+      "strict": true, "safe": [],
       "type": "string_list", "default": [], "status": "wired",
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
@@ -587,12 +593,14 @@
     },
     "lanes.max_depth": {
       "strict": true,
+      "safe": 1,
       "type": "int", "min": 1, "default": 2, "status": "wired",
       "effect": "Maximum nested lane depth, including the first dispatched lane.",
       "trade_off": "Lower limits delegation chains; higher permits deeper nested work."
     },
     "lanes.publish": {
       "strict": true,
+      "safe": false,
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
       "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests.",

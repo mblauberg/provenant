@@ -8,6 +8,7 @@
 //! asks the chair, who lands by hand; the record keeps who or what authorised it.
 use super::*;
 use crate::config::{LandChoice, LandPolicy, LandSource};
+use provenant_core::review_cover::Reviewed;
 use provenant_records::run::DeliveryMode;
 use provenant_records::workflow::{ReviewVerdict, RiskTier};
 use std::collections::{BTreeMap, BTreeSet};
@@ -288,25 +289,30 @@ fn delivered_within(
         .map(|(_, branch, commit, attempt)| (branch, commit, attempt))
 }
 
-/// The head a reviewer judged, or `None` for a node that is not a reviewer.
+/// The head a reviewer judged and the base it read that head against, or
+/// `None` for a node that is not a reviewer.
 /// The head is its pinned source commit or, without one, the
 /// newest head of `writer`'s chain among its own upstream nodes. A review that
 /// ran before a continuation therefore never judges the continuation's head.
+/// The base is the node's resolved review base or, without one, the graph's
+/// bound review or integration base. A finding decision recorded against
+/// another head, or without the resolved review base, leaves no subject.
 /// A composite boundary has no subject of its own, so its verdict resolves to
 /// the member that exported it: a council pinned to an earlier head never
-/// vouches for a later one that merely precedes the boundary.
+/// vouches for a later one that merely precedes the boundary. Members that read
+/// one head against different bases leave no base to carry the review over.
 fn reviewed_head(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
     reviewer: &str,
     writer: &str,
-) -> Option<String> {
+) -> Option<ReviewedSubject> {
     let index = *positions.get(reviewer)?;
     let node = &plan.nodes[index];
     if let Some(spec) = &node.composite {
         if spec.reduce_verdict {
-            let mut head = None;
+            let mut subject: Option<ReviewedSubject> = None;
             let mut seen = std::collections::BTreeSet::new();
             for export in &spec.exports {
                 if !seen.insert(&export.node) {
@@ -320,12 +326,18 @@ fn reviewed_head(
                     return None;
                 }
                 let reviewed = reviewed_head(plan, checkpoint, positions, &export.node, writer)?;
-                if head.as_ref().is_some_and(|prior| prior != &reviewed) {
-                    return None;
-                }
-                head = Some(reviewed);
+                subject = match subject {
+                    None => Some(reviewed),
+                    Some(prior) if prior.head != reviewed.head => return None,
+                    Some(prior) => Some(ReviewedSubject {
+                        base: prior
+                            .base
+                            .filter(|base| reviewed.base.as_ref() == Some(base)),
+                        head: prior.head,
+                    }),
+                };
             }
-            return head;
+            return subject;
         }
         let producer = spec
             .exports
@@ -346,11 +358,11 @@ fn reviewed_head(
         return None;
     }
     let progress = &checkpoint.nodes[index];
-    let head = progress
-        .source_commit
-        .clone()
-        .or_else(|| chain_head(plan, checkpoint, positions, reviewer, writer))?;
-    let base = progress
+    let head = match &progress.source_commit {
+        Some(commit) => commit.clone(),
+        None => chain_head(plan, checkpoint, positions, reviewer, writer)?,
+    };
+    let review_base = progress
         .review_base
         .as_deref()
         .or(checkpoint.bound_review_base.as_deref())
@@ -361,14 +373,25 @@ fn reviewed_head(
         });
     for decision in &progress.decisions {
         let decision_base = decision.reviewed_base()?;
-        if base.is_none_or(|b| provenant_core::GitOid::parse(b).ok() != Some(decision_base)) {
+        if review_base.is_none_or(|b| provenant_core::GitOid::parse(b).ok() != Some(decision_base))
+        {
             return None;
         }
         if provenant_core::GitOid::parse(&head).ok() != Some(decision.reviewed_head()) {
             return None;
         }
     }
-    Some(head)
+    let base = review_base
+        .map(str::to_owned)
+        .or_else(|| checkpoint.bound_integration_base.clone());
+    Some(ReviewedSubject { head, base })
+}
+
+/// What one reviewer judged: a head, read against a base.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReviewedSubject {
+    head: String,
+    base: Option<String>,
 }
 
 /// The newest head of `writer`'s chain among `node`'s upstream nodes, which a
@@ -426,17 +449,20 @@ pub(super) fn chain_attempts(
 }
 
 /// Why no passing verdict gate after `writer` accepted `head`, if none did.
-/// Landing needs a gate that passed and whose every input reviewed `head`; a
-/// failed gate whose `on_fail` reaches the land is not acceptance. A gate
-/// replaced with a condition accepting rejection is not approval either.
-pub(super) fn acceptance_error(
+/// Landing needs a gate that passed and whose every input reviewed `head`, or
+/// reviewed an earlier head that the owner proves `head` carries over: a
+/// merge-in from the target or a rebase with an unchanged delta. A failed gate
+/// whose `on_fail` reaches the land is not acceptance. A gate replaced with a
+/// condition accepting rejection is not approval either.
+pub(super) fn acceptance_error<R: AttemptOwner>(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
+    owner: &mut R,
     land: &str,
     writer: &str,
-    head: &str,
-) -> Option<String> {
+    (branch, head): (&str, &str),
+) -> Result<Option<String>, R::Error> {
     let writer_index = positions.get(writer).copied();
     let mut reviewed = Vec::new();
     for index in ancestors(&plan.nodes, positions, land) {
@@ -455,22 +481,42 @@ pub(super) fn acceptance_error(
         {
             continue;
         }
-        let subjects: Vec<Option<String>> = gate
-            .inputs
-            .iter()
-            .map(|input| reviewed_head(plan, checkpoint, positions, &input.node, writer))
-            .collect();
-        if !subjects.is_empty()
-            && subjects
-                .iter()
-                .all(|subject| subject.as_deref() == Some(head))
-        {
-            return None;
+        let mut covered = !gate.inputs.is_empty();
+        let mut subjects = Vec::new();
+        for input in &gate.inputs {
+            let Some(subject) = reviewed_head(plan, checkpoint, positions, &input.node, writer)
+            else {
+                covered = false;
+                subjects.push("no head".to_owned());
+                continue;
+            };
+            if subject.head == head {
+                subjects.push(subject.head);
+                continue;
+            }
+            let coverage = owner.review_coverage(
+                branch,
+                Reviewed {
+                    head: &subject.head,
+                    base: subject.base.as_deref(),
+                },
+                head,
+            )?;
+            match coverage {
+                Some(coverage) if coverage.covers() => subjects.push(subject.head),
+                Some(coverage) => {
+                    covered = false;
+                    subjects.push(format!("{} ({})", subject.head, coverage.reason()));
+                }
+                None => {
+                    covered = false;
+                    subjects.push(subject.head);
+                }
+            }
         }
-        let subjects: Vec<&str> = subjects
-            .iter()
-            .map(|subject| subject.as_deref().unwrap_or("no head"))
-            .collect();
+        if covered {
+            return Ok(None);
+        }
         reviewed.push(format!("{} passed {}", gate.id, subjects.join(", ")));
     }
     let evidence = if reviewed.is_empty() {
@@ -478,9 +524,9 @@ pub(super) fn acceptance_error(
     } else {
         reviewed.join("; ")
     };
-    Some(format!(
+    Ok(Some(format!(
         "node {land}: no passing verdict gate after {writer} reviewed the land head {head} ({evidence}); route the newest head through review before land"
-    ))
+    )))
 }
 
 pub(super) fn session<'a>(spec: &'a LandSpec, plan: &'a PlannedGraph) -> Option<&'a str> {
@@ -634,8 +680,16 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
                 journal,
             );
         };
-        if let Some(reason) =
-            acceptance_error(plan, checkpoint, positions, &node.id, &spec.node, &head)
+        if let Some(reason) = acceptance_error(
+            plan,
+            checkpoint,
+            positions,
+            owner,
+            &node.id,
+            &spec.node,
+            (branch.as_str(), head.as_str()),
+        )
+        .map_err(GraphError::Run)?
         {
             return fail::<R, J>(index, "land_review_required", reason, checkpoint, journal);
         }

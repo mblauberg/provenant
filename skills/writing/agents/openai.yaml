@@ -1,0 +1,4 @@
+interface:
+  display_name: "Writing"
+  short_description: "Direct AU English prose and engineering text"
+  default_prompt: "Use $writing to draft, rewrite or tighten this text in direct Australian English while preserving every fact, citation, number, identifier and obligation."

@@ -6,10 +6,9 @@ Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/catalogue_read_onl
 One executable, `provenant`, serves people, skills, hooks and CI. The `cli`
 crate parses arguments, calls typed library operations and renders typed
 results. This spec owns the envelope, exit codes and wait budgets. The machine-readable help
-catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
-covers the core verbs and everyday flags. The generated
-[complete CLI reference](../reference/cli-all.md), from `help --all --json`,
-lists every public leaf, flag and bound. Default command help hides specialist
+catalogue owns command syntax: `provenant help` covers the core verbs and
+everyday flags, and `provenant help --all` (or `--json`) lists every public
+leaf, flag and bound. Default command help hides specialist
 options; `help COMMAND --all` reveals them without changing what parses.
 Paths are relative to `tools/front-door/`.
 Numeric range and requirement builders in `crates/cli/src/metadata.rs` install
@@ -43,6 +42,11 @@ summary falls back to a generic truncator that shows text of up to 2 KiB whole
 and otherwise says how many lines it omitted. `next` is the only source of the
 next command: when a command has none, none is printed. Errors keep their
 repair command and are never compacted.
+
+The default `status` listing never omits an active or needs-attention lane;
+only settled lanes are left out, with their count. The `run` receipt prints one
+`lane: GRAPH/NODE/ATTEMPT` line per launched node (`--json`: `lane_ids`). A
+launch refused before admission prints its recorded route and reason.
 
 Global `--full` means complete detail for the command and nothing else; it
 does not widen `status` to `--all`. `--json` keeps the machine envelope and
@@ -232,7 +236,7 @@ keeps the envelope and `--full` shows complete detail.
 
 ### Leaf dispositions
 
-Each command in today's [complete CLI reference](../reference/cli-all.md) is
+Each command in today's `provenant help --all` is
 kept, renamed or removed as follows. "Unchanged" means no change to the leaf
 or its arguments. `wait`, `telemetry value` and `telemetry cost` are added.
 No leaf is renamed: where a command's job moves, the old leaf is removed and
@@ -285,14 +289,6 @@ Fabric primitives' waits. Stopping settled work reports its state and changes no
 | `fabric claim verify` | kept | unchanged |
 | `fabric claim release` | kept | unchanged |
 | `fabric claim list` | kept | unchanged |
-| `fabric landing` | kept | unchanged |
-| `fabric landing push` | kept | unchanged |
-| `fabric landing reconcile` | kept | unchanged |
-| `fabric landing acquire` | kept | unchanged |
-| `fabric landing renew` | kept | unchanged |
-| `fabric landing verify` | kept | unchanged |
-| `fabric landing release` | kept | unchanged |
-| `fabric landing wait` | kept | unchanged |
 | `install` | kept | unchanged |
 | `upgrade` | kept | unchanged |
 | `uninstall` | kept | unchanged |
@@ -378,10 +374,9 @@ Fabric primitives' waits. Stopping settled work reports its state and changes no
 | `tick` | kept | unchanged |
 | `disk` | kept | unchanged |
 | `disk report` | kept | unchanged |
-| `bench` | kept | unchanged |
-| `bench mine` | kept | unchanged |
-| `bench verify` | kept | unchanged |
-| `bench run` | kept | unchanged |
+| `cloud` | kept | unchanged |
+| `cloud launch` | kept | unchanged |
+| `cloud collect` | kept | unchanged |
 | `workflow` | kept | unchanged |
 | `workflow review` | kept | unchanged |
 | `workflow receipt` | kept | unchanged |
@@ -578,8 +573,7 @@ it never invents an uncommitted-work exemption.
 ### Output references and bounded tails
 
 Output resolves the requested attempt on its owning host. Reads are bounded,
-and a clamped tail reports its effective bound. The generated
-[complete CLI reference](../reference/cli-all.md) owns target syntax and read limits.
+and a clamped tail reports its effective bound. `provenant help --all` owns target syntax and read limits.
 - Why (default): a chair can inspect a precise attempt without copying a full target or
   opening a shell on its host.
 - Test: `crates/cli/src/run/tests_access.rs::paged_output_never_splits_a_character`;
@@ -645,8 +639,7 @@ unknown facts remain null and commands never silently truncate machine results.
 `LANE_CAP`, a disk below `gc.free_floor` is `DISK_FLOOR`, and so on. `status`
 and the exit code carry the category. The run owner declares each code once,
 with its meaning, in `ErrorKind`; `help --all --json` lists them under
-`error_codes` and the generated [CLI reference](../reference/cli.md#error-codes)
-renders that list. Tests assert the code and stable identifiers such as a
+`error_codes`. Tests assert the code and stable identifiers such as a
 configuration key or repair command, never message prose. Other owners and
 per-attempt launch refusals still use coarser codes.
 
@@ -679,9 +672,8 @@ and its fallback receipt; account and quota guards still apply.
 ### Waits are readers
 
 Every wait has an explicit budget. A lane needing input can satisfy a wait.
-Neither expiry nor cancelling a wait stops the work. The generated
-[CLI](../reference/cli-all.md) and [MCP](../reference/mcp-tools.md) references
-own the accepted bounds.
+Neither expiry nor cancelling a wait stops the work. `provenant help --all` and the MCP `tools/list` response own the accepted
+bounds.
 - Why (default): an impatient reader must never kill a healthy lane.
 - Test: `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`;
   `crates/supervisor/tests/custody.rs::cancelled_reader_preserves_healthy_custody_and_cancel_escalates`
@@ -825,7 +817,7 @@ attempt and its delivery receipt. The recorded head must match the delivered
 remote branch. The body identifies the head reviewed, route provenance and
 gate evidence; absent evidence is stated explicitly. Missing required template
 sections, unsuitable attempt states and peer-owned records refuse creation.
-The generated [complete CLI reference](../reference/cli-all.md) owns invocation syntax.
+`provenant help --all` owns invocation syntax.
 - Why: the chair rebuilt the same body by hand for every pull request, and a
   hand-built body can state a head or route the receipts do not hold.
 - Test: `crates/cli/src/pr_body.rs::the_repository_template_is_filled_from_the_receipts`;

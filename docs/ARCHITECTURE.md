@@ -9,8 +9,8 @@ analysis, documentation and other evidence-bearing work. The objective is
 quality per user attention-hour: agents create depth and verification; users
 retain scarce judgement at consequential gates.
 
-`GLOBAL-AGENTS.md` is the global bootstrap, installed as `AGENTS.md`.
-`HARNESS.md` is the compact runtime constitution. Skills load procedural depth only when triggered.
+`GLOBAL-AGENTS.md` is the constitution, installed as each harness's
+user-level instruction file. Skills load procedural depth only when triggered.
 This document preserves the design intent so future maintainers can change the
 harness without rediscovering it from individual skills.
 
@@ -53,9 +53,9 @@ flowchart TB
 
 ## Trust boundaries
 
-The [constitution](../HARNESS.md) owns lifecycle, risk, review independence,
-authority and user gates. Skills own the procedures. The architecture separates
-three kinds of evidence:
+The [constitution](../GLOBAL-AGENTS.md) owns authority, the real boundaries
+and user gates; code owns risk tiers and review floors, and skills own the
+procedures. The architecture separates three kinds of evidence:
 
 - Run records describe execution, route lineage, custody and observed outcomes.
 - Workflow receipts bind a subject, authors, risk, review attempts and a delivery
@@ -93,7 +93,7 @@ decisions. `provenant-run` owns dispatch and records the resolved route and
 provider result. `provenant-providers` owns the adapter registry and native wire forms.
 
 The [routing spec](specs/routing.md) owns selection and fallback intent; the
-[generated command reference](reference/cli-all.md) owns operator interfaces.
+`provenant help --all` owns operator interfaces.
 
 Run records retain requested and resolved model identity, effort, and any
 fallback substitution.
@@ -113,7 +113,7 @@ separate ownership under [ADR 0019](adr/0019-installed-file-class-ownership.md).
 
 ## Design constraints for maintainers
 
-- Keep `GLOBAL-AGENTS.md` and `HARNESS.md` small enough to load every session.
+- Keep `GLOBAL-AGENTS.md` under 800 words: it loads in every session.
 - Put operational detail in skill references and executable checks.
 - Keep model identities in routing data, not scattered prose or shell cases.
 - Make optional providers additive and non-blocking.

@@ -1,6 +1,6 @@
 ---
 name: d2-diagrams
-description: "Use to author, validate, render or export D2 diagrams, including fixed-layout and publication figures (SVG, vector PDF). Not for Mermaid or Graphviz (engineering-docs defaults to Mermaid) or for deciding where a diagram lives (engineering-docs)."
+description: "Use to author, validate, render or export D2 diagrams and publication figures."
 ---
 
 # D2 diagrams

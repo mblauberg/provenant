@@ -1,6 +1,6 @@
 [package]
 name = "provenant-fabric-runtime"
-version = "1.7.1"
+version = "1.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,6 +28,7 @@ retained-seed = []
 fixture = []
 
 [dev-dependencies]
+provenant-core = { workspace = true, features = ["fixture"] }
 provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

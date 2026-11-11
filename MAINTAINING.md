@@ -1,10 +1,10 @@
 # Maintaining Provenant
 
-Read [`AGENTS.md`](AGENTS.md), [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md),
-[`HARNESS.md`](HARNESS.md) and
+Read [`AGENTS.md`](AGENTS.md), [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
-Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
-risk, authority, orchestration, review policy and user gates;
+Inspect the live diff and preserve unrelated work. `GLOBAL-AGENTS.md` owns
+authority, the real boundaries and user gates; code owns risk tiers and review
+floors, and skills own orchestration;
 [`docs/worktrees.md`](docs/worktrees.md) owns branch and linked-worktree
 operation. Use the repository process declaration below for issue intake,
 workflow state and pull-request linking.
@@ -44,11 +44,11 @@ cross-tracker routes, not a second current-work owner.
 
 - Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
 - Living docs are edited in place, not appended to; see
-  [engineering-docs](skills/engineering-docs/SKILL.md#binding-rules)
+  [engineering-docs](skills/engineering-docs/SKILL.md#rules)
 - Release notes: each user-visible change adds a fragment under
   [`docs/release-notes/next.d/`](docs/release-notes/next.d/). Fragment authors
   and the release collator follow the
-  `engineering-writing` release-notes guidance
+  `writing` release-notes guidance
   and the fragment rules in the [release-notes index](docs/release-notes/README.md#writing-a-fragment).
   Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index; release notes do not repeat it. Before releasing,
   read the collated preview (`scripts/collate-release-notes`) end to end, merge
@@ -62,7 +62,8 @@ cross-tracker routes, not a second current-work owner.
 
 - Owns: `non-derivable-intent`
 - Drift gate: `scripts/check-doc-truth` checks spec indexes, Owner/Anchor
-  headers, Anchor paths, Test citations and diagram metadata; harness asset
+  headers, Anchor paths, Test citations and diagram metadata, and warns when a
+  spec passes 2,000 words; harness asset
   checks cover retained runtime-graph projections. Other prose is review-checked
 
 ### Merge policy
@@ -77,7 +78,7 @@ This repository is loaded by multiple agent platforms. A convenient
 Claude-only or Codex-only change is a regression unless the approved scope is
 platform-specific.
 
-Changes to the ambient `GLOBAL-AGENTS.md` or `HARNESS.md` apply from the next session.
+Changes to the ambient `GLOBAL-AGENTS.md` apply from the next session.
 A live session retains the prior constitution until restart.
 
 ## Documentation tiers
@@ -87,15 +88,15 @@ Documentation claims sit in three tiers, and the third is deliberate:
 1. **Code-checked.** Runtime schema and migration structure is owned by code
    and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
    machine-checked. `scripts/check-doc-truth` requires every runbook and spec
-   `Anchor:` to resolve to a source file and compares the event-intake and
-   delivery tables with the code they project. `scripts/check-harness` rejects
+   `Anchor:` to resolve to a source file and compares the delivery
+   table with the code it projects. `scripts/check-harness` rejects
    a skill `references/` path named outside its skill.
 2. **Review-checked.** The README skill count and architecture risk factors are
    maintained from current files and code; no harness check binds those regions
    to a source file. Specification prose, fenced commands, placeholders,
    unbound projections and other links remain review-owned.
-   `HARNESS.md` stays compact because it is read before cross-provider dispatch,
-   risk-tier, authority or memory decisions; see [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md).
+   [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) stays under 800 words because every
+   session of every project loads it.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
 
@@ -104,29 +105,26 @@ Documentation claims sit in three tiers, and the third is deliberate:
 These rules keep the always-loaded files small. They are review-owned; the
 Harness asset checks enforce the machine-checkable subset.
 
-1. `GLOBAL-AGENTS.md` and `HARNESS.md` are the ambient doctrine sources,
-   installed as `AGENTS.md` and `HARNESS.md`.
-   `GLOBAL-AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
-   topology, lifecycle, user gates, risk, Git, routing and memory. A
-   provider-bootstrap import shim, such as `CLAUDE.md`, may point only to
-   those owners and adds no policy.
+1. `GLOBAL-AGENTS.md` is the one ambient doctrine source, installed as
+   `AGENTS.md`. It holds the standing rules a skill, `--help` or code does not
+   already own. A provider-bootstrap import shim, such as `CLAUDE.md`, may
+   point only to it and adds no policy.
 2. Operational depth has one skill owner: compaction and checkpoints in
    `session`, routing and degradation in `orchestrate`, and receipt detail in
    `deliver`. Ambient files name skills, then load depth only when triggered.
 3. Nothing outside an owning skill names a file under its `references/`
    directory. Cross-skill references use the skill name only.
-4. `GLOBAL-AGENTS.md` and `HARNESS.md` contain no repository-relative `docs/`,
-   `config/` or `scripts/` paths and do not name `MAINTAINING.md`. Installed skills
+4. `GLOBAL-AGENTS.md` contains no repository-relative `docs/`, `config/` or
+   `scripts/` paths and does not name `MAINTAINING.md`. Installed skills
    keep local Markdown links within their own directory; use a skill-local
    reference, a `provenant` command or the consuming repository's runbook for
    other guidance. `scripts/check-harness` enforces this for skill entrypoints and
    supporting Markdown. Runnable commands are PATH-resolved. Fabric
    identity derives from the working directory.
-5. `HARNESS.md` is the sole ambient skill resolver. It states that skills
-   install into each configured harness's skills directory and names no
-   harness root; `GLOBAL-AGENTS.md` names neither an installed root nor an instance
-   skill directory. A named skill loads its `SKILL.md` and is
-   binding, while provider-native discovery may implement resolution.
+5. `GLOBAL-AGENTS.md` is the sole ambient skill resolver and names neither an
+   installed root nor an instance skill directory. A named skill loads its
+   `SKILL.md` and is binding, while provider-native discovery may implement
+   resolution.
 6. Ambient files carry no dates. Git records revision provenance.
 7. `orchestrate` remains one skill. Skill changes use targeted,
    evidence-backed pruning; no new catalogue entry or duplicate policy is
@@ -138,36 +136,30 @@ Harness asset checks enforce the machine-checkable subset.
 ## Change a skill
 
 1. Confirm the capability belongs globally and is not better kept in a project.
-2. Use `skill-craft` for a skill change: its audit branch for read-only
-   assessment, its author branch for a new or materially revised skill under an
-   explicit write envelope. `implement` owns end-to-end delivery and
-   verification.
-3. Use a consistent kebab-case capability name. Related writing skills use
-   parallel names: `engineering-writing`, `natural-writing`, `legal-writing`.
+2. Use `improve` to audit or author a skill; `deliver` owns end-to-end
+   delivery and verification.
+3. Use a consistent kebab-case capability name.
 4. Keep portable frontmatter to `name` and `description`. Keep required
    third-party notices with copied material and provider UI metadata in a
    validated sidecar. Metadata and tool lists may narrow invocation but never
    grant authority.
-5. Put trigger terms and the nearest exclusion in the first 250 description
-   characters. Keep the complete canonical catalogue at or below 8,000
+5. Keep the description to one line of trigger terms. Add a `Not for` clause
+   only where two skills would genuinely both take the same request, and keep
+   all descriptions together under 250 words. Keep the complete canonical catalogue at or below 8,000
    characters, targeting 7,600 for wrapper and version headroom.
 6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
    references loaded only when needed and deterministic behaviour into scripts.
-7. Add positive, negative and boundary fixtures with exact primary and companion
-   routes. Trigger fixtures are mandatory for every skill change;
-   `scripts/check-skill-negatives` inventories the near-miss negatives under
-   `skills/` and `library/`. A contract test is mandatory only where the change
+7. A contract test is mandatory only where the change
    introduces or alters an invariant a script, validator or CI gate evaluates at
    runtime, so that violating it fails a command rather than a reviewer's
    reading. A change confined to wording,
-   ordering, examples or explanation adds no contract test; the fixture set and
-   the harness gates carry it. Assert parsed structure (fixture routes, JSON
-   policy values, resolved paths) or a script's output, exit code or side
+   ordering, examples or explanation adds no contract test; the harness gates
+   carry it. Assert parsed structure (JSON policy values, resolved paths) or a script's output, exit code or side
    effect. Never assert the text of a document. See `test-design` for the
    exclusion list.
-8. A skill behaviour change runs its fixtures with and without the skill and
-   records the difference for the reviewer; frozen comparative evals are
-   conditional. See [skill-craft](skills/skill-craft/SKILL.md).
+8. A skill behaviour change that matters runs a few representative prompts
+   with and without the change and records the difference for the reviewer.
+   See [improve](skills/improve/SKILL.md).
 9. Re-run `scripts/check-harness` and the applicable targeted checks.
 
 Split a skill when its triggers, artifacts or completion gates differ
@@ -190,12 +182,11 @@ Nothing outside a skill may name a file under that skill's `references/`
 directory. Cross-skill references use the skill name only; `scripts/check-harness`
 enforces this. Required licence notices may name the files they cover.
 
-`natural-writing` is the writing hub and single owner of the shared prose
-doctrine (mechanism catalogue, Australian-English house style, condense pass
-and claim discipline) plus academic prose; `engineering-writing` and
-`legal-writing` keep only their domain overlay and link back to the hub. Change
-the shared doctrine in the hub, not in a domain skill. The hub's
-`skills/natural-writing/lint-rules.json` owns the general and academic rule
+`writing` owns the shared prose doctrine (mechanism catalogue,
+Australian-English house style, condense pass and claim discipline) and its
+engineering and academic overlays; `legal-writing` keeps only its domain
+overlay. Change shared doctrine in `writing`, not in `legal-writing`.
+`skills/writing/lint-rules.json` owns the general and academic rule
 vocabulary; `skills/legal-writing/lint-rules.json` owns legal rules and filing
 blocker severities. Run `provenant check writing <paths> [--rules general|academic|legal]`.
 Rules and exclusions are skill data, outside policy, configuration and records.
@@ -281,6 +272,11 @@ scripts/check-harness
 provenant check release
 git diff --check
 ```
+
+Generated contract reference is not tracked. Read `provenant help --all`,
+`provenant config schema` and `--json` output; `scripts/generate-reference`
+renders the same sources into the ignored `docs/reference/`, and CI runs it
+(`--strict`) to prove they still render and uploads the result as an artefact.
 
 The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.
 

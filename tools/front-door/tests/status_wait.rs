@@ -110,6 +110,24 @@ fn finish(store: &RunStore, attempt: AttemptId) -> Result {
     )?;
     Ok(())
 }
+const HEAD: &str = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
+const PUSHED: &str = "defdefdefdefdefdefdefdefdefdefdefdefdefd";
+/// The pull request view; CI is read separately, for its exact head.
+fn view(state: &str, head: &str) -> String {
+    json!({"state":state,"headRefOid":head,"url":"https://github.com/owner/repo/pull/1"})
+        .to_string()
+}
+fn runs(head: &str, status: &str, conclusion: Option<&str>) -> String {
+    json!({"total_count":1,"check_runs":[{"name":"test","head_sha":head,"status":status,"conclusion":conclusion}]}).to_string()
+}
+/// Serve check runs and statuses with the headers `gh api --include` prints.
+fn serve(rig: &TestRig) -> String {
+    format!(
+        "case \"$*\" in\n  *check-runs*) printf 'HTTP/2.0 200 OK\\r\\n\\r\\n'; cat '{}' ;;\n  *statuses*) printf 'HTTP/2.0 200 OK\\r\\n\\r\\n[]' ;;\n  *) cat '{}' ;;\nesac\n",
+        rig.root.join("runs.json").display(),
+        rig.root.join("pr.json").display()
+    )
+}
 fn fake_gh(rig: &mut TestRig, blocking: bool) -> Result {
     let bin = rig.root.join("bin");
     fs::create_dir_all(&bin)?;
@@ -123,10 +141,10 @@ fn fake_gh(rig: &mut TestRig, blocking: bool) -> Result {
         )
     } else {
         format!(
-            "#!/bin/sh\nif [ ! -e '{}' ]; then touch '{}'; echo 'HTTP 503 Service Unavailable' >&2; exit 1; fi\ncat '{}'\n",
+            "#!/bin/sh\nif [ ! -e '{}' ]; then touch '{}'; echo 'HTTP 503 Service Unavailable' >&2; exit 1; fi\n{}",
             rig.root.join("gh-started").display(),
             rig.root.join("gh-started").display(),
-            rig.root.join("pr.json").display()
+            serve(rig)
         )
     };
     fs::write(bin.join("gh"), script)?;
@@ -136,7 +154,8 @@ fn fake_gh(rig: &mut TestRig, blocking: bool) -> Result {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
-    fs::write(rig.root.join("pr.json"), json!({"state":"OPEN","headRefOid":"abc","statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"IN_PROGRESS","conclusion":null}]}).to_string())?;
+    fs::write(rig.root.join("pr.json"), view("OPEN", HEAD))?;
+    fs::write(rig.root.join("runs.json"), runs(HEAD, "in_progress", None))?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.wait]\ntimeout_seconds=1\nlocal_interval_ms=10\npr_interval_ms=10\n",
@@ -149,8 +168,8 @@ fn fake_gh_dynamic(rig: &mut TestRig) -> Result {
     fs::write(
         bin.join("gh"),
         format!(
-            "#!/bin/sh\ncat '{}'\ntouch '{}'\n",
-            rig.root.join("pr.json").display(),
+            "#!/bin/sh\n{}touch '{}'\n",
+            serve(rig),
             rig.root.join("gh-started").display()
         ),
     )?;
@@ -160,10 +179,8 @@ fn fake_gh_dynamic(rig: &mut TestRig) -> Result {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
-    fs::write(
-        rig.root.join("pr.json"),
-        json!({"state":"OPEN","headRefOid":"abc","statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"IN_PROGRESS","conclusion":null}]}).to_string(),
-    )?;
+    fs::write(rig.root.join("pr.json"), view("OPEN", HEAD))?;
+    fs::write(rig.root.join("runs.json"), runs(HEAD, "in_progress", None))?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.wait]\ntimeout_seconds=2\nlocal_interval_ms=10\npr_interval_ms=10\n",
@@ -382,10 +399,12 @@ fn default_single_target_wait_ignores_nonterminal_transition() -> Result {
         || rig.root.join("gh-started").exists(),
         |ready| *ready,
     )?;
+    // A push: the new head's CI has passed.
     fs::write(
-        rig.root.join("pr.json"),
-        json!({"state":"OPEN","headRefOid":"abc","statusCheckRollup":[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}).to_string(),
+        rig.root.join("runs.json"),
+        runs(PUSHED, "completed", Some("success")),
     )?;
+    fs::write(rig.root.join("pr.json"), view("OPEN", PUSHED))?;
     let mut stdout = BufReader::new(child.stdout.take().ok_or("stdout")?);
     let mut output = Vec::new();
     stdout.read_to_end(&mut output)?;
@@ -443,10 +462,7 @@ fn mixed_status_follow_streams_once_per_transition_until_all_terminal() -> Resul
         child.try_wait()?.is_none(),
         "follow exited before PR terminal"
     );
-    fs::write(
-        rig.root.join("pr.json"),
-        json!({"state":"MERGED","headRefOid":"abc"}).to_string(),
-    )?;
+    fs::write(rig.root.join("pr.json"), view("MERGED", HEAD))?;
     let merged = read(&mut stdout)?;
     assert_eq!(merged["target"], "pr:1");
     assert_eq!(merged["terminal"], true);

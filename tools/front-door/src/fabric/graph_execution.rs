@@ -1246,27 +1246,6 @@ impl Factory {
                     target.attempt = next;
                     record = store.record(next, &call).map_err(run_error)?;
                 }
-                let reference = format!("{}/{}", self.context.identity.host, target.attempt);
-                match provenant_cli::fabric::graph_cloud::installed(
-                    &self.context.roots,
-                    &store,
-                    target.attempt,
-                    "",
-                    &reference,
-                    &call,
-                    &self.cwd,
-                    std::time::Duration::from_micros(
-                        budget.remaining(self.clock.mono_now()).as_micros(),
-                    ),
-                    true,
-                ) {
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {}
-                    Err(_error) => {
-                        first_error.get_or_insert(FacadeError::InvalidInput { detail: None });
-                        continue;
-                    }
-                }
             }
             let operation_id =
                 graph_operation(&format!("graph-cancel-{}", target.attempt), &attempt.key)?;

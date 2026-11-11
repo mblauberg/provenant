@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused controls for advisory references and the optional inventory gate."""
+"""Focused controls for runbook reference failures, advisory spec warnings and the inventory gate."""
 
 import test_git_env
 test_git_env.isolate()
@@ -119,6 +119,18 @@ class DocTruthTests(unittest.TestCase):
             (self.root / f"docs/specs/{name}.md").unlink()
         self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
 
+    def test_a_spec_over_the_word_cap_warns_without_failing(self):
+        spec = self.root / "docs/specs/long.md"
+        header = "# Long\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n"
+        spec.write_text(header + "word " * 1990)
+        result = self.check("--inventory-only", "--strict-inventory", "--strict-citations", source=False)
+        self.assertNotIn("word cap", result.stdout)
+        spec.write_text(header + "word " * 2001)
+        result = self.check("--inventory-only", "--strict-inventory", "--strict-citations", source=False)
+        self.assertIn("docs/specs/long.md:1: warning: spec has", result.stdout)
+        self.assertIn("2000-word cap", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_deleted_commands_check_every_spec(self):
         (self.root / "docs/specs/new-area.md").write_text(
             "# Area\nOwner: maintainers\nAnchor: tools/front-door\n\n"
@@ -218,29 +230,56 @@ class DocTruthTests(unittest.TestCase):
         self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
                       "Run `provenant route list --apply`, then `provenant gc --apply`.\n")
         result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.count("error:"), 1)
+        self.assertIn("unresolved flag `--apply`", result.stdout)
+
+    def test_unknown_runbook_commands_and_flags_fail_inline_and_fenced(self):
+        self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n\n"
+                      "```sh\nprovenant route list --pool x \\\n  --vanished  # --comment\n"
+                      "$ provenant gone --json\nprovenant gc --apply\n```\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "docs/runbooks/example.md:6: error: unresolved flag `--vanished`",
+            "docs/runbooks/example.md:8: error: unresolved command `provenant gone`",
+        ])
+
+    def test_unknown_commands_in_specs_stay_advisory_even_when_fenced(self):
+        (self.root / "docs/specs/example.md").write_text(
+            "# Spec\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n\n"
+            "```sh\nprovenant gone --json\n```\nRun `provenant gone`.\n")
+        result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.count("warning:"), 1)
-        self.assertIn("unresolved flag `--apply`", result.stdout)
+        self.assertNotIn("error:", result.stdout)
+
+    def test_help_all_and_retired_lines_do_not_fail_runbooks(self):
+        self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
+                      "Run `provenant help --all --json`.\nRemoved: `provenant gone --old`.\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "")
 
     def test_command_must_resolve_through_all_parent_verbs(self):
         self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
                       "Run `provenant route vanished --json`.\n")
         result = self.check()
-        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertEqual(result.stdout.count("error:"), 1)
         self.assertIn("unresolved command `provenant route vanished`", result.stdout)
 
     def test_help_after_globals_still_checks_requested_command(self):
         self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
                       "Run `provenant --json help route vanished`.\n")
         result = self.check()
-        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertEqual(result.stdout.count("error:"), 1)
         self.assertIn("unresolved command `provenant route vanished`", result.stdout)
 
     def test_alternative_verbs_are_each_resolved(self):
         self.document("# Scope\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
                       "Run `provenant config set|unset|vanished`.\n")
         result = self.check()
-        self.assertEqual(result.stdout.count("warning:"), 1)
+        self.assertEqual(result.stdout.count("error:"), 1)
         self.assertIn("unresolved command `provenant config vanished`", result.stdout)
 
     def test_missing_headers_are_advisory_unless_inventory_gate_is_requested(self):
@@ -275,7 +314,7 @@ class DocTruthTests(unittest.TestCase):
         self.document("# Lines\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
                       "`provenant route\nvanished` and ``ADR 9999``.\n")
         result = self.check()
-        self.assertIn("example.md:4: warning: unresolved command", result.stdout)
+        self.assertIn("example.md:4: error: unresolved command", result.stdout)
         self.assertIn("example.md:5: warning: unresolved ADR", result.stdout)
 
     def test_invalid_help_sources_warn_once_and_paths_are_still_checked(self):
@@ -371,27 +410,6 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
 
-    def intake(self, rows, code):
-        source = self.root / "tools/front-door/src/bin/event-intake.rs"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(code)
-        (self.root / "docs/runbooks/event-intake-configuration.md").write_text(
-            "# Event intake\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n## Configure\n\n"
-            "| Variable | Meaning |\n|---|---|\n" + rows)
-
-    def test_event_intake_table_matches_the_variables_read(self):
-        code = ('env::var("PROVENANT_INTAKE_DIR");\n'
-                'env::var("PROVENANT_INTAKE_SWEEP_SECONDS").unwrap_or_else(|_| "300".into());\n')
-        self.intake("| `PROVENANT_INTAKE_DIR` | State. |\n| `PROVENANT_INTAKE_SWEEP_SECONDS` | Default `300`. |\n", code)
-        result = self.check("--inventory-only", "--strict-inventory", source=False)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.intake("| `PROVENANT_INTAKE_SWEEP_SECONDS` | Default `60`. |\n| `PROVENANT_INTAKE_GONE` | Old. |\n", code)
-        result = self.check("--inventory-only", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("PROVENANT_INTAKE_DIR is read by event-intake but not documented", result.stdout)
-        self.assertIn("PROVENANT_INTAKE_GONE is documented but not read", result.stdout)
-        self.assertIn("sweep default is 300", result.stdout)
-
     def delivery(self, rows):
         specs = self.root / "tools/front-door/crates/records/src/adapters.rs"
         hooks = self.root / "tools/front-door/crates/cli/src/hooks.rs"
@@ -418,7 +436,7 @@ class DocTruthTests(unittest.TestCase):
 
     def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
         binary = self.root / "provenant"
-        binary.write_text("#!/bin/sh\n[ \"$*\" = 'help --json' ] || exit 1\n"
+        binary.write_text("#!/bin/sh\n[ \"$*\" = 'help --all --json' ] || exit 1\n"
                           f"cat '{FIXTURES / 'help.json'}'\n")
         binary.chmod(0o755)
         marker = self.root / "executed"

@@ -8,8 +8,6 @@ use std::{ffi::OsString, io, path::Path, time::Duration};
 
 #[derive(Deserialize)]
 struct SmokeVersion {
-    #[serde(default)]
-    binary: Option<String>,
     package_version: String,
     source_digest: String,
     asset_digest: String,
@@ -32,21 +30,6 @@ pub(crate) struct SystemSmoke {
     environment: Vec<(OsString, OsString)>,
 }
 impl SystemSmoke {
-    pub(crate) fn require_matching_identity(
-        &self,
-        executable: &Path,
-        expected: &VersionInfo,
-        cancel: &CancelToken,
-    ) -> io::Result<()> {
-        let (found, binary) = self.identity_details(executable, cancel)?;
-        if found != *expected || binary.as_deref() != Some("pr-reconciler") {
-            return Err(io::Error::other(
-                "PR worker identity differs from command binary",
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn new(home: Option<&Path>) -> io::Result<Self> {
         let executor = SystemExecutor::new(1)
             .map_err(|_| io::Error::other("cannot start bounded release smoke executor"))?;
@@ -115,15 +98,6 @@ impl SystemSmoke {
         executable: &Path,
         cancel: &CancelToken,
     ) -> io::Result<VersionInfo> {
-        self.identity_details(executable, cancel)
-            .map(|(identity, _)| identity)
-    }
-
-    fn identity_details(
-        &self,
-        executable: &Path,
-        cancel: &CancelToken,
-    ) -> io::Result<(VersionInfo, Option<String>)> {
         let version = self.invoke::<SmokeVersion>(executable, &["--version", "--json"], cancel)?;
         if version.schema_version != 1
             || version.command != "version"
@@ -138,35 +112,23 @@ impl SystemSmoke {
             ));
         }
         let data = version.data;
-        let binary = data.binary;
-        Ok((
-            VersionInfo {
-                extra: Default::default(),
-                source_digest: provenant_records::SourceDigest::parse(&data.source_digest)
-                    .map_err(|_| io::Error::other("release source digest is invalid"))?,
-                asset_digest: provenant_records::SourceDigest::parse(&data.asset_digest)
-                    .map_err(|_| io::Error::other("release asset digest is invalid"))?,
-                target: data.target,
-                toolchain: data.toolchain,
-                record_schema_version: data.record_schema_version,
-                config_schema_version: data.config_schema_version,
-            },
-            binary,
-        ))
+        Ok(VersionInfo {
+            extra: Default::default(),
+            source_digest: provenant_records::SourceDigest::parse(&data.source_digest)
+                .map_err(|_| io::Error::other("release source digest is invalid"))?,
+            asset_digest: provenant_records::SourceDigest::parse(&data.asset_digest)
+                .map_err(|_| io::Error::other("release asset digest is invalid"))?,
+            target: data.target,
+            toolchain: data.toolchain,
+            record_schema_version: data.record_schema_version,
+            config_schema_version: data.config_schema_version,
+        })
     }
 }
 impl ReleaseSmoke for SystemSmoke {
     fn check(&self, release: &Release, cancel: &CancelToken) -> io::Result<VersionInfo> {
         let executable = release.source().join("bin/provenant");
         let identity = self.identity(&executable, cancel)?;
-        let worker = release.source().join("bin/pr-reconciler");
-        if release.manifest().files.iter().any(|file| {
-            file.path
-                .to_relative_path()
-                .is_ok_and(|path| path.as_path() == Path::new("bin/pr-reconciler"))
-        }) {
-            self.require_matching_identity(&worker, &identity, cancel)?;
-        }
         let help = self.invoke::<serde_json::Value>(&executable, &["--help", "--json"], cancel)?;
         if help.schema_version != 1
             || help.command != "help"

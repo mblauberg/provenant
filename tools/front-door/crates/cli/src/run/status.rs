@@ -141,8 +141,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 }
                 rows.sort_by_key(|lane| std::cmp::Reverse(lane.queued_at));
             }
-            cloud_owner::hydrate(edge.roots, &session.store, &mut rows, &call)
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
             let mut human = if command.all {
@@ -204,7 +202,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             summary = Some(compact);
             human.push_str(&capabilities);
             data["review_exempt"] = exempt;
-            attach_cloud_jobs(&session.store, &rows, &mut data, &mut human, &call)?;
             if command.id.is_none()
                 && command.cursor.is_none()
                 && append_refused_operations(
@@ -220,9 +217,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             if append_native_status(native, &mut data, &mut human) {
                 summary = None;
             }
-            if data.get("cloud_jobs").is_some() {
-                summary = None;
-            }
             Ok((data, human))
         })(),
     );
@@ -235,7 +229,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
         for key in [
             "review_exempt",
             "native_attempts_error",
-            "cloud_jobs",
             "operation",
             "refused_operations",
             "waiting_on_owner",
@@ -803,8 +796,17 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
             }
         })
     });
-    let mut summary = crate::Summary::new(headline, rows, next);
-    for lane in listed.iter().take(crate::limits::SUMMARY_ROWS) {
+    // Every active and needs-attention lane is listed whatever their number;
+    // each row is still bounded in bytes. Only settled lanes are held back.
+    let mut summary = crate::Summary::complete(headline, rows, next);
+    let settled = lanes.len() - listed.len();
+    if settled > 0 {
+        summary.lines.push(format!(
+            "{settled} settled lane{} not listed; provenant status --all lists them",
+            if settled == 1 { "" } else { "s" }
+        ));
+    }
+    for lane in &listed {
         if lane.state == "failed" {
             if let Some(reason) = &lane.git_import_failure {
                 summary
@@ -1069,10 +1071,7 @@ pub(super) fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> 
 }
 
 pub(super) fn lane_display_state(lane: &run::AttemptRecord) -> String {
-    lane.cloud_observation.0.map_or_else(
-        || state_and_reason(&lane.state).0,
-        |state| state.state().to_owned(),
-    )
+    state_and_reason(&lane.state).0
 }
 
 /// The projected state and recorded terminal reason.
@@ -1108,14 +1107,7 @@ pub fn project_retained_attempt(
     let id = target
         .attempt
         .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
-    let mut record = session.store.record(id, &call)?;
-    cloud_owner::hydrate(
-        edge.roots,
-        &session.store,
-        std::slice::from_mut(&mut record),
-        &call,
-    )
-    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+    let record = session.store.record(id, &call)?;
     if target.run.is_some_and(|run| run != record.run_id)
         || target.task.is_some_and(|task| task != record.task_id)
     {
@@ -1818,23 +1810,13 @@ pub(super) fn lanes_inner(
         |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
     let filtered = !command.states.is_empty() || command.since.is_some();
     query.newest_first = filtered || command.all;
-    // A filtered view hydrates row by row across pages, and then again as a whole.
-    let budget_end = cloud_owner::view_observation_budget();
-    let (mut lanes, next) = if filtered {
+    let (lanes, next) = if filtered {
         query.limit = 100;
         let mut matches = Vec::new();
         let mut next = None;
         loop {
             let page = session.service().lanes(&query, &call)?;
-            for mut lane in page.lanes {
-                cloud_owner::hydrate_within(
-                    edge.roots,
-                    &session.store,
-                    std::slice::from_mut(&mut lane),
-                    &call,
-                    budget_end,
-                )
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            for lane in page.lanes {
                 let state_matches = command.states.is_empty()
                     || command
                         .states
@@ -1867,8 +1849,6 @@ pub(super) fn lanes_inner(
         let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
         (lanes, page.next)
     };
-    cloud_owner::hydrate_within(edge.roots, &session.store, &mut lanes, &call, budget_end)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
 
@@ -1882,7 +1862,6 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     omit_listing_write_grants(&command.id, &mut data);
-    attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
     if command.id.is_empty() && command.cursor.is_none() && command.session.is_none() && !filtered {
         append_refused_operations(&session.store, command.limit, &mut data, &mut human, &call)?;
     }
@@ -1901,87 +1880,6 @@ pub(super) fn omit_listing_write_grants(targets: &[Target], data: &mut Value) {
             }
         }
     }
-}
-
-pub(super) fn attach_cloud_jobs(
-    store: &run::RunStore,
-    lanes: &[run::AttemptRecord],
-    data: &mut Value,
-    human: &mut String,
-    call: &run::Request<'_>,
-) -> Result<(), Fail> {
-    let mut jobs = Vec::new();
-    for lane in lanes {
-        let Some(placement) = cloud_owner::placement(store, lane, call)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-        else {
-            continue;
-        };
-        let mut value = match lane.cloud_view.0.clone() {
-            Some(view) => view,
-            None => match cloud_owner::load(store, lane.attempt_id, call)
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-            {
-                Some(job) => cloud_owner::view(&job),
-                None => json!({"target": placement.target, "state": {"state": "submitting"}}),
-            },
-        };
-        value["attempt_id"] = json!(lane.attempt_id);
-        let state = value["state"]["state"].as_str().unwrap_or("unknown");
-        human.push_str(&format!(
-            "{} cloud {}: {}",
-            lane.attempt_id,
-            plain_text(&placement.target, usize::MAX),
-            state
-        ));
-        if value["stale"] == true {
-            human.push_str(" (saved state may be stale)");
-        }
-        if let Some(passed) = value["passed"].as_bool() {
-            human.push_str(if passed {
-                " (advisory pass)"
-            } else {
-                " (advisory failure)"
-            });
-        }
-        if let Some(model) = value["observed_model_status"].as_str() {
-            // Name both models so a substitution is never hidden.
-            human.push_str(&format!(
-                ", requested model {}, observed {} ({model})",
-                plain_text(
-                    value["requested_model"].as_str().unwrap_or("unknown"),
-                    usize::MAX
-                ),
-                plain_text(
-                    value["observed_model"].as_str().unwrap_or("unknown"),
-                    usize::MAX
-                ),
-            ));
-        }
-        if let Some(branch) = value["result_branch"].as_str() {
-            human.push_str(&format!(", pushed {}", plain_text(branch, usize::MAX)));
-            if let Some(head) = value["result_head"].as_str() {
-                human.push_str(&format!(" at {}", plain_text(head, usize::MAX)));
-            }
-        } else if let Some(branch) = value["work_branch"].as_str() {
-            human.push_str(&format!(", branch {}", plain_text(branch, usize::MAX)));
-        }
-        if let Some(url) = value["session_url"].as_str() {
-            human.push_str(&format!(", session {}", plain_text(url, usize::MAX)));
-        }
-        if let Some(detail) = value["state"]["detail"].as_str() {
-            human.push_str(&format!(": {}", plain_text(detail, usize::MAX)));
-        }
-        if let Some(remedy) = value["remedy"].as_str() {
-            human.push_str(&format!("; {}", plain_text(remedy, usize::MAX)));
-        }
-        human.push('\n');
-        jobs.push(value);
-    }
-    if !jobs.is_empty() {
-        data["cloud_jobs"] = Value::Array(jobs);
-    }
-    Ok(())
 }
 
 /// What a pull request body needs from one local attempt's own record.
@@ -2114,8 +2012,13 @@ pub fn attempt_facts(
                         delivery,
                     )
                     .read()
-                    .map_err(|error| {
-                        Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                    .map_err(|error| match error {
+                        provenant_workflow::store::StoreError::Retired { .. } => {
+                            Fail::new(Status::Refused, ErrorKind::Invalid, error.to_string())
+                        }
+                        error => {
+                            Fail::new(Status::Error, ErrorKind::StateCorrupt, error.to_string())
+                        }
                     })?;
                     match receipt {
                         Some(receipt) => (

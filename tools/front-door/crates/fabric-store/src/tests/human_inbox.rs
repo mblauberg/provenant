@@ -680,7 +680,10 @@ fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() {
     for name in ["fabric.sqlite3", "host.sqlite3"] {
         let path = f.root.as_path().join("fabric").join(name);
         let db = rusqlite::Connection::open(&path).unwrap();
-        assert!(provenant_sqlite::schema_matches(&db, crate::db::SCHEMA).unwrap(), "{name}");
+        assert!(
+            provenant_sqlite::schema_matches(&db, crate::db::SCHEMA).unwrap(),
+            "{name}"
+        );
         drop(db);
         for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
             let db = rusqlite::Connection::open(&path).unwrap();

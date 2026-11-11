@@ -107,7 +107,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 
     let prompt = "Fix remaining issues in continuation";
     let task = run::TaskRequest {
-        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,
@@ -722,6 +721,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                     depth: 1,
                     attempt: AttemptId::from_bytes([6; 16]),
                     assets: &assets,
+                    fabric_mcp: true,
                 },
             })?;
             assert_eq!(launch.argv[2], "resume");

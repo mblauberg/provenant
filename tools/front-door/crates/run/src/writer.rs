@@ -52,6 +52,18 @@ fn error<E: std::fmt::Display>(
         source: std::io::Error::other(source.to_string()),
     }
 }
+/// A utility failure keeps its fixed cause, when it has one, beside its text.
+fn utility_error(
+    operation: &'static str,
+    path: Option<&Path>,
+) -> impl FnOnce(provenant_confinement::utility::UtilityError) -> RunError {
+    let path = path.map(Path::to_path_buf);
+    move |source| RunError::OperationIo {
+        operation,
+        path,
+        source: crate::CausedSource::io(source.to_string(), source.safe_cause()),
+    }
+}
 /// Held-directory errors name paths relative to their anchor. Retain a known
 /// anchor before crossing the edge; the facade omits paths with unknown anchors.
 fn anchored_error(error: FsError, anchor: &Path) -> RunError {
@@ -110,7 +122,7 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
         SystemExecutor::new(1).map_err(error("initialise source system executor", None))?;
     let selected = utility
         .project_location(&executor, cwd, budget()?, &CancelToken::new())
-        .map_err(error("locate source project", Some(cwd)))?;
+        .map_err(utility_error("locate source project", Some(cwd)))?;
     let repo = selected
         .repository
         .ok_or(RunError::Validation("source needs a Git project"))?;
@@ -161,7 +173,7 @@ fn resolve_writer_with(
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let selected = utility
         .project_location(&executor, cwd, budget()?, &CancelToken::new())
-        .map_err(error("locate writer project", Some(cwd)))?;
+        .map_err(utility_error("locate writer project", Some(cwd)))?;
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
@@ -524,7 +536,7 @@ pub(crate) fn cleanup_git_pins(
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let repo = utility
         .open_repo(&executor, &writer.project, budget()?, &CancelToken::new())
-        .map_err(error(
+        .map_err(utility_error(
             "open writer repository for Git ref cleanup",
             Some(&writer.project),
         ))?;
@@ -680,7 +692,10 @@ pub fn prepare_writer_with_facts(
     )?;
     let repo = utility
         .open_repo(&executor, &request.project, budget()?, &cancel)
-        .map_err(error("open writer repository", Some(&request.project)))?;
+        .map_err(utility_error(
+            "open writer repository",
+            Some(&request.project),
+        ))?;
     if !common.metadata()?.same_identity(&repo.common_identity()) {
         return Err(RunError::Validation(
             "writer repository changed during setup",
@@ -1061,7 +1076,7 @@ fn prepare_writer_git(
     let config_lock = lock_config(LockMode::Shared)?;
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
-        .map_err(error("reopen writer repository", Some(&project)))?;
+        .map_err(utility_error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -1101,7 +1116,7 @@ fn prepare_writer_git(
     // Refresh every dependent snapshot only after regaining the common owner.
     let fresh_repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
-        .map_err(error(
+        .map_err(utility_error(
             "reopen writer repository after fetch",
             Some(&project),
         ))?;
@@ -1190,7 +1205,7 @@ fn prepare_writer_git(
     for merge in [false, true] {
         let repo = utility
             .open_repo(&executor, &project, budget()?, cancel)
-            .map_err(error("reopen writer repository", Some(&project)))?;
+            .map_err(utility_error("reopen writer repository", Some(&project)))?;
         let worktree = provenant_confinement::verify_worktree(&repo, &path)
             .map_err(worktrees::WorktreeError::from)?;
         if !root_identity.same_identity(&worktree.identity())
@@ -1214,7 +1229,7 @@ fn prepare_writer_git(
     }
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
-        .map_err(error("reopen writer repository", Some(&project)))?;
+        .map_err(utility_error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -2601,6 +2616,7 @@ impl WriterLaunch {
                     self.branch.as_str(),
                 )? == verified_tip
             {
+                self.advance_files(attempt, verified_tip)?;
                 crate::objects::restore_index(source, self.worktree.repo())?;
                 if !merge_objects.is_empty() {
                     crate::artifacts::seal(
@@ -2686,6 +2702,79 @@ impl WriterLaunch {
                 head: verified_tip,
             })?,
             crate::RECORD_LIMIT,
+        )?;
+        Ok(())
+    }
+}
+impl WriterLaunch {
+    /// Put the bound worktree's files back at the branch the host still holds
+    /// when the lane's commits could not be published, and say where the work
+    /// is. Only files that still hold the lane's own content move. Best effort:
+    /// the note says what happened either way.
+    pub(crate) fn unpublish(&self, attempt: &Directory) -> String {
+        let attempt_work = || -> Result<String> {
+            let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+            let Some(source) = crate::objects::bound_source(attempt)? else {
+                return Ok(String::new());
+            };
+            let repo = self.worktree.repo();
+            let branch = self.branch.as_str();
+            let tip = crate::objects::private_tip(&source, branch)?;
+            let held = crate::objects::resolve_ref(&git, repo, branch)?;
+            let location = format!(
+                "the lane's work is commit {tip} on branch {branch}, retained in its private Git"
+            );
+            if tip == self.base || held != self.base {
+                return Ok(String::new());
+            }
+            let scratch = source.refs.current_path()?;
+            let objects = source.objects.current_path()?;
+            let moved = crate::objects::worktree::converge(
+                &git,
+                repo,
+                &crate::objects::worktree::Stores {
+                    git_dir: &scratch,
+                    objects: Some(&objects),
+                },
+                tip,
+                self.base,
+            )?;
+            crate::objects::worktree::seal_reverted(attempt, tip)?;
+            let mut note = format!(
+                "worktree restored to {} ({} files); {location}",
+                self.base, moved.moved
+            );
+            if !moved.kept.is_empty() {
+                let listed: Vec<_> = moved
+                    .kept
+                    .iter()
+                    .take(UNCOMMITTED_LISTED)
+                    .cloned()
+                    .collect();
+                note.push_str(&format!("; left as found: {}", listed.join(", ")));
+            }
+            Ok(note)
+        };
+        attempt_work().unwrap_or_else(|error| format!("worktree files not restored: {error}"))
+    }
+
+    /// After a revert, publication moves the files forward again so the files,
+    /// index and HEAD agree at the published commit.
+    fn advance_files(&self, attempt: &Directory, tip: GitOid) -> Result<()> {
+        if !crate::objects::worktree::reverted(attempt)? || tip == self.base {
+            return Ok(());
+        }
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let repo = self.worktree.repo();
+        crate::objects::worktree::converge(
+            &git,
+            repo,
+            &crate::objects::worktree::Stores {
+                git_dir: repo.common_git_dir(),
+                objects: None,
+            },
+            self.base,
+            tip,
         )?;
         Ok(())
     }

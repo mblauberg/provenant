@@ -2416,3 +2416,56 @@ fn writer_owner_decision_or_missing_capability_returns_to_chair_without_launch()
         }
     }
 }
+
+#[test]
+fn container_retry_brief_names_the_field_and_template_the_container_came_from() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"redo-container-brief","nodes":[{
+            "id":"work","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"leaf","access":"read_only","prompt":"Do the work","route":{"alias":"senior"}}],
+                "exports":[{"node":"leaf","outputs":["result"]}]
+            }
+        }]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [terminal_from("first result", "first-attempt")].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    // A container built from a template that declares no `brief` parameter.
+    checkpoint.expansions.push(plans::Expansion {
+        extra: Default::default(),
+        source: String::new(),
+        continuation: false,
+        nodes: Vec::new(),
+        uses: vec![patch::TemplateUse {
+            extra: Default::default(),
+            id: "work".into(),
+            name: "review-panel".into(),
+            parameters: serde_json::Value::Null,
+            nodes: vec!["work".into()],
+        }],
+        patch: Some(
+            serde_json::from_value(json!({"revision":1,"digest":"sha256:0","journaled":true}))
+                .unwrap(),
+        ),
+    });
+    let error = retry_id(
+        &document,
+        &mut checkpoint,
+        "work",
+        Some("Redo it"),
+        &|_| Ok(()),
+        None,
+    )
+    .unwrap_err();
+    let refusal = error.parameter.clone().unwrap_or_else(|| panic!("{}", error.message));
+    assert_eq!(refusal.template, "review-panel");
+    assert_eq!(refusal.node.as_deref(), Some("work"));
+    assert!(matches!(
+        refusal.fault,
+        template::ParameterFault::Unknown { key: Some(ref key), .. } if key == "brief"
+    ));
+}

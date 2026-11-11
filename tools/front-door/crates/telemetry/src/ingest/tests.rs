@@ -100,15 +100,149 @@ fn populate(f: &Fixture) -> Result {
     Ok(())
 }
 
+/// Every segment's text, for checks on what is stored.
+fn stored(f: &Fixture) -> Result<String> {
+    let mut text = String::new();
+    for name in crate::segments::list(&Directory::open_anchor(&f.base.join("state/ingest"))?)? {
+        text.push_str(&std::fs::read_to_string(
+            f.base.join("state/ingest").join(name),
+        )?);
+    }
+    Ok(text)
+}
+
+fn segment_files(f: &Fixture) -> Result<Vec<String>> {
+    Ok(crate::segments::list(&Directory::open_anchor(
+        &f.base.join("state/ingest"),
+    )?)?)
+}
+
 #[test]
-fn an_oversized_store_is_refused_rather_than_truncated() -> Result {
+fn a_single_file_store_over_the_old_cap_is_split_on_first_open() -> Result {
+    use std::io::Write;
     let f = Fixture::new()?;
-    let file = std::fs::File::create(f.base.join("state/ingest.jsonl"))?;
-    file.set_len(STORE_CAP + 1)?;
-    let error = read_rows(&f.roots, &RowFilter::default())
-        .err()
-        .ok_or("oversized store was read")?;
-    assert!(error.to_string().contains("size cap"));
+    let legacy = f.base.join("state/ingest.jsonl");
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&legacy)?);
+    let padding = "x".repeat(64 << 10);
+    let days = ["2026-10-01", "2026-10-02", "2026-10-03"];
+    let total = 2_199usize;
+    for index in 0..total {
+        let row = Row {
+            schema_version: ROW_SCHEMA_VERSION,
+            account: "a".into(),
+            provider: PROVIDER.into(),
+            model: padding.clone(),
+            effort: None,
+            uncached_input: 1,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            output: 1,
+            timestamp: format!("{}T00:00:00Z", days[index % days.len()]),
+            session: "s".into(),
+            message: format!("m{index}"),
+            source: Source::Lane,
+            agent_id: None,
+            native_config: None,
+            native_attempt: None,
+            reasoning_tokens: None,
+            reply: None,
+        };
+        serde_json::to_writer(&mut out, &row)?;
+        out.write_all(b"\n")?;
+    }
+    out.flush()?;
+    drop(out);
+    assert!(std::fs::metadata(&legacy)?.len() > 128 << 20);
+    // A reader gets the rows, split by day, and the single file is gone.
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(rows.len(), total);
+    assert!(!legacy.exists());
+    assert_eq!(segment_files(&f)?.len(), days.len());
+    // A window reads only its own days.
+    let window = RowFilter {
+        since: Some(
+            "2026-10-02T00:00:00Z"
+                .parse::<jiff::Timestamp>()?
+                .as_second(),
+        ),
+        until: Some(
+            "2026-10-02T23:59:59Z"
+                .parse::<jiff::Timestamp>()?
+                .as_second(),
+        ),
+        ..RowFilter::default()
+    };
+    assert_eq!(read_rows(&f.roots, &window)?.len(), total / days.len());
+    // Ingest then adds to the split store.
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("new", "2026-10-04T00:00:00Z", 1, 0, 0, 1),
+    )?;
+    let report = f.run(&DIRS, &[], None)?;
+    assert_eq!((report.added, report.store_full), (1, false));
+    assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), total + 1);
+    Ok(())
+}
+
+#[test]
+fn a_message_seen_on_both_sides_of_midnight_is_counted_once() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T23:59:59Z", 5, 0, 0, 1),
+    )?;
+    f.run(&DIRS, &[], None)?;
+    // A later run reads only the stream's tail, which is stamped the next day.
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-02T00:00:01Z", 5, 0, 0, 9),
+    )?;
+    let report = f.run(&DIRS, &[], None)?;
+    assert_eq!((report.added, report.already_present), (0, 1));
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].output, 9);
+    assert_eq!(segment_files(&f)?, ["2026-10-01.jsonl"]);
+    Ok(())
+}
+
+#[test]
+fn legacy_lines_too_long_to_migrate_keep_the_old_file() -> Result {
+    let f = Fixture::new()?;
+    let legacy = f.base.join("state/ingest.jsonl");
+    let kept = serde_json::json!({"timestamp": "2026-10-01T00:00:00Z", "message": "m1"});
+    let huge = "x".repeat(MAX_ROW_LINE + 10);
+    std::fs::write(&legacy, format!("{kept}\n{huge}\n"))?;
+    read_rows(&f.roots, &RowFilter::default())?;
+    let aside = f.base.join("state/ingest.jsonl.unmigrated");
+    assert!(!legacy.exists());
+    assert!(std::fs::read_to_string(&aside)?.contains(&huge));
+    assert!(stored(&f)?.contains("\"m1\""));
+    // A later open does not migrate again.
+    read_rows(&f.roots, &RowFilter::default())?;
+    assert!(aside.exists());
+    Ok(())
+}
+
+#[test]
+fn ingest_removes_staging_files_a_crash_left_in_the_store() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T00:00:00Z", 1, 0, 0, 1),
+    )?;
+    f.run(&DIRS, &[], None)?;
+    let stale = f
+        .base
+        .join("state/ingest/.ingest-.provenant-staging.abc.tmp");
+    std::fs::write(&stale, b"partial")?;
+    f.run(&DIRS, &[], None)?;
+    assert!(!stale.exists());
     Ok(())
 }
 
@@ -165,8 +299,7 @@ fn rerun_adds_nothing_and_accounts_stay_distinct() -> Result {
     assert_eq!(source("m1"), Source::Chair);
     assert_eq!(source("m3"), Source::Subagent);
     assert_eq!(source("m4"), Source::Lane);
-    let store = std::fs::read_to_string(f.base.join("state/ingest.jsonl"))?;
-    assert!(!store.contains("private"));
+    assert!(!stored(&f)?.contains("private"));
     Ok(())
 }
 
@@ -320,12 +453,12 @@ fn lines_this_build_cannot_read_survive_a_rewrite() -> Result {
         &message("m1", "2026-10-01T00:00:00Z", 10, 0, 0, 1),
     )?;
     f.run(&DIRS, &[], None)?;
-    let store = f.base.join("state/ingest.jsonl");
+    let day = f.base.join("state/ingest/2026-10-01.jsonl");
     // A row another schema version wrote, then a torn line from a crash.
-    let current = std::fs::read_to_string(&store)?;
+    let current = std::fs::read_to_string(&day)?;
     let foreign = current.replacen("{\"schema_version\":1,", "{\"schema_version\":2,", 1);
     let torn = "{\"schema_version\":1,\"account\":\"half";
-    std::fs::write(&store, format!("{foreign}{torn}\n"))?;
+    std::fs::write(&day, format!("{foreign}{torn}\n"))?;
     f.write(
         "claude",
         "projects/p/s2.jsonl",
@@ -333,7 +466,7 @@ fn lines_this_build_cannot_read_survive_a_rewrite() -> Result {
     )?;
     let report = f.run(&DIRS, &[], None)?;
     assert_eq!(report.added, 2);
-    let text = std::fs::read_to_string(&store)?;
+    let text = std::fs::read_to_string(&day)?;
     assert!(
         text.lines()
             .any(|line| line == foreign.trim_end_matches('\n'))
@@ -407,7 +540,7 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     f.run(&DIRS, &[], None)?;
-    let store = f.base.join("state/ingest.jsonl");
+    let store = f.base.join("state/ingest/2026-10-01.jsonl");
     let before = std::fs::read(&store)?;
     f.write(
         "claude",
@@ -493,7 +626,9 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     assert_eq!(run()?.added, 1);
     assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 3);
     // A removed store must not leave valid cursors pointing past its contents.
-    std::fs::remove_file(f.base.join("state/ingest.jsonl"))?;
+    for name in segment_files(&f)? {
+        std::fs::remove_file(f.base.join("state/ingest").join(name))?;
+    }
     assert_eq!(run()?.added, 1);
     let cursor = std::fs::read_to_string(f.base.join("state/ingest-cursors.json"))?;
     assert!(!cursor.contains("private"));
@@ -854,15 +989,18 @@ fn enrichment_preserves_existing_token_buckets_and_excludes_text() -> Result {
     legacy.as_object_mut().unwrap().remove("reply");
     legacy.as_object_mut().unwrap().remove("reasoning_tokens");
     std::fs::write(
-        fixture.roots.state.as_path().join(STORE),
+        fixture
+            .roots
+            .state
+            .as_path()
+            .join("ingest/2026-10-01.jsonl"),
         format!("{legacy}\n"),
     )?;
     fixture.run(&[("fixture-account", "native")], &[], None)?;
     let after = read_rows(&fixture.roots, &RowFilter::default())?;
     assert_eq!(before[0].buckets(), after[0].buckets());
     assert!(after[0].reply.is_some());
-    let stored = std::fs::read_to_string(fixture.roots.state.as_path().join(STORE))?;
-    assert!(!stored.contains("private words"));
+    assert!(!stored(&fixture)?.contains("private words"));
     let row = serde_json::to_value(&after[0])?;
     assert!(row.get("content").is_none());
     assert!(row.get("prompt").is_none());

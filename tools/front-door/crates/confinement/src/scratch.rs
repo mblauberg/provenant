@@ -5,6 +5,9 @@ use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use std::{ffi::OsStr, path::PathBuf};
 
+/// The project scratch root, relative to the repository root.
+pub const PROJECT_SCRATCH: &str = ".provenant/scratch";
+
 /// Create (if needed) and exclude `.provenant/scratch`, the only project scratch
 /// root. A legacy `.agent-run` is never probed, created, moved or deleted.
 pub fn ensure(
@@ -43,7 +46,7 @@ fn ensure_inner(
         Ok(parent.open_verified_directory(OsStr::new(name))?)
     }
     repo.revalidate()?;
-    let relative = ".provenant/scratch";
+    let relative = PROJECT_SCRATCH;
     let parent = child(repo.root_dir(), ".provenant")?;
     let scratch = child(&parent, "scratch")?;
     let info = child(repo.common_dir(), "info")?;

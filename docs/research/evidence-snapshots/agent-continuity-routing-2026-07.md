@@ -5,7 +5,7 @@ Status: Dated pre-ADR-0020 descriptive evidence; not implementation authority
 Current owners: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md),
 [Fabric Rust design](../../specs/fabric.md),
 [provider recordings](../../../tools/front-door/tests/fixtures/providers/README.md),
-and [`HARNESS.md`](../../../HARNESS.md). Daemon and Console references below
+and the [global rules](../../../GLOBAL-AGENTS.md). Daemon and Console references below
 are retained as evidence, not current paths.
 
 Evidence cut-off: 12 July 2026
@@ -89,7 +89,6 @@ dated disposition only.
 | Adapter capability/effective configuration, OpenCode boundary, telemetry and runtime stack | Specs 01/03/04 (the standalone note was deleted; see Git history) |
 | Terminal framework/language comparison, interaction references and resize contract | Not retained; the console was never built |
 | General delivery lifecycle and skill portfolio evidence | See repository history for the earlier research baselines |
-| Skill-trigger lifecycle routing baseline | [Lifecycle routing dataset](../../evals/lifecycle-routing-2026-07/README.md); not provider routing |
 
 Exact source-section coverage:
 

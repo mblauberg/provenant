@@ -10,8 +10,7 @@ prompt, route and result of each, so completion and cancellation survive a
 disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
 stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
-itself. Grammar and bounds are in the generated [CLI
-reference](../reference/cli-all.md). Paths are relative to `tools/front-door/`.
+itself. Grammar and bounds are in `provenant help --all`. Paths are relative to `tools/front-door/`.
 
 Templates bind route and access controls before admission. The receipt reports
 the applied effort and effective network access.
@@ -359,8 +358,7 @@ Admission and operation insertion commit together; the immutable request is
 published before acknowledgement. Transactions contain no launches, probes,
 waits or supervisor calls. Optional total and writer-specific host/project caps
 are independent. Build slots gate compiling Cargo commands rather than idle
-writers. Configuration and bounds belong to the generated
-[configuration reference](../reference/config-keys-all.md).
+writers. Configuration and bounds belong to `provenant config schema --all`.
 
 Known kernel memory pressure may defer either class. Low available memory alone
 is advisory. The disk floor holds lanes with write authority, including prepared
@@ -467,6 +465,14 @@ terminal settlement.
 | `record` | Seal the result and terminal decision before acquiring the publication lock and committing the attempt, summary, operation state and event. A lock timeout leaves the exact scoped decision replayable. Retention-ref cleanup follows the transaction outside the publication lock. |
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
+
+A worktree-write lane edits the bound worktree's files while its commits stay
+in private Git, so until publication the files are ahead of HEAD and the index.
+When settlement cannot publish, it moves back every file that still holds the
+lane's own content to the branch the host holds, keeps any other file as found,
+and names the lane's commit and branch in the settlement reason. A later
+successful publication moves those files forward again, so files, index and HEAD
+always describe one commit.
 
 A chair can release an unsettleable writer fence with
 `provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
@@ -1316,9 +1322,8 @@ sealed owner and lineage; a changed owner or a live predecessor refuses reuse.
 An uninitialised gitlink is acceptable, while an initialised nested repository
 requires review because Git could follow lane-controlled configuration.
 
-Owned settlement atomically queues intent under a non-blocking per-request lock.
-The lock holder owns the receipt; a successful holder records `cleanup_deferred: true`.
-A queue failure records a retryable retained receipt with a warning.
+Owned settlement records `cleanup_deferred: true`, unless a worker already
+began pruning, and then spawns one detached collection. A failed spawn records nothing.
 It performs no network operations, recursive output survey or worktree removal.
 Deferred-intent receipts are never final. A detached worker can remove only its
 own clean checkout after successful
@@ -1397,21 +1402,14 @@ once, and judges local branches on those targets and the fetched default.
 Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
 `outcome`, `reason`, `head`): under `artefacts` in the settlement receipt and
 `worktree_cleanup[].refs` in `gc --json`. A failure warns and never fails the
-settlement or the pass. Completion requests with a final retention reason
-leave the queue even if output cleanup warned. Dirty trees, absent worktrees
-and unlanded work without requested delivery are final retentions. Transient
-failures retry at most five times with durable exponential backoff starting
-at ten minutes, with at most four dispatches per host tick. Exhausted requests
-move from `gc/completions` to `gc/completion-exhausted` for diagnosis.
-Settlement atomically publishes only its own request, using a non-blocking per-request lock.
-Only the host tick enumerates and dispatches the queue. Each request contains
-its identity payload, attempt count, next-retry time and last cause; the filename
-hash covers only identity. A worker claims the entire record by rename to the
-same filename with `.claim` appended, under a non-blocking OS lock. The host tick
-retries abandoned claims after their durable backoff. Requeuing publishes fresh
-pending intent independently of any claimed record, including an exhausted one.
-Exhaustion renames the complete claimed record into diagnostics in one operation;
-there is no separate retry file or orphan reconciliation.
+settlement or the pass. Completion cleanup is one detached attempt per
+settlement and keeps no queue or retry state. A transient failure leaves a
+non-final receipt. The next applied `gc` sweep runs the same owner-bound
+collection, under the collection lock it holds, for each terminal lane whose
+receipt is deferred, retryable or pruning and whose worktree exists, landing
+against the fetched default branch (falling back to the owner's base when the
+fetch fails, there is no origin, or the sweep is a pressure sweep, matching
+settlement); dirty trees and unlanded work are retained by both.
 - Why (default): finished lanes leave nothing behind once their work has landed, and
   never take a ref Provenant did not make.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`
@@ -1489,42 +1487,6 @@ action where the host has an identifiable PR.
   `crates/run/src/delivery_tests/settlement.rs::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
   `crates/run/src/delivery_tests/host_commands.rs::existing_pr_delivery_only_creates_after_positive_absence`
 - Owner: `crates/run/src/delivery.rs`, `crates/records/src/run.rs`, `crates/cli/src/run.rs`
-
-## Cloud writers
-
-A task with `attempt.cloud` runs on a provider VM instead of a local
-supervisor ([ADR 0038](../adr/0038-cloud-job-ownership.md); operator steps in
-[providers](../runbooks/providers.md#cloud-placement)). Any access mode may
-use it, including `worktree-write` and a delivery target. Dispatch seals the
-placement with the request. For a writer it also seals the named branch
-`work_branch`: an explicit `attempt.cloud.work_branch`, else the delivery
-branch, else the writer's own branch. It refuses a writer without a named
-branch, a named branch equal to the base branch, and a `work_branch` on a
-task without a writer.
-
-The job starts from the task's pinned full commit on the named branch. It may
-merge the base branch, commits and pushes without force to the named branch,
-and may run heavy proof there. Changed tracked files are a writer's normal
-output and never fail a result. Where the platform restricts branch names,
-as hosted Claude does with `claude/*`, the job pushes the branch it is allowed
-and the result names that branch.
-
-The owner settles a writer only after it verifies the push on `origin`: the
-reported branch exists, its head is the reported full head, and that head
-descends from the starting commit. A refused check fails the job with its
-reason; an unreadable or failed remote read settles nothing and is observed
-again. The verified branch and head become the graph node's `branch` and
-`commit` outputs, so pull request and land nodes work on the remote branch.
-The owner does not push, open a pull request or integrate for a cloud writer.
-A verification job without a writer has no named branch; Claude's
-result-only branch is deleted after the result is saved.
-
-Status and `cloud_jobs` show the base branch, named branch, pushed branch and
-head, session URL where the provider has one, and the requested and observed
-model with `observed_model_status` (`matches`, `differs` or `unknown`). A
-difference is shown, never hidden. Credentials never enter the prompt,
-placement or record. A cloud result never replaces required CI on the exact
-head; the push is what starts that CI.
 
 ## Fresh continuation fallback
 
@@ -1691,12 +1653,14 @@ another; everything else returns to the chair.
 | `adapter_unavailable` | `new_route` | no |
 | `permission_denied` | `chair` | no |
 | `identity_unobserved` | `chair` | no |
+| `lane_token_lost` | `new_route` | no |
 | `source_view_refused` | `chair` | no |
 | `route_refused` | `chair` | no |
 | `access_policy_refused` | `chair` | no |
 | `disk_floor` | `chair` | no |
 | `disk_unobserved` | `chair` | no |
 | `prompt_unreadable` | `chair` | no |
+| `cloud_placement_removed` | `chair` | no |
 | `write_grants_refused` | `chair` | no |
 | `worktree_busy` | `chair` | no |
 | `launch_handoff_refused` | `chair` | no |

@@ -49,7 +49,7 @@ body:
       description: A guess is fine. It routes the issue; it does not commit anyone to a design.
       options:
         - A skill
-        - The lifecycle or its gates (HARNESS.md)
+        - The lifecycle or its gates (GLOBAL-AGENTS.md)
         - Risk, authority or review policy
         - Routing and models
         - Installer or scripts

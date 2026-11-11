@@ -1,6 +1,6 @@
 ---
 name: playwright
-description: "Use for shell-driven browser work with playwright-cli: open, click, fill, snapshot, screenshot, extract data or replay a UI flow. Not for Playwright tests (test-design) or design review (ui-ux-design)."
+description: "Use for shell-driven browser work with playwright-cli: click, fill, screenshot, scrape."
 ---
 
 # Playwright CLI

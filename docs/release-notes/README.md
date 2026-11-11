@@ -2,6 +2,7 @@
 
 Released versions, newest first:
 
+- [1.8.0](v1.8.0.md)
 - [1.7.1](v1.7.1.md)
 - [1.7.0](v1.7.0.md)
 - [1.6.24](v1.6.24.md)
@@ -61,7 +62,7 @@ place the policy is stated; release notes do not repeat or link it.
 
 ## Writing a fragment
 
-Follow the release-notes guidance in the [`engineering-writing`](../../skills/engineering-writing/SKILL.md) skill.
+Follow the release-notes guidance in the [`writing`](../../skills/writing/SKILL.md) skill.
 Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`.
 
 ```markdown

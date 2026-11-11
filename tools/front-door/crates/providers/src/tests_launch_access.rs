@@ -93,6 +93,7 @@ pub(super) fn fixture_input<'a>(
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: std::path::Path::new("/fixture/provenant"),
+            fabric_mcp: true,
         },
     }
 }

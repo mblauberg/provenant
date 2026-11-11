@@ -394,7 +394,6 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
             "VERDICT: BANANA",
             "VERDICT: APPROVE",
             "VERDICT: PASS\nVERDICT: PASS",
-            "VERDICT: PASS\nmore text",
         ] {
             let mut node = review("review.tests", "review");
             // Repair panels remove the PASS requirement, not the output contract.

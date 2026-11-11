@@ -1,4 +1,0 @@
-interface:
-  display_name: Refactor
-  short_description: Behaviour-preserving structural refactoring method
-  default_prompt: Use $refactor inside the authorised implementation run to preserve contracts, simplify ownership, and prove equivalence.

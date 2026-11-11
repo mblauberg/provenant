@@ -1039,6 +1039,19 @@ impl RunStore {
         Ok(())
     }
 
+    /// Settlement could not publish the lane's commits: leave the bound
+    /// worktree at the branch the host holds, and name where the work is.
+    fn unpublish_worktree(
+        &self,
+        attempt: &Directory,
+        writer: &crate::WriterRequest,
+        project: provenant_core::ProjectId,
+    ) -> String {
+        crate::prepare_writer_with_facts(writer, &self.writer_registry, project, &self.repo_facts)
+            .map(|launch| launch.unpublish(attempt))
+            .unwrap_or_else(|error| format!("worktree files not restored: {error}"))
+    }
+
     fn refuse_pending_import(
         &self,
         record: &AttemptRecord,
@@ -1053,8 +1066,17 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("pending import lacks writer"))?;
-        let reason = object_import_refused(attempt, Self::scope(record))?
-            .unwrap_or_else(|| reason.to_owned());
+        let reason = match object_import_refused(attempt, Self::scope(record))? {
+            Some(reason) => reason,
+            None => {
+                let note = self.unpublish_worktree(attempt, writer, record.project_id);
+                if note.is_empty() {
+                    reason.to_owned()
+                } else {
+                    format!("{reason}; {note}")
+                }
+            }
+        };
         seal_import_refusal(attempt, Self::scope(record), &writer.worktree, &reason)?;
         self.record_effect(
             record.attempt_id,
@@ -1782,11 +1804,21 @@ impl RunStore {
                             decoded.outcome = Outcome::Failed;
                             decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
                         }
+                        let restored = self.unpublish_worktree(attempt, writer, record.project_id);
+                        let restored = if restored.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {restored}")
+                        };
                         let reason = match decoded.reason.take() {
                             Some(reason) => {
-                                format!("{reason}; writer import remains unresolved: {error}")
+                                format!(
+                                    "{reason}; writer import remains unresolved: {error}{restored}"
+                                )
                             }
-                            None => format!("writer import remains unresolved: {error}"),
+                            None => {
+                                format!("writer import remains unresolved: {error}{restored}")
+                            }
                         };
                         decoded.reason = Some(reason.chars().take(4096).collect());
                         deferred.push((
@@ -1808,6 +1840,12 @@ impl RunStore {
                         writer.worktree.display(),
                         last_failure.as_deref().unwrap_or("settlement retry limit")
                     );
+                    let note = self.unpublish_worktree(attempt, writer, record.project_id);
+                    let reason = if note.is_empty() {
+                        reason
+                    } else {
+                        format!("{reason}; {note}")
+                    };
                     seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
                     decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
@@ -2007,6 +2045,28 @@ impl RunStore {
             decoded.outcome = Outcome::ReviewRequired;
             decoded.terminal_cause = Some(TerminalCause::ContextHandoff);
             decoded.reason = Some(TerminalCause::ContextHandoff.detail().into());
+            handoff = Some(stopped);
+        }
+        // A writer whose launch-time token copy was lost settles the same way:
+        // a declared stop on its latest handoff, continued on a new token. The
+        // successor's launch re-probes the account, so a login that really
+        // lapsed refuses it there as `account_login_required`.
+        if decoded.outcome == Outcome::AuthRequired
+            && decoded.terminal_cause == Some(TerminalCause::LaneTokenLost)
+            && task.writer.is_some()
+            && !cancelled
+        {
+            let stopped = stopped_handoff(
+                handoff.take(),
+                "The lane's access token was lost before it recorded a progress handoff; inspect the branch and worktree.",
+            );
+            decoded.result = format!(
+                "Stopped because this lane's access token was revoked or expired; a fresh attempt continues from this handoff on a new token.\n\n{}",
+                stopped.fenced()
+            );
+            decoded.turns.clear();
+            decoded.complete = true;
+            decoded.outcome = Outcome::ReviewRequired;
             handoff = Some(stopped);
         }
         let answer_limit = RESULT_LIMIT as usize;
@@ -2433,6 +2493,18 @@ pub(crate) fn seal_manifest(
 fn context_handoff(
     progress: Option<provenant_records::handoff::Handoff>,
 ) -> provenant_records::handoff::Handoff {
+    stopped_handoff(
+        progress,
+        "Stopped at the context handoff threshold before the lane recorded a progress handoff; inspect the branch and worktree.",
+    )
+}
+
+/// The lane's latest unfinished progress handoff, or a stopped-early one
+/// carrying `missing` when it recorded none.
+fn stopped_handoff(
+    progress: Option<provenant_records::handoff::Handoff>,
+    missing: &str,
+) -> provenant_records::handoff::Handoff {
     use provenant_records::handoff::{Handoff, HandoffStatus};
     match progress {
         Some(handoff) if handoff.unfinished() => handoff,
@@ -2440,7 +2512,7 @@ fn context_handoff(
             let mut handoff = progress.unwrap_or_else(|| Handoff {
                 schema_version: 2,
                 status: HandoffStatus::StoppedEarly,
-                note: "Stopped at the context handoff threshold before the lane recorded a progress handoff; inspect the branch and worktree.".into(),
+                note: missing.into(),
                 remaining: vec!["unknown: inspect the branch and worktree".into()],
                 decisions: Vec::new(),
                 verify: Vec::new(),
@@ -2762,18 +2834,21 @@ mod host_clock_tests {
 
     #[test]
     fn only_a_reportable_verdict_counts_as_a_lane_reporting() {
-        assert!(reports_verdict("Reviewed the change.\n\nVERDICT: APPROVE"));
+        assert!(reports_verdict("Reviewed the change.\n\nVERDICT: PASS"));
         assert!(reports_verdict(
-            "Reviewed the change.\nVERDICT: APPROVE\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
+            "Reviewed the change.\nVERDICT: FAIL\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
         ));
-        // A verdict that is not the first or last thing said is ambiguous: the
-        // reader refuses it, and so does settlement.
-        assert!(!reports_verdict(
-            "Reviewed the change.\nVERDICT: APPROVE\nOne more note."
+        // Exactly one verdict line outside fenced blocks counts, wherever it sits.
+        assert!(reports_verdict(
+            "Reviewed the change.\nVERDICT: PASS\nOne more note."
         ));
-        assert!(!reports_verdict(
-            "VERDICT: APPROVE\nVERDICT: REQUEST_CHANGES"
+        assert!(reports_verdict(
+            "```text\nVERDICT: FAIL\n```\nVERDICT: INCONCLUSIVE"
         ));
+        // Several verdict lines, a malformed token or none do not.
+        assert!(!reports_verdict("VERDICT: PASS\nVERDICT: FAIL"));
+        assert!(!reports_verdict("Reviewed.\nVERDICT: MAYBE soon"));
+        assert!(!reports_verdict("Reviewed.\nVERDICT: maybe"));
         assert!(!reports_verdict("Reviewed the change with no verdict."));
     }
 
@@ -3893,6 +3968,127 @@ mod writer_recovery_tests {
         assert_eq!(
             std::fs::read_to_string(fixture.writer.worktree.join("context-work.txt"))?,
             "uncommitted work before the context handoff\n"
+        );
+        Ok(())
+    }
+
+    /// A Claude writer whose launch-time token copy was lost mid-run (the
+    /// host renewed the account login) settles as a declared stop on its
+    /// latest handoff and seals one automatic continuation; its uncommitted
+    /// edit stays, and the reason stays the lane-token one, not a login.
+    #[test]
+    fn writer_that_lost_its_lane_token_is_continued_from_its_handoff()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = input();
+        run.request.tasks[0].writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let mut applied = route();
+        applied.extra.insert("max_continuations".into(), 2.into());
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &applied,
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = format!("refs/provenant/import/{}", launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory.try_clone()?,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        std::fs::write(
+            launch.worktree.repo().root_path().join("token-work.txt"),
+            "uncommitted work before the token was lost\n",
+        )?;
+        let progress = serde_json::json!({
+            "schema_version": 2,
+            "status": "stopped_early",
+            "note": "Parser done; renderer next",
+            "remaining": ["Finish renderer"],
+            "decisions": [],
+            "verify": [],
+        });
+        crate::artifacts::seal(
+            &attempt,
+            provenant_records::AttemptFile::Handoff.name(),
+            &serde_json::to_vec(&progress)?,
+            provenant_records::handoff::HANDOFF_BYTES as u64,
+        )?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        let mut fake =
+            crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::AuthRequired));
+        fake.terminal_cause = Some(TerminalCause::LaneTokenLost);
+        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        let AttemptState::Terminal {
+            extra,
+            outcome,
+            reason,
+            ..
+        } = &finished.state
+        else {
+            panic!("attempt must be terminal");
+        };
+        assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
+        assert_eq!(
+            extra.get("terminal_cause"),
+            Some(&serde_json::json!(TerminalCause::LaneTokenLost))
+        );
+        let result =
+            String::from_utf8(read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?)?;
+        let handoff =
+            provenant_records::handoff::Handoff::from_result(&result)?.ok_or("result handoff")?;
+        assert_eq!(handoff.note, "Parser done; renderer next");
+        assert!(store.automatic_continuation(&finished)?.is_some());
+        assert_eq!(
+            std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
+            "uncommitted work before the token was lost\n"
         );
         Ok(())
     }

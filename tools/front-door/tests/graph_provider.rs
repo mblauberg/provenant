@@ -15,7 +15,7 @@ use support::{Result, TestRig, code};
 // confinement. No network, provider login, compiler or sleeps are involved.
 fn writer_shell_probe() -> Result<String> {
     let script = r#"set -eu
-for name in AGENTS.md CLAUDE.md HARNESS.md; do
+for name in AGENTS.md CLAUDE.md GLOBAL-AGENTS.md; do
     test -f "$name"
     printf 'edited by lane shell\n' > "$name"
 done
@@ -24,7 +24,7 @@ printf disposable > shell-scratch/build/file
 rm -rf shell-scratch/build
 test ! -e shell-scratch/build
 rmdir shell-scratch
-git add AGENTS.md CLAUDE.md HARNESS.md
+git add AGENTS.md CLAUDE.md GLOBAL-AGENTS.md
 git commit -qm 'test: edit root instructions'
 printf 'shell completed\n'
 printf 'ghp_abcdefghijklmnopqrstuvwxyz0123456789\n'
@@ -721,7 +721,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original instructions\n")?;
     }
     for args in [
@@ -781,7 +781,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         1,
         "direct launch must report policy once: {stderr}"
     );
-    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         assert_eq!(
             fs::read_to_string(tree.join(name))?,
             "edited by lane shell\n"
@@ -2404,7 +2404,6 @@ fn persisted_attempt_with(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
-                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -3573,7 +3572,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
     let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     let git = provenant_os::git::git_executable().ok_or("git")?;
-    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original\n")?;
     }
     let remote = rig.root.join("remote.git");
@@ -3850,12 +3849,18 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         };
         let cleanup = rig.process_cleanup();
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             fs::write(rig.project.join(name), "original instructions\n")?;
         }
         fs::write(rig.project.join(".gitignore"), "setup-assets/\n")?;
         for args in [
-            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md", ".gitignore"],
+            vec![
+                "add",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "GLOBAL-AGENTS.md",
+                ".gitignore",
+            ],
             vec!["commit", "-qm", "instructions"],
         ] {
             let out = rig.execute(&git, &args, None)?;
@@ -3899,7 +3904,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
             fs::read_to_string(tree.join("setup-assets/current"))?,
             "setup output\n"
         );
-        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert_eq!(
                 fs::read_to_string(tree.join(name))?,
                 "edited by lane shell\n"
@@ -3937,7 +3942,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
                 path.to_path_buf().map_err(Into::into)
             })
             .collect::<Result<Vec<std::path::PathBuf>>>()?;
-        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert!(paths.contains(&tree.join(name)), "{paths:?}");
         }
         let human = rig.command(&["output", id])?;

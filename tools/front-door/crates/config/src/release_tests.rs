@@ -198,39 +198,8 @@ fn completed_release_with_a_different_manifest_returns_typed_conflict() {
 }
 
 #[test]
-fn optional_pr_worker_has_a_manifest_digest_and_exact_executable_mode() {
-    let fixture = Fixture::new();
-    let worker = fixture.source.join("bin/pr-reconciler");
-    let bytes = b"fixture worker";
-    fs::write(&worker, bytes).unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
-    let release = package_release(
-        &fixture.source,
-        &fixture.version,
-        &Smoke(fixture.version.clone()),
-        &CancelToken::new(),
-    )
-    .unwrap();
-    assert_eq!(release.manifest.asset_digest, fixture.version.asset_digest);
-    assert_eq!(release.files[Path::new("bin/pr-reconciler")].1, 0o755);
-    Release::read(&fixture.source, &fixture.version.target).unwrap();
-
-    fs::write(&worker, b"tampered worker").unwrap();
-    assert!(matches!(
-        Release::read(&fixture.source, &fixture.version.target),
-        Err(InstallError::Tampered(path)) if path == worker
-    ));
-    fs::write(&worker, bytes).unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(matches!(
-        Release::read(&fixture.source, &fixture.version.target),
-        Err(InstallError::Tampered(path)) if path == worker
-    ));
-}
-
-#[test]
-fn staging_refuses_nonexecutable_pr_workers_and_unknown_binaries() {
-    for (name, mode) in [("pr-reconciler", 0o644), ("unrecognised", 0o755)] {
+fn staging_refuses_unknown_binaries() {
+    for (name, mode) in [("provenant-worker", 0o644), ("unrecognised", 0o755)] {
         let fixture = Fixture::new();
         let binary = fixture.source.join("bin").join(name);
         fs::write(&binary, b"fixture helper").unwrap();

@@ -220,6 +220,7 @@ pub(super) fn prepare_command(
                 depth: paths.lane_depth,
                 attempt: paths.attempt_id,
                 assets,
+                fabric_mcp: config.fabric_mcp_server(),
             },
         })
         .map_err(|error| error.to_string())?;

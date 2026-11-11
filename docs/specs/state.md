@@ -6,8 +6,7 @@ Anchor: `crates/core/src/roots.rs`, `crates/records/tests/contracts.rs`,
 `crates/config/src/managed_tests.rs`
 
 State owns root selection, identities, record codecs, typed configuration and
-the managed installation. Config keys are listed in the generated [config
-reference](../reference/config-keys.md); the attempt layout is `AttemptFile`
+the managed installation. Config keys are listed in `provenant config schema`; the attempt layout is `AttemptFile`
 in `crates/records/src/attempt_file.rs`. Operator steps are in the [install
 runbook](../runbooks/install.md) and [GC runbook](../runbooks/gc.md). Paths
 are relative to `tools/front-door/`.
@@ -45,7 +44,7 @@ provider signal.
 
 Readiness evidence has a separate tree from quota snapshots, so a failed
 publication cannot corrupt an account commit. `crates/cli/src/quota.rs` owns
-its paths; [route readiness](route-readiness.md) owns scope and freshness.
+its paths; [routing](routing.md#unknown-never-means-ready) owns readiness scope and freshness.
 
 ## Records
 
@@ -149,7 +148,7 @@ uses defaults; syntax, version and filesystem-boundary failures refuse loading.
 Invalid optional values warn and use defaults. A malformed restriction must not
 become permission. Unknown optional keys survive an unrelated edit; `config set`
 validates the requested value and publishes atomically. `config show` redacts
-secrets and never rewrites the file. The [config reference](../reference/config-keys.md)
+secrets and never rewrites the file. `provenant config schema`
 owns keys and defaults.
 - Why (default): configuration errors need visible remedies without silently expanding
   authority or discarding unrelated user settings.

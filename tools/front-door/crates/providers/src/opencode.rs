@@ -120,21 +120,35 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    let mut statement = db
-        .prepare(
-            "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
-             FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
-        )
-        .map_err(|_| ProviderError::UnknownIdentity)?;
-    let models = statement
-        .query_map([session], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .map_err(|_| ProviderError::UnknownIdentity)?;
+    // OpenCode keeps assistant turns in `session_message` (v2 shape) or in the
+    // older `message` table. A session may be recorded in either, so read both
+    // and require every recorded answer to name the same provider and model.
+    let mut models = Vec::new();
+    for sql in [
+        "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
+         FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
+        "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
+         FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2",
+    ] {
+        // A table the installed OpenCode does not have records nothing.
+        let Ok(mut statement) = db.prepare(sql) else {
+            continue;
+        };
+        let rows = statement
+            .query_map([session], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|_| ProviderError::UnknownIdentity)?;
+        for row in rows {
+            if !models.contains(&row) {
+                models.push(row);
+            }
+        }
+    }
     match models.as_slice() {
         [] => Err(ProviderError::UnknownIdentity),
         [(Some(provider), Some(model))] => Ok(format!("opencode/{provider}/{model}")),
@@ -1053,6 +1067,48 @@ mod tests {
             observe_model(dir.path(), outcome.session().unwrap()),
             Err(ProviderError::IdentityMismatch)
         ));
+    }
+
+    fn seed_v1(dir: &std::path::Path, provider: &str, model: &str) {
+        let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS message (session_id TEXT, data TEXT)")
+            .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES ('ses_z', ?)",
+            [format!(
+                r#"{{"role":"assistant","providerID":"{provider}","modelID":"{model}"}}"#
+            )],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn zen_session_recorded_in_message_table_is_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_v1(dir.path(), "opencode", "deepseek-v4.1-flash-free");
+        assert_eq!(
+            observe_model(dir.path(), "ses_z").unwrap(),
+            "opencode/opencode/deepseek-v4.1-flash-free"
+        );
+        seed_v1(dir.path(), "opencode-go", "mimo-v2.6-flash");
+        assert!(matches!(
+            observe_model(dir.path(), "ses_z"),
+            Err(ProviderError::IdentityMismatch)
+        ));
+        assert!(matches!(
+            observe_model(dir.path(), "ses_other"),
+            Err(ProviderError::UnknownIdentity)
+        ));
+    }
+
+    #[test]
+    fn go_session_recorded_in_message_table_names_the_go_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_v1(dir.path(), "opencode-go", "mimo-v2.6-flash");
+        assert_eq!(
+            observe_model(dir.path(), "ses_z").unwrap(),
+            "opencode/opencode-go/mimo-v2.6-flash"
+        );
     }
 
     // Reduced from #1891: three tool steps, then final text without step_finish.

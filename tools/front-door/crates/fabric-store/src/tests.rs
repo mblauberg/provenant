@@ -1,12 +1,12 @@
 use super::*;
 use provenant_core::{
     CancelToken, Clock, DurationMicros, MessageId, MonoTime, PathResolver, RootInputs, StateRoot,
-    TestClock,
+    TestClock, TimeError,
 };
 use provenant_records::{ArtifactRef, PathWire, RecordHeader};
 use std::{
     path::{Path, PathBuf},
-    sync::Barrier,
+    sync::{Arc, Barrier},
 };
 
 #[test]
@@ -826,6 +826,11 @@ fn store_clock_controls_mutation_times_and_acknowledgements() {
     let events = store.events(project(), 0, 100, &f.request()).unwrap();
     assert_eq!(events.items.last().unwrap().record.at, f.now());
 }
+
+mod f2;
+
+mod human_inbox;
+mod operations;
 
 #[test]
 fn host_store_refuses_unsafe_database_companions() {

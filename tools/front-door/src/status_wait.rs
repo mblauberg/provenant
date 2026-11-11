@@ -143,12 +143,9 @@ impl Snapshot {
                 if rows.is_empty() {
                     return Err("named lane selection is empty".into());
                 }
-                let terminal = rows.iter().all(|row| {
-                    row.cloud_observation.0.map_or_else(
-                        || matches!(row.state, provenant_run::AttemptState::Terminal { .. }),
-                        |cloud| cloud.is_terminal(),
-                    )
-                });
+                let terminal = rows
+                    .iter()
+                    .all(|row| matches!(row.state, provenant_run::AttemptState::Terminal { .. }));
                 let notable = terminal;
                 let mut lanes: Vec<_> = rows
                     .iter()
@@ -207,8 +204,10 @@ impl Snapshot {
             Target::Pr(number) => {
                 let row = crate::pr::status::wait_line(
                     edge.cwd,
+                    edge.roots.state.as_path(),
                     *number,
                     left.min(pr_read_timeout),
+                    crate::pr::observer::POLL,
                     Some(cancel),
                 )
                 .map_err(|e| {
