@@ -57,13 +57,6 @@ pub enum QuotaProbeKind {
     LocalLedger,
 }
 
-/// Installed cloud transport implementation, when supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloudTransport {
-    Claude,
-    Codex,
-}
-
 /// How a provider receives host GitHub authentication for an open-network launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GithubAuth {
@@ -187,7 +180,6 @@ pub struct AdapterSpec {
     pub local_offer_reader: bool,
     /// The account reports the models it offers; a launch naming another model is refused.
     pub offered_models: bool,
-    pub cloud_transport: Option<CloudTransport>,
     pub github_auth: Option<GithubAuth>,
     /// Supports launching a transferred interactive session.
     pub session_handoff: bool,
@@ -415,7 +407,6 @@ adapter_specs! { $;
         chair_switch: true,
         local_offer_reader: true,
         offered_models: false,
-        cloud_transport: Some(CloudTransport::Claude),
         github_auth: Some(GithubAuth::Environment),
         session_handoff: true,
         launch_token_refresh: true,
@@ -498,7 +489,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: false,
-        cloud_transport: Some(CloudTransport::Codex),
         github_auth: Some(GithubAuth::ShellEnvironment),
         session_handoff: false,
         launch_token_refresh: false,
@@ -580,7 +570,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: false,
-        cloud_transport: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -666,7 +655,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: true,
-        cloud_transport: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -750,7 +738,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: false,
-        cloud_transport: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -825,7 +812,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: false,
-        cloud_transport: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -902,7 +888,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: false,
-        cloud_transport: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
@@ -978,7 +963,6 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         offered_models: false,
-        cloud_transport: None,
         github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,

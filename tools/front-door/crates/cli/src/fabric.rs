@@ -1,7 +1,6 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 use crate::metadata::CatalogueArg;
 mod context;
-pub mod graph_cloud;
 pub mod graph_relay;
 
 pub(crate) use context::private_dir;

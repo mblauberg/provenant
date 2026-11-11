@@ -192,6 +192,9 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
+/// The refusal for a graph, node or `--set` value that names cloud placement.
+pub const CLOUD_PLACEMENT_REMOVED: &str = "invalid input field `attempt.cloud`: cloud placement was removed. Launch a cloud session with `provenant cloud launch --file BRIEF`";
+
 /// Execution specification for an attempt, carrying what a plain lane expresses.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptSpec {
@@ -209,9 +212,6 @@ pub struct AttemptSpec {
     pub provider_timeout: Option<u64>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
-    /// Placement override for cloud execution.
-    #[serde(default, alias = "cloud", skip_serializing_if = "Option::is_none")]
-    pub placement: Option<provenant_records::run::CloudPlacement>,
     /// A writer worktree branch created from base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_worktree: Option<crate::coordination::facade::NewWorktree>,
@@ -309,12 +309,19 @@ impl AttemptSpec {
         knobs
     }
 
+    /// Whether the spec still names the removed cloud placement. Such a node
+    /// is refused rather than run locally.
+    pub fn names_cloud_placement(&self) -> bool {
+        ["cloud", "placement"]
+            .iter()
+            .any(|field| self.extra.contains_key(*field))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.host.is_none()
             && self.directory.is_none()
             && !self.confidential
             && self.provider_timeout.is_none()
-            && self.placement.is_none()
             && self.new_worktree.is_none()
             && self.account.is_none()
             && self.capabilities.is_empty()

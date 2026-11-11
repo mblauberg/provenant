@@ -226,8 +226,7 @@ size, it also records that manifest's install-verified executable SHA-256 and
 size and its release source digest. Attempt creation is on the launch path, so
 it never reads or hashes the executable; development builds leave both unknown.
 The instruction observation hashes only the observed source-root `AGENTS.md`,
-not the full effective session instructions. Cloud execution leaves that local
-file observation absent. Harness version, harness experiment, system prompt
+not the full effective session instructions. Harness version, harness experiment, system prompt
 and tool schema remain unknown when the host does not expose them. A recorded
 Provenant experiment arm is separate from a harness experiment.
 

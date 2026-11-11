@@ -407,7 +407,6 @@ fn graph_replay_preserves_accepted_context_without_a_checkpoint_reference()
     let plain_request = session.store.request(plain_run.run_id, &run_owner.call(&cancel))?;
     let graph_task = &graph_request.tasks[0];
     let plain_task = &plain_request.tasks[0];
-    assert_eq!(graph_task.cloud, plain_task.cloud);
     assert_eq!(graph_task.build_heavy, plain_task.build_heavy);
     assert_eq!(graph_task.account, plain_task.account);
     assert_eq!(graph_task.route, plain_task.route);

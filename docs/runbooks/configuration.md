@@ -373,23 +373,6 @@ is recorded as failed and retried after the interval with the same updater.
 `<state>/provider-updates/worker.json` holds the last worker launch and its
 failure, if any; activity records old and new versions.
 
-## Codex cloud transport
-
-```toml
-[providers.codex.cloud]
-transport = "thread"
-command = "codex-cloud-task"
-```
-
-`official` uses `codex cloud exec`, `status` and `list`. Select `thread` when
-the workspace's environments use the cloud thread API, which official
-`codex cloud exec` may report as `no cloud environments are available for this
-workspace`, and install a compatible client separately. The client must accept
-`submit --env NAME_OR_ID [--read-only]` with the prompt on stdin, and
-`status THREAD_ID` returning thread and turn JSON. Keep the same transport and
-command while observing saved jobs after a restart. See
-[cloud placement](providers.md#cloud-placement).
-
 ## Lane runtime deadline
 
 A lane may run for its task's provider timeout; `runtime_deadline_seconds` under

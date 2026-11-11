@@ -191,6 +191,9 @@ pub enum Command {
     /// Mine, verify and run benchmark tasks
     #[command(subcommand)]
     Bench(crate::bench::Bench),
+    /// Hand a brief to a provider cloud session and collect its branch
+    #[command(subcommand)]
+    Cloud(crate::cloud::Cloud),
     /// Check reviews and keep receipts and session checkpoints
     #[command(subcommand)]
     Workflow(crate::workflow::Workflow),
@@ -774,15 +777,6 @@ pub enum Condition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum LaneState {
-    CloudSubmitting,
-    CloudRunning,
-    CloudPassed,
-    CloudFailed,
-    CloudSetupFailed,
-    CloudCancelled,
-    CloudCancellationUnconfirmed,
-    CloudUnknown,
-    CloudAbandoned,
     Queued,
     Starting,
     Running,
@@ -806,15 +800,6 @@ pub enum LaneState {
 impl LaneState {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::CloudSubmitting => "cloud_submitting",
-            Self::CloudRunning => "cloud_running",
-            Self::CloudPassed => "cloud_passed",
-            Self::CloudFailed => "cloud_failed",
-            Self::CloudSetupFailed => "cloud_setup_failed",
-            Self::CloudCancelled => "cloud_cancelled",
-            Self::CloudCancellationUnconfirmed => "cloud_cancellation_unconfirmed",
-            Self::CloudUnknown => "cloud_unknown",
-            Self::CloudAbandoned => "cloud_abandoned",
             Self::Queued => "queued",
             Self::Starting => "starting",
             Self::Running => "running",

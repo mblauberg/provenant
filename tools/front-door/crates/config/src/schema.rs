@@ -72,8 +72,6 @@ const INSTALL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("targets.{harness}.config", "string"),
 ];
 const PROVIDER_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata::enumeration("codex.cloud.transport", &["official", "thread"]),
-    FieldMetadata::new("codex.cloud.command", "string"),
     FieldMetadata::new("{provider}.update", "bool"),
     FieldMetadata::int("{provider}.update_interval_seconds", 1, i64::MAX),
     FieldMetadata::int("{provider}.update_timeout_seconds", 1, i64::MAX),

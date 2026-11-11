@@ -1,8 +1,12 @@
 # ADR 0038: Cloud job ownership without a local process
 
-**Status:** Accepted
+**Status:** Superseded
 
 Changed: 2026-11-05, #2889. Revised 2026-11-09: cloud jobs may write.
+Superseded 2026-11-11, #3225: Provenant no longer owns cloud jobs. Cloud
+placement was removed; `provenant cloud launch` submits a brief and
+`provenant cloud collect` takes back the result branch, with no lifecycle,
+polling or custody. See [Cloud launch](../runbooks/cloud-launch.md).
 
 ## Context
 

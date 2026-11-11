@@ -48,79 +48,6 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
     out
 }
 
-fn cloud_abandon_warning(remote_id: &str) -> String {
-    if remote_id.trim().is_empty() {
-        "a remote session may exist".to_owned()
-    } else {
-        format!(
-            "a remote session may exist: {}",
-            plain_text(remote_id, usize::MAX)
-        )
-    }
-}
-
-fn cloud_abandon_output(
-    run: impl serde::Serialize,
-    id: impl serde::Serialize + std::fmt::Display,
-    job: &provenant_providers::cloud::RemoteJob,
-) -> (Value, String) {
-    let warning = cloud_abandon_warning(&job.remote_id);
-    (
-        json!({"run_id": run, "attempt_id": id, "found": cloud_owner::view(job), "warning": warning}),
-        format!("{id} abandoned; {warning}\n"),
-    )
-}
-
-#[test]
-fn abandon_output_carries_json_and_text_with_the_remote_warning() {
-    use provenant_providers::cloud::{RemoteJob, RemoteState};
-    let mut job = RemoteJob {
-        job_id: "j".into(),
-        nonce: "n".into(),
-        deadline_unix_seconds: 1,
-        provider: "p".into(),
-        target: "t".into(),
-        environment: "e".into(),
-        repository: "r".into(),
-        branch: "b".into(),
-        work_branch: None,
-        remote_id: String::new(),
-        session_url: None,
-        commit: String::new(),
-        requested_model: "m".into(),
-        requested_effort: None,
-        state: RemoteState::Abandoned {
-            reason: "gave up".into(),
-        },
-        submit_error: None,
-        submit_refused: false,
-        cloud_transport: Default::default(),
-        cloud_command: None,
-    };
-    let (data, human) = cloud_abandon_output("run-1", "att-1", &job);
-    assert_eq!(human, "att-1 abandoned; a remote session may exist\n");
-    assert_eq!(data["run_id"], "run-1");
-    assert_eq!(data["attempt_id"], "att-1");
-    assert_eq!(data["warning"], "a remote session may exist");
-    assert_eq!(data["found"], cloud_owner::view(&job));
-    job.remote_id = "remote-1".into();
-    let (data, human) = cloud_abandon_output("run-1", "att-1", &job);
-    assert_eq!(
-        human,
-        "att-1 abandoned; a remote session may exist: remote-1\n"
-    );
-    assert_eq!(data["warning"], "a remote session may exist: remote-1");
-}
-
-#[test]
-fn abandonment_warning_includes_known_remote_identity() {
-    assert_eq!(cloud_abandon_warning(""), "a remote session may exist");
-    assert_eq!(
-        cloud_abandon_warning("remote-1"),
-        "a remote session may exist: remote-1"
-    );
-}
-
 pub(super) const SCAN: u64 = 320;
 
 fn reservation_root(context: &run::ExecutionContext) -> PathBuf {
@@ -163,16 +90,6 @@ pub(super) fn reconcile_inner(
         let reason = command
             .reason
             .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
-        let call = request(&clock, &cancel)?;
-        let record = session.store.record(id, &call)?;
-        if cloud_owner::placement(&session.store, &record, &call)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-            .is_some()
-        {
-            let job = cloud_owner::abandon(&session.store, id, &reason, &call)
-                .map_err(|error| Fail::new(Status::Refused, ErrorKind::Io, error))?;
-            return Ok(cloud_abandon_output(selected.run, id, &job));
-        }
         let state =
             session
                 .service()
@@ -188,32 +105,8 @@ pub(super) fn reconcile_inner(
         let session = open(edge, &request(&clock, &cancel)?)?;
         let call = request(&clock, &cancel)?;
         prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
-        let initial = session.store.open_runs_readonly(SCAN + 1, &call)?;
-        let mut finished = Vec::new();
-        for run in &initial {
-            if cloud_owner::finished_run(&session.store, *run, &call).unwrap_or(false) {
-                finished.push(*run);
-            }
-        }
-        // Finished cloud jobs retain their advisory record. Scan past them so
-        // they cannot crowd live jobs out of the bounded recovery page.
-        let scan_cap = SCAN * 32;
-        let mut runs = if finished.is_empty() {
-            initial
-        } else {
-            session.store.open_runs_readonly(scan_cap + 1, &call)?
-        };
-        let exhausted = runs.len() as u64 > scan_cap;
-        if !finished.is_empty() {
-            let mut active = Vec::new();
-            for run in runs {
-                if !cloud_owner::finished_run(&session.store, run, &call).unwrap_or(false) {
-                    active.push(run);
-                }
-            }
-            runs = active;
-        }
-        let truncated = exhausted || runs.len() as u64 > SCAN;
+        let mut runs = session.store.open_runs_readonly(SCAN + 1, &call)?;
+        let truncated = runs.len() as u64 > SCAN;
         runs.truncate(SCAN as usize);
         (
             runs.into_iter()
@@ -245,58 +138,6 @@ pub(super) fn reconcile_inner(
             cwd: &scoped_cwd,
             ..*edge
         };
-        let mut cloud_jobs = Vec::new();
-        let mut cloud_ids = std::collections::BTreeSet::new();
-        for record in session
-            .store
-            .pending_attempts(run, &request(&clock, &cancel)?)?
-        {
-            let call = request(&clock, &cancel)?;
-            let Some(placement) = cloud_owner::placement(&session.store, &record, &call)
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-            else {
-                continue;
-            };
-            cloud_ids.insert(record.attempt_id);
-            let job = cloud_owner::load(&session.store, record.attempt_id, &call)
-                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
-            match job {
-                Some(job) => match cloud_owner::observe_installed(
-                    edge.roots,
-                    &session.store,
-                    record.attempt_id,
-                    &job,
-                    &call,
-                    &scoped_cwd,
-                    false,
-                ) {
-                    Ok(job) => {
-                        let mut view = cloud_owner::view(&job);
-                        view["attempt_id"] = json!(record.attempt_id);
-                        human.push_str(&format!(
-                            "{run}/{} cloud {}\n",
-                            record.attempt_id,
-                            state_tag(&job.state)
-                        ));
-                        cloud_jobs.push(view);
-                    }
-                    Err(error) => {
-                        *fenced = true;
-                        human.push_str(&format!(
-                            "{run}/{} cloud observation failed: {}\n",
-                            record.attempt_id,
-                            plain_text(&error, usize::MAX)
-                        ));
-                        cloud_jobs.push(json!({"attempt_id": record.attempt_id, "error": error}));
-                    }
-                },
-                None => {
-                    *fenced = true;
-                    human.push_str(&format!("{run}/{} cloud target {} has no recorded submission; to stop tracking, run `provenant reconcile --abandon {run}/{} --reason 'REASON'`\n", record.attempt_id, plain_text(&placement.target, usize::MAX), record.attempt_id));
-                    cloud_jobs.push(json!({"attempt_id": record.attempt_id, "state": "submission_not_recorded"}));
-                }
-            }
-        }
         let registry = Registry {
             roots: Some(edge.roots),
             home: Some(edge.home),
@@ -309,7 +150,7 @@ pub(super) fn reconcile_inner(
             repo_facts: session.store.repo_facts().clone(),
         };
         // Each step gets a fresh budget; recovery waits on custody locks.
-        let mut found = match request(&clock, &cancel)
+        let found = match request(&clock, &cancel)
             .and_then(|call| Ok(session.service().reconcile(run, &registry, &call)?))
         {
             Ok(found) => found,
@@ -320,7 +161,6 @@ pub(super) fn reconcile_inner(
                 continue;
             }
         };
-        found.retain(|(id, _)| !cloud_ids.contains(id));
         let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
             request(&clock, &cancel).and_then(|call| launch(&session, run, &scoped_edge, &call))
         } else {
@@ -365,7 +205,6 @@ pub(super) fn reconcile_inner(
             "launch_unknown": unknown,
             "launch_error": launch_error,
             "started": started.as_ref().ok(),
-            "cloud_jobs": cloud_jobs,
         }));
     }
     if rows.is_empty() {

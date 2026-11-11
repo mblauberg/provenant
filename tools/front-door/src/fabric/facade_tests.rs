@@ -756,7 +756,6 @@ pub(crate) mod peer_tests {
                     parent_attempt: None,
                     tasks: vec![provenant_run::DispatchTask {
                     source_head: None,
-                        cloud: None,
                         context: graph_id.map(|id| provenant_records::run::WorkContext {
                             graph_id: Some(id.to_owned()), ..Default::default()
                         }),
@@ -1056,7 +1055,6 @@ pub(crate) mod peer_tests {
                 parent_attempt: None,
                 tasks: vec![provenant_run::DispatchTask {
                     source_head: None,
-                    cloud: None,
                     context: None,
                     build_heavy: false,
                     title: Some("writer".into()),

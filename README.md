@@ -275,6 +275,7 @@ find into process changes and repeatable evaluations.
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |
 | [Model routing](docs/runbooks/model-routing.md) | Pools, weights and pacing |
 | [Providers](docs/runbooks/providers.md) | Launch notes for each provider |
+| [Cloud launch](docs/runbooks/cloud-launch.md) | Hand a brief to a provider cloud session and collect its branch |
 | [Fabric hosts](docs/runbooks/fabric-hosts.md) | Peer hosts and remote dispatch |
 | [Worktrees](docs/worktrees.md) | Worktree policy and writer dispatch |
 | [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |

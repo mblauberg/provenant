@@ -452,7 +452,6 @@ pub fn peer(
                         serde_json::from_value(attempt)
                             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                     if attempt.host.is_some()
-                        || attempt.placement.is_some()
                         || attempt.new_worktree.is_some()
                         || !attempt.write_roots.is_empty()
                         || !attempt.capabilities.is_empty()

@@ -107,7 +107,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 
     let prompt = "Fix remaining issues in continuation";
     let task = run::TaskRequest {
-        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,

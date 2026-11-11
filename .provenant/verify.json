@@ -52,15 +52,6 @@
     },
     {
       "paths": [
-        "tools/front-door/crates/cli/src/run/cloud*",
-        "tools/front-door/crates/providers/src/cloud*",
-        "tools/front-door/tests/cloud_adapter.rs"
-      ],
-      "package": "provenant",
-      "binary": "cloud_adapter"
-    },
-    {
-      "paths": [
         "tools/front-door/src/pr_service*",
         "tools/front-door/src/bin/pr-reconciler.rs",
         "tools/front-door/tests/pr_reconciler_service.rs",
