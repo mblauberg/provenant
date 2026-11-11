@@ -1634,8 +1634,16 @@ cause its outcome names. It applies the table as follows.
   hold its worktree, so custody is not proved released and the stop goes to the
   chair whatever `on_stop` says. Uncertain custody never starts another writer.
 - A depleted route (`usage_limited`, `model_unavailable`, `auth_required`)
-  hands the work to another route at once through `depletion_successor`, the
-  seam the routing depletion ladder fills. Nothing waits for a reset.
+  hands the work at once to the next rung of the routing depletion ladder
+  (`crates/routing/src/ladder.rs`) through `depletion_successor`. The host
+  supplies the ladder's facts through `AttemptOwner::depletion_facts`: the
+  readiness the stopped attempt's preparation probed, the routing
+  configuration, the host-native routes and the exclusions the stopped attempt
+  carried. No route the node already ran is offered again. The work waits for
+  the stopped route's reset only when `routing.depletion_wait_seconds` is set
+  and the reset falls inside it; when no rung yields a route, the stop goes to
+  the chair. A host that keeps no routing facts restarts on the node's
+  declared routes instead.
 - A restart patches the node in place: the worktree and its edits stay, prior
   attempts are archived, and the patch record names the node, the cause and the
   step. The stop is saved in one checkpoint with its restart or its chair pause,

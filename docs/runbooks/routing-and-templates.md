@@ -76,8 +76,8 @@ top-level `windows`) block every configuration write until
 `provenant config migrate` rewrites them.
 
 `max_context`, `max_turns` and cache keys are guidance, not kills.
-`lane.max_continuations` (default 2, maximum 8) bounds automatic restarts of a
-writer that declares `stopped_early`; `blocked` returns to the chair.
+A graph node's `on_stop` and the graph-wide `limits.continuations` (default 2)
+bound restarts of a stopped writer; `blocked` returns to the chair.
 `lanes.context_handoff_tokens` (off; 200000 suggested) continues a Claude writer
 in a fresh attempt on the same worktree when one call's context reaches it.
 

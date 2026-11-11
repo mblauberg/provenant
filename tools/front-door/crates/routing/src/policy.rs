@@ -83,8 +83,6 @@ pub struct LanePolicy {
     pub max_context: Option<u64>,
     pub max_turns: Option<u64>,
     pub stop_early_ok: Option<bool>,
-    pub max_continuations: Option<u8>,
-    pub resume_continuations: Option<bool>,
     pub read_only: Option<bool>,
     pub user_skills: Option<provenant_records::run::UserSkillsMode>,
 }
@@ -132,8 +130,6 @@ impl ModelPolicy {
             max_context,
             max_turns,
             stop_early_ok,
-            max_continuations,
-            resume_continuations,
             read_only,
             user_skills,
         );
@@ -846,11 +842,6 @@ impl ModelPolicy {
                 "restriction",
             ),
             (
-                "lane.max_continuations",
-                self.lane.max_continuations.is_some_and(|n| n > 8),
-                "policy",
-            ),
-            (
                 "cache.read_heavy_weight",
                 self.cache
                     .read_heavy_weight
@@ -1042,38 +1033,6 @@ mod tests {
     fn bundled_policy_has_valid_rules_and_schedules() -> Result<(), Box<dyn std::error::Error>> {
         let policies: ModelPolicies =
             toml_edit::de::from_str(include_str!("../assets/model-policy.toml"))?;
-        let knobs: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))?;
-        let documented = &knobs["host_model_policy_settings"]["settings"]["defaults.lane.max_continuations"]
-            ["default"];
-        assert_eq!(policies.defaults.lane.max_continuations, Some(2));
-        // Model and project layers remain free to override the common default.
-        for model in ["codex/gpt-6.1-terra", "claude/claude-sonnet-5-5"] {
-            assert_eq!(
-                ModelPolicies::default()
-                    .effective(&ModelId::parse(model)?, None, at(0))
-                    .policy
-                    .lane
-                    .max_continuations,
-                Some(2)
-            );
-        }
-        assert_eq!(documented.as_str(), Some("2"));
-        assert_eq!(policies.defaults.lane.resume_continuations, Some(false));
-        assert_eq!(
-            knobs["host_model_policy_settings"]["settings"]["defaults.lane.resume_continuations"]["default"],
-            "false"
-        );
-        for model in crate::Catalogue::bundled()?.models() {
-            assert_eq!(
-                policies
-                    .effective(&model.model, None, at(0))
-                    .policy
-                    .lane
-                    .resume_continuations,
-                Some(false)
-            );
-        }
         assert!(!policies.rules.is_empty());
         let mut errors = Vec::new();
         policies.validate(&mut errors);
@@ -1098,8 +1057,6 @@ mod tests {
             bundled = false
             [defaults.cache]
             read_share_target = 0.8
-            [defaults.lane]
-            resume_continuations = false
             [[rules]]
             model = "opencode/policy-fixture"
             [rules.schedule]
@@ -1125,8 +1082,6 @@ mod tests {
             account = "work"
             [rules.policy.lane]
             stop_early_ok = true
-            max_continuations = 0
-            resume_continuations = true
             [[rules]]
             adapter = "opencode"
             model_suffix = "-free"
@@ -1172,9 +1127,6 @@ mod tests {
             )
             .policy;
         assert_eq!(terra.lane.stop_early_ok, Some(true));
-        assert_eq!(terra.lane.max_continuations, Some(0));
-        assert_eq!(terra.lane.resume_continuations, Some(true));
-        assert_eq!(claude.lane.resume_continuations, Some(false));
         let free = policies
             .effective(
                 &ModelId::parse("opencode/unknown-free")?,
@@ -1691,7 +1643,6 @@ mod tests {
         for text in [
             "[defaults.cache]\nread_ratio=-1",
             "[defaults.cache]\nread_share_target=1.1",
-            "[defaults.lane]\nmax_continuations=9",
             "[[rules]]\n[rules.schedule]\nwindows=[{start_hour=24,end_hour=1}]",
             "[[rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }", // timebomb: allow fixed epoch fixture, not the live clock
             "[defaults.result]\nsections=['']",
