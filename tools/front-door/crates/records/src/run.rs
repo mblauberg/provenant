@@ -837,6 +837,9 @@ pub enum TerminalCause {
     DiskFloor,
     DiskObservationUnavailable,
     StoredPromptUnreadable,
+    /// A request stored before cloud placement was removed names `cloud`;
+    /// it never runs under the local supervisor.
+    CloudPlacementRemoved,
     WriteGrantsRefused,
     WorktreeBusy,
     HandoffRefused,
@@ -878,6 +881,7 @@ impl TerminalCause {
             Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
             Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
             Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
+            Self::CloudPlacementRemoved => "cloud placement removed; provenant cloud launch",
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
             Self::HandoffRefused => "launch handoff refused; provenant output ID",
@@ -930,6 +934,9 @@ impl TerminalCause {
             }
             Self::StoredPromptUnreadable => {
                 "launch preparation could not read the stored prompt; inspect the run's local files and resubmit the request"
+            }
+            Self::CloudPlacementRemoved => {
+                "this attempt was stored with cloud placement, which was removed, so it never runs locally; relaunch the brief with `provenant cloud launch --file BRIEF`"
             }
             Self::WriteGrantsRefused => {
                 "launch preparation refused the write grants; check grant paths and domains.run.write_grant_limit_bytes before retrying"

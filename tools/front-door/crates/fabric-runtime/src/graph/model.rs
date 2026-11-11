@@ -616,6 +616,15 @@ impl GraphDocument {
         validate_schema(self)?;
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
+        // Refused at admission only. A graph persisted before the removal
+        // still replays, and its node launch blocks with the same refusal.
+        if expanded.nodes.iter().any(|node| {
+            node.attempt
+                .as_ref()
+                .is_some_and(AttemptSpec::names_cloud_placement)
+        }) {
+            return Err(AdmissionError::Plan(CLOUD_PLACEMENT_REMOVED.into()));
+        }
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
