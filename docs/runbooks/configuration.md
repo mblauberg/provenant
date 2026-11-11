@@ -49,20 +49,27 @@ wins over configuration. Each sealed task and attempt records the profile,
 effective knob values and dispatch overrides, and continuations keep that
 stamp.
 
-Unknown knobs are refused. Other unknown keys and invalid optional values warn
-and fall back to their defaults; each warning names the key, and valid siblings
-in the same table still apply. A model policy rule or pacing override whose
-selector or schedule is malformed is dropped whole, because without it the
-record would apply more widely. Syntax, file size and schema-version errors are
-hard failures. Recovery never widens a restriction, so these also refuse the
-file:
+Unknown keys and invalid values warn and fall back to their defaults. A
+misspelt knob name is ignored and the warning suggests the nearest valid name.
+Each warning names the file, line and key, and valid siblings in the same table
+still apply. A model policy rule or pacing override whose selector or schedule
+is malformed is dropped whole, because without it the record would apply more
+widely. Syntax, file size and schema-version errors are hard failures.
 
-- knobs marked `strict` in the registry, whose default could grant what the
-  user withheld (`lanes.publish`, `fabric.accept_handoff`, `chair.auto_switch`,
-  `chair.switch_accounts`, `lanes.max_depth`,
-  `confinement.census_ignore_unreadable`), and a `knobs` or `domains` value
-  that is not a table;
-- invalid known credentials, authority, confinement and Git-boundary settings;
+Recovery never widens a restriction. A knob marked `strict` in the registry,
+whose default could grant what the user withheld (`lanes.publish`,
+`fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts`,
+`lanes.max_depth`, `confinement.census_ignore_unreadable`), takes its
+restrictive value when its entry is invalid (`lanes.publish` off,
+`lanes.max_depth` 1), and so do all of them when `knobs` is not a table.
+`config set` and `apply` validate the name and value before writing, so the CLI
+never writes an entry the loader would warn about; `config unset` also removes
+a misspelt entry already in the file.
+
+These still refuse the file:
+
+- invalid known credentials, authority, confinement and Git-boundary settings
+  outside `[knobs]`;
 - enforced model policy (`lane.read_only`, `lane.max_context`,
   `lane.max_turns`), and a malformed rule that carries one;
 - Fabric protocol caps (`limits.*`, which may only be lowered), graph limits
