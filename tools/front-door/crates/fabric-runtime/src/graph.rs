@@ -856,6 +856,7 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
             .or_else(|| graph.task_kind.clone()),
         graph_id: Some(plan.graph_id.clone()),
         node_id: Some(node.id.clone()),
+        attempt: None,
         role: context
             .role
             .clone()
@@ -2815,6 +2816,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         family_peers: &family_peers,
                         context: provenant_records::run::WorkContext {
                             tier: route.alias.clone(),
+                            // The work key's attempt: one-based launch order
+                            // within the node, never reused.
+                            attempt: u32::try_from(checkpoint.nodes[node_index].attempts.len())
+                                .ok(),
                             ..node_context(&plan, node)
                         },
                         read_roots: &node.read_roots,

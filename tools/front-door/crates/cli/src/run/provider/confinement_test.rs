@@ -2,11 +2,11 @@
 fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::WriteGrant;
     for path in [
-        "/state/work-index.sqlite3",
-        "/state/work-index.sqlite3-wal",
-        "/state/work-index.sqlite3-shm",
-        "/state/work-index.sqlite3-journal",
-        "/state/work-index.sqlite3.lock",
+        "/state/run.sqlite3",
+        "/state/run.sqlite3-wal",
+        "/state/run.sqlite3-shm",
+        "/state/run.sqlite3-journal",
+        "/state/run.sqlite3.lock",
         "/state/fabric",
         "/state/fabric/fabric.sqlite3",
         "/state/fabric/fabric.sqlite3-wal",

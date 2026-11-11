@@ -8,7 +8,7 @@ pub use board::{BoardLane, BoardPage};
 pub use completion::{handoff_progress_guidance, lane_preamble, sanitise_handoff};
 mod controls;
 mod correlation;
-pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};
+pub use correlation::{WorkCoverage, WorkSelector, validate_work};
 mod db;
 mod delivery;
 mod disk;
@@ -46,8 +46,8 @@ pub mod target_seed_gc;
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, AdmissionTimeoutOrigin, AdmissionWindow, EffectiveAdmissionTimeout,
-    HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, AdmissionTimeoutOrigin, EffectiveAdmissionTimeout, HOST_ACTIVE, HOST_QUEUED,
+    LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,

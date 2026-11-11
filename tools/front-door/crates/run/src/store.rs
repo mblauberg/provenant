@@ -65,6 +65,37 @@ pub struct PreparedRun {
     pub attempts: Vec<NewAttempt>,
     pub created_at: WallTime,
 }
+/// The work key an admitted task records. A graph launch names its key in the
+/// task context; the store never assigns its attempt number. Any other launch
+/// is a one-node graph keyed by its run and task, the adaptor until callers
+/// pass keys themselves.
+pub(crate) fn work_key(
+    project: provenant_core::ProjectId,
+    context: Option<&provenant_records::run::WorkContext>,
+    run: RunId,
+    task: TaskId,
+    number: u64,
+) -> Result<provenant_records::WorkKey> {
+    let named = context.and_then(|context| {
+        Some((
+            context.graph_id.clone()?,
+            context.node_id.clone()?,
+            context.attempt?,
+        ))
+    });
+    match named {
+        Some((graph, node, attempt)) => {
+            provenant_records::WorkKey::new(project, graph, node, attempt)
+        }
+        None => provenant_records::WorkKey::new(
+            project,
+            run.to_string(),
+            task.to_string(),
+            u32::try_from(number).map_err(|_| RunError::Validation("attempt number"))?,
+        ),
+    }
+    .map_err(|_| RunError::Validation("work key"))
+}
 /// Result and route material is supplied by the trusted provider/confinement
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
@@ -113,7 +144,7 @@ impl RunStore {
         self.write(call, |tx| {
             let raw: Vec<u8> = tx
                 .query_row(
-                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    "SELECT operation_record FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 AND refused=1 ORDER BY sequence LIMIT 1",
                     params![
                         self.context.project_id.to_string(),
                         self.context.actor_id.to_string(),
@@ -142,7 +173,7 @@ impl RunStore {
                 .extra
                 .insert("refusal_notice_done".into(), serde_json::json!(true));
             tx.execute(
-                "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+                "UPDATE attempts SET operation_record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
                 params![
                     bytes(&current)?,
                     self.context.project_id.to_string(),
@@ -224,20 +255,70 @@ impl RunStore {
                 .clone()
                 .or_else(|| input.request.chair.clone()),
         };
-        self.insert_refusal(operation, call)
+        let first = input
+            .attempts
+            .first()
+            .ok_or(RunError::Validation("refused request has no attempt"))?;
+        let context = input
+            .request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == first.task_id)
+            .and_then(|task| task.context.as_ref());
+        let key = work_key(
+            self.context.project_id,
+            context,
+            input.run_id,
+            first.task_id,
+            1,
+        )?;
+        self.insert_refusal_row(
+            key,
+            first.attempt_id.to_string(),
+            first.task_id.to_string(),
+            operation,
+            call,
+        )
     }
 
     /// Commit a trusted owner's preflight refusal before canonical admission.
     /// The caller supplies only an already projected, safe diagnostic. The first
     /// record wins; replays may not change its scope, kind or request identity.
+    /// Without a work key the refusal is a one-node graph keyed by its run.
     pub fn insert_refusal(
         &self,
+        operation: OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let run = operation.run_id.to_string();
+        let key =
+            provenant_records::WorkKey::new(self.context.project_id, run.clone(), run.clone(), 1)
+                .map_err(|_| RunError::Validation("work key"))?;
+        self.insert_refusal_row(key, run.clone(), run, operation, call)
+    }
+    /// Commit a preflight refusal under the work key the caller would have
+    /// admitted. The refused row keeps the key, so it is never reused.
+    pub fn insert_refusal_under(
+        &self,
+        key: &provenant_records::WorkKey,
+        operation: OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let run = operation.run_id.to_string();
+        self.insert_refusal_row(key.clone(), run.clone(), run, operation, call)
+    }
+    fn insert_refusal_row(
+        &self,
+        key: provenant_records::WorkKey,
+        id: String,
+        task: String,
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
         if operation.schema_version != 1
             || operation.project_id != self.context.project_id
             || operation.actor_id != self.context.actor_id
+            || key.project() != self.context.project_id
             || operation.state != OperationState::Refused
             || operation.refusal.is_none()
             || operation.refused_at.is_none()
@@ -254,7 +335,7 @@ impl RunStore {
         self.write(call, |tx| {
             let prior: Option<Vec<u8>> = tx
                 .query_row(
-                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    "SELECT operation_record FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1",
                     params![
                         self.context.project_id.to_string(),
                         self.context.actor_id.to_string(),
@@ -275,14 +356,33 @@ impl RunStore {
                 }
                 return Ok(prior);
             }
+            if let Some((prior_digest, raw)) = tx
+                .query_row(
+                    "SELECT digest,operation_record FROM attempts WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4",
+                    params![key.project().to_string(), key.graph(), key.node(), key.attempt()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?
+            {
+                if prior_digest != digest.to_string() {
+                    return Err(RunError::OperationConflict);
+                }
+                return decode(&raw);
+            }
             tx.execute(
-                "INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,refused,operation_record,revision,terminal,record,tmp_retained) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,1,?11,0,1,NULL,0)",
                 params![
+                    id,
                     self.context.project_id.to_string(),
+                    key.graph(),
+                    key.node(),
+                    key.attempt(),
+                    digest.to_string(),
                     self.context.actor_id.to_string(),
                     operation.operation_id.as_str(),
-                    digest.to_string(),
                     operation.run_id.to_string(),
+                    task,
                     bytes(&operation)?
                 ],
             )?;
@@ -684,9 +784,9 @@ impl RunStore {
     fn adopt(&self, run: RunId, input: &PreparedRun, call: &Request<'_>) -> Result<PreparedRun> {
         call.check()?;
         let ids: Vec<(String, String)> = {
-            let mut query = self
-                .db
-                .prepare("SELECT task,id FROM attempts WHERE run=?1 AND project=?2")?;
+            let mut query = self.db.prepare(
+                "SELECT task,id FROM attempts WHERE run=?1 AND project=?2 AND refused=0",
+            )?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -767,8 +867,12 @@ impl RunStore {
             closed_at: None,
             closure: Closure::Open,
         };
+        let mut operation_extra = provenant_records::ExtraFields::default();
+        if let Some(parent) = input.request.parent_attempt {
+            operation_extra.insert("parent_attempt".into(), serde_json::json!(parent));
+        }
         let operation = OperationRecord {
-            extra: Default::default(),
+            extra: operation_extra,
             schema_version: 1,
             project_id: context.project_id,
             actor_id: context.actor_id,
@@ -809,8 +913,10 @@ impl RunStore {
                 return self.run(op.run_id, call);
             }
         }
-        self.write(call, |tx| {
-            let prior: Option<Vec<u8>> = tx.query_row("SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| r.get(0)).optional()?;
+        let admitted = self.write(call, |tx| {
+            // The operation ID is the caller's replay handle until work keys
+            // replace it; the work key is the attempt's identity.
+            let prior: Option<Vec<u8>> = tx.query_row("SELECT operation_record FROM attempts WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str()], |r| r.get(0)).optional()?;
             if let Some(prior) = prior {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.request_digest != digest { return Err(RunError::OperationConflict); }
@@ -818,30 +924,46 @@ impl RunStore {
                     return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
                 }
                 if prior.run_id != input.run_id { return Err(RunError::Conflict); }
-                return Ok(());
+                return Ok(None);
+            }
+            // A continuation is the next attempt of the prior task, and each
+            // terminal attempt is continued at most once.
+            let number: i64 = match input.request.parent {
+                None => 1,
+                Some(target) => {
+                    let (task, number): (String, i64) = tx.query_row("SELECT task,number FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(RunError::NotFound)?;
+                    if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
+                    let taken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1)", [target.to_string()], |r| r.get(0))?;
+                    if taken { return Err(RunError::Conflict); }
+                    number.checked_add(1).ok_or(RunError::Validation("attempt number"))?
+                }
+            };
+            let number_u64 = u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?;
+            let keys = input.request.tasks.iter().map(|task| work_key(context.project_id, task.context.as_ref(), input.run_id, task.task_id, number_u64)).collect::<Result<Vec<_>>>()?;
+            if keys.iter().enumerate().any(|(index, key)| keys[..index].contains(key)) {
+                return Err(RunError::Validation("work key repeats within a request"));
+            }
+            // Concurrent submissions of one key serialise on this write; the
+            // first admits it and the rest replay or conflict.
+            for key in &keys {
+                let existing: Option<(String, bool, Vec<u8>, String)> = tx.query_row("SELECT digest,refused,operation_record,run FROM attempts WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4", params![key.project().to_string(), key.graph(), key.node(), key.attempt()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+                if let Some((prior_digest, refused, raw, run)) = existing {
+                    if prior_digest != digest.to_string() { return Err(RunError::OperationConflict); }
+                    if refused {
+                        let prior: OperationRecord = decode(&raw)?;
+                        return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
+                    }
+                    return Ok(Some(RunId::parse(&run).map_err(|_| RunError::Validation("run index ID"))?));
+                }
             }
             let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
             let local_tasks = input.request.tasks.len();
             if queued + local_tasks as i64 > sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
-            tx.execute("INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)", params![context.project_id.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), digest.to_string(), input.run_id.to_string(), bytes(&operation)?])?;
-            tx.execute("INSERT INTO runs VALUES (?1,?2,?3)", params![input.run_id.to_string(), context.project_id.to_string(), bytes(&run)?])?;
-            if let Some(target) = input.request.parent {
-                // Each terminal attempt is continued at most once.
-                let taken = tx.execute("INSERT INTO continuations(target,run) VALUES (?1,?2) ON CONFLICT DO NOTHING", params![target.to_string(), input.run_id.to_string()])?;
-                if taken != 1 { return Err(RunError::Conflict); }
-            }
-            // A continuation is the next attempt of the prior task.
-            let number: i64 = match input.request.parent {
-                None => 1,
-                Some(target) => {
-                    let (task, number): (String, i64) = tx.query_row("SELECT task,number FROM attempts WHERE id=?1 AND project=?2", params![target.to_string(), context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or(RunError::NotFound)?;
-                    if input.request.tasks.iter().any(|t| t.task_id.to_string() != task) { return Err(RunError::Validation("continuation must keep its task")); }
-                    number.checked_add(1).ok_or(RunError::Validation("attempt number"))?
-                }
-            };
-            for (index, task) in input.request.tasks.iter().enumerate() {
+            let operation_bytes = bytes(&operation)?;
+            for (index, (task, key)) in input.request.tasks.iter().zip(&keys).enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {extra: Default::default(),
+                    key: Some(key.clone()),
                     context: task.context.clone(),
                     title: task.title.clone(),
                     continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
@@ -862,14 +984,17 @@ impl RunStore {
                         parent: input.request.parent.or(input.request.parent_attempt),
                     },
                 };
-                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, crate::db::attempt_bytes(&attempt)?])?;
+                tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,?14)", params![attempt.attempt_id.to_string(), run.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), run.run_id.to_string(), task.task_id.to_string(), number, input.request.parent.map(|target| target.to_string()), operation_bytes, crate::db::attempt_bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
                 let waves = index as u64 / input.request.concurrency.max(1);
                 let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
                 self.queue_ticket(tx, &attempt, class, input.request.concurrency, crate::admission::Allowance { queue_seconds: waves.saturating_mul(task.provider_timeout_seconds), runtime_seconds: task.provider_timeout_seconds }, disk_floor_bytes)?;
             }
-            Ok(())
+            Ok(None)
         })?;
+        if let Some(existing) = admitted {
+            return self.run(existing, call);
+        }
         provenant_os::changes::hint(
             self.context.state_root.as_path(),
             &[provenant_os::changes::Scope::Board],
@@ -896,7 +1021,7 @@ impl RunStore {
             let mut accepted = operation.clone();
             accepted.state = OperationState::Accepted;
             tx.execute(
-                "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+                "UPDATE attempts SET operation_record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
                 params![
                     bytes(&accepted)?,
                     context.project_id.to_string(),
@@ -1720,7 +1845,7 @@ impl RunStore {
         next: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<()> {
-        let AttemptState::Terminal { finished_at, .. } = next.state else {
+        let AttemptState::Terminal { .. } = next.state else {
             return Err(RunError::Validation("terminal state missing"));
         };
         let id = old.attempt_id;
@@ -1759,17 +1884,6 @@ impl RunStore {
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             Self::insert_reaction(tx, &reaction)?;
             insert_event(tx, next)?;
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)", [old.run_id.to_string()], |r| r.get(0))?;
-            let mut run = self.run_on(tx, old.run_id)?;
-            run.revision = run.revision.checked_add(1).ok_or(RunError::Conflict)?;
-            if !pending && run.children.is_empty() { run.closure = Closure::Closed; run.closed_at = Some(finished_at); }
-            tx.execute("UPDATE runs SET record=?1 WHERE id=?2", params![bytes(&run)?, run.run_id.to_string()])?;
-            if run.closure == Closure::Closed {
-                let raw: Vec<u8> = tx.query_row("SELECT record FROM operations WHERE run=?1", [run.run_id.to_string()], |r| r.get(0))?;
-                let mut op: OperationRecord = decode(&raw)?;
-                op.state = OperationState::Terminal;
-                tx.execute("UPDATE operations SET record=?1 WHERE run=?2", params![bytes(&op)?, run.run_id.to_string()])?;
-            }
             #[cfg(test)]
             crate::tests::crash_at("transaction");
             Ok(())

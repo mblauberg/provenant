@@ -456,13 +456,6 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     let batch = two_tasks(2);
     store.create(&batch, &call)?;
     let [queued, starting] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
-    let op = provenant_core::OperationId::parse("stop")?;
-    store.bind_cancel(&op, &queued.to_string(), &call)?;
-    store.bind_cancel(&op, &queued.to_string(), &call)?;
-    assert!(matches!(
-        store.bind_cancel(&op, &starting.to_string(), &call),
-        Err(RunError::OperationConflict)
-    ));
 
     assert_eq!(
         store.cancel(queued, "stop", &call)?,

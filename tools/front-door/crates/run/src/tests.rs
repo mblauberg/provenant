@@ -420,7 +420,7 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         .category("refused")
         .detail("admission queue is full");
     let store = RunStore::open(&context, &call)?;
-    store.db.execute_batch("CREATE TEMP TRIGGER refusal_write_failure BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT, 'fixture refusal write'); END")?;
+    store.db.execute_batch("CREATE TEMP TRIGGER refusal_write_failure BEFORE INSERT ON attempts BEGIN SELECT RAISE(ABORT, 'fixture refusal write'); END")?;
     assert!(
         store
             .record_refusal(&input, diagnostic.clone(), Some("lane".into()), &call)
@@ -533,6 +533,7 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     for n in 10_u8..91 {
         input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
         input.run_id = RunId::from_bytes([n; 16]);
+        input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
         store.record_refusal(
             &input,
             provenant_records::diagnostic::Diagnostic::new("REFUSED"),
@@ -541,12 +542,11 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
         )?;
     }
     // Stored records are BLOBs: SQLite JSON queries must cast these exact bytes.
-    let storage: String =
-        store
-            .db
-            .query_row("SELECT typeof(record) FROM operations LIMIT 1", [], |row| {
-                row.get(0)
-            })?;
+    let storage: String = store.db.query_row(
+        "SELECT typeof(operation_record) FROM attempts LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
     assert_eq!(storage, "blob");
     assert_eq!(store.recent_refusals(100, &call)?.len(), 82);
     let page = store.pending_refusal_notices_after(80, 0, &call)?;
@@ -585,6 +585,7 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
     for n in 0_u8..164 {
         input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
         input.run_id = RunId::from_bytes([n; 16]);
+        input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
         let record = store.record_refusal(
             &input,
             provenant_records::diagnostic::Diagnostic::new("REFUSED"),
@@ -596,7 +597,6 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
             continue;
         }
         let mut value = serde_json::to_value(&record)?;
-        let mut operation = input.operation_id.to_string();
         let raw = if n == 0 {
             b"{malformed JSON".to_vec()
         } else {
@@ -606,7 +606,7 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
                     serde_json::to_vec(&value)?
                 }
                 1 => {
-                    operation = format!("invalid id {n}");
+                    value["operation_id"] = serde_json::json!(format!("invalid id {n}"));
                     serde_json::to_vec(&value)?
                 }
                 _ => {
@@ -616,8 +616,8 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
             }
         };
         store.db.execute(
-            "UPDATE operations SET operation=?1,record=?2 WHERE operation=?3",
-            rusqlite::params![operation, raw, input.operation_id.as_str()],
+            "UPDATE attempts SET operation_record=?1 WHERE operation=?2",
+            rusqlite::params![raw, input.operation_id.as_str()],
         )?;
     }
     let first = store.pending_refusal_notices_after(80, 0, &call)?;
@@ -1390,11 +1390,13 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
         .as_path()
         .join(format!("runs/{}/request.json", input.run_id));
     std::fs::write(&path, &raw)?;
-    let mut record = store.run(input.run_id, &call)?;
-    record.request_digest = digest;
+    let mut operation = store
+        .operation(&input.operation_id, &call)?
+        .ok_or("operation")?;
+    operation.request_digest = digest;
     store.db.execute(
-        "UPDATE runs SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::bytes(&record)?, input.run_id.to_string()],
+        "UPDATE attempts SET operation_record=?1 WHERE run=?2",
+        rusqlite::params![crate::db::bytes(&operation)?, input.run_id.to_string()],
     )?;
     let decoded = store.request(input.run_id, &call)?;
     assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
@@ -2738,11 +2740,9 @@ fn host_stores_match_their_schema_and_refuse_other_versions_unchanged() -> TestR
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
     let admission = crate::ledger::open(host, &call)?;
-    let work = crate::correlation::WorkIndex::open(host, &call)?;
     let contributions = crate::pr_contribution::Contributions::open(host, &call)?;
     let stores = [
         ("admission.sqlite3", crate::ledger::SCHEMA, admission),
-        ("work-index.sqlite3", crate::correlation::SCHEMA, work.0),
         (
             "pr-contributions.sqlite3",
             crate::pr_contribution::SCHEMA,
@@ -2762,7 +2762,6 @@ fn host_stores_match_their_schema_and_refuse_other_versions_unchanged() -> TestR
             let before = std::fs::read(&path)?;
             let refused = match name {
                 "admission.sqlite3" => crate::ledger::open(host, &call).map(drop),
-                "work-index.sqlite3" => crate::correlation::WorkIndex::open(host, &call).map(drop),
                 _ => crate::pr_contribution::Contributions::open(host, &call).map(drop),
             };
             assert!(
@@ -3375,5 +3374,155 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     assert!(store.reaction(id, &call)?.is_some());
     store.gc_temporary(&directory, 7, 5, now, false, &call)?;
     assert!(store.reaction(id, &call)?.is_none());
+    Ok(())
+}
+
+/// A graph node's launch: its own run, task and attempt ids under `key`.
+fn keyed_input(seed: u8, operation: &str, graph: &str, node: &str, attempt: u32) -> PreparedRun {
+    let mut prepared = input();
+    let task = TaskId::from_bytes([seed; 16]);
+    prepared.run_id = RunId::from_bytes([seed + 1; 16]);
+    prepared.operation_id = OperationId::parse(operation).unwrap();
+    prepared.request.tasks[0].task_id = task;
+    prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+        graph_id: Some(graph.into()),
+        node_id: Some(node.into()),
+        attempt: Some(attempt),
+        ..Default::default()
+    });
+    prepared.attempts[0] = NewAttempt {
+        task_id: task,
+        attempt_id: AttemptId::from_bytes([seed + 2; 16]),
+        prompt: "exact prompt".into(),
+    };
+    prepared
+}
+
+fn run_database(
+    context: &ExecutionContext,
+) -> std::result::Result<rusqlite::Connection, Box<dyn std::error::Error>> {
+    Ok(rusqlite::Connection::open(
+        context.state_root.as_path().join("run.sqlite3"),
+    )?)
+}
+
+#[test]
+fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let plain = input();
+    let graph = keyed_input(20, "graph-test", "graph-one", "review", 1);
+    store.create(&plain, &call)?;
+    store.create(&graph, &call)?;
+    let plain_key = provenant_records::WorkKey::new(
+        context.project_id,
+        plain.run_id.to_string(),
+        plain.attempts[0].task_id.to_string(),
+        1,
+    )?;
+    let graph_key = provenant_records::WorkKey::new(context.project_id, "graph-one", "review", 1)?;
+    for (prepared, key) in [(&plain, &plain_key), (&graph, &graph_key)] {
+        let id = prepared.attempts[0].attempt_id;
+        assert_eq!(&store.work_key(id, &call)?, key);
+        let record = store.attempt_by_key(key, &call)?;
+        assert_eq!(record.attempt_id, id);
+        assert_eq!(record.key.as_ref(), Some(key));
+        assert_eq!(store.record(id, &call)?.key.as_ref(), Some(key));
+    }
+    let database = run_database(&context)?;
+    let shape = |id: AttemptId| {
+        database.query_row(
+            "SELECT refused,terminal,revision,number,continues IS NULL,record IS NOT NULL,sealed \
+             FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+    };
+    assert_eq!(
+        shape(plain.attempts[0].attempt_id)?,
+        shape(graph.attempts[0].attempt_id)?
+    );
+    Ok(())
+}
+
+#[test]
+fn concurrent_creates_of_one_work_key_admit_one_attempt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    {
+        let clock = clock();
+        let cancel = CancelToken::new();
+        RunStore::open(&context, &call(&clock, &cancel))?;
+    }
+    let first = keyed_input(30, "graph-race-a", "graph-race", "build", 1);
+    let second = keyed_input(40, "graph-race-b", "graph-race", "build", 1);
+    let results: Vec<Result<RunRecord>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|prepared| {
+                let context = &context;
+                scope.spawn(move || {
+                    let clock = clock();
+                    let cancel = CancelToken::new();
+                    let call = call(&clock, &cancel);
+                    RunStore::open(context, &call)?.create(prepared, &call)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert!(
+        results
+            .iter()
+            .any(|r| matches!(r, Err(RunError::OperationConflict)))
+    );
+    let rows: i64 = run_database(&context)?.query_row(
+        "SELECT COUNT(*) FROM attempts WHERE graph='graph-race' AND node='build' AND attempt=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(rows, 1);
+    Ok(())
+}
+
+#[test]
+fn run_store_keeps_no_run_or_operation_tables() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    RunStore::open(&context, &call(&clock, &cancel))?;
+    let names: Vec<String> = run_database(&context)?
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for dropped in [
+        "admission_windows",
+        "cancellations",
+        "continuations",
+        "operations",
+        "runs",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == dropped),
+            "{dropped}: {names:?}"
+        );
+    }
+    assert!(names.iter().any(|name| name == "attempts"));
     Ok(())
 }

@@ -1,5 +1,5 @@
 //! Local board metadata read in one SQLite snapshot, without artifact I/O.
-use crate::{db::decode, *};
+use crate::*;
 use provenant_core::ProjectId;
 use rusqlite::params;
 
@@ -67,15 +67,16 @@ impl RunStore {
         }
         let generation = format!("events:{event}");
         let mut statement = tx.prepare(
-            "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,r.record,\
+            "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,a.operation,\
              a.number,a.revision,a.terminal FROM attempts a \
-             JOIN runs r ON r.id=a.run AND r.project=a.project \
-             WHERE (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
+             WHERE a.refused=0 AND (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
              AND (?3=0 OR a.sequence<?3) AND a.sequence<=?5 ORDER BY a.sequence DESC LIMIT ?4",
         )?;
         let mut rows =
             statement.query(params![project, all, after, (limit + 1) as i64, high_water])?;
         let mut lanes = Vec::new();
+        let mut runs: std::collections::HashMap<(ProjectId, provenant_core::RunId), RunRecord> =
+            std::collections::HashMap::new();
         let mut last = 0;
         let mut more = false;
         while let Some(row) = rows.next()? {
@@ -84,7 +85,7 @@ impl RunStore {
                 break;
             }
             let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(5)?)?;
-            let run: RunRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
+            let operation: String = row.get(6)?;
             if attempt.attempt_id.to_string() != row.get::<_, String>(1)?
                 || attempt.project_id.to_string() != row.get::<_, String>(2)?
                 || attempt.run_id.to_string() != row.get::<_, String>(3)?
@@ -93,13 +94,18 @@ impl RunStore {
                 || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(8)?
                 || matches!(attempt.state, AttemptState::Terminal { .. })
                     != row.get::<_, bool>(9)?
-                || run.run_id != attempt.run_id
-                || run.project_id != attempt.project_id
-                || run.operation_id != attempt.operation_id
-                || !run.task_ids.contains(&attempt.task_id)
+                || attempt.operation_id.as_str() != operation
             {
                 return Err(RunError::Validation("board index identity"));
             }
+            let run = match runs.get(&(attempt.project_id, attempt.run_id)) {
+                Some(run) => run.clone(),
+                None => {
+                    let run = Self::run_in(&tx, attempt.project_id, attempt.run_id)?;
+                    runs.insert((attempt.project_id, attempt.run_id), run.clone());
+                    run
+                }
+            };
             crate::reader::validate_attempt(&attempt)?;
             last = u64::try_from(row.get::<_, i64>(0)?)
                 .map_err(|_| RunError::Validation("board sequence"))?;

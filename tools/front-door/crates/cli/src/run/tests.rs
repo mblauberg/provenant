@@ -310,59 +310,6 @@ fn opencode_decode_holder_context(
 }
 
 #[test]
-fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane("run::tests::admission_window_deadline_is_preserved_on_restart")? {
-        return Ok(());
-    }
-    let fixture = linked_fixture()?;
-    with_edge(
-        &fixture.root,
-        &fixture.tree,
-        |edge| -> Result<(), Box<dyn std::error::Error>> {
-            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
-            provenant_config::bind_project(
-                edge.roots,
-                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
-            )?;
-            provenant_config::bind_host(edge.roots)?;
-
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
-            let session = open(edge, &call).map_err(|fail| fail.message)?;
-
-            let op: OperationId = "test-restart-op".parse().unwrap();
-            let t0 = WallTime::from_micros(10_000_000).unwrap();
-            let initial_window = run::AdmissionWindow {
-                deadline: t0,
-                wake_at: None,
-            };
-            let saved = session
-                .store
-                .save_admission_window(&op, initial_window, &call)?;
-            assert_eq!(saved.deadline, t0);
-            assert_eq!(saved.wake_at, None);
-
-            // Later restart attempts to set a later deadline (t1) and a wake_at
-            let t1 = WallTime::from_micros(20_000_000).unwrap();
-            let wake = WallTime::from_micros(12_000_000).unwrap();
-            let restarted_window = run::AdmissionWindow {
-                deadline: t1,
-                wake_at: Some(wake),
-            };
-            let reloaded = session
-                .store
-                .save_admission_window(&op, restarted_window, &call)?;
-            // The deadline MUST NOT be renewed: it must remain t0!
-            assert_eq!(reloaded.deadline, t0);
-            // wake_at was updated
-            assert_eq!(reloaded.wake_at, Some(wake));
-            Ok(())
-        },
-    )??;
-    Ok(())
-}
-#[test]
 fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::ffi::OsString;

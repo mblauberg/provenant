@@ -167,6 +167,10 @@ pub struct WorkContext {
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// The graph's one-based launch order within the node. With `graph_id`
+    /// and `node_id` it is the attempt's work key; the store never assigns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     /// Stamped by trusted graph launch admission, never inferred from labels.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub graph_template_launch: bool,
@@ -227,6 +231,7 @@ impl WorkContext {
         .into_iter()
         .flatten()
         .all(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            && self.attempt != Some(0)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1342,6 +1347,10 @@ impl SettlementReceipts {
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
+    /// The attempt's work identity. The run store sets it on every attempt it
+    /// admits; records built elsewhere may leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::WorkKey>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// Human-supplied task title, when provided at submission.

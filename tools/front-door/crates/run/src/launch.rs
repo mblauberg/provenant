@@ -1469,41 +1469,54 @@ impl RunStore {
         }
         Ok(started)
     }
+    /// The run's adaptor operation record and whether every attempt of the
+    /// run has settled, which makes the operation terminal.
+    fn run_operation(
+        &self,
+        tx: &rusqlite::Connection,
+        run: RunId,
+    ) -> Result<(OperationRecord, bool)> {
+        let (raw, settled): (Vec<u8>, bool) = tx.query_row(
+            "SELECT operation_record, NOT EXISTS(SELECT 1 FROM attempts p WHERE p.run=a.run AND p.terminal=0) \
+             FROM attempts a WHERE run=?1 AND project=?2 AND refused=0 ORDER BY sequence LIMIT 1",
+            params![run.to_string(), self.context.project_id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((decode(&raw)?, settled))
+    }
     fn launch_unknown(&self, run: RunId, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
-            let raw: Vec<u8> = tx.query_row(
-                "SELECT record FROM operations WHERE run=?1 AND project=?2",
-                params![run.to_string(), self.context.project_id.to_string()],
-                |r| r.get(0),
-            )?;
-            let mut op: OperationRecord = decode(&raw)?;
-            if op.state == OperationState::Terminal {
+            let (mut op, settled) = self.run_operation(tx, run)?;
+            if settled {
                 return Ok(());
             }
             op.state = OperationState::LaunchUnknown;
             tx.execute(
-                "UPDATE operations SET record=?1 WHERE run=?2",
-                params![crate::db::bytes(&op)?, run.to_string()],
+                "UPDATE attempts SET operation_record=?1 WHERE run=?2 AND project=?3",
+                params![
+                    crate::db::bytes(&op)?,
+                    run.to_string(),
+                    self.context.project_id.to_string()
+                ],
             )?;
             Ok(())
         })
     }
     fn launch_blocked(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
-            let raw: Vec<u8> = tx.query_row(
-                "SELECT record FROM operations WHERE run=?1 AND project=?2",
-                params![run.to_string(), self.context.project_id.to_string()],
-                |r| r.get(0),
-            )?;
-            let mut op: OperationRecord = decode(&raw)?;
-            if op.state == OperationState::Terminal {
+            let (mut op, settled) = self.run_operation(tx, run)?;
+            if settled {
                 return Err(RunError::Conflict);
             }
             op.state = OperationState::Blocked;
             op.blocked_reason = Some(reason.to_owned());
             tx.execute(
-                "UPDATE operations SET record=?1 WHERE run=?2",
-                params![crate::db::bytes(&op)?, run.to_string()],
+                "UPDATE attempts SET operation_record=?1 WHERE run=?2 AND project=?3",
+                params![
+                    crate::db::bytes(&op)?,
+                    run.to_string(),
+                    self.context.project_id.to_string()
+                ],
             )?;
             Ok(())
         })

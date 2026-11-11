@@ -81,14 +81,6 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
             let selected_ids = selected.clone();
             let target = &targets[0];
             let resolved = targets::local(&session, target, &call)?;
-            let bound = match (resolved.attempt, resolved.task) {
-                (Some(attempt), _) => attempt.to_string(),
-                (None, Some(task)) => format!("{}/{task}", resolved.run),
-                (None, None) => resolved.run.to_string(),
-            };
-            session
-                .service()
-                .bind_cancel(&command.operation_id, &bound, &call)?;
             let mut receipts = Vec::new();
             let mut human = String::new();
             let mut requested = false;

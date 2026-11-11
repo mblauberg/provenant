@@ -39,6 +39,8 @@ struct GraphRefusalScope {
     digest: provenant_core::Digest,
     worktree: Option<String>,
     chair: Option<provenant_run::ChairBinding>,
+    /// The work key the refused launch would have taken, when the graph named it.
+    work: Option<provenant_records::WorkKey>,
 }
 
 impl GraphRefusalScope {
@@ -99,6 +101,16 @@ impl GraphRefusalScope {
                 .and_then(|name| name.to_str())
                 .map(str::to_owned),
             chair,
+            work: node
+                .context
+                .graph_id
+                .clone()
+                .zip(node.context.node_id.clone())
+                .zip(node.context.attempt)
+                .and_then(|((graph, node), attempt)| {
+                    provenant_records::WorkKey::new(context.identity.project, graph, node, attempt)
+                        .ok()
+                }),
         })
     }
 }
@@ -333,7 +345,11 @@ impl BoundGraphOwner<'_> {
             ),
             refusal_chair: scope.chair.clone(),
         };
-        let saved = store.insert_refusal(record, &call).map_err(run_error)?;
+        let saved = match &scope.work {
+            Some(key) => store.insert_refusal_under(key, record, &call),
+            None => store.insert_refusal(record, &call),
+        }
+        .map_err(run_error)?;
         if saved.state != provenant_run::OperationState::Refused {
             return Err(run_error(provenant_run::RunError::OperationConflict));
         }

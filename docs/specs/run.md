@@ -91,10 +91,20 @@ operation kind and a digest of the prompt, route, authority and execution
 controls. Reader waits are excluded from the digest. The same ID and digest
 return the recorded outcome without repeating effects. The same ID with a
 different digest fails with `operation_conflict` (exit 2).
+
+Each attempt row also carries its work key: project, graph, node and attempt
+number. The graph assigns the number, one-based in launch order within the
+node and never reused; the store enforces one row per key and never assigns
+it. A plain lane is a one-node graph keyed by its run and task with attempt 1.
+Admitting a key that already holds a row with the same request digest returns
+that run; a different digest fails with `operation_conflict`. Operation IDs
+remain an adaptor on the attempt row; there is no operation or run table.
 - Why (default): lost replies and concurrent duplicates, including resume, must never
   launch twice.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;
-  `crates/run/src/service_tests.rs::dispatch_replay_output_and_cancel_share_the_service`
+  `crates/run/src/service_tests.rs::dispatch_replay_output_and_cancel_share_the_service`;
+  `crates/run/src/tests.rs::plain_lane_and_one_node_graph_store_the_same_attempt_row`;
+  `crates/run/src/tests.rs::concurrent_creates_of_one_work_key_admit_one_attempt`
 - Owner: `crates/core/src/ids.rs`, `crates/run/src/store.rs`
 
 ### Refusal before admission
@@ -108,6 +118,10 @@ Replaying that operation returns its retained refusal without consulting changed
 worktree state or repeating preparation. A different request under the same
 operation identity still conflicts. Correct the cause and start a new attempt
 through `retry` to try again.
+
+A refusal is stored as a terminal attempt row under the work key it would have
+been admitted with, with no attempt record. That key is never reused, and
+attempt readers and lane listings skip refused rows.
 
 Graph launch refusals use the saved attempt key and launch actor. A proven
 pre-admission refusal is evidence that no provider was accepted, so it can be
@@ -215,9 +229,9 @@ not infer contribution from transcripts or centrally backfill old attempts.
 
 ## Work correlation lookup
 
-`run::WorkIndex` owns immutable membership in `<host-state>/work-index.sqlite3`.
-The trusted host seals root, resume and continuation attempts before marking
-them Starting. New nested dispatches use host-verifiable derived IDs. Their
+Membership facts (repository and head) live on the host's attempt rows in
+`<host-state>/run.sqlite3`; there is no separate work index. The trusted host
+seals root, resume and continuation attempts before marking them Starting. New nested dispatches use host-verifiable derived IDs. Their
 canonical request carries `child_attempt_id_version: 1`. The child run ID is
 the first 16 bytes of SHA-256 over `provenant-child-run-v1\0`, then the raw
 project and parent attempt IDs, the SHA-256 digest of the operation ID's UTF-8
@@ -267,9 +281,8 @@ run-only selection, returns `Unindexed`. Contradictory
 facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
 coverage, including run-only selectors. A mismatch observed among the first 64
 candidates also wins over `Limit`; otherwise `Limit` never proves absence. Lookups traverse no child roots and accept
-no caller-supplied store locator. Configured grants cannot expose the host index,
-its companions or lock. Membership survives lane-local record removal. Index
-growth is unbounded and is not counted towards the disk floor.
+no caller-supplied store locator. Configured grants cannot expose the host store,
+its companions or lock. Membership is retained with the attempt row.
 
 - Why (default): caller claims cannot establish membership or hide a known contradiction,
   and a waiting index reader must not block unrelated Fabric writers.
@@ -354,8 +367,9 @@ must not hold a shared writer registry lock. Repository mutation locks protect
 creation/removal; they do not serialise independent writer claims. Contention
 waits until the admission deadline, never an unrelated retry-count limit.
 
-Admission and operation insertion commit together; the immutable request is
-published before acknowledgement. Transactions contain no launches, probes,
+Admission and the attempt rows commit together; the immutable request is
+published before acknowledgement. The store refuses a second row for a work key
+inside the same transaction. Transactions contain no launches, probes,
 waits or supervisor calls. Optional total and writer-specific host/project caps
 are independent. Build slots gate compiling Cargo commands rather than idle
 writers. Configuration and bounds belong to `provenant config schema --all`.
@@ -1163,6 +1177,8 @@ unreserved `tmp/`; owner locks such as `writer.lock`,
 ## Store
 
 The run store is SQLite with write-ahead logging (WAL), foreign keys and `synchronous=FULL`.
+Its unit is the attempt row, unique by work key and by attempt ID; a run's
+record is read from its attempt rows rather than stored.
 The store opens from one schema file at one version and refuses any other
 version (`STATE_RESET_REQUIRED`, naming `install --reset-state`) without modifying it; it also
 refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,
@@ -1175,6 +1191,7 @@ instead. Relaxed state survives a process crash but not power loss; it is for
 disposable test and CI state, and any other value or none keeps the full flush.
 - Why (default): a corrupt or foreign store must never be repaired into evidence.
 - Test: `crates/run/src/tests.rs::opens_refuse_unsafe_database_companions`;
+  `crates/run/src/tests.rs::run_store_keeps_no_run_or_operation_tables`;
   `crates/run/src/tests.rs::oversize_is_refused_before_publication_or_read`
 - Owner: `crates/run/src/db.rs`
 
@@ -1500,8 +1517,8 @@ the owner's recorded base
 with any unavailable-history diagnostic, and the new prompt. When the prior
 worktree is displaced, the prompt states that its history is unavailable;
 it never substitutes primary-checkout history. Existing secret
-scanning and prompt limits apply to the combined text. The continuation
-admission fence still permits one successor, and operation replay retains the
+scanning and prompt limits apply to the combined text. The unique
+`continues` column on the successor's attempt row permits one successor, and operation replay retains the
 original choice and prompt even after provider-state expiry. Uncertain custody
 never triggers a new writer; refusal names the fresh fallback when it cannot
 launch safely.

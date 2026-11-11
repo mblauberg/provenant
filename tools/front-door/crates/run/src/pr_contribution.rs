@@ -66,7 +66,7 @@ impl crate::RunStore {
         call: &Request<'_>,
     ) -> Result<Vec<crate::AttemptRecord>> {
         let mut query = self.db.prepare(
-            "SELECT id FROM attempts WHERE run=?1 AND project=?2 ORDER BY sequence LIMIT 10001",
+            "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND refused=0 ORDER BY sequence LIMIT 10001",
         )?;
         let ids = query
             .query_map(

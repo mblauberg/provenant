@@ -26,11 +26,14 @@ fn rewrite_child_request(
         &crate::db::bytes(request)?,
         provenant_os::fs::PublishMode::Replace,
     )?;
-    let mut record = store.run(run, call)?;
-    record.request_digest = request.digest()?;
+    let record = store.run(run, call)?;
+    let mut operation = store
+        .operation(&record.operation_id, call)?
+        .ok_or("operation")?;
+    operation.request_digest = request.digest()?;
     store.db.execute(
-        "UPDATE runs SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::bytes(&record)?, run.to_string()],
+        "UPDATE attempts SET operation_record=?1 WHERE run=?2",
+        rusqlite::params![crate::db::bytes(&operation)?, run.to_string()],
     )?;
     assert_eq!(&store.request(run, call)?, request);
     Ok(())
