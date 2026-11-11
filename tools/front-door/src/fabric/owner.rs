@@ -1407,7 +1407,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )
             },
         )
-        .map_err(landing::repository_fact_error)?;
+        .map_err(git_facts::repository_fact_error)?;
         if let Some(tip) = remote_tip {
             if !default_base && reference != tip.to_string() {
                 let warning = format!(
@@ -1434,7 +1434,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     )
                 },
             )
-            .map_err(landing::repository_fact_error)?;
+            .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 self.launch_warnings.push(warning);

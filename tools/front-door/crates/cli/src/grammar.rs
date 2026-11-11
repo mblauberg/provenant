@@ -188,9 +188,6 @@ pub enum Command {
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
-    /// Mine, verify and run benchmark tasks
-    #[command(subcommand)]
-    Bench(crate::bench::Bench),
     /// Check reviews and keep receipts and session checkpoints
     #[command(subcommand)]
     Workflow(crate::workflow::Workflow),

@@ -209,17 +209,6 @@ succeeds and custody is released; settlement advances only the matching graph.
 - Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
   `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 
-## Landing
-
-Landing runs on the home host under a per-ref lock and pushes with a lease on
-the expected OID. After a lost reply the outcome stays unknown, and the fence
-held, until the remote is reconciled. The fence token comes from the
-environment, never argv.
-- Why: two landers must never overwrite each other, and argv is visible host-wide.
-- Test: `crates/fabric-runtime/src/landing_tests.rs::lost_push_reply_keeps_successor_fenced_until_remote_reconciliation`;
-  `tests/fabric.rs::landing_fence_reads_secret_from_environment_without_a_token_argument`
-- Owner: `crates/fabric-runtime/src/coordination.rs`
-
 ## Peer hosts
 
 Each host owns its records and liveness, so an unreachable peer is `Unknown`,

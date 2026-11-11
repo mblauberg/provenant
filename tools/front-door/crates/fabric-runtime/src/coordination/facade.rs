@@ -305,7 +305,6 @@ pub enum InvalidInputDetail {
     UpgradeDrainRequired,
     CutoverFindings(String),
     Schema,
-    LandingLock,
     UnresolvableBase(String),
     Field(String),
     FieldDecode {
@@ -382,7 +381,6 @@ impl InvalidInputDetail {
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
-            Self::LandingLock => Some("landing lock required".into()),
             Self::UnresolvableBase(name) => safe_base_ref(name)
                 .map(|name| format!("unresolvable base `{name}`")),
             Self::InputUnreadable => {
@@ -1310,9 +1308,6 @@ impl From<&super::CoordinationError> for FacadeError {
             CoordinationError::LaneMutation => Self::LaneCoordinationRefused,
             CoordinationError::Peer(error) => Self::from(error),
             CoordinationError::InvalidInput(_) => Self::InvalidInput { detail: None },
-            CoordinationError::LandingLockRequired => {
-                Self::invalid(InvalidInputDetail::LandingLock)
-            }
             CoordinationError::Input(error) => Self::InvalidInput {
                 detail: error.diagnostic_detail(),
             },
@@ -1336,10 +1331,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
-            Error::Conflict
-            | Error::PushUnresolved { .. }
-            | Error::PushTransition { .. }
-            | Error::Overlap { .. } => Self::Conflict,
+            Error::Conflict | Error::Overlap { .. } => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
@@ -1940,10 +1932,6 @@ mod diagnostic_tests {
         let received: FacadeError =
             serde_json::from_value(serde_json::to_value(&from_field).unwrap()).unwrap();
         assert_eq!(received.diagnostic(), from_field.diagnostic());
-        assert_eq!(
-            FacadeError::from(&super::super::CoordinationError::LandingLockRequired).to_string(),
-            "invalid input: landing lock required"
-        );
     }
 
     #[test]

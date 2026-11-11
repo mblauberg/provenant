@@ -13,13 +13,13 @@ pub(crate) use unified::{
 };
 pub(crate) mod gc_cleanup;
 mod graph_document;
-pub(crate) mod landing;
+pub(crate) mod git_facts;
 pub(crate) mod owner;
 mod peer;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 
-pub use landing::*;
+pub(crate) use git_facts::*;
 pub(crate) use owner::*;
 pub(crate) use run_owner::*;
 pub(crate) use settlement::*;
@@ -30,6 +30,8 @@ pub(crate) use graph_document::publish_graph_document;
 use graph_human::graph_ci_waiting;
 #[cfg(test)]
 pub(crate) use graph_human::graph_human;
+#[cfg(test)]
+#[allow(unused_imports)]
 use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
 pub use peer::{hosts, peer};
@@ -160,7 +162,7 @@ impl Factory {
             .ok_or(FacadeError::InvalidInput { detail: None })?;
         provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
             .map_err(|error| match error {
-                provenant_run::RunError::Writer(error) => landing::repository_fact_error(error),
+                provenant_run::RunError::Writer(error) => git_facts::repository_fact_error(error),
                 error => run_error(error),
             })?
             .parse()

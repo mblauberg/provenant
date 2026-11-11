@@ -72,7 +72,6 @@ impl Request<'_> {
 pub struct Store {
     pub(crate) db: Connection,
     pub(crate) state_root: std::path::PathBuf,
-    pub(crate) locks: Option<Directory>,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
 }
@@ -173,7 +172,6 @@ impl Store {
         let store = Self {
             db,
             state_root: root.as_path().to_owned(),
-            locks: None,
             _owner: PhantomData,
         };
         if schema_version(&store.db)? != MIGRATIONS.len() {
@@ -223,7 +221,6 @@ impl Store {
         Ok(Self {
             db,
             state_root: root.as_path().to_owned(),
-            locks: None,
             _owner: PhantomData,
         })
     }
@@ -242,7 +239,7 @@ impl Store {
         root: &StateRoot,
         request: &Request<'_>,
         database: &str,
-        landing_locks: bool,
+        lane_locks: bool,
     ) -> Result<Self> {
         request.check()?;
         let mut directory = Directory::root(true)?;
@@ -286,7 +283,7 @@ impl Store {
         // Lanes may write only the shared database files and `locks`, so the
         // shared database's initialisation lock lives there. Host-only
         // databases ignore that lane-writable directory and lock in `fabric`.
-        let locks = if landing_locks {
+        let locks = if lane_locks {
             match fabric.mkdir(OsStr::new("locks"), 0o700) {
                 Ok(()) => fabric.sync()?,
                 Err(error) if error.is_exists() => {}
@@ -345,7 +342,6 @@ impl Store {
         let store = Self {
             db,
             state_root: root.as_path().to_owned(),
-            locks,
             _owner: PhantomData,
         };
         let initial_version = schema_version(&store.db)?;

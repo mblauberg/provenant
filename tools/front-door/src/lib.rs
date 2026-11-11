@@ -4,7 +4,6 @@ mod graph_support;
 // `main.rs` parses and calls `dispatch`; the worktree driver includes this
 // file and dispatches with its fixture seams. Plain comments only: `include!`
 // refuses inner attributes.
-mod bench;
 mod build_slot;
 mod chair;
 mod checks;
@@ -1094,10 +1093,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             page,
             wait,
         })) => fabric::events(page, wait, globals, process.workers()),
-        Command::Fabric(provenant_cli::Fabric::Landing(
-            landing @ (provenant_cli::fabric::Landing::Push { .. }
-            | provenant_cli::fabric::Landing::Reconcile { .. }),
-        )) => fabric::landing(landing, globals, process.workers()),
         Command::Fabric(cmd) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => provenant_cli::fabric::run(
@@ -1535,7 +1530,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Tick => tick::run(globals, process.workers()),
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
-        Command::Bench(command) => bench::run(command, globals),
         Command::Tracker(command) => tracker::run(command, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),
