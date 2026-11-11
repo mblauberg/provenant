@@ -26,7 +26,8 @@ Claude usage from every registered account directory and every other
 other directory, the default `~/.claude` included, is `unattributed`. Rows are
 keyed by session and message, so reruns add nothing. The chair's SessionStart
 hook ingests the last day automatically within a three-second budget. The store
-(`ingest.jsonl` in the state root) holds counts, model, account, timestamps and
+(the `ingest` directory in the state root, one `YYYY-MM-DD.jsonl` segment per
+UTC day, with no whole-size limit) holds counts, model, account, timestamps and
 IDs only, never prompt, reply, tool or path text.
 
 To attribute chair sessions, launch with the registered account's directory:
@@ -36,7 +37,9 @@ and lane tokens per account and project.
 ## Reading the reports
 
 - `telemetry stats [--by issue|graph|preset|role|pr] [--since T]` is the
-  default report; `--detail`, `--usage` (CLI verb and MCP tool counters),
+  default report, and `--json` carries the same summary rows; per-attempt
+  arrays need `--detail`, and a result over 1 MiB is refused with
+  `RESULT_TOO_LARGE`, so narrow it with `--since`. `--detail`, `--usage` (CLI verb and MCP tool counters),
   `--outcomes` and `--suggest` extend it. `T` is seconds ago, a date or RFC3339. `--by pr` joins the local contribution store to PRs GitHub
   reports as merged (needs `gh`); missing weights count at full value and are
   reported as unknown allocations.

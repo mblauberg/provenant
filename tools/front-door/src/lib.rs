@@ -166,6 +166,45 @@ fn emit_summarised<T: Serialize>(
         }
     }
 }
+/// `emit_summarised` for a result the caller narrows rather than reads from an
+/// artefact: oversize is `RESULT_TOO_LARGE` with a repair, never published, so
+/// no file is left in the results area on any path.
+fn emit_unpublished<T: Serialize>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    human: &str,
+    read_only: bool,
+    summary: Option<&provenant_cli::Summary>,
+) -> u8 {
+    let mode = globals.render_mode(human, read_only, summary);
+    // The size bounds the result, not its presentation: a compact view of an
+    // oversized result is still an oversized result.
+    let oversized = !globals.json
+        && serde_json::to_vec(result)
+            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
+    let rendered = if oversized {
+        Err(RenderError::TooLarge)
+    } else if !globals.json && result.error.is_some() {
+        provenant_cli::render(result, mode, &mut io::stderr().lock())
+    } else {
+        provenant_cli::render(result, mode, &mut io::stdout().lock())
+    };
+    match rendered {
+        Ok(()) => provenant_cli::exit_status(&result.status),
+        Err(RenderError::TooLarge) => fail_with_repair(
+            &result.command,
+            Outcome::Error,
+            "RESULT_TOO_LARGE",
+            "result exceeds 1 MiB; no artefact was written",
+            Some("narrow it with --since and --until, or drop --detail"),
+            globals,
+        ),
+        Err(_) => {
+            let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
+            3
+        }
+    }
+}
 /// Accounts by adapter, then the registered rows; none needs action.
 fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> provenant_cli::Summary {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -238,6 +277,17 @@ fn run_edge_workspace(
     workspace: Workspace<'_>,
     action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
 ) -> u8 {
+    run_edge_emitting(leaf, globals, workspace, true, action)
+}
+/// `run_edge_workspace`; with `publish` false an oversized result is refused
+/// with `RESULT_TOO_LARGE` and nothing is written to the results area.
+fn run_edge_emitting(
+    leaf: &str,
+    globals: &provenant_cli::Globals,
+    workspace: Workspace<'_>,
+    publish: bool,
+    action: impl FnOnce(&provenant_cli::run::Edge<'_>) -> provenant_cli::run::Reply,
+) -> u8 {
     match roots::resolve(globals, workspace, Product::Required) {
         Ok(resolved) => {
             let reply = action(&provenant_cli::run::Edge {
@@ -246,13 +296,23 @@ fn run_edge_workspace(
                 assets: &resolved.assets,
                 cwd: &resolved.project,
             });
-            emit_summarised(
-                &reply.result,
-                globals,
-                &reply.human,
-                reply.read_only,
-                reply.summary.as_ref(),
-            )
+            if publish {
+                emit_summarised(
+                    &reply.result,
+                    globals,
+                    &reply.human,
+                    reply.read_only,
+                    reply.summary.as_ref(),
+                )
+            } else {
+                emit_unpublished(
+                    &reply.result,
+                    globals,
+                    &reply.human,
+                    reply.read_only,
+                    reply.summary.as_ref(),
+                )
+            }
         }
         Err(error) => {
             let status = match error {
@@ -1284,11 +1344,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         );
                     }
                 };
-                run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
+                run_edge_emitting(&inv.leaf, globals, Workspace::Project, false, |edge| {
                     provenant_cli::run::stats_by_pr(cmd, edge, merged)
                 })
             } else {
-                run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
+                run_edge_emitting(&inv.leaf, globals, Workspace::Project, false, |edge| {
                     provenant_cli::run::stats(cmd, edge)
                 })
             }
