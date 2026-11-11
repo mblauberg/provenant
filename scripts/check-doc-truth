@@ -263,6 +263,18 @@ def check_spec_index(root):
     return missing
 
 
+SPEC_WORD_CAP = 2000
+
+
+def check_spec_length(root):
+    """Specs are invariants pages; past the cap, behaviour is being narrated."""
+    for spec in sorted((root / "docs/specs").glob("*.md")):
+        words = len(spec.read_text().split())
+        if words > SPEC_WORD_CAP:
+            print(f"{spec.relative_to(root)}:1: warning: spec has {words} words, "
+                  f"over the {SPEC_WORD_CAP}-word cap; cite tests instead of narrating")
+
+
 def check_diagrams(root, document):
     """Mermaid accessibility metadata is structural; visual review is separate."""
     missing = 0
@@ -523,6 +535,7 @@ def main():
                   if document in documents or document.name == "worktrees.md")
     missing += sum(check_anchors(root, document) for document in evidence)
     missing += check_spec_index(root)
+    check_spec_length(root)
     adr_documents = sorted((root / "docs/adr").glob("*.md"))
     missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
     citations = sum(check_test_citations(root, document) for document in evidence

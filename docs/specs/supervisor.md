@@ -5,1008 +5,221 @@ evidence, worktrees), `crates/os` (bounded I/O and execution)
 Anchor: `crates/supervisor/tests/custody.rs`, `crates/supervisor/src/custody_tests.rs`,
 `crates/confinement/src/permissions.rs`, `src/worktree_tests.rs`
 
-Supervisor holds processes, output and live custody through provider exit and
-durable exit publication. Run then drives resumable settlement while retaining
-the worktree writer flock through import and publication. Confinement turns an authorised plan into
-filesystem, Git, network and provider permissions and checks evidence. Together they prevent a failed write, a lost client or a mistaken process identity from killing a healthy lane, freeing a busy worktree or publishing an incomplete result. Run owns admission and result
-semantics ([run](run.md)). Wiring and platform limits are in the [crate
-notes](../../tools/front-door/crates/supervisor/README.md). Paths are
+Supervisor holds a provider's process, output and custody through durable exit
+publication; confinement turns an authorised plan into filesystem, Git, network
+and provider permissions. Wiring and platform limits are in the
+[crate notes](../../tools/front-door/crates/supervisor/README.md). Paths are
 relative to `tools/front-door/`.
 
 ## Custody
 
-### Command-scoped repository facts
-
-Each command owns one repository facts session, passed into successive
-worktree contexts, admission and writer preparation. The session owns inventory
-and scalar output caps; callers do not interpret their own fact-limit cases.
-A GC command shares its worktree inventory between discovery and preview for
-each repository. The snapshot is tied to the common Git directory identity and
-is consumed once. Applied cleanup discards the snapshot and reads Git again
-under the repository lock before authorising mutations. Ref resolution uses
-fresh bounded evidence after fetch. The facts session's inventory and scalar
-caps are configurable and never widen the caller's utility budget. Cached
-inventories are reused only under the same effective utility budget. Session
-handoff uses one facts session for its inventory, upstream commit reads and
-WIP rechecks, refreshing mutable evidence after its own Git writes. Target-side
-handoff recreation reuses an identity-bound advisory inventory between branches;
-guarded reads and attempted mutations invalidate it before authorising writes.
-Peer and handoff base resolution pins through the facts session and then checks
-that exact commit against remote-tracking refs, so a moved ref cannot change the
-commit after the reachability check. A containing tracking tip must also match
-a currently advertised remote branch tip; deleted tracking refs cannot prove
-reachability. Replacement objects and grafts do not alter that ancestry check.
-Fetch, resolution and advertisement share the peer deadline. Pull-request base
-resolution and landing branch and commit tree reads each use a command-scoped facts session
-and read-only verified checkouts, including when Git uses a separate directory
-or native object alternates. Landing inventory reads the common repository's
-trusted local and included bare settings before listing worktrees, so Git's
-primary bare registration is preserved without accepting lane-writable or
-worktree-level configuration overrides. Worktree GC uses the same fact but
-requires an explicit trusted non-bare setting before selecting a primary
-checkout. Batch landing passes its facts session into local follow-up and discards verified
-checkout handles around command-controlled mutations. Landing revalidates those
-handles before reading their common or private Git paths instead of rediscovering
-the paths with separate Git commands. Target-seed builds resolve their pinned
-remote-tracking commit through the same bounded read-only facts boundary.
-
-### Worktree census sessions
-
-Each command owns a census session. Within an unchanged observation epoch,
-root state, holder identity and refusal detail come from the same process
-evidence. The session is scoped to the command and effective host policy; it is
-not a cross-command cache and elapsed time alone does not authorise reuse.
-Adding a candidate root requires evidence that can place occupants for that
-root, otherwise the session refreshes. Root identity, ancestor-exclusion
-mode, effective host policy, or command-controlled process, custody or
-worktree changes start a new epoch.
-
-Uncertainty remains attached to each root the available evidence cannot
-exclude. Positive occupants remain live when another part of the census is
-incomplete. Ordinary custody may accept `Unknown` where its writer proof
-permits it; land and complete-census collection require a positive `Free`.
-Destructive decisions always acquire fresh evidence after writer custody is
-held, and repeat required census checks after output preparation. A native
-process that does not take the advisory writer lock may start after the
-observation; the census is not atomic exclusion and never grants signalling
-authority.
-
-An unowned worktree may be claimed when writer custody is available even if
-the census observes a bystander or cannot complete. Admission warns with the
-observation, and the claim checks the Git registration, HEAD, cleanliness and
-in-progress Git operations under repository and writer custody. A different
-operation cannot replace a nonterminal lane owner, including a reservation that
-has not yet acquired an attempt ID. A replay of that same operation can use
-its reservation despite advisory census evidence, after reacquiring custody.
-Publishing an initial owner also takes repository and writer custody and checks
-the previously observed owner, so a creator cannot overwrite a competing claim.
-Subsequent owner updates compare the complete observed record under both guards.
-These reservations are published before the writer lease, so they do not yet
-prove which attempt holds an acquired lease.
-Failed-creation cleanup rechecks the operation owner under those locks before
-removing the tree. An unreadable owner record is custody uncertainty with the
-worktree scope and read failure, not an unowned checkout. Inventory retains the
-validated owner record or its read error, while the existing worktree-list
-owner labels remain stable. A retained import fence still refuses custody, but
-is reported as scoped custody uncertainty rather than as a live held lease.
-
-Read-only inventory and doctor take the existing short `writer-probe.lock`
-gate before probing writer exclusion. Writer acquisition takes that gate before
-trying `writer.lock`, so an observer cannot cause a spurious `WriterBusy`.
-A budgeted acquisition holds the gate only for each nonblocking writer-lock
-attempt, then releases it before waiting to retry. A recovery or delivery waiting
-for a live writer therefore cannot hide that writer from list or doctor. Each
-retry repeats verified-inode checks and preserves cancellation and its deadline.
-The gate wait has its own five-second bound and reports observation uncertainty,
-never writer contention, if it cannot complete. Registry mutation initialises
-the gate; a read-only report does not create missing state. Legacy slots without
-a gate remain scoped uncertainty until the next registry mutation initialises
-it. The writer flock remains authoritative; stale reservation records do not
-make an unlocked worktree occupied.
-
-A lane owner whose recorded attempt is confirmed terminal may be reassigned
-when the writer lock is free even if the census sees a process in the tree.
-Admission warns about that observation, or the scoped census evidence when
-it is incomplete. A refusal caused by incomplete census also carries that
-scope and evidence. Admission represents a held lease, an advisory process and
-unknown census or custody evidence as distinct occupancy outcomes. Inventory,
-admission, cache retention and cleanup share that occupancy; the established
-`writer` output is a projection of it. Reassignment rechecks the owner and HEAD under repository
-and writer custody, and still refuses dirty trees, Git operations and retained
-writer fences. Peer worktree adoption also rechecks writer custody, branch,
-HEAD and Git-operation state before accepting an existing checkout;
-process-only observations travel as warnings. Local worktree, GC and landing
-refusals include the affected scope and escaped occupancy evidence; remote
-diagnostics retain their existing disclosure boundary.
-
-Session handoff holds writer custody through WIP Git operations. It rechecks
-registration, branch, HEAD, Git operation markers and untracked files before
-writing; a held lease or unresolved custody prevents WIP. Process observations
-and incomplete census evidence are advisory and produce scoped warnings.
-
 ### Closed stop reasons; natural exit wins
 
-Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal
-cleanup. Silence, CPU inactivity, capture failure, ENOSPC and failed
-publication cannot produce a stop reason, and there is no startup deadline. A
-natural exit observed in a tick wins over a late cancel or deadline.
-- Why (default): a bookkeeping fault or slow start must never kill a healthy provider.
+Only `ProviderGroup::stop(StopReason)` signals a provider: cancellation, the
+wall-clock runtime deadline, protocol rejection, a supervisor signal or
+post-terminal cleanup. Silence, inactivity, capture failure, ENOSPC and failed
+publication are never stop reasons, and there is no startup deadline. A natural
+exit wins over a late cancel or deadline, and a host sleep cannot extend the
+deadline.
+- Why: a bookkeeping fault or slow start must never kill a healthy provider,
+  and a stuck one must not hold a worktree for hours.
 - Test: `crates/supervisor/src/machine.rs::silence_capture_and_observation_failures_are_not_stop_reasons`;
-  `::a_wnowait_exit_wins_over_late_cancel_and_deadline`
+  `::a_wnowait_exit_wins_over_late_cancel_and_deadline`;
+  `::a_host_sleep_cannot_extend_the_wall_deadline`
 - Owner: `crates/supervisor/src/machine.rs`
-
-### The runtime deadline is wall-clock time
-
-An attempt's allowance is its dispatch `--provider-timeout`, tightened by the
-provider's `providers.<id>.runtime_deadline_seconds` cap when one is set.
-The guardian stops the provider (SIGTERM, then SIGKILL after the cleanup
-grace) when either the monotonic clock or the wall clock has run the whole
-allowance since launch. The monotonic clock stands still while a host sleeps, so
-it alone would extend a deadline by the length of every sleep. Run records the
-absolute `runtime_deadline` when the attempt starts, `status` shows it for
-running lanes, and `reconcile` asks a live guardian that is still running
-two minutes past it to stop at the deadline. The attempt settles as
-`timed_out` with the reason `runtime deadline exceeded: provider stopped after
-Ns`, custody is released, and `provenant retry` continues its session.
-- Why (default): stuck attempts hold worktrees, locks and quota for hours.
-- Test: `crates/supervisor/src/machine.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
-  `crates/supervisor/tests/custody.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
-  `crates/run/src/dispatch_core_tests.rs::a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout`
-- Owner: `crates/supervisor/src/machine.rs`, `crates/supervisor/src/guardian.rs`,
-  `crates/run/src/holder.rs`, `crates/run/src/controls.rs`
 
 ### Signals need proven identity and scope
 
-Supervisor registers child observation before spawn, observes exit with
-`WNOWAIT` and reaps the handle last, so the PID stays reserved through
-cleanup. Only the unreaped provider, its group while the leader is unreaped,
-and proven attempt-sandbox escapees may be signalled. Reused identities,
-members that left the group, shared hosts and sibling groups are never signalled.
-Census and working-directory (CWD) observations never grant signal authority.
-- Why (default): signalling a recycled PID or a sibling's group kills unrelated work.
+The PID stays reserved until the handle is reaped last. Only the unreaped
+provider, its group while the leader is unreaped, and proven attempt-sandbox
+escapees may be signalled; a nested owner with proven custody is spared. A
+census or cwd observation never grants signal authority, and recovery signals
+only a PID whose recorded identity matches.
+- Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
-  `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`
+  `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`;
+  `::nested_owner_stays_protected_when_native_custody_proof_is_uncertain`;
+  `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
-
-### Nested owners are spared unless disproven
-
-A registered nested owner is spared from signals only with matching native identity,
-observed ancestry and proof of its held custody; an unlocked descriptor,
-environment token or process name is not proof. When macOS cannot prove an
-owner's custody, that owner and its descendants stay protected.
-- Why (default): a nested lane's owner must survive its parent's cleanup.
-- Test: `crates/supervisor/tests/custody.rs::nested_owner_stays_protected_when_native_custody_proof_is_uncertain`;
-  `crates/supervisor/src/census.rs::ancestry_requires_exact_identities_and_strictly_older_parent_stamps`
-- Owner: `crates/supervisor/src/census.rs`
-
-### Escapees
-
-Each confined launch may look up one Mach name unique to its attempt. After
-exit, a live process outside the provider that the sandbox reports as
-permitted to look up that name is an escapee: supervisor re-identifies it,
-then sends SIGTERM and SIGKILL. If the nested child store is unreadable or
-holds a nested run, supervisor signals nothing and the escapee stays
-unresolved.
-- Why (default): a detached descendant keeps the sandbox but leaves the group.
-- Test: `crates/supervisor/tests/custody.rs::detached_descendant_in_the_attempt_sandbox_is_found_and_ended`;
-  `::escapee_is_ended_only_when_the_host_reports_no_nested_runs`
-- Owner: `crates/supervisor/src/guardian/`
 
 ### Guardian holds custody past its owner
 
-The attempt guardian runs in its own session and receives the plan and a
-duplicated writer lease over a bounded private channel and acknowledges them
-before the parent disconnects. Secrets travel in memory and pipes, never argv or
-disk. The guardian keeps the provider, attempt lock and lease after the run
-owner or MCP host dies. Provider exec needs both leases and the durable
-reservation and closes every custody descriptor. A missing acknowledgement
-is an unknown launch, never permission to launch again.
-- Why (default): losing the caller must not lose custody or double-launch a writer.
+The guardian keeps the provider, attempt lock and writer lease after its owner
+dies. Secrets travel in memory and pipes, never argv or disk.
+A missing launch acknowledgement is an unknown launch, never permission to
+launch again.
+- Why: losing the caller must not lose custody or double-launch a writer.
 - Test: `crates/supervisor/tests/custody.rs::owner_death_keeps_guardian_and_writer_live`;
   `crates/os/src/exec/tests.rs::secret_input_arrives_by_descriptor_with_eof_and_no_token_environment`.
   The unknown-launch rule has no test (gap).
-- Owner: `crates/supervisor/src/guardian/`, `crates/run/src/launch.rs`
-
-While a provider is live, the guardian walks its scoped process tree only
-when process events or failed observations require it, at most once per 100 ms.
-A full census backs up missed notifications every five seconds and follows an
-overflow or persistent observation failure on the next walk. A transient
-fork or exit retries the validated scoped walk once before a full scan.
-Zombies remain in custody history but receive no fork/exit watch. Darwin census topology reads omit task
-CPU accounting; the provider's one-second progress sample still requests it.
-
-Pipes, signals and process events wake the guardian. An attempt-directory
-notification also wakes cancellation reads without requesting a census. With
-that watch installed, idle timers back off to one second; cancellation falls
-back to 100 ms polling if the directory watch fails. The one-second read also
-covers in-place changes and missed directory notifications. Cleanup and lease
-release always use fresh full censuses owned by that guardian: another
-supervisor's older snapshot cannot establish this attempt's quiescence.
-
-The host graph-child check runs only when a control action needs it, rather
-than on census walks. Live descendant journals batch changes once a second;
-the initial journal and cleanup writes remain immediate. Failed journal writes
-retry after 100 ms. Process observations publish changed facts once a second,
-without rewriting `process.json` solely for its observation timestamp.
-- Test: `crates/supervisor/tests/custody.rs::idle_supervisor_does_no_census_per_wake`;
-  `crates/supervisor/src/guardian/tests.rs::census_watches_only_possible_live_identities_without_discarding_custody_history`
-- Owner: `crates/supervisor/src/guardian/`, `crates/supervisor/src/process_os/`
+- Owner: `crates/supervisor/src/guardian/`
 
 ### Quiescence before release
 
-A writer stays fenced until three things hold: the provider is reaped; two
-complete census snapshots at least 20 ms apart show no other session or group
-member and no tracked survivor; and a fresh non-blocking lock on the original
-lease inode succeeds. Failed, racing or incomplete reads keep the fence.
-- Why (default): a leftover descendant could still write the worktree.
+A writer stays fenced until the provider is reaped, two complete censuses show
+no surviving member or escapee, and a fresh lock on the original lease inode
+succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
+decision with matching authority clears one, and that decision permits no signal.
+- Why: a leftover descendant could still write the worktree.
 - Test: `crates/supervisor/src/guardian/tests.rs::darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes`;
-  `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`
-- Owner: `crates/supervisor/src/guardian/`
-
-### Unresolved exits and orphans
-
-An unresolved exit keeps the guardian cleaning; once quiescence is proven it
-replaces `process-exit.json` once, the only replacement of that file. With the
-guardian gone, recovery takes the writer lock without waiting and signals
-only a PID whose boot ID, PID and start time match the record, or that macOS
-places in the attempt sandbox; anything else is named, never signalled.
-Uncertainty never clears a fence; only a recorded decision with matching
-authority may do so, and that decision permits no signal.
-If the original lock inode has been unlinked, a guardian can retire without
-settling after two complete clear censuses and a fresh nonblocking lock on an
-independently opened descriptor for that original inode. It leaves any
-reservation and unresolved exit in place; a replacement lock never proves
-the old inode idle.
-- Why (default): recovery must not kill a reused PID or free a busy worktree.
-- Test: `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`;
-  `crates/supervisor/src/custody_tests.rs::reconcile_requires_matching_authority_and_records_before_release`
-- Owner: `crates/supervisor/src/custody/orphans.rs`
-
-### Escalation to the user
-
-Signalling a healthy process, weakened confinement and lost publication
-escalate to the user; no environment guess or uncertain signal compensates.
-- Why (default): these outcomes cannot be repaired safely by the supervisor alone.
-- Test: none (review gate); the blocking tests in this section stop the
-  signal but do not notify the user.
-- Owner: `crates/supervisor/src/custody/orphans.rs`
+  `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`;
+  `::reconcile_requires_matching_authority_and_records_before_release`
 
 ### Durable exit publication
 
-The exit record is published without replacing an existing record after the files it references are
-durable. A failed publication keeps custody and retries; a visible link with
-a failed directory sync is `durability_unconfirmed`, never absent. On ENOSPC,
-supervisor releases a 64 KiB reserve for one retry, with no provider signal.
-- Why (default): a lost or overwritten exit record loses the only proof of outcome.
+The exit record is published without replacing an existing one, after what it
+references is durable. A failed publication keeps custody and retries; an
+unconfirmed sync is `durability_unconfirmed`, never absent.
+- Why: a lost or overwritten exit record loses the only proof of outcome.
 - Test: `crates/supervisor/tests/publication.rs::exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot`;
   `crates/supervisor/tests/custody.rs::publication_failure_retains_the_lease_and_retries_without_overwrite`
-- Owner: `crates/supervisor/src/custody.rs`
 
 ### Writer reservation and settlement
 
-The writer reservation is published in `<worktree-slot>/<attempt>/` under
-the shared writer lock before spawn and cleared only after quiescence and run's terminal commit, or an
-authorised reconcile decision. Provider exit releases its host build slot;
-once quiescence is proven, the attempt custody lock is released, while the
-worktree writer flock remains held through object import and publication. The
-reservation remains as recovery evidence. Run journals import,
-publication, terminal recording and release with one native process owner and
-a counter capped at three attempts that reach import. Import claims use
-persisted backoff; an unknown process observation expires after ten minutes.
-Short locks protect only journal updates; Git runs
-without them. A dead owner resumes at the last durable phase, including after
-branch publication. Public cancel records its request without waiting for a
-writer lock; reconcile queues a detached driver rather than doing import in
-the caller. Lane waits continue reporting settlement until custody is released.
-See [publication order](run.md#publication-order). A missing or
-malformed reservation refuses
-recovery and readmission of that attempt. Admission of a different attempt does
-not inspect predecessor records or retired files in the shared lock slot.
-`SettlementCommit`, needed for scratch deletion and fence clearing, is issued only after the attempt inode, custody lock and both
-digests in `release.json` are verified. After a verified boot change, a
-reservation whose recorded device number differs from the current one (APFS
-can renumber volumes across a reboot) is still recoverable when the
-reservation and attempt shared a device, their current directories still have
-the recorded inodes, and both now share a device. Within one boot, a changed
-device number refuses recovery.
-- Why (default): a writer must never be freed on a partial or forged settlement.
+The writer reservation is published before spawn and cleared only after
+quiescence and run's terminal commit, or an authorised reconcile; the worktree
+flock stays held through import and [publication](run.md#publication-order). A
+missing or malformed reservation refuses recovery of that attempt, and scratch
+deletion needs a verified settlement commit.
+- Why: a writer must never be freed on a partial or forged settlement.
 - Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
   `::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
-  `::worktree_settlement_retains_flock_until_recovery_is_dropped`;
-  `::admission_uses_flock_and_retains_predecessor_evidence`;
-  `::reservation_listing_isolates_an_inaccessible_slot`;
-  `crates/run/src/dispatch_recovery_tests.rs::reconcile_recovers_writer_when_device_numbers_change_after_reboot`;
-  `::changed_device_numbers_on_same_boot_keep_writer_custody`
-- Owner: `crates/supervisor/src/custody.rs`
-
-### Cancel requests from lanes
-
-A stop request from a held scope replaces an undecodable, foreign or
-earlier-generation `cancel.json`, or a symlink, FIFO or oversized entry, without
-following it; a reattached handle never replaces a later generation's
-request. Because the lane can write its attempt directory, it can pre-empt
-or undo the host's stop request; this residual risk is accepted.
-- Why (default): stale or forged requests must not cancel a later attempt.
-- Test: `crates/supervisor/tests/custody.rs::held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation`
-- Owner: `crates/supervisor/src/custody.rs`
+  `::worktree_settlement_retains_flock_until_recovery_is_dropped`
 
 ### Stable locks and atomic writes
 
-Lock leaves are regular, single-link, owner-controlled files whose inodes are
-never unlinked while a duplicate descriptor is open. Acquisition polls `flock(LOCK_NB)`
-to one monotonic deadline and never revokes or steals a lease. Locks are taken in this order:
-run custody, repository metadata, writer reservation, attempt publication,
-children journal. Authoritative writes use held directory handles, 0600
-temporaries in 0700 directories, file sync, atomic rename or no-replace and
-a parent sync.
-- Why (default): a recreated lock inode lets two owners hold "the same" lock, and a
-  crash must leave the old or new file whole.
+Lock inodes are never unlinked while held, and acquisition never revokes or
+steals a lease. Authoritative writes are private temporaries, synced, renamed
+atomically and followed by a parent sync. Owner records carry no PID-derived or
+replayable authority.
+- Why: a recreated lock inode lets two owners hold one lock, and a crash must
+  leave the old or new file whole.
 - Test: `crates/os/src/fs/tests.rs::stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion`;
-  `::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes`.
-  Lock ordering has no test (gap).
+  `::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes`;
+  `crates/supervisor/src/custody_tests.rs::contradictory_never_spawned_records_never_prove_absence`
 - Owner: `crates/os/src/fs.rs`
 
 ### Bounded execution
 
-Captures are bounded (8 MiB retained per stream by default, 64 MiB maximum,
-64 KiB frames). Frames are decoded before truncation; an oversized frame is
-decoder loss, never a fabricated terminal event, and tee loss never stalls
-capture. A natural exit followed by a drain deadline is `drain_truncated`,
-not `timed_out`. Utility execution reserves its reaper slot before spawn.
-- Why (default): unbounded output or a hung pipe must not stall custody or invent an
-  outcome.
-- Test: `crates/os/src/capture.rs::oversized_frames_are_counted_and_never_decoded_as_terminal`;
-  `crates/os/src/exec/tests.rs::reaper_reserves_before_spawn_and_releases_unused_admission`
-- Owner: `crates/os/src/capture.rs`, `crates/os/src/exec/`
-
-### Real profiles need native recordings
-
-Fake providers cannot certify a real sandbox profile, and a missing native
-recording of the platform, backend and allowed or denied operations blocks
-that profile's support.
-- Why (default): snapshot equality does not prove confinement behaviour.
-- Test: none (review gate); acceptance evidence is the native recordings under
-  `crates/confinement/tests/fixtures/external`.
-- Owner: `crates/confinement/src/permissions.rs`
+Captures and frames are bounded; an oversized frame is decoder loss, never a
+fabricated terminal event.
+- Why: unbounded output must not stall custody or invent an outcome.
+- Test: `crates/os/src/capture.rs::oversized_frames_are_counted_and_never_decoded_as_terminal`
 
 ## Permission policy
 
-Rendered profiles are pinned by
+Lane profiles start open and deny the boundaries
+([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)); rendered
+profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
-The rules below are what every profile must keep.
-
-### Writer tools use confinement
-
-Writer profiles allow process execution and forks, including programs created
-in the checkout, and their own pseudo-terminals. Claude writers bypass native
-permission prompts with the default tool set; OpenCode writers approve tools
-and external directories. Filesystem grants, selected network access, credential
-and keychain denials, shared Git immutability and host-process isolation remain
-in force. Read-only lanes retain their requested tool restrictions.
-- Why (default): a second tool permission table can refuse ordinary work already
-  authorised by the confinement plan.
-- Test: `crates/confinement/src/permissions/tests/render.rs::writer_programs_keep_filesystem_and_credential_boundaries`;
-  `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`;
-  `crates/providers/src/tests_launch_access.rs::claude_writer_uses_confinement_instead_of_native_tool_permissions`
-- Owner: `crates/confinement/src/permissions/render.rs`, `crates/providers/src/claude.rs`,
-  `crates/providers/src/opencode.rs`
-
-### Tool requirements and runtime closure
-
-Launch preparation records selected executable requirements and resolves their
-Mach-O dependencies into exact read-only file grants. Closure results distinguish
-complete, incomplete and unsupported images. Missing, malformed,
-loader-relative, limit-bound and credential or protected-root dependencies are
-recorded in the receipt; dependencies covered by lane-owned roots are recorded
-as already covered and still traversed for their own dependencies.
-Trace output names the tool and reason without exposing dependency directories.
-An incomplete closure leaves the resolved grants in place and does not itself
-refuse launch. The host dependency-preparation PATH does not grant lane access.
-An optional search-path entry that cannot be encoded is omitted with a warning;
-the writer's private Git binding remains required. The complete applied write-grant
-ledger is bounded by `domains.run.write_grant_limit_bytes`; its effective value
-and origin are reported, and terminal decisions retain space for the ledger.
-
-### Staged user content
-
-The host captures user skills in an attempt-owned tree and grants the lane read
-access to the staged copy. Links are copied as content rather than retained;
-links resolving into credential roots, cycles, changed entries and content
-exceeding the configured size bound are skipped with warnings. Optional grant
-discovery also omits credential-root targets with warnings. Required executable,
-worktree and configured grants keep the credential-root guard. Invalid provider
-network endpoints, discovery-only paths and native-control labels are omitted
-with warnings; valid endpoints and the selected network policy remain in force. Confinement limits
-access; it does not make a networked lane hermetic.
-
-### Database IPC shares the host namespace
-
-Lane profiles start from `(allow default)` ([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)),
-so SysV shared memory and semaphores are available to every lane, with or
-without a database capability. `ProviderProfileSpec.allow_database_ipc` still
-adds explicit `ipc-sysv-shm` and `ipc-sysv-sem` allows in
-`crates/confinement/src/permissions/render.rs#render_profile`; it no longer gates
-the operations. Capability sources are in the
-[configuration runbook](../runbooks/configuration.md).
-
-macOS SysV IPC is host-global and Seatbelt cannot restrict it to a lane's own
-segments or semaphore sets. A lane can discover keys and access another
-process's objects when ordinary Unix IPC permissions allow it, including
-mutation and `IPC_RMID` removal for objects owned by the same user. Use a
-separate OS user or a VM when isolation from same-user IPC is required.
-A lane can exhaust host-global limits such as `kern.sysv.shmmni`, and a failed
-database start can leave objects behind. Settlement does not sweep them.
-
-PostgreSQL 18 always takes a small SysV shared-memory interlock, even with
-`shared_memory_type=mmap`. Configure dynamic shared memory to use files in the
-confined database directory, including during initialisation:
-
-```sh
-initdb -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
-postgres -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
-```
-
-Every SysV-touching native test records host `ipcs -m -s -q` inventories before
-and after. Trusted test code journals exact newly created IDs; a host-side
-guard removes only those IDs and asserts that none remain. Cleanup never
-deletes an unowned inventory difference or a pre-existing object. A forced kill
-between allocation and journal append can still leave an unrecorded test object.
-
-`(allow signal (target same-sandbox))` lets PostgreSQL backends signal their
-postmaster parent and siblings. Signals to the outside supervisor, host
-processes and independently launched sandboxes stay denied.
-
-- Why (default): PostgreSQL startup and database checks need kernel IPC and
-  intra-sandbox signals for queries and clean shutdown.
-- Test: `crates/confinement/src/permissions/tests/ipc.rs::postgres_lifecycle_is_ambient_with_and_without_database_grants`;
-  `::ambient_database_creates_and_removes_own_sysv_segments_and_semaphores`;
-  `::ambient_database_can_use_same_uid_sysv_objects_outside_mandatory_state`;
-  `crates/confinement/src/permissions/tests/grants.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
-  `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`;
-  `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
-- Owner: `crates/confinement/src/permissions.rs`
-
-### Lane process-tree memory interface
-
-Inside a macOS lane, run `provenant process-tree --root PID --json` with the PID
-of the command being supervised. The normal command envelope has this `data`:
-
-```json
-{"schema_version":2,"root_pid":410,"sampled_at":"2026-11-01T00:00:00.000000Z","swap_used_bytes":536870912,"swap_total_bytes":1073741824,"processes":[{"pid":410,"ppid":400,"pgid":410,"rss_bytes":1048576},{"pid":411,"ppid":410,"pgid":410,"rss_bytes":524288}]}
-```
-
-The root and its descendants are included, sorted by PID. RSS is in bytes;
-`sampled_at` is the observation's start in RFC 3339 UTC with six fractional
-digits. Sum `rss_bytes` to estimate the command tree's resident memory; shared
-pages can be counted by more than one process. Zombies have no resident task;
-they are omitted when the kernel no longer exposes their sandbox, or included
-with zero RSS. Selecting an exited or zombie root is unavailable.
-`swap_used_bytes` and `swap_total_bytes` describe system-wide swap in bytes,
-read by the unconfined supervisor through `sysctlbyname("vm.swapusage")`
-in the same sampling pass. Both fields are null when swap cannot be measured;
-missing swap is never reported as zero and does not invalidate RSS data.
-Swap shares the snapshot's five-second freshness rule and is unchanged when
-selecting a subtree. No swap query or additional sysctl, process-info or file
-scope is granted to the lane. The native tree sampler currently runs only on
-macOS; the unsupported backend leaves swap fields null.
-This is periodic observation, not an atomic kernel census or a kernel
-memory limit: short-lived processes and changes between samples can be missed.
-The tree follows current parent links. Reparented orphans are no longer in
-that rooted tree and are not counted; use a separate containment policy when
-commands may deliberately daemonise.
-
-The unconfined supervisor walks descendants of its held provider identity with
-libproc, checks each process against the existing attempt sandbox marker, and
-rechecks parent links, start times and child lists before publishing. Host
-processes and independent peer lanes are excluded even when a peer has the
-same profile text or process group. No global process list is published.
-The walk runs on the host, so the lane needs no process-listing authority
-beyond the ambient baseline in the process-information section below.
-
-One worker per live provider refreshes `<attempt>/process-tree.json` about
-once a second without blocking the guardian's control loop. Publication uses
-the held attempt directory and atomic replacement. The lane receives one
-exact read grant for this file and its absolute path in `PROVENANT_PROCESS_TREE`;
-the attempt directory and snapshot remain outside lane write authority. The
-guard uses the host-provided path. Caller configuration and environment are
-trusted; overriding this path to supply other data is unsupported. The file
-envelope is private; use the CLI for the stable interface. The CLI opens no
-host state store and needs no configured project.
-
-The reader selects only a root present in that lane snapshot, rechecks its
-native identity, and rejects an exited root, another boot, a future observation
-or a sample older than five seconds on the host's sleep-aware monotonic clock.
-Missing, malformed, oversized, incomplete, stale or unsupported samples return
-exit **4**, status `unavailable`, error `PROCESS_TREE_UNAVAILABLE`, and null
-`data`. A guard must treat this as lost observation, never zero memory; retry
-or apply its own refusal policy. Invalid CLI arguments return exit 2.
-Traversal is limited to 4,096 processes and a 250 ms observation budget;
-detected churn or exceeded bounds invalidates the sample rather than returning
-a partial tree. The deadline is checked throughout revalidation as well as
-traversal. Only process churn is retried, up to three attempts per refresh;
-size/time overruns and unavailable native observations stop the refresh.
-The worker retains the last good sample until it expires; it never reports
-an incomplete observation as a new sample. Failed publication also leaves
-bytes that the freshness check expires. Provider exit
-stops the worker and requests invalidation; a dead supervisor's file expires.
-
-Supported nested lanes also get their own attempt snapshot and tree, sampled
-by an unconfined host guardian. Submissions inside a lane are queued for the
-parent guardian's host-side child-launch service; the lane does not launch its
-child supervisor locally (`crates/cli/src/run.rs::submit_with_host_and_wait`,
-`::launch_prepared_with_wait`, `crates/cli/src/run/children.rs::serve`). A supervisor
-started directly inside a parent sandbox is not the supported nested-lane launch
-path; if sampling is unavailable there, the reader returns exit 4.
-
-- Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
-  `crates/supervisor/src/process_tree.rs::tests`;
-  `tests/command_adapter.rs::command_lane_reads_its_supervisors_process_tree_through_the_cli`;
-  `::process_tree_cli_is_unavailable_without_a_supervisor_sample`
-- Owner: `crates/supervisor/src/process_tree.rs`, `crates/cli/src/run/provider.rs`,
-  `src/process_tree.rs`
-
-### Process information is ambient; arguments are denied
-
-The runtime baseline (`crates/confinement/src/permissions/render.rs#RUNTIME_BASELINE_RULES`)
-allows `process-info*` and `sysctl-read`, so a lane can read resident memory and
-list processes, host processes included. It denies
-`(sysctl-name-prefix "kern.procargs")`, so another process's arguments are not
-readable, and it denies the task-port and `process-info-setcontrol` and
-`process-info-dirtycontrol` operations except for the same sandbox.
-`provenant process-tree` remains the supported interface for a lane's
-descendants; see the process-tree section above.
-
-Stock `ps` is a separate restriction: `execve("/bin/ps", ... )` returns `EPERM`
-before any process-info lookup. On Darwin 27 the binary is setuid and
-libsandbox's diagnostic `sandbox_check` reports `forbidden-exec-sugid` denied.
-This is a queried policy denial, not a captured kernel log. The process-info
-rule does not fix consumers that invoke stock `ps`.
-
-The native production-profile shell probe also runs an offline Cargo test with
-two jobs. Its build script acquires and returns an inherited jobserver token,
-and its compiled Rust test checks the success marker. The same probe commits
-with Git and runs Node child-process spawn/fork IPC directly and through a pnpm
-script. macOS CI requires Node and pnpm availability.
-
-- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_includes_host_and_reports_own_rss`;
-  `crates/confinement/src/permissions/tests/sysctl.rs::sysctl_allows_host_process_queries`;
-  `src/worktree_tests/lane_cases.rs::lane_prepare_isolates_nested_state` (`verify_lane_profile` shell probe);
-  `crates/confinement/src/permissions/tests/ipc.rs::postgres_lifecycle_is_ambient_with_and_without_database_grants`
-- Owner: `crates/confinement/src/permissions.rs`
 
 ### Plans refuse unsafe roots
 
-Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)` from
-verified anchors. It refuses traversal, symlinked state or lock leaves,
-credential roots and grants enclosing them, broad home or tmp grants and
-Git-internal roots. `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets` and Cargo
-`credentials` are denied after every grant. Unsupported or nested
-confinement fails `ConfinementUnavailable` and never widens access; Linux has
-no backend.
-An optional discovered root that resolves into a credential root is omitted
-with a warning; required roots continue to fail closed.
-Literal discovery grants accept absent entries or real directories through
-  held, revalidated parents. They refuse symlinks and other entry types and
-  grant no reads of children beyond existing read roots. Anchor refusals during
-  discovery and held-directory revalidation name the path and failure stage.
-- Why (default): one broad grant silently voids the boundary; directory discovery must
-  not pass through regular-file validation or expand configuration access.
+Confinement refuses traversal, symlinked state or lock leaves, credential roots
+and grants enclosing them, broad home or tmp grants and Git-internal roots;
+credential directories are denied after every grant. Unsupported confinement
+fails `ConfinementUnavailable` and never widens access. An optional root that
+resolves into a credential root is omitted with a warning.
+- Why: one broad grant silently voids the boundary.
 - Test: `crates/confinement/src/permissions/tests/validation.rs::broad_home_tmp_and_credential_roots_are_refused`;
-  `crates/confinement/src/permissions/tests/render.rs::network_levels_shared_writes_and_hard_denies_render_in_order`;
-  `crates/confinement/src/permissions/tests/validation.rs::directory_discovery_keeps_literal_scope_and_refuses_symlinks`;
-  `::anchored_directory_detects_replacement_at_its_sbpl_path`;
-  `crates/providers/src/opencode.rs::homebrew_launch_plan_anchors_with_default_xdg_homes`;
-  `::homebrew_writer_launch_plan_anchors_with_discovery_directories`
-- Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/opencode.rs`
-
-### Git write set
-
-The host exports `PROVENANT_PRIMARY_CHECKOUT` and, for a linked worktree,
-`PROVENANT_WORKTREE_GITDIR`. These identify host paths without changing the
-lane's private Git view. The real admin directory receives read access only.
-Project `shared_paths` add read-write grants for existing host resources to
-writer lanes; `exec_roots` add read and execution grants to primary-checkout
-toolchain directories and never write access. Git, credentials, protected host
-state and overlaps with executable roots remain excluded from shared writes.
-Invalid entries warn and are ignored. Applied grants and portable paths in the
-receipt derive from one host-side resolution.
-
-A writer owns a complete Git directory and object store under attempt scratch,
-including its index, HEAD, refs, config, temporary files, stash, rebase and merge
-state. Plain Git environment selects these paths; its object alternate supplies
-read access to the shared store. The original worktree gitfile remains fixed
-for host identity checks. A single small wrapper restores scrubbed environment
-and publishing configuration where needed.
-
-The linked admin directory and shared Git directory are read-only throughout
-their subtrees. This includes the original index, all refs and reflogs, config,
-hooks and info. No per-file write exception reopens either subtree. Provider
-configuration retains its separate protections.
-After provider exit, the host imports the pinned head through Git's receive
-quarantine and moves the real branch with compare-and-swap. Lane configuration
-is never executed as host configuration. Read-only lanes likewise cannot write
-the common Git directory.
-- Why (default): private Git supports ordinary commands while the shared metadata and
-  object store retain one host-controlled write boundary.
-- Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
-  `crates/confinement/tests/lane_git_conformance.rs`;
-  `src/worktree_tests/writer_cases.rs::writer_production_plan_denies_outside_writes`
-- Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
-  `crates/run/src/objects.rs`
-
-### Network and sockets
-
-Network is a level: `provider` (API endpoints, when network is off),
-`local` (adds localhost and the Postgres socket, when network is off with
-Postgres capability) or `open` (adds outbound IP, the default for every lane).
-At every level the Unix-socket peers are the DNS responder, the attempt-bound
-[host Fabric relay](fabric.md#lane-store-isolation) and, from `local`, Postgres.
-No lane reaches the peer agent's socket.
-- Why (default): the peer agent relays to unconfined `fabric peer` children.
-- Test: `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`
+  `::directory_discovery_keeps_literal_scope_and_refuses_symlinks`
 - Owner: `crates/confinement/src/permissions.rs`
+
+### Shared Git metadata is read-only
+
+A writer owns a private Git directory with the shared object store as a
+read-only alternate; shared refs, config, hooks and admin metadata stay
+read-only, and the host imports the result and moves the branch by
+compare-and-swap.
+- Why: ordinary Git works in the lane while one host boundary guards shared
+  metadata.
+- Test: `crates/confinement/src/permissions/tests/grants.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
+  `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
 
 ### No writes to stores the host runs later
 
-No lane writes the Cargo registry, Git caches, pnpm, npm or Node caches the
-host later runs unconfined. Writers get a private per-worktree cache, exactly
-`$HOME/Library/Caches/provenant-lane-cargo/<sha256>` of the worktree and Git
-identities, created by no-follow traversal with mode 0700; read-only lanes
-link shared stores read-only and build offline. Only writers may execute
-fixtures, and only in their own `tmp/candidate-N`. Only a profile declaring
-`allow_pseudo_tty` (Agy's) may open a PTY.
-- Why (default): a poisoned `build.rs` or package would run on the host's next build.
+No lane writes the Cargo registry, Git, pnpm, npm or Node caches the host later
+runs unconfined; writers get a private per-worktree cache.
+- Why: a poisoned `build.rs` or package would run on the host's next build.
 - Test: `crates/providers/src/tests_lane_toolchains.rs::no_lane_can_write_shared_toolchain_stores`;
   `crates/confinement/src/permissions/tests/grants.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
-- Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/`
 
-### Swift toolchain grants
+### Network, IPC and process information
 
-A writer runs `swift build` and `swift test` in its registered worktree. The
-lane profile cannot host SwiftPM's defaults: nested `sandbox-exec` fails
-(`sandbox_apply: Operation not permitted`, so manifest evaluation dies with
-`posix_spawn` denials), the default XCBuild system creates temporary
-directories in `/var/tmp` (an opaque `permissionDenied` or "Unknown error
-parsing property list"), and SwiftPM and Clang write caches under
-`~/Library` and `~/.cache`. Lanes also pin `DEVELOPER_DIR` to the Command
-Line Tools for Cargo's linker, whose SDK and compiler can disagree.
+No lane reaches the peer agent's socket. Lanes may read process information
+but never another process's arguments, and signals stay inside the lane's own
+sandbox. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
+separate OS user or VM.
+- Why: the peer agent relays to unconfined children, and Seatbelt can enforce
+  no more.
+- Test: `crates/confinement/src/permissions.rs::native_sandbox_blocks_path_escape_probes`;
+  `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`;
+  `crates/confinement/src/permissions/tests/process_info.rs::process_info_includes_host_and_reports_own_rss`
 
-Preparation therefore resolves the host's Swift toolchain (`DEVELOPER_DIR`,
-else `xcode-select -p`, run once with a 5 s bound; there is no fallback to a
-default Xcode) and, for a writer only. A developer directory counts only when
-its canonical path is `/Library/Developer/CommandLineTools` or
-`/Applications/<name>.app/Contents/Developer`; any other `DEVELOPER_DIR` gets
-no grant and no shim. Then:
+### Lane process-tree memory interface
 
-- grants read on the Xcode app's `Developer`, `Frameworks` and
-  `SharedFrameworks` directories, its `Info.plist` and `version.plist`, and
-  the accepted-licence record, and execute on `Developer`; it grants no write
-  (the Command Line Tools need no extra grant);
-- installs a `swift` shim first on `PATH` that selects that toolchain, moves
-  the Clang module cache and SwiftPM cache, configuration and security
-  directories into the lane cache (`.../swift`), and runs
-  `build`, `test`, `run` and `package` with `--disable-sandbox` (the lane
-  profile already confines every child) and, except for `package`,
-  `--build-system native`, which writes only the scratch path (`.build` in the
-  worktree), `TMPDIR` and the lane cache. Explicit `--build-system` wins, as
-  long as it comes before `--`.
+`provenant process-tree --root PID --json` reads a host-sampled snapshot of the
+lane's own descendants; the lane gets one exact read grant and no process-listing
+authority. A missing, stale, incomplete or unsupported sample is exit 4
+`PROCESS_TREE_UNAVAILABLE` with null data, never a partial tree or zero memory.
+The sample is periodic observation, not an atomic census or a memory limit.
+- Why: a memory guard that reads lost observation as zero would approve a
+  runaway build.
+- Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
+  `tests/command_adapter.rs::command_lane_reads_its_supervisors_process_tree_through_the_cli`;
+  `::process_tree_cli_is_unavailable_without_a_supervisor_sample`
+- Owner: `crates/supervisor/src/process_tree.rs`, `src/process_tree.rs`
 
-Writer confinement is unchanged: writes stay in the worktree, attempt scratch
-and the lane cache. A Seatbelt denial is not reported to the sandboxed
-process, and the unified log carries no record of a lane's denials, so the
-shim cannot name the denied path itself. Where SwiftPM or the compiler names
-the path, it appears in the output. On a non-zero exit the shim adds one line
-naming the writable roots and the overrides in force. Read-only lanes (#2542)
-reuse the same toolchain resolution and shim with scratch-only roots; they
-do not receive it yet.
-- Why (default): a writer that cannot build or test commits untested Swift.
-- Test: `src/worktree_tests/lane_cases.rs::lane_builds_and_tests_swift_in_a_registered_worktree`
-  (one writer case: builds and tests a SwiftPM package in the worktree
-  through the production profile when a Swift toolchain is selected; it has
-  its own nextest timeout in `.config/nextest.toml`);
-  `crates/providers/src/swift.rs::install_puts_the_shim_first_on_path_and_grants_no_write`,
-  `only_the_command_line_tools_and_an_app_bundle_are_toolchains`,
-  `build_system_scan_stops_at_the_argument_separator`
-- Owner: `crates/providers/src/swift.rs`, `crates/providers/src/launch.rs`
+### Disclosure and safe Git evidence
 
-### Host-side delivery
-
-A writer task may carry `deliver`. Run binds the remote's single push URL and
-the lane branch under writer custody. Only after a complete, verified
-successful exit does the host push the final commit, fetch it back and
-require it to equal the lane head, from the primary root with hooks,
-fsmonitor and tag and submodule pushes off. URLs with embedded credentials,
-query or fragment, shell SSH overrides and opaque credential helpers are
-refused, and credentials travel only on the guardian pipe. A sealed start
-marker stops the push repeating.
-- Why (default): delivery is the one external effect a lane causes; it must be exactly
-  once and never leak credentials.
-- Test: `crates/run/src/delivery_tests/prepare.rs::host_delivery_fetches_commits_pushes_and_records_upstream`;
-  `crates/run/src/delivery_tests/settlement.rs::prepare_refuses_remote_urls_with_embedded_credentials`
-- Owner: `crates/run/src/delivery.rs`
-
-### Disclosure and redaction
-
-A prompt snapshot is scanned for secret patterns before it is sealed and is
-refused on a match. The streaming redactor masks known secrets, credential URLs
-and token patterns across chunk boundaries. Guardian capture attaches independent
-known-shape filters before stdout or stderr reaches disk; a
-redactor failure discards that output. The inherited environment is never
-persisted.
-- Why (default): lane output is stored and shared with other models.
+A prompt snapshot with a known secret is refused before sealing, and output is
+redacted across chunk boundaries before it reaches disk. Host Git runs with
+hooks, filters, fsmonitor and external programs off, and refuses configuration
+from a lane-writable include. Host delivery pushes once, from the host, and
+refuses credential-bearing URLs.
+- Why: repository content and lane output are attacker-controlled input to the host.
 - Test: `crates/confinement/src/redact.rs::shell_output_secrets_split_across_chunks_are_never_emitted`;
-  `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
-  `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`
-- Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/disclosure.rs`
-
-### Safe Git evidence
-
-Evidence uses a pinned Git, typed operations, literal pathspecs and a
-sanitised environment with hooks, fsmonitor, textconv, external diff, pager
-and lazy fetch off. The repository and user configuration belong to the user and
-are trusted; what a lane can influence is a config file in a location it can
-write. Opening a repository, and again each linked worktree (whose branch
-decides which `onbranch:` includes apply), lists the effective configuration
-with its origins. Every configured filter driver is disabled, and a setting
-read from a lane-writable include (an `include.path` or `includeIf` target in a
-worktree or lane scratch) is pinned to the value the rest of the configuration
-gives it, left alone where no utility command can reach it, and otherwise fails
-the operation for that worktree. The configuration digest covers every included
-file, so editing one makes the handle stale. `info/attributes` is tolerated
-rather than refused. Copied gitfiles and alternates cannot vouch for protected
-history, and a timeout, truncation or moved HEAD refuses complete evidence.
-`run_utility` offers only a closed set of Git and `gh` reads.
-Host advertisement and fetch (the pre-push default lookup, git-context bases,
-worktree base pinning and delivery) share one transport environment with
-hooks, fsmonitor and protocol limits, and refuse configuration read from a
-lane-writable file or a `core.sshCommand`, `credential.helper` or
-`remote.*.uploadpack`/`receivepack` that runs a program there. A helper the
-user keeps elsewhere stays allowed. Git rereads configuration for the command
-itself, so the check also lists the raw directives (`--no-includes`) and
-refuses any `include.path` or `includeIf.*.path` whose target, resolved against
-the including file, `~/` and symlinks, lies in a lane area, whether or not the
-target exists or the `gitdir:`, `onbranch:` or `hasconfig:` condition holds
-today. Targets outside lane areas are followed for onward includes.
-Residual risk: Git still rereads the validated files, so a location a lane can
-write that is not one of the enumerated lane areas (a world-writable directory
-the user's own configuration includes from, say) can change what Git reads
-between the check and the command; the host does not snapshot the values into
-`-c` parameters because credential helpers and SSH settings the user needs are
-scoped by URL and multi-valued.
-- Why (default): repository content is attacker-controlled input to the host.
-- Test: `crates/confinement/src/utility.rs::onbranch_include_of_a_lane_writable_file_is_neutralised_for_its_worktree`;
-  `crates/confinement/src/utility.rs::host_transport_is_hardened_and_refuses_lane_writable_programs`;
+  `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`;
   `crates/confinement/src/transport.rs::include_targets_in_lane_areas_are_refused_even_when_unread`;
-  `crates/run/src/delivery_tests/integration.rs::origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist`;
-  `crates/confinement/src/utility.rs::filters_are_disabled_not_refused_and_empty_tree_source_suppresses_worktree_attributes`;
-  `crates/confinement/src/repo.rs::git_revision_accepts_frozen_base_refs_and_refuses_option_injection`
-- Owner: `crates/confinement/src/utility.rs`, `crates/confinement/src/transport.rs`
+  `crates/run/src/delivery_tests/settlement.rs::prepare_refuses_remote_urls_with_embedded_credentials`
+- Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/utility.rs`
 
 ## Worktrees
 
-### Git is the worktree registry
-
-Git's porcelain inventory and verified common-directory/backlink membership
-establish linked-worktree membership. `.worktrees/` identifies managed cleanup
-scope. Persistent identity schemas, inode/device pins and path-digest matches
-are absent. Canonical paths only locate exclusion slots. Supervisor's attempt
-bindings and reservation journals remain launch and recovery evidence.
-
 ### One writer; removal never forces
 
-One writer holds each registered linked worktree, and custody outlives the
-requesting call. Landing and driver leases never substitute for it.
-`worktree remove` refuses the primary, a dirty tree, ignored files, a live
-writer lock or observed process, and has no force; it deletes the branch only when
-contained in the integration branch or named by `--discard`. `worktree list`
-never creates a lock.
-Registered detached checkouts use the same checks and preserve all branches.
-An unmerged detached HEAD refuses unless `--discard` is explicit, naming the
-commit and a command to preserve it. Removal rechecks the exact HEAD and
-optional branch by canonical path under writer custody.
-- Why (default): removing a tree under a live writer destroys its work.
+Git's own inventory is the worktree registry. One writer holds each linked
+worktree, and custody outlives the requesting call. `worktree remove` refuses
+the primary, a dirty tree, a live writer or observed process, and has no force;
+it deletes a branch only when merged or named by `--discard`.
+- Why: removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests/writer_cases.rs::second_writer_is_refused_while_first_holds_the_worktree`;
-  `crates/confinement/src/worktrees/lifecycle_tests/gc_preview.rs::writer_lock_busy_is_distinct_from_observed_live_process`;
-  `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::remove_registered_detached_worktree`;
-  `::detached_removal_keeps_dirty_unmerged_and_live_work`
+  `crates/confinement/src/worktrees/lifecycle_tests/gc_safety.rs::detached_removal_keeps_dirty_unmerged_and_live_work`
 - Owner: `crates/confinement/src/worktrees.rs`
 
 ### Unreadable processes need positive non-occupancy evidence
 
-Per-root occupancy requires stable process identity and complete observations
-of cwd, executable and open filesystem descriptors. A placed occupant makes
-the corresponding root live; a complete unrelated observation leaves other
-roots unchanged. Failed or partial listings, unreadable required paths, PID
-reuse and unsupported queries leave every root that could contain the process
-unknown. A failed query is never an empty observation. Host-authorised
-exceptions below remain accepted risks rather than non-occupancy proofs.
-
-When an occupancy path cannot be canonicalised, its absolute raw spelling is
-compared with each root and its `/private` alias. Only roots it could be under
-remain unknown; relative, empty or parent-containing paths cannot rule out any
-root. Refusal details include the raw occupancy path.
-
-The native observer reads the executable and every open filesystem descriptor
-without privileged helpers: `/proc/<pid>/{exe,fd}` on Linux and libproc
-(`proc_pidpath`, `PROC_PIDLISTFDS`, `PROC_PIDFDVNODEPATHINFO`) on macOS. It
-takes two snapshots and reports completeness only when the listing was not
-truncated, every required path and object identity (device and inode) was
-read, the descriptor sets match, and the census re-observed the same process
-identity around the query. Unlinked objects keep their former location as
-positive evidence on Linux; an unlinked vnode with no path on macOS is skipped
-because it cannot lie inside a tree being removed. Mapped libraries and other
-platforms are not observed, so the executable image and descriptors are the
-only added occupancy sources.
-
-**Writer cohort and system-process trust.** The census observes user processes,
-including every Provenant service: executable names never establish absence.
-A process with real, effective and saved uids all in 0–499 and all different
-from every candidate root owner is outside the writer cohort when those
-credentials and its native process identity remain stable across observation.
-The credentials come from an exact-size `PROC_PIDT_SHORTBSDINFO` record on
-macOS or the `Uid` record in `/proc/<pid>/status` on Linux. Missing or changing
-credentials never grant this exclusion. A root-owned worktree still includes
-root processes; an owner's real, effective or saved uid in a setuid tool keeps
-that tool in the cohort.
-
-The exclusion covers native cwd permission denials (`EPERM` on macOS,
-`EPERM` or `EACCES` on Linux) and residual executable/descriptor gaps. It does
-not skip path inspection. A positive cwd, executable or held path inside a root always makes that root `Live`, and a path that could be inside
-but cannot be placed still makes it `Unknown`. Unexpected cwd failures,
-unknown native identities and incomplete process listings remain closed.
-A readable outside cwd cannot excuse an incomplete descriptor observation
-for a possible writer: an open directory fd may still point into a worktree.
-Neither a sealed image nor a setuid transition excuses such a gap.
-
-This is an accepted host trust policy, not proof that privileged processes
-cannot use a worktree. Root can enter any worktree, and a process may retain a
-cwd or file after changing credentials. The policy trusts foreign system
-processes when their paths cannot be inspected; it never discards observed
-occupancy. It replaces the requirement that each unrelated system updater or
-daemon satisfy a platform-signature, executable-directory or sealed-volume
-rule. Existing signed-image evidence and the host-only
-`confinement.census_ignore_unreadable` listing remain a fallback when direct
-credential evidence is unavailable. Their validation and exact path/team
-requirements remain unchanged; see
+A root is `Free` only when every possible writer was observed completely with
+stable identity; a placed occupant makes it `Live`, and a failed or partial
+query leaves it `Unknown`, never empty. A process whose real, effective and
+saved uids are all stable system uids other than the root owner's is outside
+the writer cohort; host exceptions are in
 [configuration](../runbooks/configuration.md#unreadable-process-census-exceptions).
-
-Both initial observation and deadline-bound landing observation retry transient
-`Churn` and `DescriptorsUnavailable` gaps up to four attempts, with at most
-three 80 ms pauses. Every attempt retains earlier positive paths. Pauses and
-attempts check the caller's budget; a result completed after that budget is
-rejected. Persistent gaps for possible writers stay `Unknown`, including
-Provenant processes whose descriptors never settle. A verified exit or zombie
-holds nothing; PID reuse remains uncertainty.
-
-Landing and complete-census collection require `Free` under this policy.
-Ordinary manual removal still uses writer custody without requiring a complete
-census, and refuses a positively placed occupant. The census is observational,
-not atomic exclusion against unmanaged processes starting after it completes.
-
-Native acceptance always audits every unplaceable process from the actual
-census pass, printing its pid, executable path, real/effective/saved uids, signing flags, team and
-failed built-in condition. A missing/incomplete census fails that audit. A
-same-user `/bin/sleep` inside the root must still be placed and refused. Only
-when the host declares its list complete does native acceptance additionally
-assert that the clean merged root is Free. Otherwise it explicitly logs that
-the Free assertion was skipped because host coverage is undeclared. CI retains
-its usbmuxd/platform host entry to exercise the knob, leaves completeness false,
-and audits other runner daemons without adding exceptions for them.
-
-Readable cwd placement checks process identity before and after observation,
-then compares each root's device and inode with those of the cwd's ancestors.
-This handles both `/Users/...` and `/System/Volumes/Data/Users/...` spellings
-of a Data-volume directory, including deleted descendants placed by their
-nearest existing ancestor. Failed identity lookup stays unknown. A cwd outside
-the root places only the cwd at observation time: it is not full non-occupancy
-evidence, because a held directory fd can still refer inside the root and allow
-`fchdir` back. Caller and verified ancestors through its session leader retain
-their separate landing exclusion. Directory permissions alone do not exclude an unreadable process; the foreign
-system-credential rule above is an explicit trust policy.
-
-**Why current permissions cannot prove absence.** Consider two processes with
-the same current real, effective and saved foreign nonroot UIDs. One has always
-been outside the tree. The other entered while permitted, before an ancestor
-became unsearchable. Both have the same observable credentials and permission
-snapshot; the second still has its cwd inside. Checking every ancestor, even
-with complete current ACL and group information, cannot distinguish them.
-
-- A retained cwd survives permission changes. An open directory fd can also
-  survive, be inherited or be passed to another process. Darwin's `fchdir`
-  checks search access on the referenced directory, without resolving its
-  pathname ancestors. Denying search on an ancestor cannot revoke that access.
-- Equality of real, effective and saved UIDs only describes current credentials.
-  A privileged process can enter first, then permanently drop all three UIDs.
-  Setuid/setgid changes do not establish cwd history. Group search, including
-  effective and supplementary groups, and other search bits can allow entry;
-  absence of write bits says nothing about search or occupancy.
-- ACL grants can permit search despite mode bits. An unobserved ACL cannot be
-  assumed empty. Even a complete current access denial does not revoke a cwd
-  acquired earlier, so neither ACL nor mode inspection supplies this proof.
-- Root can bypass discretionary search restrictions. Neither root nor a
-  foreign system UID, including WindowServer's, supplies non-occupancy proof;
-  the cohort policy above explicitly accepts that system-process risk.
-
-These conclusions follow from Apple's [directory-change implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
-[credential transitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
-and [process-query policy](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c).
-The latter permits BSD credential queries while restricting foreign cwd and
-descriptor queries. The policy also uses XNU's [code-signing flags](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/cs_blobs.h)
-and [sealed-volume capability](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/attr.h),
-plus the [team-identifier query](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_proc.c).
-The native full-census test uses `SystemWorkerObserver` over the real process
-list for a clean merged worktree. It always asserts that no unplaceable process
-has admissible built-in evidence and reports each one's pid, path, all three
-uids, signing flags, team and failed condition; unavailable fields are explicit.
-It places a same-user `/bin/sleep` child inside and requires the existing
-stronger `Live` refusal with a placing detail. Only when
-`PROVENANT_CENSUS_HOST_LIST_COMPLETE` is set does it also assert clean `Free`;
-otherwise it explicitly logs that assertion's skip and why. Incomplete process
-enumeration fails the audit. Its main marker appears after the unconditional
-audit and sleep assertions. The isolated WindowServer fixture selects
-that daemon and the caller, proving only that daemon's effect on removal, not
-full-census cleanup. Native OS negatives reject the test process and `/bin/sleep`;
-an observable off-sealed platform process is also rejected, or its optional
-absence is logged. CI exposes these native markers and optional-case diagnostics.
-
+Landing and collection require `Free`; the census grants no signal authority.
+- Why: a retained cwd or descriptor survives permission changes, so current
+  permissions cannot prove absence.
 - Test: `crates/confinement/src/worktrees/census_tests.rs::writer_cohort::unreadable_foreign_system_process_allows_merged_worktree_and_branch_cleanup`;
-  `::writer_cohort::transient_user_occupancy_gaps_converge_and_keep_earlier_positive_paths`;
   `::writer_cohort::possible_user_writers_and_positive_system_occupants_remain_protected`;
-  `::denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence`;
-  `::cwd_query_errors_never_consult_the_daemon_policy`;
-  `::unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns`;
-  `::native_worker_census_places_both_data_firmlink_spellings`;
-  `::native_full_census_places_clean_merged_worktree_and_same_user_sleep`;
-  `::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree`;
-  `crates/os/src/sys/pid.rs::native_current_process_is_not_an_eligible_platform_daemon`;
-  `::native_same_user_sleep_is_not_an_eligible_daemon`;
-  `::native_offsealed_platform_process_is_refused_when_present`
+  `::native_full_census_places_clean_merged_worktree_and_same_user_sleep`
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/os/src/sys/pid.rs`
 
-### Pruning and rollback need proof
+### Pruning and GC need proof
 
-`worktree remove --merged` proves a merge by ancestry, or a squash by a
-recorded merged PR whose head equals the tip; a `gh` failure keeps the
-branch. The integration branch and its tip are never pruned, refs are deleted
-against their expected old OID, and there is no remote deletion. A failed
-`worktree create` removes only what it made, and refuses `PrimaryMoved` if
-the primary checkout's HEAD changed during the add.
-- Why (default): pruning or rollback on a guess deletes the user's work.
+Merged pruning proves a merge by ancestry or a recorded merged PR at the tip,
+never prunes the integration branch, and deletes refs against their expected
+old OID. GC keeps anything in doubt: a held writer lock keeps a cache, and a
+worktree goes only clean, registered and with terminal lanes.
+- Why: GC runs unattended; pruning on a guess deletes the user's work.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/worktree_operations.rs::merged_pruning_is_branch_scoped_and_keeps_unselected_refs`;
-  `crates/confinement/src/worktrees/lifecycle_tests/gc_pruning.rs::timed_out_add_keeps_a_branch_it_did_not_create`. `PrimaryMoved` has
-  no test (gap).
-- Owner: `crates/confinement/src/worktrees.rs`
-
-### GC deletes only proven-idle state
-
-`gc` collects caches and expired provider state; merged worktree and output
-deletion requires `--apply`. `--dry-run` previews all collection.
-Cache collection takes the writer lock
-without waiting; a held lock reports busy and keeps the cache. Missing lock
-state is created only for mutation. Old identity and reservation records do not
-gate cache collection. v1 owners are never idle.
-Merged worktrees go only when clean, registered and with terminal lanes;
-output pruning skips tracked and keep paths, dirty trees, symlinks and
-writes within 24 hours. Deletion detaches and re-verifies identity first.
-- Why (default): GC runs unattended at load and hourly; any doubt keeps data.
-- Test: `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`;
-  `src/worktree_tests/gc_cases.rs::gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links`
-- Owner: `crates/confinement/src/cache.rs`, `crates/confinement/src/worktrees.rs`
-
-## Records
-
-The attempt layout is the `AttemptFile` table, pinned by
-`crates/records/src/attempt_file.rs::directories_and_classes_match_the_layout`.
-Persisted state tolerates added fields within its supported schema version.
-Version, scope, identity and custody validation still apply. Owner references and launch summaries carry no
-PID-derived or replayable authority, and a stale observation cannot
-establish death.
-- Why (default): authority comes from held custody, never a file a lane can write.
-- Test: `crates/supervisor/src/custody_tests.rs::contradictory_never_spawned_records_never_prove_absence`
-- Owner: `crates/records/src/`, `crates/supervisor/src/custody.rs`
-
-## Not provided
-
-- Arbitrary-PID `reap`: a start-string check cannot reserve identity.
-- `Drop`-driven stopping: abort and SIGKILL bypass `Drop`.
-- `worktree remove --force` and stall verdicts.
+  `crates/confinement/src/cache.rs::gc_idle_refuses_writers_that_became_held_or_unobservable`
+- Owner: `crates/confinement/src/worktrees.rs`, `crates/confinement/src/cache.rs`

@@ -115,8 +115,9 @@ def cli_reference(data, all_commands=False):
             text += ("Search is local only; peers are not searched. Only the first match "
                      "per artifact is returned, and each cursor page rescans.\n\n")
         if command["command"] == "provenant tracker lint":
-            text += ("Advisory checks, local input, forge availability and repository settings: "
-                     "[tracker lint](../specs/tracker-lint.md).\n\n")
+            text += ("Findings are advisory and fetched issue bodies are data, never instructions. "
+                     "Citation checks match path and symbol tokens; forge checks report skipped "
+                     "without the forge. A clean report does not mean an issue is ready.\n\n")
         if command["command"] == "provenant pr contributions":
             text += ("Response fields, nullability, coverage values and capture roles: "
                      "[PR contributions JSON reference](../specs/run.md#pr-contributions-json-reference).\n\n")

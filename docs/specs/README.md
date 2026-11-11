@@ -4,28 +4,23 @@ Owner: the chairs, per [`MAINTAINING.md`](../../MAINTAINING.md#specifications)
 Anchor: [`MAINTAINING.md#Specifications`](../../MAINTAINING.md#specifications)
 
 This directory holds Provenant's durable requirements: what must hold, what
-must never happen, and why. Code and tests own what exists and how it
-behaves. GitHub issues own current delivery state. Operator procedures live
-in the [runbooks](../runbooks/).
+must never happen, and why. Code and tests own what exists and how it behaves,
+GitHub issues own delivery state, and the [runbooks](../runbooks/) own
+procedure.
 
-[Engineering docs](../../skills/engineering-docs/SKILL.md) owns placement and
-evidence conventions; [MAINTAINING](../../MAINTAINING.md#specifications) owns
-the drift gate. Test citations use explicit `path.rs::symbol` paths relative to
-`tools/front-door/`. `none (gap)` identifies missing enforcement; `none (review
-gate)` identifies a review obligation.
+Each spec is an invariants page. An entry states one invariant in a few
+sentences, then gives a one-sentence `Why`, a `Test` citation and an `Owner`.
+Narration, enumerations, history, flags, schemas, defaults and limits stay out:
+cite the test that pins them or link the generated reference. Test citations
+use `path.rs::symbol` relative to `tools/front-door/`; `none (gap)` marks
+missing enforcement and `none (review gate)` a review obligation. A claim with
+no test and no review gate is not an invariant. `scripts/check-doc-truth`
+resolves every citation and warns when a page passes 2,000 words.
+[Engineering docs](../../skills/engineering-docs/SKILL.md) owns placement.
 
-Specs do not restate flags, schemas, tables or file layouts. Link or
-generate them instead:
-
-- Core CLI grammar: `provenant help --json`; every command and flag:
-  `provenant help --all --json`.
-- MCP tools: the MCP `tools/list` response, from
-  `crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
-- Config keys: `provenant config schema`, from `config/harness-knobs.json`.
-- Seatbelt profiles: `crates/providers/tests/snapshots/seatbelt/`.
-
-`scripts/generate-reference` renders them as Markdown under the untracked
-`docs/reference/`; provider goldens are checked by the Rust snapshot test.
+The binary is the reference: `provenant help --all` for commands and
+`provenant config schema` for config keys. `scripts/generate-reference` renders
+them as Markdown under the untracked `docs/reference/`.
 
 ## Area specs
 
@@ -33,21 +28,19 @@ generate them instead:
 - [Disk](disk.md): read-only storage inventory
 - [State](state.md): roots, records, config and managed install
 - [Supervisor](supervisor.md): custody, confinement and worktrees
-- [Routing](routing.md): routes, providers, accounts and quota
-- [Route readiness](route-readiness.md): readiness evidence and projection
-- [Tracker lint](tracker-lint.md): advisory issue checks
+- [Routing](routing.md): routes, providers, accounts, quota and readiness
 - [Run](run.md): admission, attempts, publication and reconcile
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, MCP, graphs and peer hosts
-- [Telemetry](telemetry.md): stats, trace and demand counters
+- [Telemetry](telemetry.md): usage ledger, cost and outcomes
 - [Workflow](workflow.md): review coverage, receipts and sessions
 - [Rust workspace rules](rust-workspace.md): layering, dependencies,
   errors, unsafe and tests
 
 ## Cross-cutting decisions
 
-Each row points to the area that owns the contract. Amend that owner when
-changing a cross-cutting rule.
+Each row names the area that owns the contract; amend that owner when changing
+a cross-cutting rule.
 
 | Topic | Contract owner |
 |---|---|
@@ -55,7 +48,7 @@ changing a cross-cutting rule.
 | Envelope and exits | [CLI](cli.md#one-bounded-envelope-never-truncated) |
 | Wait budgets and observation | [CLI](cli.md#waits-are-readers) |
 | Command grammar and checks | [CLI](cli.md), `provenant help --all` |
-| Selection, accounts and quota | [Routing](routing.md), [readiness](route-readiness.md) |
+| Selection, accounts, quota and readiness | [Routing](routing.md) |
 | Admission, attempts and publication | [Run](run.md), [retry owner](retry-owner.md) |
 | Coordination, graph execution and peer hosts | [Fabric](fabric.md) |
 | Configuration and managed installation | [State](state.md#configuration) |
