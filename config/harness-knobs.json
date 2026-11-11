@@ -383,7 +383,7 @@
     "confinement.census_exclude_ancestors": {
         "type": "bool",
         "default": true,
-        "strict": true,
+        "strict": true, "safe": false,
         "status": "wired",
         "reader": "tools/front-door/crates/confinement/src/worktrees/census.rs",
         "effect": "Exclude the invoking process's ancestor chain from live-writer detection at run admission. When false, only the invoking process itself is excluded, so an ancestor shell with its working directory inside the worktree is treated as a live writer."
@@ -391,13 +391,13 @@
     "confinement.census_ignore_unreadable": {
         "type": "census_ignore_list",
         "default": [],
-        "strict": true,
+        "strict": true, "safe": [],
         "host_only": true,
         "status": "wired",
         "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."
     },
     "routing.allow_unknown_partial_headroom": {
-      "type": "bool", "default": false, "strict": true, "host_only": true, "status": "wired",
+      "type": "bool", "default": false, "strict": true, "safe": false, "host_only": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
       "effect": "Allow uncalibrated partial quota headroom below the limit.",
       "trade_off": "Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."
@@ -433,7 +433,7 @@
       "trade_off": "Off keeps project identity out of usage logs; on makes project-level usage visible to anyone who can read them."
     },
     "fabric.accept_handoff": {
-      "strict": true,
+      "strict": true, "safe": false,
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
@@ -482,7 +482,7 @@
       "trade_off": "Off keeps the inbox quiet; inbox makes refusals visible to the chair."
     },
     "chair.auto_switch": {
-      "strict": true,
+      "strict": true, "safe": false,
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Allow the Claude UserPromptSubmit hook to checkpoint and switch accounts at the quota threshold.",
@@ -495,7 +495,7 @@
       "trade_off": "Lower switches sooner; higher leaves less headroom for the handoff."
     },
     "chair.switch_accounts": {
-      "strict": true,
+      "strict": true, "safe": [],
       "type": "string_list", "default": [], "status": "wired",
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",

@@ -387,7 +387,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
 
     let knobs_item = user.remove("knobs");
-    let knobs_item_was_present = knobs_item.is_some();
     let version = user.get("schema_version");
     if text.is_some() {
         let location = site(&user_sites, "schema_version", &user_origin, false);
@@ -415,7 +414,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .and_then(Item::as_str)
         .and_then(Profile::from_name)
         .unwrap_or_default();
-    let knob_boundary = user
+    let mut knob_boundary = user
         .get("profile")
         .and_then(Item::as_str)
         .filter(|name| Profile::from_name(name).is_none())
@@ -423,38 +422,51 @@ fn inspect<T: DeserializeOwned + Serialize>(
             location: site(&user_sites, "profile", &user_origin, false),
             rule: "range",
         });
-    // A malformed container is ignored with a warning. It holds capability
-    // and authority knobs, so every strict knob then takes its restrictive
-    // value rather than a default that could grant what the user withheld.
-    let valid_knobs = knobs_item.and_then(|item| match item.into_table() {
-        Ok(table) => Some(table),
-        Err(_) => {
-            issues.push(Issue {
-                location: site(&user_sites, "knobs", &user_origin, false),
-                rule: "type",
-                source: None,
-                rejected: String::new(),
-            });
-            None
+    // A malformed container is ignored with a warning, and every strict knob
+    // takes its restrictive value. A strict knob with none (an exclusion list
+    // whose default is empty) has no safe reading, so the file is refused.
+    let malformed_knobs = match &knobs_item {
+        Some(item) if !item.is_table_like() => {
+            let location = site(&user_sites, "knobs", &user_origin, false);
+            if crate::knobs::any_refuses_when_invalid() {
+                knob_boundary.get_or_insert(ConfigError::Schema {
+                    location,
+                    rule: "type",
+                });
+            } else {
+                issues.push(Issue {
+                    location,
+                    rule: "type",
+                    source: None,
+                    rejected: String::new(),
+                });
+            }
+            true
         }
-    });
-    let malformed_knobs = knobs_item_was_present && valid_knobs.is_none();
+        _ => false,
+    };
     let (knobs, knob_problems) = crate::knobs::resolve(
         profile,
-        valid_knobs
-            .as_ref()
-            .map(|table| table as &dyn toml_edit::TableLike),
+        knobs_item.as_ref().and_then(Item::as_table_like),
         malformed_knobs,
     )?;
     for problem in knob_problems {
         let key = format!("knobs.{}", problem.name);
+        let location = site(
+            &user_sites,
+            &key,
+            &user_origin,
+            problem.rule == "unknown_key",
+        );
+        if crate::knobs::refuses_when_invalid(&problem.name) {
+            knob_boundary.get_or_insert(ConfigError::Schema {
+                location,
+                rule: problem.rule,
+            });
+            continue;
+        }
         issues.push(Issue {
-            location: site(
-                &user_sites,
-                &key,
-                &user_origin,
-                problem.rule == "unknown_key",
-            ),
+            location,
             rule: problem.rule,
             source: None,
             rejected: String::new(),

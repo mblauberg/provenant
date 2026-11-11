@@ -949,6 +949,34 @@ mod tests {
     }
 
     #[test]
+    fn retired_cloud_keys_warn_and_do_not_refuse_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let text = "schema_version = 1\n[providers.codex.cloud]\ntransport = 'x'\ncommand = ['y']\n[domains.lanes.cloud_targets.main]\nid = 'z'\n[projects.demo]\ncloud_target = 'main'\n";
+        let config = provenant_config::load_with_domains(
+            &roots,
+            Some(std::io::Cursor::new(text.as_bytes())),
+            &SECTIONS,
+        )
+        .unwrap();
+        assert!(
+            config
+                .warnings
+                .iter()
+                .all(|warning| warning.rule == "unknown_key"),
+            "{:?}",
+            config.warnings
+        );
+        for line in [2, 5, 7] {
+            assert!(
+                config.warnings.iter().any(|warning| warning.line == line),
+                "no warning at line {line}: {:?}",
+                config.warnings
+            );
+        }
+    }
+
+    #[test]
     fn lanes_user_skills_defaults_to_discover_and_supports_project_overrides() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
