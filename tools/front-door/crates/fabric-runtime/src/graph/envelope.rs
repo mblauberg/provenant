@@ -53,6 +53,9 @@ pub(super) fn latest() -> provenant_core::WallTime {
 
 /// Worst-case link: the IDs, session and deadline of one ask. The question and
 /// its answer live in the inbox, so no text is counted.
+/// `.retry-` and the digits of a u64 generation.
+const RETRY_SUFFIX_BYTES: usize = 27;
+
 fn ask_bound(ask: &AskRequest) -> usize {
     let link = AskLink {
         extra: Default::default(),
@@ -421,7 +424,7 @@ fn node_bound(
         bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
             let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
-            bytes += loop_rounds * ask_bound(&ask);
+            bytes += loop_rounds * (ask_bound(&ask) + RETRY_SUFFIX_BYTES);
         }
     }
     if let Some(spec) = &node.decide {
@@ -440,15 +443,22 @@ fn node_bound(
             Some(""),
         );
         bytes += ask_bound(&ask)
-            // The repair scope ask ID adds `.retry-` and a u64 generation.
-            + if repair_scope { 27 } else { 0 };
+            // A retried node's ask ID adds `.retry-` and a u64 generation.
+            + RETRY_SUFFIX_BYTES;
     }
     if let Some(spec) = &node.land {
         // branch, head, ask ID, actor and note; and one ask link.
         bytes +=
             2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
-        let ask = land::land_ask(&plan.graph_id, node, &land_skeleton(spec.tier), session);
+        let ask = land::land_ask(
+            &plan.graph_id,
+            node,
+            &land_skeleton(spec.tier),
+            session,
+            1,
+            u64::MAX,
+        );
         bytes += ask_bound(&ask);
     }
     if gate {

@@ -302,3 +302,41 @@ default = false
     assert!(!second(&off));
     assert!(second(&on));
 }
+
+#[test]
+fn a_condition_on_a_loop_is_refused_whether_it_holds_or_not() {
+    for actual in ["true", "false"] {
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"when","nodes":[{
+                "id":"repair","kind":"loop","access":"read_only",
+                "when":[{"name":"extra","expected":"true","actual":actual}],
+                "loop":{"max_rounds":2,"until":"accepted","body":[
+                    {"id":"writer","access":"read_only","prompt":"repair","route":{"alias":"senior"}},
+                    {"id":"accepted","kind":"gate","access":"read_only","depends_on":["writer"],
+                        "inputs":[{"node":"writer","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}
+            }]
+        }))
+        .unwrap();
+        let error = when::prune(&document).unwrap_err();
+        assert!(
+            matches!(&error, AdmissionError::Plan(reason) if reason.contains("repair")),
+            "{actual}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_skipped_stage_does_not_need_the_resolver_it_fans_out_over() {
+    let mut bound = resolvers("f0-v0-s0");
+    bound.remove("review-verifiers");
+    let node = compile(&bound, json!({"id":"panel","use":"review-panel"}))
+        .expect("the verify stage is skipped, so its verifiers are not needed");
+    assert!(node.composite.is_some());
+
+    let mut bound = resolvers("f0-v1-s0");
+    bound.remove("review-verifiers");
+    let error = compile(&bound, json!({"id":"panel","use":"review-panel"})).unwrap_err();
+    assert!(error.to_string().contains("review-verifiers"), "{error}");
+}

@@ -201,3 +201,50 @@ fn a_request_closed_by_a_cancel_is_not_reused_after_a_resume() {
     assert_eq!(link.ask_id, "choose.ask-2");
     assert_eq!(owner.open(), [link.request.as_str()]);
 }
+
+fn retry_node(document: &GraphDocument, checkpoint: &mut GraphCheckpoint, id: &str) {
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document,
+            checkpoint,
+        },
+        id,
+        None,
+        &patch::PatchContext {
+            library: &template::TemplateLibrary::bundled(),
+            resolvers: &Default::default(),
+            scan: &|_| Ok(()),
+            journal: None,
+            limits: &plans::generous(),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_retried_decide_node_files_a_new_request_and_ignores_the_old_answer() {
+    let document = question();
+    let mut owner = InboxOwner::default();
+    let mut journal = FlakyJournal::default();
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    let first = waiting.checkpoint.asks[0].request.clone();
+    owner.answer(&first, "ship");
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.status, GraphStatus::Complete);
+
+    let mut checkpoint = done.checkpoint;
+    retry_node(&document, &mut checkpoint, "choose");
+    journal.saved = Some(checkpoint);
+    let retried = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        retried.status,
+        GraphStatus::Pending,
+        "the stale answer was consumed"
+    );
+    let [link] = &retried.checkpoint.asks[..] else {
+        panic!("one link for the new ask");
+    };
+    assert_ne!(link.request, first);
+    assert_eq!(owner.open(), [link.request.as_str()]);
+    assert_eq!(owner.created, 2);
+}

@@ -1412,3 +1412,15 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
     );
     assert!(owner.lands.is_empty());
 }
+
+#[test]
+fn a_land_ask_id_carries_the_sequence_and_the_retry_generation() {
+    for (sequence, generation) in [(1, 0), (2, 0), (1, 3), (7, 12)] {
+        let id = land::ask_id("land", sequence, generation);
+        assert_eq!(land::parse(&id, "land"), Some((sequence, generation)));
+    }
+    assert_ne!(land::ask_id("land", 1, 0), land::ask_id("land", 1, 1));
+    assert_eq!(land::parse("land.ask-1.retry-0", "land"), None);
+    assert_eq!(land::parse("land.ask-0", "land"), None);
+    assert_eq!(land::parse("other.ask-1", "land"), None);
+}

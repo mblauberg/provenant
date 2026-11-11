@@ -1547,10 +1547,24 @@ impl<'a> Compiler<'a> {
         bindings: &Map<String, Value>,
         stack: &mut Vec<String>,
     ) -> Result<Value, CompileError> {
-        let items = self.items(over)?;
         let mut copy = object.clone();
         copy.remove("over");
         self.resolve_when(&mut copy, bindings, stack)?;
+        // A stage whose condition does not hold never runs, so what it fans out
+        // over need not be bound at this launch; one placeholder keeps the
+        // skipped boundary well formed.
+        let skipped = copy
+            .get("when")
+            .and_then(Value::as_array)
+            .is_some_and(|terms| {
+                serde_json::from_value::<Vec<WhenTerm>>(Value::Array(terms.clone()))
+                    .is_ok_and(|terms| !when::holds(&terms))
+            });
+        let items = match self.items(over) {
+            Ok(items) => items,
+            Err(_) if skipped => vec!["skipped".to_owned()],
+            Err(error) => return Err(error.into()),
+        };
         let mut boundary = Map::new();
         // The boundary and every copy share one condition.
         if let Some(when) = copy.get("when") {
