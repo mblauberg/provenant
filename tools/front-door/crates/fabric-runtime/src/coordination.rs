@@ -20,8 +20,8 @@ use thiserror::Error;
 pub use provenant_core::{Pause, ThreadPause};
 use provenant_fabric_store::{ClaimFence, ClaimRequest, Request, Store};
 pub use provenant_fabric_store::{
-    Delivery, Event, EventKind, EventRecord, Message, MessageKind, MessageRef, Page,
-    WorkClaim, WorkScope,
+    Delivery, Event, EventKind, EventRecord, Message, MessageKind, MessageRef, Page, WorkClaim,
+    WorkScope,
 };
 
 #[derive(Debug, Error)]

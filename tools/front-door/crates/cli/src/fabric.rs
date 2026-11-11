@@ -487,10 +487,7 @@ fn execute(
         }
     };
     let value = match cmd {
-        Fabric::Identity
-        | Fabric::Mcp { .. }
-        | Fabric::Peer { .. }
-        | Fabric::PeerAgent => {
+        Fabric::Identity | Fabric::Mcp { .. } | Fabric::Peer { .. } | Fabric::PeerAgent => {
             return Err(EdgeError::InvalidField("command"));
         }
         Fabric::Mail(Mail::Send {

@@ -12,8 +12,8 @@ pub(crate) use unified::{
     unified_graph_command, unified_graph_output, unified_graph_steer, unified_graph_trace,
 };
 pub(crate) mod gc_cleanup;
-mod graph_document;
 pub(crate) mod git_facts;
+mod graph_document;
 pub(crate) mod owner;
 mod peer;
 pub(crate) mod run_owner;

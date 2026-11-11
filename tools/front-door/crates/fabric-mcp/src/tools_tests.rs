@@ -657,7 +657,8 @@ fn removed_tools_are_unknown_and_merged_operations_are_typed() {
         ToolCall::parse("fabric_context", json!({"op":"hosts","limit":1})),
         Ok(ToolCall::Hosts(_))
     ));
-    let input = json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1571"},"lease_seconds":1});
+    let input =
+        json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1571"},"lease_seconds":1});
     let call = ToolCall::parse("fabric_lease", input).unwrap();
     assert_eq!(call.name(), "fabric_lease");
 }

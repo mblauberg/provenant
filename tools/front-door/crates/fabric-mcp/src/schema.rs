@@ -147,7 +147,9 @@ pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
 }
 
 fn proof() -> Value {
-    object(json!({"id": reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")}))
+    object(
+        json!({"id": reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")}),
+    )
 }
 fn definitions() -> Value {
     let message_ref = tagged(

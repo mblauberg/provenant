@@ -112,7 +112,9 @@ pub(super) fn contract_error(
         };
         return Some((
             "review_verdict_invalid",
-            format!("review needs exactly one VERDICT: PASS, FAIL or INCONCLUSIVE line outside fenced blocks: {cause}"),
+            format!(
+                "review needs exactly one VERDICT: PASS, FAIL or INCONCLUSIVE line outside fenced blocks: {cause}"
+            ),
         ));
     }
     if outputs.findings_available != Some(true) {
