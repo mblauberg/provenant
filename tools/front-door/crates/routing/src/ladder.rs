@@ -266,6 +266,17 @@ pub struct DepletionInput<'a> {
     pub wait_bound_seconds: Option<u64>,
 }
 
+/// The wait bound from resolved knobs, in seconds: `None` when
+/// `routing.depletion_wait_seconds` is zero, the default.
+pub fn depletion_wait_bound(
+    knobs: &std::collections::BTreeMap<String, provenant_config::KnobValue>,
+) -> Option<u64> {
+    knobs
+        .get("routing.depletion_wait_seconds")
+        .and_then(|knob| knob.value.as_u64())
+        .filter(|seconds| *seconds > 0)
+}
+
 /// Choose where the stopped work goes next.
 pub fn next_after_depletion(input: &DepletionInput<'_>) -> DepletionStep {
     if let Some(unix_seconds) = wait_target(input) {

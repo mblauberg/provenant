@@ -624,3 +624,19 @@ fn depletion_facts_judge_each_account_with_the_dispatch_checks()
     assert!(facts.iter().all(|fact| fact.model != model(SONNET)));
     Ok(())
 }
+
+#[test]
+fn the_wait_knob_is_off_at_zero_and_unset() {
+    let knobs = |value: serde_json::Value| {
+        std::collections::BTreeMap::from([(
+            "routing.depletion_wait_seconds".to_owned(),
+            provenant_config::KnobValue {
+                value,
+                source: provenant_config::KnobSource::Default,
+            },
+        )])
+    };
+    assert_eq!(depletion_wait_bound(&knobs(0.into())), None);
+    assert_eq!(depletion_wait_bound(&knobs(90.into())), Some(90));
+    assert_eq!(depletion_wait_bound(&Default::default()), None);
+}
