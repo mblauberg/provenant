@@ -27,12 +27,14 @@ pub struct CapturedResult {
     /// The settled attempt's sealed handoff. Capture never parses it from text;
     /// the caller that holds the sealed snapshot sets it.
     pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
-    /// Exactly one well-formed verdict, on the final non-empty line of the
-    /// complete stream, ignoring a closed trailing `handoff` fence. Only lines
+    /// Exactly one well-formed verdict among the lines outside fenced blocks
     /// that start with `VERDICT:` (after emphasis or list markers; not
-    /// blockquotes) count as declarations. Independent of the legacy required-line contract.
+    /// blockquotes), wherever it sits. Independent of the legacy required-line contract.
     pub verdict: Option<Box<str>>,
+    /// Declarations were seen but are not exactly one well-formed verdict.
     pub verdict_invalid: bool,
+    /// Why there is no verdict, naming what was seen; `None` when there is one.
+    pub verdict_cause: Option<String>,
     /// Saturating count of verdict declarations across the complete stream.
     pub declarations: u8,
     pub digest: String,
@@ -166,11 +168,12 @@ impl ResultCapture {
             || String::from_utf8_lossy(&self.tail).len() > TAIL_BYTES;
         let truncated = self.bytes > HEAD_BYTES as u64
             || String::from_utf8_lossy(&self.head).len() > HEAD_BYTES;
-        let (verdict, verdict_invalid, declarations) = self.verdict.finish();
+        let (verdict, verdict_invalid, declarations, verdict_cause) = self.verdict.finish();
         CapturedResult {
             handoff: Ok(None),
             verdict,
             verdict_invalid,
+            verdict_cause,
             declarations,
             digest,
             excerpt,
@@ -339,26 +342,35 @@ impl DispositionCapture {
 }
 
 /// Retain one bounded line and count standalone verdict declarations across
-/// every byte, even outside the excerpt windows. Repeated or malformed
-/// declarations cannot be hidden by a later valid verdict. A closed trailing
-/// `handoff` fence after the verdict is ignored, since every lane must end
-/// with one; any other later text clears the verdict.
+/// every byte, even outside the excerpt windows. One rule: the result holds
+/// exactly one `VERDICT:` line outside fenced blocks. Fenced blocks (findings,
+/// handoff, quoted examples) and prose that merely mentions a verdict never
+/// count, and position does not matter. Two declarations, or one malformed
+/// declaration, are rejected with a cause that names what was seen.
 #[derive(Default)]
 struct VerdictCapture {
     line: Vec<u8>,
     overflow: bool,
-    in_handoff: bool,
+    lines: usize,
+    /// Open fence: its character, run length and line number.
+    fence: Option<(u8, usize, usize)>,
     /// Declaration scan of the current line, over every byte so clipping
     /// cannot hide it: past the marker prefix, after digits of a possible
-    /// ordered-list marker, not a declaration (blockquote or other text), and
-    /// the first bytes after the prefix.
+    /// ordered-list marker, not a declaration (blockquote or other text), the
+    /// first bytes after the prefix, and where the declaration starts.
     past_prefix: bool,
     digits: bool,
     no_decl: bool,
     head: Vec<u8>,
-    markers: u8,
-    final_verdict: Option<Box<str>>,
+    start: usize,
+    declarations: u8,
+    /// The first two declarations as written, for the cause.
+    seen: Vec<String>,
+    /// The latest declaration, if well formed.
+    verdict: Option<Box<str>>,
 }
+
+const DECLARATION: &[u8] = b"VERDICT:";
 
 impl VerdictCapture {
     fn push(&mut self, chunk: &[u8]) {
@@ -381,7 +393,7 @@ impl VerdictCapture {
             return;
         }
         if self.past_prefix {
-            if self.head.len() < 8 {
+            if self.head.len() < DECLARATION.len() {
                 self.head.push(byte);
             }
             return;
@@ -394,36 +406,41 @@ impl VerdictCapture {
             _ if self.digits => self.no_decl = true,
             _ => {
                 self.past_prefix = true;
+                self.start = self.line.len();
                 self.head.push(byte);
             }
         }
     }
 
     fn end_line(&mut self) {
-        let text = std::str::from_utf8(&self.line).ok().map(str::trim);
-        if self.in_handoff {
-            self.in_handoff = self.overflow || text != Some("```");
-        } else {
-            if !self.no_decl && self.head.eq_ignore_ascii_case(b"verdict:") {
-                self.markers = self.markers.saturating_add(1);
+        self.lines += 1;
+        let text = std::str::from_utf8(&self.line)
+            .ok()
+            .map(str::trim)
+            .filter(|_| !self.overflow);
+        let run = text.and_then(fence_run);
+        match self.fence {
+            Some((ch, len, _)) => {
+                // A closing fence repeats the opener's character at least as
+                // often and carries no other text.
+                if let (Some(text), Some((c, n))) = (text, run)
+                    && c == ch
+                    && n >= len
+                    && text.bytes().all(|byte| byte == ch)
+                {
+                    self.fence = None;
+                }
             }
-            if self.final_verdict.is_some() && !self.overflow && text == Some("```handoff") {
-                self.in_handoff = true;
-            } else if self.overflow || text != Some("") {
-                self.final_verdict = text
-                    .filter(|line| {
-                        !self.overflow
-                            && self.markers == 1
-                            && line.strip_prefix("VERDICT: ").is_some_and(|token| {
-                                !token.is_empty()
-                                    && token.bytes().all(|byte| {
-                                        byte.is_ascii_uppercase()
-                                            || byte.is_ascii_digit()
-                                            || matches!(byte, b'_' | b'-')
-                                    })
-                            })
-                    })
-                    .map(Box::<str>::from);
+            None => {
+                if let (Some(text), Some((ch, len))) = (text, run) {
+                    // A backtick fence's info string cannot hold a backtick,
+                    // which makes `inline` code on its own line prose.
+                    if ch != b'`' || !text[len..].contains('`') {
+                        self.fence = Some((ch, len, self.lines));
+                    }
+                } else if !self.no_decl && self.head == DECLARATION {
+                    self.declare();
+                }
             }
         }
         self.line.clear();
@@ -434,14 +451,79 @@ impl VerdictCapture {
         self.head.clear();
     }
 
-    fn finish(mut self) -> (Option<Box<str>>, bool, u8) {
-        self.end_line();
-        // An unterminated handoff fence is not a trailing handoff block.
-        let verdict = self
-            .final_verdict
-            .filter(|_| self.markers == 1 && !self.in_handoff);
-        let invalid = self.markers > 0 && verdict.is_none();
-        (verdict, invalid, self.markers)
+    fn declare(&mut self) {
+        self.declarations = self.declarations.saturating_add(1);
+        let written = if self.overflow {
+            None
+        } else {
+            std::str::from_utf8(&self.line)
+                .ok()
+                .and_then(|line| line.get(self.start..))
+                .map(str::trim)
+        };
+        let token = written.and_then(|text| {
+            let token = text[DECLARATION.len()..]
+                .trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'));
+            (!token.is_empty()
+                && token.bytes().all(|byte| {
+                    byte.is_ascii_uppercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                }))
+            .then_some(token)
+        });
+        self.verdict = token.map(|token| format!("VERDICT: {token}").into());
+        if self.seen.len() < 2 {
+            self.seen.push(match written {
+                Some(text) => quoted(text),
+                None => "a VERDICT: line that is over-long or not UTF-8".to_owned(),
+            });
+        }
+    }
+
+    fn finish(mut self) -> (Option<Box<str>>, bool, u8, Option<String>) {
+        if !self.line.is_empty() {
+            self.end_line();
+        }
+        let verdict = self.verdict.take().filter(|_| self.declarations == 1);
+        let invalid = self.declarations > 0 && verdict.is_none();
+        let cause = verdict.is_none().then(|| match (self.declarations, &self.fence) {
+            (0, Some((_, _, line))) => format!(
+                "no VERDICT: line outside fenced blocks; the fence opened at line {line} is never closed, so everything after it was read as fenced"
+            ),
+            (0, None) => "no VERDICT: line outside fenced blocks".to_owned(),
+            (1, _) => format!(
+                "the VERDICT: line {} is not VERDICT: PASS, FAIL or INCONCLUSIVE",
+                self.seen[0]
+            ),
+            (count, _) => format!(
+                "{count} VERDICT: lines outside fenced blocks, {} and {}{}; exactly one is allowed",
+                self.seen[0],
+                self.seen[1],
+                if count > 2 { " and more" } else { "" }
+            ),
+        });
+        (verdict, invalid, self.declarations, cause)
+    }
+}
+
+/// The character and length of a fence opener or closer: three or more
+/// backticks or tildes at the start of a trimmed line.
+fn fence_run(text: &str) -> Option<(u8, usize)> {
+    let ch = *text
+        .as_bytes()
+        .first()
+        .filter(|&&b| matches!(b, b'`' | b'~'))?;
+    let len = text.bytes().take_while(|&byte| byte == ch).count();
+    (len >= 3).then_some((ch, len))
+}
+
+fn quoted(text: &str) -> String {
+    let clipped: String = text.chars().take(80).collect();
+    if clipped.len() < text.len() {
+        format!("`{clipped}...`")
+    } else {
+        format!("`{clipped}`")
     }
 }
 
@@ -472,44 +554,97 @@ fn window(bytes: &[u8], cap: usize, tail: bool) -> String {
 mod tests {
     use super::*;
 
+    fn run(text: &str) -> CapturedResult {
+        let mut capture = ResultCapture::new(None);
+        for chunk in text.as_bytes().chunks(5) {
+            capture.push(chunk);
+        }
+        capture.finish()
+    }
+
+    const HANDOFF: &str = "```handoff\n{\"note\":\"VERDICT: FAIL\"}\n```\n";
+    const FINDINGS: &str = "```findings\n{\"findings\":[]}\n```\n";
+
+    /// The shape that settled as invalid in #3193: prose, a findings block,
+    /// one verdict line, then a handoff block.
     #[test]
-    fn verdict_survives_trailing_handoff_but_not_prose() {
-        let block = "```handoff\n{\"note\":\"verdict: x\"}\n```\n";
-        let run = |text: &str| {
-            let mut capture = ResultCapture::new(None);
-            for chunk in text.as_bytes().chunks(5) {
-                capture.push(chunk);
-            }
-            capture.finish()
-        };
-        let ok = run(&format!("review\nVERDICT: PASS\n\n{block}"));
-        assert_eq!(ok.verdict.as_deref(), Some("VERDICT: PASS"));
-        assert!(!ok.verdict_invalid);
-        let prose = run(&format!("VERDICT: PASS\nthanks\n{block}"));
-        assert!(prose.verdict.is_none());
-        let prose_after = run(&format!("VERDICT: PASS\n{block}done\n"));
-        assert!(prose_after.verdict.is_none());
-        let twice = run(&format!("VERDICT: PASS\nVERDICT: FAIL\n{block}"));
-        assert!(twice.verdict.is_none() && twice.verdict_invalid);
+    fn prose_findings_one_verdict_handoff_is_one_verdict() {
+        for line in [
+            "VERDICT: PASS",
+            "VERDICT: PASS   ",
+            "**VERDICT: PASS**",
+            "- VERDICT: PASS",
+            "VERDICT:PASS",
+        ] {
+            let text = format!("Reviewed the diff.\n\n{FINDINGS}{line}\n\n{HANDOFF}");
+            let captured = run(&text);
+            assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"), "{line}");
+            assert!(!captured.verdict_invalid && captured.verdict_cause.is_none());
+            assert_eq!(captured.declarations, 1);
+        }
+    }
+
+    #[test]
+    fn two_verdict_lines_outside_fences_fail_naming_both() {
+        let captured = run(&format!(
+            "VERDICT: PASS\nmore\n{FINDINGS}VERDICT: FAIL\n{HANDOFF}"
+        ));
+        assert!(captured.verdict.is_none() && captured.verdict_invalid);
+        assert_eq!(captured.declarations, 2);
+        let cause = captured.verdict_cause.unwrap();
+        assert!(
+            cause.contains("`VERDICT: PASS`") && cause.contains("`VERDICT: FAIL`"),
+            "{cause}"
+        );
+        let malformed = run("VERDICT: MAYBE soon\n");
+        assert!(malformed.verdict.is_none() && malformed.verdict_invalid);
+        assert!(malformed.verdict_cause.unwrap().contains("MAYBE soon"));
+    }
+
+    #[test]
+    fn verdict_words_in_fences_and_prose_are_ignored() {
+        for text in [
+            format!("Verdict: looks fine.\nThe verdict: PASS is likely.\nVERDICT: PASS\n{HANDOFF}"),
+            "```text\nVERDICT: FAIL\n```\nVERDICT: PASS\n".to_owned(),
+            "~~~\nVERDICT: FAIL\n~~~\nVERDICT: PASS\n".to_owned(),
+            "````\n```\nVERDICT: FAIL\n```\n````\nVERDICT: PASS\n".to_owned(),
+            "VERDICT: PASS\n```\nVERDICT: FAIL\n".to_owned(),
+            "> VERDICT: FAIL\nsee VERDICT: FAIL\nVERDICT: PASS\nmore findings\n".to_owned(),
+        ] {
+            let captured = run(&text);
+            assert_eq!(
+                captured.verdict.as_deref(),
+                Some("VERDICT: PASS"),
+                "{text:?}"
+            );
+            assert!(!captured.verdict_invalid, "{text:?}");
+        }
+        let swallowed = run("```findings\n{}\nVERDICT: PASS\n");
+        assert!(swallowed.verdict.is_none() && !swallowed.verdict_invalid);
+        assert!(swallowed.verdict_cause.unwrap().contains("never closed"));
+        assert!(
+            run("nothing here\n")
+                .verdict_cause
+                .unwrap()
+                .contains("no VERDICT")
+        );
+    }
+
+    #[test]
+    fn overlong_declarations_still_count() {
         let long = " ".repeat(1100);
         for (text, valid) in [
             (format!("{long}VERDICT: FAIL\nVERDICT: PASS\n"), false),
             ("> VERDICT: FAIL\nVERDICT: PASS\n".to_owned(), true),
             ("1. VERDICT: FAIL\nVERDICT: PASS\n".to_owned(), false),
             ("2) VERDICT: FAIL\nVERDICT: PASS\n".to_owned(), false),
-            (
-                format!("VERDICT: PASS\n```handoff\n{{}}\n```{long}junk\n"),
-                false,
-            ),
         ] {
             assert_eq!(run(&text).verdict.is_some(), valid, "{text:?}");
         }
-        let mid = run("I will say the verdict: soon.\nVERDICT: PASS\n");
-        assert_eq!(mid.verdict.as_deref(), Some("VERDICT: PASS"));
     }
 
     #[test]
-    fn verdict_evidence_is_unique_final_and_independent_of_chunk_boundaries() {
+    fn verdict_evidence_is_unique_and_independent_of_chunk_boundaries() {
         for (text, expected, invalid) in [
             (
                 "Findings first.\nVERDICT: PASS\n\n".to_owned(),
@@ -518,8 +653,12 @@ mod tests {
             ),
             ("VERDICT: FAIL".to_owned(), Some("VERDICT: FAIL"), false),
             ("No verdict".to_owned(), None, false),
-            ("VERDICT: PASS\nmore text".to_owned(), None, true),
-            ("verdict: PASS\nVERDICT: PASS".to_owned(), None, true),
+            (
+                "VERDICT: PASS\nmore text".to_owned(),
+                Some("VERDICT: PASS"),
+                false,
+            ),
+            ("VERDICT: PASS\nVERDICT: PASS".to_owned(), None, true),
             (
                 "Quoted: VERDICT: PASS\nVERDICT: PASS".to_owned(),
                 Some("VERDICT: PASS"),
