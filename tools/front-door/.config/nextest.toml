@@ -17,6 +17,12 @@ slow-timeout = { period = "10s", terminate-after = 3 }
 filter = 'package(=provenant-run) & test(=delivery_tests::restart::delivery_restart_drives_pending_retryable_and_uncertain_receipts)'
 slow-timeout = { period = "10s", terminate-after = 9 }
 
+# Three independent Git/worktree fixtures each launch a provider and restart the
+# stopped writer in place, so one test makes six launches.
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [profile.ci.junit]
 path = "junit.xml"
 
@@ -80,6 +86,10 @@ not (
 
 [test-groups]
 serial-process = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 # This fixture runs two provider commands, each with its own 30-second wait.
 # Keep the outer limit above their combined budgets so failures reach assertions.

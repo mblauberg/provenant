@@ -324,11 +324,13 @@ fn admit_patch_for_retry(
             };
         }
         if revision(graph.checkpoint) != 0
-            || graph
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.state != NodeState::Pending || !node.attempts.is_empty())
+            || graph.checkpoint.nodes.iter().any(|node| {
+                // A row a `when` condition skipped at submission has not started.
+                let skipped_at_submission =
+                    node.state == NodeState::Skipped && node.skip_reason.is_some();
+                (node.state != NodeState::Pending && !skipped_at_submission)
+                    || !node.attempts.is_empty()
+            })
         {
             return Err(PatchError::new(
                 "started",

@@ -227,11 +227,21 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         return Ok(());
     }
     use provenant_fabric_runtime::graph;
-    struct Seed { actor: String, at: provenant_core::WallTime }
-    impl graph::AttemptOwner for Seed {
+    // A graph that stays open files its ask as a real inbox request, so a later
+    // close finds the request it links. An already expired ask cannot be filed
+    // there, so that graph keeps the host-less link and settles on its deadline.
+    struct Seed<'a> { actor: String, at: provenant_core::WallTime, inbox: bool,
+        file: &'a dyn Fn(graph::AskFiling<'_>) -> Result<graph::AskFiled, FacadeError> }
+    impl graph::AttemptOwner for Seed<'_> {
         type Error = FacadeError;
         fn actor(&self) -> String { self.actor.clone() }
         fn wall_now(&self) -> Option<provenant_core::WallTime> { Some(self.at) }
+        fn file_ask(&mut self, filing: graph::AskFiling<'_>) -> Result<graph::AskFiled, Self::Error> {
+            if !self.inbox {
+                return Ok(graph::AskFiled { request: filing.ask.ask_id.clone(), deadline: filing.ask.wake_at, closed: false });
+            }
+            (self.file)(filing)
+        }
         fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>,
             _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>)
             -> Result<graph::AttemptObservation, Self::Error> { Err(FacadeError::OwnerUnavailable) }
@@ -240,14 +250,25 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone()).map_err(|e| format!("roots: {e}"))?;
     let context = Context::open(roots.clone(), &rig.home, &rig.project).map_err(|e| format!("context: {e}"))?;
     let project = context.identity.project;
+    let actor = context.identity.inbox.actor.to_string();
+    let factory = Factory {
+        context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+    };
+    let file = |filing: graph::AskFiling<'_>| {
+        let cancel = CancelToken::new();
+        crate::fabric::owner::graph_ask_with(&factory, &cancel, filing.actor, &filing.ask.ask_id,
+            |service| crate::fabric::owner::graph_ask_file(service, &filing, &cancel))
+    };
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
-    let mut seed = Seed { actor: context.identity.inbox.actor.to_string(), at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
+    let mut seed = Seed { actor, file: &file, inbox: true, at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
     for id in ["a-missing", "b-present"] {
-        if id == "a-missing" { seed.at = now; }
-        else { seed.at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?; }
+        seed.inbox = id == "a-missing";
+        seed.at = if seed.inbox { now } else { provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":id, "decision_session":"chair-session",
             "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
@@ -273,11 +294,6 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     assert!(second.warnings.is_empty());
     assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
     assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_some());
-    let factory = Factory {
-        context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
-        executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-        assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
-    };
     factory.graph(GraphInput::Cancel { extra: Default::default(), id: "a-missing".into(), reason: None }, budget, &cancel)?;
     assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
     assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_none());
