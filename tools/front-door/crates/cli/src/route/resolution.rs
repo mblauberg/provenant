@@ -109,7 +109,12 @@ pub(super) fn quota_observations(
             })
             .flat_map(|a| &a.observed_models)
         {
-            models.insert(ModelId::parse(&format!("{}/{}", adapter, observed_model))?);
+            // Providers may list display names (with spaces) that are not
+            // model ids; skip those rather than refusing the whole resolution.
+            let Ok(model) = ModelId::parse(&format!("{}/{}", adapter, observed_model)) else {
+                continue;
+            };
+            models.insert(model);
         }
         models.extend(
             requested_models
