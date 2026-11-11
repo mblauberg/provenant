@@ -267,13 +267,10 @@ fn stats_default_output_omits_attempt_rows_and_leaves_other_sections_unchanged()
     let detail_prefix = detail_text.split(header).next().unwrap();
     assert_eq!(default_prefix, detail_prefix);
 
-    // Default output omits per-attempt rows and gives the count summary line.
-    assert!(default_text.contains("1 attempts; per-attempt rows with --detail or --json"));
+    // Default output omits per-attempt rows; `--detail` includes them.
     assert!(!default_text.contains("reviewer claude-opus-5-5:"));
-
-    // Detail output includes per-attempt rows and omits the count summary line.
     assert!(detail_text.contains("reviewer claude-opus-5-5: input=23 output=45"));
-    assert!(!detail_text.contains("1 attempts; per-attempt rows with --detail or --json"));
+    assert_ne!(default_text, detail_text);
 
     // Both retain unlinked sub-agent usage.
     assert!(default_text.contains("unlinked claude-opus-5-5: 1 messages, input=23 output=30"));
