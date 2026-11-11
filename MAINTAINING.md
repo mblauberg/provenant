@@ -282,6 +282,11 @@ provenant check release
 git diff --check
 ```
 
+Generated contract reference is not tracked. Read `provenant help --all`,
+`provenant config schema` and `--json` output; `scripts/generate-reference`
+renders the same sources into the ignored `docs/reference/`, and CI runs it
+(`--strict`) to prove they still render and uploads the result as an artefact.
+
 The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.
 
 Use `provenant check writing PATHS --rules general` for prose, with

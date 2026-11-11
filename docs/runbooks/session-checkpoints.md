@@ -159,7 +159,7 @@ the returned `next_cursor`; a byte limit may shorten a page. Entries are
 limited to 16 KiB. Log contents are not copied into demand telemetry.
 
 Each append applies the per-session age, count and size limits set under
-[`[retention]`](../reference/config-keys-all.md#host-retention-settings). Listing applies all
+`[retention]` (`provenant config schema --all`). Listing applies all
 three limits without changing storage, and full `gc` removes excess payloads
 even for idle sessions. Operation receipts are kept for the configured replay horizon,
 then pruned; aggregate appended/pruned counts survive. There is no lifetime

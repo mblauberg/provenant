@@ -405,7 +405,7 @@ def check_projections(root):
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
-    "README.md", "docs/worktrees.md", "docs/reference/schemas.md",
+    "README.md", "docs/worktrees.md",
     "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
 )
 DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"

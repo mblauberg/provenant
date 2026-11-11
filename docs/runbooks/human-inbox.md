@@ -146,8 +146,7 @@ chair actor and chair session must match. Stale revisions and already closed
 items conflict. Concurrent replacements have one winner. Saved answers, their
 delivery state and historical request revisions remain visible; supersession
 does not retract an answer already queued or consumed. The old item's closure
-reason names the replacement; the new request retains the backward link. See generated
-[CLI](../reference/cli-all.md) and [MCP](../reference/mcp-tools.md) references for syntax.
+reason names the replacement; the new request retains the backward link. See `provenant help --all` and the MCP `tools/list` response for syntax.
 
 ## Work links
 

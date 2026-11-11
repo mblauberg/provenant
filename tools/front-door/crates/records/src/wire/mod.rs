@@ -1,9 +1,9 @@
-//! Planned typed wire projections for the CLI, MCP and generated reference.
+//! Planned typed wire projections for the CLI and MCP.
 //!
 //! Each planned projection has a builder-written
 //! JSON Schema (draft 2020-12) beside it; tests validate serialised values
-//! against the schema, and `scripts/generate-reference --check` fails when the
-//! published schema files drift from [`published`].
+//! against the schema. `scripts/generate-reference` renders [`published`] into
+//! the untracked `docs/reference/schemas/`.
 //!
 //! # Versioning
 //!
@@ -183,7 +183,7 @@ pub fn mcp_output_schema(tool: &str) -> Option<Value> {
 pub const MCP_TOOLS: &[&str] = &["fabric_run", "fabric_output"];
 
 /// Every published schema as `(relative file name, schema)`, in stable order.
-/// `scripts/generate-reference` writes them under `docs/reference/schemas/`.
+/// `scripts/generate-reference` writes them under the untracked `docs/reference/schemas/`.
 pub fn published() -> Vec<(String, Value)> {
     let mut files = Vec::new();
     for command in COMMANDS {

@@ -7,8 +7,7 @@ Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/ingest/tests.rs`,
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
 prices) using the bundled price table, and exports a trace. It keeps a usage
-ledger of terminal attempts; there is no billing ledger or collector. Grammar is in the generated [CLI
-reference](../reference/cli-all.md); quota is specified in [routing](routing.md).
+ledger of terminal attempts; there is no billing ledger or collector. Grammar is in `provenant help --all`; quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
 `telemetry stats --by route` groups attempts by their resolved `model@effort`,
@@ -196,7 +195,7 @@ its cursor, so interruption can cause a reread but never skip committed input.
 
 Reads and stores are bounded and never follow links. Missing message timestamps
 are counted as skipped. Reaching the store cap stops additions visibly instead
-of manufacturing complete coverage. The [CLI reference](../reference/cli-all.md)
+of manufacturing complete coverage. `provenant help --all`
 owns invocation; `crates/telemetry/src/ingest.rs` owns limits and record layout.
 - Why (default): most Claude spend is the interactive chair and its native sub-agents,
   which no supervised attempt record sees.

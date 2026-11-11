@@ -189,8 +189,8 @@ sweep measured it; it still counts towards the cap and is reported as `recent`.
 A modification time more than five minutes in the future is clock skew and earns
 no grace. Zero turns the grace off. A test or run binary that runs longer than
 the grace without writing under `target/` is unprotected once its Cargo locks
-are free. Defaults and ranges are in the
-[advanced reference](../reference/config-keys-all.md#host-lane-build-settings).
+are free. Defaults and ranges are in
+`provenant config schema --all`.
 
 Collection runs on two events:
 

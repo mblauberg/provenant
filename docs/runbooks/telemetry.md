@@ -306,7 +306,7 @@ Prices are USD unless `currency` says otherwise, and nothing converts currencies
 shows both. An account may also list extra `directories` signed into it; native
 ingest attributes them to the same label, so one account signed in to two config
 directories counts once. The keys are listed in
-[config keys](../reference/config-keys.md). Mileage reads these prices; the
+`provenant config schema`. Mileage reads these prices; the
 value multiple is not built yet.
 
 ## Routing

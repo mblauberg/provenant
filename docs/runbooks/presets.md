@@ -104,7 +104,7 @@ to pinned readers. Writers keep one
 writer per worktree, so `shared` isolation is refused on a writer node. Secret
 redaction, confinement and object integrity are not settings and stay on in
 every preset. The matching knobs are `lanes.isolation`, `lanes.supervision` and
-`lanes.receipts` in the [configuration reference](../reference/config-keys.md).
+`lanes.receipts` in `provenant config schema`.
 
 ## Hand off long writers before context grows
 

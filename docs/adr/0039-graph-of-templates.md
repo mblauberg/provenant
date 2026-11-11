@@ -116,7 +116,7 @@ advances pending graphs without a second scheduler in the CLI or MCP façade
 
 ## Interface
 
-The [generated command reference](../reference/cli.md) owns commands and flags.
+`provenant help` owns commands and flags.
 CLI and MCP call the same graph service. Inside a lane, submission adds child
 work through the host relay; it does not create a private child store.
 

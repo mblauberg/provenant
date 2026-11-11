@@ -17,17 +17,15 @@ gate)` identifies a review obligation.
 Specs do not restate flags, schemas, tables or file layouts. Link or
 generate them instead:
 
-- Core CLI grammar: [`docs/reference/cli.md`](../reference/cli.md), from
-  `provenant help --json`. The [complete CLI reference](../reference/cli-all.md)
-  comes from `provenant help --all --json`.
-- MCP tools: [`docs/reference/mcp-tools.md`](../reference/mcp-tools.md),
-  from `crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
-- Config keys: [`docs/reference/config-keys.md`](../reference/config-keys.md),
-  from `config/harness-knobs.json`.
+- Core CLI grammar: `provenant help --json`; every command and flag:
+  `provenant help --all --json`.
+- MCP tools: the MCP `tools/list` response, from
+  `crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
+- Config keys: `provenant config schema`, from `config/harness-knobs.json`.
 - Seatbelt profiles: `crates/providers/tests/snapshots/seatbelt/`.
 
-`scripts/generate-reference` writes the CLI, MCP and configuration references;
-provider goldens are checked by the Rust snapshot test.
+`scripts/generate-reference` renders them as Markdown under the untracked
+`docs/reference/`; provider goldens are checked by the Rust snapshot test.
 
 ## Area specs
 
@@ -56,7 +54,7 @@ changing a cross-cutting rule.
 | State roots, identities, layout and environment | [State](state.md#roots-and-identities) |
 | Envelope and exits | [CLI](cli.md#one-bounded-envelope-never-truncated) |
 | Wait budgets and observation | [CLI](cli.md#waits-are-readers) |
-| Command grammar and checks | [CLI](cli.md), [generated reference](../reference/cli.md) |
+| Command grammar and checks | [CLI](cli.md), `provenant help --all` |
 | Selection, accounts and quota | [Routing](routing.md), [readiness](route-readiness.md) |
 | Admission, attempts and publication | [Run](run.md), [retry owner](retry-owner.md) |
 | Coordination, graph execution and peer hosts | [Fabric](fabric.md) |
