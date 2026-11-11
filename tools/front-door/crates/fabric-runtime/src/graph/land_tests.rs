@@ -47,6 +47,8 @@ struct Owner {
     policy: Option<LandChoice>,
     reply: Option<String>,
     asked: usize,
+    /// Every request filed, in order.
+    filed: Vec<AskRequest>,
     writer_branch: Option<String>,
     /// The newest commit a writer delivered, which CI reports as the head.
     head: Option<String>,
@@ -148,6 +150,16 @@ impl AttemptOwner for Owner {
     }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
+    }
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        if !self.filed.iter().any(|ask| ask.ask_id == filing.ask.ask_id) {
+            self.filed.push(filing.ask.clone());
+        }
+        Ok(AskFiled {
+            request: filing.ask.ask_id.clone(),
+            deadline: filing.ask.wake_at,
+            closed: false,
+        })
     }
     fn node_ask(&mut self, _: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked += 1;
@@ -753,11 +765,13 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
         (ask.ask_id.as_str(), ask.kind, ask.session.as_str()),
         ("land.ask-1", AskKind::Land, "chair")
     );
-    let options: Vec<_> = ask.options.iter().map(|o| o.id.as_str()).collect();
+    let filed = &owner.filed[0];
+    let options: Vec<_> = filed.options.iter().map(|o| o.id.as_str()).collect();
     assert_eq!(options, ["hold"]);
-    assert!(ask.body.contains(REPAIR_HEAD) && ask.body.contains("crucial tier asks first"));
+    assert!(filed.body.contains(REPAIR_HEAD) && filed.body.contains("crucial tier asks first"));
     assert!(
-        ask.body
+        filed
+            .body
             .contains(&format!("provenant land N --head {REPAIR_HEAD}"))
     );
 
@@ -780,7 +794,7 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
             .excerpt
             .contains("the chair landed it by hand after land.ask-1")
     );
-    assert!(checkpoint.asks[0].resolved);
+    assert!(checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -859,7 +873,7 @@ fn a_configured_policy_overrides_the_default_and_records_its_source() {
         ),
         (LandPolicy::Ask, LandSource::Project, None)
     );
-    assert!(checkpoint.asks[0].body.contains("project config"));
+    assert!(owner.filed[0].body.contains("project config"));
     assert!(owner.lands.is_empty());
 }
 

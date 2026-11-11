@@ -99,6 +99,8 @@ struct FakeOwner {
     answers: std::collections::BTreeMap<String, AskReply>,
     now: Option<provenant_core::WallTime>,
     asked: Vec<String>,
+    /// Every request filed, in order; a repeat files nothing.
+    filed: Vec<AskRequest>,
     closed_asks: Vec<String>,
     owner_notifications: Vec<String>,
     file_requests: Vec<Vec<InputRequest>>,
@@ -271,12 +273,25 @@ impl AttemptOwner for FakeOwner {
     fn actor(&self) -> String {
         self.actor.clone()
     }
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        let id = &filing.ask.ask_id;
+        let first = self.filed.iter().find(|ask| &ask.ask_id == id);
+        let deadline = first.map_or(filing.ask.wake_at, |ask| ask.wake_at);
+        if first.is_none() {
+            self.filed.push(filing.ask.clone());
+        }
+        Ok(AskFiled {
+            request: id.clone(),
+            deadline,
+            closed: self.closed_asks.contains(id),
+        })
+    }
     fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked.push(scope.ask.ask_id.clone());
         Ok(self.answers.get(&scope.ask.ask_id).cloned())
     }
-    fn notify_owner(&mut self, scope: AskScope<'_>) -> Result<bool, Self::Error> {
-        self.owner_notifications.push(scope.ask.ask_id.clone());
+    fn notify_owner(&mut self, filing: AskFiling<'_>) -> Result<bool, Self::Error> {
+        self.owner_notifications.push(filing.ask.ask_id.clone());
         Ok(true)
     }
     fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {

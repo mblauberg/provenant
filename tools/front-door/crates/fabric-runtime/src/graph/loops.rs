@@ -885,53 +885,54 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             return Ok(None);
         };
-        asks::identity::<R, J::Error>(checkpoint, owner)?;
         let ask_id = format!("{}.rounds-{rounds}", node.id);
+        let paused = format!(
+            "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
+            node.id
+        );
+        if asks::withdrawn(checkpoint, &node.id) {
+            return ask_closed(index, &node.id, rounds, checkpoint, journal);
+        }
         let position = match checkpoint.asks.iter().position(|ask| ask.ask_id == ask_id) {
             Some(position) => position,
             None => {
-                let ask = asks::loop_ask(&checkpoint.graph_id, &node.id, rounds, session);
-                checkpoint.asks.push(ask);
-                checkpoint.asks.len() - 1
+                let request = asks::loop_ask(&checkpoint.graph_id, &node.id, rounds, session);
+                match asks::file(checkpoint, owner, journal, &request) {
+                    Ok((_, true)) => {
+                        // The request was closed with no answer. Another
+                        // decision comes through graph resume.
+                        return ask_closed(index, &node.id, rounds, checkpoint, journal);
+                    }
+                    Ok((link, false)) => {
+                        checkpoint.asks.push(link);
+                        checkpoint.asks.len() - 1
+                    }
+                    Err(GraphError::Run(error)) => {
+                        pause_invalid_decision(
+                            checkpoint,
+                            &node.id,
+                            &format!("inbox unavailable: {error}"),
+                            journal,
+                        )?;
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
         journal.save(checkpoint).map_err(GraphError::Journal)?;
-        if checkpoint.asks[position].resolved {
-            // A recorded answer is applied again after a crash; an ask
-            // resolved without one leaves the decision to graph resume.
-            if let Some(answer) = checkpoint.asks[position].answer.clone() {
-                return apply(&node.id, rounds, &answer, checkpoint, journal);
-            }
-            if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
-                checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
-                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
-                checkpoint.nodes[index].loop_pause = Some(format!(
-                    "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
-                    node.id, node.id, node.id
-                ));
-                refresh_pause(checkpoint);
-                journal.save(checkpoint).map_err(GraphError::Journal)?;
-            }
-            return Ok(None);
-        }
         match asks::poll(checkpoint, position, owner) {
             Ok(reply) => {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
                 checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
-                checkpoint.nodes[index].loop_pause = Some(format!(
-                    "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
-                    node.id
-                ));
+                checkpoint.nodes[index].loop_pause = Some(paused);
                 refresh_pause(checkpoint);
                 let Some(reply) = reply else {
                     journal.save(checkpoint).map_err(GraphError::Journal)?;
                     return Ok(None);
                 };
+                // The inbox keeps the answer, so a crash replays this read.
                 let answer = asks::answered(reply);
-                let ask = &mut checkpoint.asks[position];
-                ask.answer = Some(answer.clone());
-                ask.resolved = true;
-                journal.save(checkpoint).map_err(GraphError::Journal)?;
                 return apply(&node.id, rounds, &answer, checkpoint, journal);
             }
             Err(error) => {
@@ -948,11 +949,31 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     Ok(None)
 }
 
+/// The ask for an exhausted loop was closed without an answer.
+fn ask_closed<R: Error + 'static, J: GraphJournal>(
+    index: usize,
+    node: &str,
+    rounds: usize,
+    checkpoint: &mut GraphCheckpoint,
+    journal: &mut J,
+) -> Result<Option<String>, GraphError<R, J::Error>> {
+    if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
+        checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
+        checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
+        checkpoint.nodes[index].loop_pause = Some(format!(
+            "loop {node} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept"
+        ));
+        refresh_pause(checkpoint);
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    Ok(None)
+}
+
 /// Turn a recorded loop answer into its extension, or pause on a bad one.
 fn apply<R: Error + 'static, J: GraphJournal>(
     node: &str,
     rounds: usize,
-    answer: &asks::AskAnswer,
+    answer: &asks::Answer,
     checkpoint: &mut GraphCheckpoint,
     journal: &mut J,
 ) -> Result<Option<String>, GraphError<R, J::Error>> {
@@ -972,19 +993,6 @@ fn apply<R: Error + 'static, J: GraphJournal>(
     match extension {
         Ok(extension) => Ok(Some(extension)),
         Err(reason) => {
-            for ask in &mut checkpoint.asks {
-                if ask.node.as_deref() == Some(node)
-                    && ask.rounds == Some(rounds)
-                    && let Some(answer) = ask.answer.as_mut()
-                {
-                    answer
-                        .rejection_code
-                        .get_or_insert_with(|| "invalid_loop_decision".into());
-                    answer
-                        .rejected
-                        .get_or_insert_with(|| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-                }
-            }
             pause_invalid_decision(checkpoint, node, &reason, journal)?;
             Ok(None)
         }

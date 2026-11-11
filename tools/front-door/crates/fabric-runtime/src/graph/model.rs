@@ -1082,9 +1082,10 @@ pub struct GraphCheckpoint {
     pub settlements: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
-    /// Inbox decisions raised by loops, decide nodes and pauses, by ask ID.
+    /// Links to the inbox requests raised by loops, decide nodes, lands and
+    /// pauses, by ask ID. The inbox holds the question and the answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub asks: Vec<NodeAsk>,
+    pub asks: Vec<AskLink>,
     /// Actor every ask is raised under, recorded before the first ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_actor: Option<String>,

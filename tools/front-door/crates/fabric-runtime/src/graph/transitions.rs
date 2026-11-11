@@ -1383,22 +1383,6 @@ pub(super) fn refresh_structure_pause(
     structural_pause
 }
 
-pub(super) fn reject_loop_decision(checkpoint: &mut GraphCheckpoint, node_id: &str, reason: &str) {
-    for ask in &mut checkpoint.asks {
-        if ask.node.as_deref() == Some(node_id) {
-            ask.resolved = true;
-            if let Some(answer) = ask.answer.as_mut() {
-                answer
-                    .rejection_code
-                    .get_or_insert_with(|| "invalid_loop_decision".into());
-                answer
-                    .rejected
-                    .get_or_insert_with(|| bounded(reason, MAX_ADVANCE_ERROR_BYTES));
-            }
-        }
-    }
-}
-
 pub(super) fn refresh_limit_notes(
     checkpoint: &mut GraphCheckpoint,
     document: &GraphDocument,

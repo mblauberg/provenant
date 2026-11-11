@@ -146,11 +146,20 @@ delivery, and an extension never adds rounds twice.
 
 ### Node asks and decide nodes
 
-A node ask is a blocking inbox decision stored on the checkpoint and replayed
-identically. A decide node's chosen option, or its default at the deadline,
-becomes its verdict; an answer is saved before it is acted on.
-- Why: graphs need human decisions at known points with a safe default.
-- Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`
+A node ask is one blocking request in the human inbox, which is the only store
+of its question, options and answer. The checkpoint keeps just a link: the ask
+ID, kind, node, session, deadline and the request ID. Filing is idempotent by an
+operation ID derived from the graph instance, the ask and the session, so a
+replay after a crash finds the same open request and never files a second. An
+answer still needs the held authority, whether it arrives by chat or the CLI.
+A decide node's chosen option, or its default at the deadline, becomes its
+verdict; the link is dropped in the same save as the verdict. A cancelled graph
+closes the requests it still owns.
+- Why: the owner and the chair read one list, and two copies of a question could
+  disagree.
+- Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`;
+  `crates/fabric-runtime/src/graph/ask_link_tests.rs`;
+  `tests/inbox.rs::console_overview_and_the_cli_list_the_same_open_asks`
 
 ### Land nodes
 

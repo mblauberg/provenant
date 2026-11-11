@@ -762,7 +762,7 @@ mod graph_review_tests {
 mod graph_ask_inbox_tests {
     use super::*;
     use provenant_fabric_runtime::{
-        graph::{AskScope, LoopDecision, loop_ask},
+        graph::{AskFiling, AskLink, AskScope, LoopDecision, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
     use provenant_records::inbox::{
@@ -791,10 +791,10 @@ mod graph_ask_inbox_tests {
         ask.title = "Principal redesign".into();
         ask.body = "Delivery continues within approved scope: smallest slice and acceptance evidence".into();
         let actor = identity.inbox.actor.to_string();
-        let scope = AskScope { graph_id:"fixture", instance_id:"instance-one", actor:&actor, ask:&ask };
+        let filing = AskFiling { graph_id:"fixture", instance_id:"instance-one", actor:&actor, ask:&ask };
         let mut receipts = Vec::new();
         for _ in 0..2 {
-            let input = graph_notification_input(&scope)?;
+            let input = graph_notification_input(&filing)?;
             input.validate()?;
             let InboxResult::Saved { receipt } = service.execute(input, &cancel)? else {
                 return Err("missing notification receipt".into());
@@ -814,7 +814,7 @@ mod graph_ask_inbox_tests {
     }
 
     #[test]
-    fn graph_ask_inbox_replays_requests_and_acknowledged_answers()
+    fn graph_ask_inbox_files_once_and_reads_answers_from_any_channel()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
@@ -834,6 +834,17 @@ mod graph_ask_inbox_tests {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
+        let actor = identity.inbox.actor.to_string();
+        let link = |ask: &provenant_fabric_runtime::graph::AskRequest, request: String| AskLink {
+            extra: Default::default(),
+            ask_id: ask.ask_id.clone(),
+            kind: ask.kind,
+            node: ask.node.clone(),
+            rounds: ask.rounds,
+            session: ask.session.clone(),
+            wake_at: ask.wake_at,
+            request,
+        };
         for (index, (option, text, expected)) in [
             (Some("stop"), None, Some(LoopDecision::Stop)),
             (Some("accept"), None, Some(LoopDecision::Accept)),
@@ -862,23 +873,50 @@ mod graph_ask_inbox_tests {
                         .checked_add(provenant_core::DurationMicros::from_seconds(3600)?)?,
                 );
             }
-            let actor = identity.inbox.actor.to_string();
-            let scope = AskScope {
+            let filing = AskFiling {
                 graph_id: "fixture",
                 instance_id: "instance-one",
                 actor: &actor,
                 ask: &ask,
             };
+            let filed = graph_ask_file(&service, &filing, &cancel)?;
+            assert!(!filed.closed);
+            // Filing again, even with a deadline recomputed from the clock,
+            // finds the request filed first.
+            let mut later = ask.clone();
+            later.wake_at = later.wake_at.map(|time| {
+                time.checked_add(provenant_core::DurationMicros::from_seconds(5).unwrap())
+                    .unwrap()
+            });
+            let again = graph_ask_file(
+                &service,
+                &AskFiling { ask: &later, ..filing },
+                &cancel,
+            )?;
+            assert_eq!(again, filed);
+            assert_eq!(filed.deadline, ask.wake_at);
+            let request: provenant_core::HumanRequestId = filed.request.parse()?;
+            let stored = link(&ask, filed.request.clone());
+            let scope = AskScope { actor: &actor, ask: &stored };
             assert_eq!(graph_ask_poll(&service, &scope, &cancel)?, None);
-            let InboxResult::Saved { receipt } =
-                service.execute(graph_ask_input(&scope)?, &cancel)?
+            let InboxResult::Item { item, .. } = service.execute(
+                InboxInput::List {
+                    extra: Default::default(),
+                    id: Some(request),
+                    session: None,
+                    state: InboxFilter::All,
+                    limit: 1,
+                    cursor: None,
+                },
+                &cancel,
+            )?
             else {
-                return Err("missing ask receipt".into());
+                return Err("missing request".into());
             };
             service.execute(
                 InboxInput::Answer {
                     extra: Default::default(),
-                    id: receipt.request_id,
+                    id: request,
                     action: if option.is_some() {
                         AnswerAction::Choose
                     } else {
@@ -886,8 +924,13 @@ mod graph_ask_inbox_tests {
                     },
                     option_id: option.map(String::from),
                     text: text.map(String::from),
-                    expect_revision: receipt.revision,
-                    channel: InteractionChannel::Cli,
+                    expect_revision: item.request.revision,
+                    // Chat and the command line are the same answer to the graph.
+                    channel: if index % 2 == 0 {
+                        InteractionChannel::Chat
+                    } else {
+                        InteractionChannel::Cli
+                    },
                     operation_id: None,
                 },
                 &cancel,
@@ -908,7 +951,7 @@ mod graph_ask_inbox_tests {
             let InboxResult::Item { item, .. } = service.execute(
                 InboxInput::List {
                     extra: Default::default(),
-                    id: Some(receipt.request_id),
+                    id: Some(request),
                     session: None,
                     state: InboxFilter::All,
                     limit: 1,
@@ -929,22 +972,24 @@ mod graph_ask_inbox_tests {
             assert_eq!(item.request.request.recommended_option_id, ask.default);
             assert_eq!(item.request.request.deadline, ask.wake_at);
             if index == 1 {
-                let fresh = AskScope {
+                // The same ask under another graph instance is a new question.
+                let fresh = AskFiling {
                     instance_id: "instance-two",
-                    ..scope
+                    ..filing
                 };
-                assert_eq!(
-                    graph_ask_poll(&service, &fresh, &cancel)?,
-                    None,
-                    "same document recreated state must ask again"
-                );
-                graph_ask_close(&service, &fresh, identity.inbox.actor, &cancel)?;
+                let other = graph_ask_file(&service, &fresh, &cancel)?;
+                assert_ne!(other.request, filed.request);
+                let other_link = link(&ask, other.request);
+                let other_scope = AskScope { actor: &actor, ask: &other_link };
+                assert_eq!(graph_ask_poll(&service, &other_scope, &cancel)?, None);
+                graph_ask_close(&service, &other_scope, &cancel)?;
+                assert_eq!(graph_ask_poll(&service, &other_scope, &cancel)?, None);
             }
             if index == 0 {
                 service.execute(
                     InboxInput::Close {
                         extra: Default::default(),
-                        id: receipt.request_id,
+                        id: request,
                         state: RequestState::Superseded,
                         reason: "Replace the decision".into(),
                         expect_revision: item.request.revision,
@@ -957,10 +1002,11 @@ mod graph_ask_inbox_tests {
                     None,
                     "a superseded request reused its historical answer"
                 );
+                assert!(graph_ask_file(&service, &filing, &cancel)?.closed);
             }
-            graph_ask_close(&service, &scope, identity.inbox.actor, &cancel)?;
-            graph_ask_close(&service, &scope, identity.inbox.actor, &cancel)?;
-            assert_eq!(graph_ask_poll(&service, &scope, &cancel)?, None);
+            // Closing never reopens or withdraws an answered request.
+            graph_ask_close(&service, &scope, &cancel)?;
+            graph_ask_close(&service, &scope, &cancel)?;
         }
         let InboxResult::Listed { items, .. } = service.execute(
             InboxInput::List {
@@ -981,10 +1027,17 @@ mod graph_ask_inbox_tests {
             6,
             "replay or cleanup created duplicate decisions"
         );
-        assert!(
+        let answered = items
+            .iter()
+            .filter(|item| item.state == RequestState::Answered)
+            .count();
+        assert_eq!(answered, 4);
+        assert_eq!(
             items
                 .iter()
-                .all(|item| item.state == RequestState::Superseded)
+                .filter(|item| item.state == RequestState::Superseded)
+                .count(),
+            2
         );
         Ok(())
     }
@@ -1009,6 +1062,12 @@ mod graph_ask_inbox_tests {
         fn actor(&self) -> String {
             self.actor.clone()
         }
+        fn file_ask(
+            &mut self,
+            filing: AskFiling<'_>,
+        ) -> Result<provenant_fabric_runtime::graph::AskFiled, FacadeError> {
+            graph_ask_file(self.service, &filing, self.cancel)
+        }
         fn node_ask(
             &mut self,
             scope: AskScope<'_>,
@@ -1016,8 +1075,7 @@ mod graph_ask_inbox_tests {
             graph_ask_poll(self.service, &scope, self.cancel)
         }
         fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), FacadeError> {
-            let actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
-            graph_ask_close(self.service, &scope, actor, self.cancel)
+            graph_ask_close(self.service, &scope, self.cancel)
         }
         fn observe_or_start(
             &mut self,
@@ -1051,6 +1109,99 @@ mod graph_ask_inbox_tests {
             self.0 = Some(checkpoint.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn graph_ask_is_one_open_request_and_a_chat_answer_resumes_the_node()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphDocument, GraphStatus, NodeState, advance_with_budget,
+        };
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
+        let mut owner = InboxOwner {
+            service: &service,
+            clock: &clock,
+            cancel: &cancel,
+            actor: identity.inbox.actor.to_string(),
+        };
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "chat-answer", "decision_session": "chair-session",
+            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {
+                "question": "Ship the change?",
+                "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
+        }))?;
+        let mut journal = MemoryJournal::default();
+        let limits = Default::default();
+        let graph_budget = Default::default();
+        let list = |state| {
+            service.execute(
+                InboxInput::List {
+                    extra: Default::default(),
+                    id: None,
+                    session: Some("chair-session".into()),
+                    state,
+                    limit: 50,
+                    cursor: None,
+                },
+                &cancel,
+            )
+        };
+        // Saving the checkpoint twice leaves one open request.
+        for _ in 0..2 {
+            let run =
+                advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+            assert_eq!(run.status, GraphStatus::Pending);
+        }
+        let InboxResult::Listed { items, .. } = list(InboxFilter::Open)? else {
+            return Err("missing inbox listing".into());
+        };
+        let [open] = &items[..] else {
+            return Err("expected exactly one open request".into());
+        };
+        service.execute(
+            InboxInput::Answer {
+                extra: Default::default(),
+                id: open.id,
+                action: AnswerAction::Choose,
+                option_id: Some("hold".into()),
+                text: None,
+                expect_revision: open.revision,
+                channel: InteractionChannel::Chat,
+                operation_id: None,
+            },
+            &cancel,
+        )?;
+        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert!(run.checkpoint.asks.is_empty());
+        let InboxResult::Listed { items, .. } = list(InboxFilter::Open)? else {
+            return Err("missing inbox listing".into());
+        };
+        assert!(items.is_empty(), "the answered request is still open");
+        let InboxResult::Listed { items, .. } = list(InboxFilter::All)? else {
+            return Err("missing inbox listing".into());
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].state, RequestState::Answered);
+        Ok(())
     }
 
     #[test]
@@ -1109,7 +1260,6 @@ mod graph_ask_inbox_tests {
         }
         let checkpoint = journal.0.as_ref().ok_or("missing checkpoint")?;
         assert_eq!(checkpoint.asks[0].ask_id, "choose.ask-3");
-        assert_eq!(checkpoint.asks[0].inbox_error, None);
         let InboxResult::Listed { items, .. } = service.execute(
             InboxInput::List {
                 extra: Default::default(),
