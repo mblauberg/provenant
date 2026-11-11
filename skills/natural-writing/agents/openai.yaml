@@ -1,4 +1,0 @@
-interface:
-  display_name: "Natural Writing"
-  short_description: "Natural, direct prose without factual drift"
-  default_prompt: "Use $natural-writing to rewrite this general-purpose draft in a natural, direct voice while preserving facts, citations, numbers, meaning, and intent."

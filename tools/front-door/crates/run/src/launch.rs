@@ -833,6 +833,7 @@ pub enum RefusalKind {
     WorktreeBusy,
     PriorityUnavailable,
     StoredPromptUnreadable,
+    CloudPlacementRemoved,
     InvalidWriteGrantPath,
     WriteGrantsLimit(provenant_records::diagnostic::ResourceFact),
     Handoff,
@@ -899,7 +900,7 @@ impl RefusalKind {
             | Self::PolicyBoundary(class) => *class,
             Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
             Self::RetainedImport { .. } => B::LaneGit,
-            Self::StoredPromptUnreadable => B::Authority,
+            Self::StoredPromptUnreadable | Self::CloudPlacementRemoved => B::Authority,
             Self::Policy
             | Self::Preparation
             | Self::PacingReserve
@@ -1109,15 +1110,6 @@ impl RunStore {
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
-            // Never hand a cloud attempt to the local supervisor, including
-            // during recovery after the submitting process exits.
-            if request
-                .tasks
-                .iter()
-                .any(|task| task.task_id == record.task_id && task.cloud.is_some())
-            {
-                continue;
-            }
             let now = || {
                 call.clock
                     .wall_now()
@@ -1130,6 +1122,37 @@ impl RunStore {
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
+            // A request stored before cloud placement was removed still names
+            // `cloud`. Never hand it to the local supervisor; settle it so
+            // status, reconcile and gc can clear the run.
+            if task.extra.contains_key("cloud") {
+                let cause = TerminalCause::CloudPlacementRemoved;
+                match self.withdraw_with_preparation_failure(
+                    id,
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Queued {
+                            extra: Default::default(),
+                        },
+                        outcome: Outcome::Rejected,
+                        reason: cause.detail(),
+                        finished_at: now()?,
+                        failure: None,
+                        terminal_cause: Some(cause),
+                        terminal_note: None,
+                    },
+                    call,
+                ) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
+                }
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: cause.detail().to_owned(),
+                    kind: RefusalKind::CloudPlacementRemoved,
+                });
+                continue;
+            }
             let resume = if record.continuation.as_deref() == Some("automatic") {
                 record
                     .retry_of

@@ -607,41 +607,12 @@ fn explain_compiles_template_parameters_and_over_without_graph_state() -> Result
 }
 
 #[test]
-fn cloud_placement_explain_and_invalid_input_paths() -> Result {
+fn cloud_placement_is_refused_and_names_the_launch_command() -> Result {
     let rig = GraphProject::new()?;
-    let brief = rig.project.join("brief.md");
-    std::fs::write(&brief, "Count the runbooks.")?;
-    let brief = brief.to_str().ok_or("brief path")?;
-    for (provider, environment) in [("claude", ""), ("codex", ",environment='provenant'")] {
-        let setting = format!(
-            "attempt.cloud={{target='verify',provider='{provider}'{environment},repository='mblauberg/provenant',branch='main',model='test-model',deadline_seconds=1800}}"
-        );
-        let (output, value) = rig.run(&[
-            "run",
-            "--file",
-            brief,
-            "--mode",
-            "read-only",
-            "--set",
-            &setting,
-            "--explain",
-        ])?;
-        assert!(output.status.success(), "{value}");
-        let placement = &value["data"]["document"]["nodes"][0]["attempt"]["placement"];
-        assert_eq!(placement["provider"], provider);
-        assert_eq!(
-            placement["environment"],
-            if provider == "claude" {
-                ""
-            } else {
-                "provenant"
-            }
-        );
-    }
-    let graph = rig.project.join("invalid.json");
+    let graph = rig.project.join("cloud.json");
     std::fs::write(
         &graph,
-        r#"{"schema_version":1,"graph_id":"bad","nodes":[{"id":"x","access":"read_only","prompt":"inspect","attempt":{"cloud":{"target":"verify","provider":"claude","repository":"owner/repo","branch":"main","model":"test","deadline_seconds":"secret-value"}},"route":{"adapter":"claude","model":"test"}}]}"#,
+        r#"{"schema_version":1,"graph_id":"cloud","nodes":[{"id":"x","access":"read_only","prompt":"inspect","attempt":{"cloud":{"target":"verify","provider":"claude"}},"route":{"adapter":"claude","model":"test"}}]}"#,
     )?;
     let (output, value) = rig.run(&[
         "run",
@@ -650,101 +621,8 @@ fn cloud_placement_explain_and_invalid_input_paths() -> Result {
         "--explain",
     ])?;
     assert!(!output.status.success(), "{value}");
-    let error = value.to_string();
-    assert!(
-        error.contains("nodes[0].attempt.cloud.deadline_seconds"),
-        "{error}"
-    );
-    assert!(error.contains("invalid type or value"), "{error}");
-    assert!(!error.contains("secret-value"));
-    let valid_graph = std::fs::read_to_string(&graph)?.replace("\"secret-value\"", "1800");
-    std::fs::write(&graph, valid_graph)?;
-    let (output, value) = rig.run(&[
-        "run",
-        "--file",
-        graph.to_str().ok_or("graph path")?,
-        "--explain",
-    ])?;
-    assert!(output.status.success(), "{value}");
-    assert_eq!(
-        value["data"]["document"]["nodes"][0]["attempt"]["placement"]["provider"],
-        "claude"
-    );
-    let (output, value) = rig.run(&[
-        "run",
-        "Inspect",
-        "--set",
-        "attempt.cloud={target='verify'}",
-        "--explain",
-    ])?;
-    assert!(!output.status.success(), "{value}");
-    let error = value.to_string();
-    assert!(error.contains("attempt.cloud.provider"), "{error}");
-    assert!(error.contains("required field is missing"), "{error}");
-    let (output, value) = rig.run(&["run", "Inspect", "--set", "attempt.cloud={", "--explain"])?;
-    assert!(!output.status.success(), "{value}");
-    assert!(
-        value
-            .to_string()
-            .contains("--set `attempt.cloud`: value is not valid TOML"),
-        "{value}"
-    );
-    Ok(())
-}
-
-#[test]
-fn cloud_set_form_reaches_submission_for_both_providers() -> Result {
-    use std::os::unix::fs::PermissionsExt;
-    for (provider, target, environment, model) in [
-        (
-            "codex",
-            "codex-cloud",
-            ",environment='provenant'",
-            "gpt-6.1-sol",
-        ),
-        ("claude", "claude-hosted", "", "claude-sonnet-5-5"),
-    ] {
-        let rig = GraphProject::new()?;
-        let bin = rig.temp.path().join("bin");
-        std::fs::create_dir(&bin)?;
-        let stub = bin.join(provider);
-        let expected = if provider == "codex" {
-            "cloud exec"
-        } else {
-            "--cloud"
-        };
-        std::fs::write(
-            &stub,
-            format!(
-                "#!/bin/sh\ncase \"$*\" in '{expected}'*) ;; *) exit 8;; esac\nprintf submitted > \"$CLOUD_TEST_MARKER\"\nprintf '{{\"id\":\"fake-job\"}}'\n"
-            ),
-        )?;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700))?;
-        let marker = rig.temp.path().join("submitted");
-        let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ));
-        let brief = rig.project.join("brief.md");
-        std::fs::write(&brief, "Count the runbooks.")?;
-        let setting = format!(
-            "attempt.cloud={{target='{target}',provider='{provider}'{environment},repository='mblauberg/provenant',branch='main',model='{model}',deadline_seconds=1800}}"
-        );
-        let output = rig
-            .command()
-            .env("PATH", std::env::join_paths(paths)?)
-            .env("CLOUD_TEST_MARKER", &marker)
-            .args(["run", "--file"])
-            .arg(&brief)
-            .args(["--mode", "read-only", "--set", &setting])
-            .output()?;
-        let value: Value = serde_json::from_slice(&output.stdout)?;
-        assert!(
-            marker.exists(),
-            "provider {provider}: {value}; {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(value.to_string().contains("cloud launch"), "{value}");
+    assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
 
@@ -1801,5 +1679,108 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             );
         }
     }
+    Ok(())
+}
+
+/// The newest stored prompt of a graph node, read from its checkpoint.
+fn stored_prompt(rig: &GraphProject, graph: &str, node: &str) -> Result<(String, usize)> {
+    use provenant_core::{RootInputs, StateRoot};
+    use provenant_fabric_runtime::graph::FileJournal;
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| *name == *format!("graph-{graph}.json"))
+        })
+        .ok_or("checkpoint file")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let checkpoint = FileJournal::read_checkpoint(&state, project, graph)?.ok_or("checkpoint")?;
+    let prompt = checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .flat_map(|patch| &patch.replaced)
+        .rfind(|candidate| candidate.id == node)
+        .map(|candidate| candidate.prompt.clone())
+        .ok_or("replacement node")?;
+    let previous = checkpoint
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == node)
+        .map_or(0, |candidate| candidate.previous_attempts.len());
+    Ok((prompt, previous))
+}
+
+fn settled_task_graph(rig: &GraphProject) -> Result<String> {
+    let (_, started) = rig.run(&[
+        "run",
+        "old brief",
+        "--use",
+        "task",
+        "--model",
+        "fixture/model",
+        "--wait=10s",
+    ])?;
+    let id = started["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("graph id: {started}"))?;
+    assert_eq!(
+        started["data"]["checkpoint"]["nodes"][0]["state"], "failed",
+        "{started}"
+    );
+    Ok(id.to_owned())
+}
+
+#[test]
+fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
+    for qualified in [true, false] {
+        let rig = GraphProject::new()?;
+        let id = settled_task_graph(&rig)?;
+        let target = if qualified {
+            format!("{id}/task")
+        } else {
+            id.clone()
+        };
+        let brief = "line one\nline two: corrected scope\n";
+        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
+        assert!(output.status.success(), "{target}: {retried}");
+        let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
+        assert_eq!(prompt, brief, "{target}");
+        assert!(previous > 0, "started attempts are kept: {target}");
+    }
+    Ok(())
+}
+
+#[test]
+fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":1,"graph_id":"two-nodes","nodes":[
+        {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+        {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+    ]}))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--wait=10s")
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let (output, refusal) = rig.run(&["retry", "two-nodes", "--brief", "corrected"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--node")),
+        "{refusal}"
+    );
     Ok(())
 }

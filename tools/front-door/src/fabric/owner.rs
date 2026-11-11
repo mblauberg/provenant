@@ -1407,7 +1407,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )
             },
         )
-        .map_err(landing::repository_fact_error)?;
+        .map_err(git_facts::repository_fact_error)?;
         if let Some(tip) = remote_tip {
             if !default_base && reference != tip.to_string() {
                 let warning = format!(
@@ -1434,7 +1434,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     )
                 },
             )
-            .map_err(landing::repository_fact_error)?;
+            .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 self.launch_warnings.push(warning);
@@ -2091,32 +2091,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 host: Some(host),
                 attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
             };
-            if host == self.factory.context.identity.host {
-                let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
-                let call = owner.call(self.cancel);
-                if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
-                    &self.factory.context.roots,
-                    &store,
-                    target.attempt,
-                    "",
-                    reference,
-                    &call,
-                    &self.factory.cwd,
-                    std::time::Duration::from_micros(
-                        self.budget
-                            .remaining(self.factory.clock.mono_now())
-                            .as_micros(),
-                    ),
-                    true,
-                )
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?
-                {
-                    return Ok(matches!(
-                        observation,
-                        provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }
-                    ));
-                }
-            }
             let record = owner.snapshot(target, self.budget, self.cancel)?;
             if record.extra.get("peer_subtree").is_some_and(|subtree| {
                 matches!(subtree["status"].as_str(), Some("pending" | "paused"))
@@ -2154,35 +2128,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     let fact = fact.map_err(run_error)?;
                     let record = store.record(fact.attempt_id, &call).map_err(run_error)?;
                     found = true;
-                    let reference = format!(
-                        "{}/{}",
-                        self.factory.context.identity.host, record.attempt_id
-                    );
-                    if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
-                        &self.factory.context.roots,
-                        &store,
-                        record.attempt_id,
-                        "",
-                        &reference,
-                        &call,
-                        &self.factory.cwd,
-                        std::time::Duration::from_micros(
-                            self.budget
-                                .remaining(self.factory.clock.mono_now())
-                                .as_micros(),
-                        ),
-                        true,
-                    )
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
-                    {
-                        if matches!(
-                            observation,
-                            provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }
-                        ) {
-                            continue;
-                        }
-                        return Ok(false);
-                    }
                     if !store.custody_released(&record, &call).map_err(run_error)? {
                         return Ok(false);
                     }
@@ -2405,40 +2350,17 @@ impl BoundGraphOwner<'_> {
                 .transpose()?;
             if host.is_some_and(|host| host != self.factory.context.identity.host)
                 && (access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                    || node.attempt.is_some_and(|spec| {
-                        spec.placement.is_some() || spec.new_worktree.is_some()
-                    }))
+                    || node.attempt.is_some_and(|spec| spec.new_worktree.is_some()))
             {
                 return Err(FacadeError::WorktreeNotApplicable);
             }
-            if let Some(cloud) = node.attempt.and_then(|spec| spec.placement.as_ref()) {
-                use provenant_fabric_runtime::coordination::facade::CloudPlacementIssue as Issue;
-                let invalid =
-                    |issue| FacadeError::invalid(InvalidInputDetail::CloudPlacement(issue));
-                for (issue, value) in [
-                    (Issue::Target, &cloud.target),
-                    (Issue::Provider, &cloud.provider),
-                    (Issue::Repository, &cloud.repository),
-                    (Issue::Branch, &cloud.branch),
-                    (Issue::Model, &cloud.model),
-                ] {
-                    if value.trim().is_empty() {
-                        return Err(invalid(issue));
-                    }
-                }
-                let Some(transport) = provenant_records::AdapterSpec::get(&cloud.provider)
-                    .and_then(|spec| spec.cloud_transport)
-                else {
-                    return Err(invalid(Issue::Provider));
-                };
-                if transport == provenant_records::CloudTransport::Codex
-                    && cloud.environment.trim().is_empty()
-                {
-                    return Err(invalid(Issue::Environment));
-                }
-                if cloud.deadline_seconds == 0 {
-                    return Err(invalid(Issue::Deadline));
-                }
+            if node
+                .attempt
+                .is_some_and(|spec| spec.names_cloud_placement())
+            {
+                return Err(FacadeError::invalid(
+                    InvalidInputDetail::CloudPlacementRemoved,
+                ));
             }
             // Replaying an accepted operation must observe its existing writer,
             // even after that writer has advanced beyond the pinned start.
@@ -2647,7 +2569,6 @@ impl BoundGraphOwner<'_> {
                             accepted_access = Some(task.access.clone());
                             accepted_skill_location = Some(task.profile.require_skill_location);
                             accepted_attempt = Some(provenant_fabric_runtime::graph::AttemptSpec {
-                                placement: task.cloud.clone(),
                                 account: task.account.clone(),
                                 build_heavy: task.build_heavy,
                                 confidential: task
@@ -2674,28 +2595,7 @@ impl BoundGraphOwner<'_> {
             if !accepted && let Some(context) = &mut context {
                 context.writer_predecessor = writer_predecessor;
             }
-            // Cloud jobs require an immutable commit even for the default
-            // read-only task, which otherwise reads the live checkout. On
-            // replay successor_head comes from the sealed request.
-            let cloud = node.attempt.and_then(|spec| spec.placement.as_ref());
-            let cloud_head = if !accepted && cloud.is_some() && node.source_commit.is_none() {
-                Some(
-                    self.factory
-                        .resolve_base(&self.factory.cwd, "HEAD", &self.repo_facts, self.cancel)
-                        .map_err(|_| FacadeError::DispatchRefused {
-                            fact: None,
-                            disk: None,
-                            reason: "attempt.cloud requires a resolvable checkout HEAD".into(),
-                        })?
-                        .to_string(),
-                )
-            } else {
-                None
-            };
-            let source_commit = successor_head
-                .as_deref()
-                .or(node.source_commit)
-                .or(cloud_head.as_deref());
+            let source_commit = successor_head.as_deref().or(node.source_commit);
             let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             // An exact route cannot be substituted, so required separation is
             // decided here, before any worktree advance or submission. An
@@ -3416,32 +3316,6 @@ impl BoundGraphOwner<'_> {
             ));
             (target, reference)
         };
-        if target
-            .host
-            .is_none_or(|host| host == self.factory.context.identity.host)
-        {
-            let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
-            let call = owner.call(self.cancel);
-            if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
-                &self.factory.context.roots,
-                &store,
-                target.attempt,
-                node.prompt,
-                reference.as_deref().ok_or(FacadeError::StateCorrupt)?,
-                &call,
-                &self.factory.cwd,
-                std::time::Duration::from_micros(
-                    self.budget
-                        .remaining(self.factory.clock.mono_now())
-                        .as_micros(),
-                ),
-                false,
-            )
-            .map_err(|error| cloud_refusal(&error))?
-            {
-                return Ok(observation);
-            }
-        }
         let mut target = target;
         let mut reference = reference;
         let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
@@ -3819,40 +3693,6 @@ pub(crate) fn restore_scratch_source(
             }
         }
         Err(_) => Err(FacadeError::io("access graph scratch")),
-    }
-}
-
-/// Map a cloud submission or observation error to the facade refusal.
-fn cloud_refusal(error: &str) -> FacadeError {
-    FacadeError::DispatchRefused {
-        fact: None,
-        disk: None,
-        reason: format!(
-            "cloud submission or observation failed: {}",
-            provenant_confinement::redact::bounded_line(error, 600)
-        ),
-    }
-}
-
-#[cfg(test)]
-mod cloud_refusal_tests {
-    #[allow(
-        unused_imports,
-        reason = "the custom worktree driver includes this module without libtest"
-    )]
-    use super::*;
-
-    #[test]
-    fn cloud_error_maps_to_a_redacted_bounded_dispatch_refusal() {
-        let secret = format!("sk-{}", "a1b2c3d4".repeat(6));
-        let error = format!("submit failed with {secret} {}", "x".repeat(2000));
-        let FacadeError::DispatchRefused { fact, disk, reason } = cloud_refusal(&error) else {
-            panic!("expected a dispatch refusal");
-        };
-        assert!(fact.is_none() && disk.is_none());
-        assert!(reason.starts_with("cloud submission or observation failed: submit failed"));
-        assert!(!reason.contains(&secret));
-        assert!(reason.len() < 700);
     }
 }
 

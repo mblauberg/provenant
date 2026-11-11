@@ -24,8 +24,8 @@ This is the only definition of blocking. A finding blocks when it shows one of:
 - a failed acceptance criterion, which includes an undisclosed divergence from
   the spec and a write outside the write scope;
 - a defect on a reachable default path;
-- a breach of a hard boundary the repository declares (in Provenant, the four
-  in ADR 0035: lane Git, credentials, object integrity and authority gates);
+- a breach of a real boundary: credentials, Git isolation, data integrity,
+  authority, or one the repository declares;
 - data loss.
 
 A default path is what ordinary use reaches: normal input, the scenarios the

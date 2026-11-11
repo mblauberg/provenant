@@ -40,7 +40,7 @@ body:
       description: >-
         The kebab-case skill directory name. Use "none" if the failure is in
         scripts/, runtime/, config/ or CI rather than in a skill.
-      placeholder: implement
+      placeholder: deliver
     validations:
       required: true
 

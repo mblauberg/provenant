@@ -44,11 +44,11 @@ cross-tracker routes, not a second current-work owner.
 
 - Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
 - Living docs are edited in place, not appended to; see
-  [engineering-docs](skills/engineering-docs/SKILL.md#binding-rules)
+  [engineering-docs](skills/engineering-docs/SKILL.md#rules)
 - Release notes: each user-visible change adds a fragment under
   [`docs/release-notes/next.d/`](docs/release-notes/next.d/). Fragment authors
   and the release collator follow the
-  `engineering-writing` release-notes guidance
+  `writing` release-notes guidance
   and the fragment rules in the [release-notes index](docs/release-notes/README.md#writing-a-fragment).
   Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index; release notes do not repeat it. Before releasing,
   read the collated preview (`scripts/collate-release-notes`) end to end, merge
@@ -88,8 +88,8 @@ Documentation claims sit in three tiers, and the third is deliberate:
 1. **Code-checked.** Runtime schema and migration structure is owned by code
    and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
    machine-checked. `scripts/check-doc-truth` requires every runbook and spec
-   `Anchor:` to resolve to a source file and compares the event-intake and
-   delivery tables with the code they project. `scripts/check-harness` rejects
+   `Anchor:` to resolve to a source file and compares the delivery
+   table with the code it projects. `scripts/check-harness` rejects
    a skill `references/` path named outside its skill.
 2. **Review-checked.** The README skill count and architecture risk factors are
    maintained from current files and code; no harness check binds those regions
@@ -136,36 +136,30 @@ Harness asset checks enforce the machine-checkable subset.
 ## Change a skill
 
 1. Confirm the capability belongs globally and is not better kept in a project.
-2. Use `skill-craft` for a skill change: its audit branch for read-only
-   assessment, its author branch for a new or materially revised skill under an
-   explicit write envelope. `implement` owns end-to-end delivery and
-   verification.
-3. Use a consistent kebab-case capability name. Related writing skills use
-   parallel names: `engineering-writing`, `natural-writing`, `legal-writing`.
+2. Use `improve` to audit or author a skill; `deliver` owns end-to-end
+   delivery and verification.
+3. Use a consistent kebab-case capability name.
 4. Keep portable frontmatter to `name` and `description`. Keep required
    third-party notices with copied material and provider UI metadata in a
    validated sidecar. Metadata and tool lists may narrow invocation but never
    grant authority.
-5. Put trigger terms and the nearest exclusion in the first 250 description
-   characters. Keep the complete canonical catalogue at or below 8,000
+5. Keep the description to one line of trigger terms. Add a `Not for` clause
+   only where two skills would genuinely both take the same request, and keep
+   all descriptions together under 250 words. Keep the complete canonical catalogue at or below 8,000
    characters, targeting 7,600 for wrapper and version headroom.
 6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
    references loaded only when needed and deterministic behaviour into scripts.
-7. Add positive, negative and boundary fixtures with exact primary and companion
-   routes. Trigger fixtures are mandatory for every skill change;
-   `scripts/check-skill-negatives` inventories the near-miss negatives under
-   `skills/` and `library/`. A contract test is mandatory only where the change
+7. A contract test is mandatory only where the change
    introduces or alters an invariant a script, validator or CI gate evaluates at
    runtime, so that violating it fails a command rather than a reviewer's
    reading. A change confined to wording,
-   ordering, examples or explanation adds no contract test; the fixture set and
-   the harness gates carry it. Assert parsed structure (fixture routes, JSON
-   policy values, resolved paths) or a script's output, exit code or side
+   ordering, examples or explanation adds no contract test; the harness gates
+   carry it. Assert parsed structure (JSON policy values, resolved paths) or a script's output, exit code or side
    effect. Never assert the text of a document. See `test-design` for the
    exclusion list.
-8. A skill behaviour change runs its fixtures with and without the skill and
-   records the difference for the reviewer; frozen comparative evals are
-   conditional. See [skill-craft](skills/skill-craft/SKILL.md).
+8. A skill behaviour change that matters runs a few representative prompts
+   with and without the change and records the difference for the reviewer.
+   See [improve](skills/improve/SKILL.md).
 9. Re-run `scripts/check-harness` and the applicable targeted checks.
 
 Split a skill when its triggers, artifacts or completion gates differ
@@ -188,12 +182,11 @@ Nothing outside a skill may name a file under that skill's `references/`
 directory. Cross-skill references use the skill name only; `scripts/check-harness`
 enforces this. Required licence notices may name the files they cover.
 
-`natural-writing` is the writing hub and single owner of the shared prose
-doctrine (mechanism catalogue, Australian-English house style, condense pass
-and claim discipline) plus academic prose; `engineering-writing` and
-`legal-writing` keep only their domain overlay and link back to the hub. Change
-the shared doctrine in the hub, not in a domain skill. The hub's
-`skills/natural-writing/lint-rules.json` owns the general and academic rule
+`writing` owns the shared prose doctrine (mechanism catalogue,
+Australian-English house style, condense pass and claim discipline) and its
+engineering and academic overlays; `legal-writing` keeps only its domain
+overlay. Change shared doctrine in `writing`, not in `legal-writing`.
+`skills/writing/lint-rules.json` owns the general and academic rule
 vocabulary; `skills/legal-writing/lint-rules.json` owns legal rules and filing
 blocker severities. Run `provenant check writing <paths> [--rules general|academic|legal]`.
 Rules and exclusions are skill data, outside policy, configuration and records.

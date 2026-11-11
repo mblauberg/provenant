@@ -75,7 +75,6 @@ impl CommitSourcePreparation {
                 .create(path)?;
         }
         let task = run::TaskRequest {
-            cloud: None,
             context: None,
             extra: Default::default(),
             build_heavy: false,

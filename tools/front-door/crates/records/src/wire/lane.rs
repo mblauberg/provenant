@@ -66,15 +66,13 @@ lane_row! {
     optional {
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work", "context_handoff", "lane_token_lost"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work", "context_handoff", "lane_token_lost"]);
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
-        cloud: Value => open_object();
-        cloud_state: String => string();
         payload: String => choices(&["evicted"]);
         capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
     }
@@ -215,12 +213,7 @@ impl LaneRow {
     /// Project a retained attempt with explicitly supplied observations.
     pub fn project(lane: &crate::run::AttemptRecord, facts: LaneProjectionFacts) -> Self {
         use crate::run::AttemptState;
-        let (state, mut terminal_reason) = Self::state_and_reason(&lane.state);
-        let cloud_state = lane
-            .cloud_observation
-            .0
-            .map(|cloud| cloud.state().to_owned());
-        let mut state = cloud_state.clone().unwrap_or(state);
+        let (mut state, mut terminal_reason) = Self::state_and_reason(&lane.state);
         // Settlement reasons are closed, locally recorded facts, unlike the
         // terminal state's free text, which can contain provider output.
         if let Some(reason) = lane.settlement_reason
@@ -464,8 +457,6 @@ impl LaneRow {
             provider_seconds: facts.provider_seconds,
             handoff: None,
             provider_error: None,
-            cloud: lane.cloud_view.0.clone(),
-            cloud_state,
             capabilities: None,
             payload: facts.payload_evicted.then(|| "evicted".to_owned()),
         }
@@ -553,6 +544,7 @@ mod terminal_cause_tests {
             TerminalCause::DiskFloor,
             TerminalCause::DiskObservationUnavailable,
             TerminalCause::StoredPromptUnreadable,
+            TerminalCause::CloudPlacementRemoved,
             TerminalCause::WriteGrantsRefused,
             TerminalCause::WorktreeBusy,
             TerminalCause::HandoffRefused,

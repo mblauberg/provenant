@@ -60,6 +60,9 @@ fn decode_input<T: serde::de::DeserializeOwned>(
 
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    if error.parameter.is_some() {
+        return graph_patch_error(error);
+    }
     let cause = if error.message.starts_with("unknown node ") {
         GraphRelayCause::RetryUnknownNode
     } else if error.message.contains("settled") {
@@ -182,6 +185,11 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     }
     let typed: provenant_fabric_runtime::graph::AttemptSpec =
         decode_input(attempt.clone(), "attempt")?;
+    if typed.names_cloud_placement() {
+        return Err(FacadeError::invalid(
+            InvalidInputDetail::CloudPlacementRemoved,
+        ));
+    }
     for (field, invalid_value) in [
         (
             "attempt.provider_timeout",
@@ -497,9 +505,10 @@ impl Factory {
             if host != local
                 && (node.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     || node.worktree.is_some()
-                    || node.attempt.as_ref().is_some_and(|attempt| {
-                        attempt.placement.is_some() || attempt.new_worktree.is_some()
-                    }))
+                    || node
+                        .attempt
+                        .as_ref()
+                        .is_some_and(|attempt| attempt.new_worktree.is_some()))
             {
                 return Err(FacadeError::WorktreeNotApplicable);
             }
@@ -1651,7 +1660,8 @@ impl Factory {
             )));
         }
         let id = target.graph.clone();
-        if let Some(node) = target.node.as_deref() {
+        let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
+        if target.node.is_some() || brief_given {
             let mut journal = FileJournal::open(
                 &self.context.roots.state,
                 self.context.identity.project,
@@ -1672,6 +1682,19 @@ impl Factory {
                 .load(&id)
                 .map_err(graph_journal_error)?
                 .ok_or(FacadeError::NotFound)?;
+            // A brief belongs to one node. A graph of one node names it;
+            // otherwise the chair must say which.
+            let node = match target.node.clone() {
+                Some(node) => node,
+                None => match checkpoint.nodes.as_slice() {
+                    [only] => only.id.clone(),
+                    _ => {
+                        return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                            provenant_fabric_runtime::coordination::facade::GraphRelayCause::RetryBriefNeedsNode,
+                        )));
+                    }
+                },
+            };
             let library = self.template_library(None)?;
             let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
             patch::retry_node_and_dependants(
@@ -1679,7 +1702,7 @@ impl Factory {
                     document: &execution.document,
                     checkpoint: &mut checkpoint,
                 },
-                node,
+                &node,
                 input.get("brief").and_then(Value::as_str),
                 &PatchContext {
                     library: &library,
@@ -1691,10 +1714,7 @@ impl Factory {
             )
             .map_err(retry_patch_error)?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
-        } else if input.get("brief").is_some_and(|value| !value.is_null()) {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                "brief".into(),
-            )));
+            target.node = Some(node);
         }
         let run = self.graph(
             GraphInput::Resume {

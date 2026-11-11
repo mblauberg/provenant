@@ -9,7 +9,7 @@
 //!
 //! Every reader reports a line it does not recognise, by segment and line
 //! number. None is skipped silently.
-use crate::{CostTotal, PriceTable, TelemetryError, reducer::Money};
+use crate::{CostTotal, PriceTable, TelemetryError, reducer::Money, segments};
 use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, RunId, WaitBudget, WallTime};
 use provenant_os::fs::{Directory, FsError, LockMode};
 use provenant_records::AttemptFact;
@@ -27,7 +27,6 @@ pub const DIRECTORY: &str = "usage-ledger";
 /// The one row format this build reads and writes.
 pub const FORMAT: &str = "provenant.usage-ledger.v1";
 const LOCK: &str = "ledger.lock";
-const SUFFIX: &str = ".jsonl";
 /// Largest segment read. A segment holds one day of attempts.
 const SEGMENT_CAP: u64 = 64 << 20;
 const LOCK_WAIT_MICROS: u64 = 10_000_000;
@@ -127,10 +126,7 @@ impl Row {
     }
     /// The daily segment, by the attempt's UTC end.
     fn segment(&self) -> String {
-        format!(
-            "{}{SUFFIX}",
-            self.finished.as_timestamp().strftime("%Y-%m-%d")
-        )
+        segments::name(self.finished.as_timestamp())
     }
 }
 
@@ -318,7 +314,7 @@ pub fn read(state: &Path) -> Result<Ledger, LedgerError> {
         if entry == OsStr::new(LOCK) || entry == "." || entry == ".." {
             continue;
         }
-        match entry.to_str().filter(|name| segment_name(name)) {
+        match entry.to_str().filter(|name| segments::is_segment(name)) {
             Some(name) => names.push(name.to_owned()),
             None => ledger.unrecognised.push(Unrecognised {
                 segment: entry.to_string_lossy().into_owned(),
@@ -386,11 +382,6 @@ pub fn spend(
             subscription_attempts: subscription,
         },
     })
-}
-
-fn segment_name(name: &str) -> bool {
-    name.strip_suffix(SUFFIX)
-        .is_some_and(|date| date.len() == 10 && date.parse::<jiff::civil::Date>().is_ok())
 }
 
 fn read_segment(directory: &Directory, name: &str) -> Result<Option<Vec<u8>>, LedgerError> {

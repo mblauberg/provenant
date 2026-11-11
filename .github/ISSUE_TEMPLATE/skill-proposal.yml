@@ -17,8 +17,7 @@ body:
     attributes:
       label: Skill name
       description: >-
-        kebab-case capability name. Related skills use parallel names
-        (engineering-writing, natural-writing, legal-writing).
+        kebab-case capability name.
       placeholder: threat-modelling
     validations:
       required: true

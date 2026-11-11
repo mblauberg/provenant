@@ -26,8 +26,6 @@ use std::{
 };
 
 mod cancel;
-pub mod cloud_owner;
-pub mod cloud_store;
 mod holder;
 mod launch;
 mod output;
@@ -1192,8 +1190,13 @@ fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::R
 }
 fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     let (roots, project_id, actor_id) =
-        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error.to_string()))?;
+        crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd).map_err(|error| {
+            match error {
+                // A configuration problem is not an identity problem.
+                crate::fabric::EdgeError::Config(error) => Fail::config(Status::Invalid, error),
+                error => Fail::new(Status::Error, ErrorKind::Identity, error.to_string()),
+            }
+        })?;
     Ok(run::ExecutionContext {
         state_root: roots.state.clone(),
         project_id,

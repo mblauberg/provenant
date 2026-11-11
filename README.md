@@ -105,7 +105,7 @@ hand-written graph; `--explain` inspects it before launch.
 | **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
 | **Telemetry** | Local cost and token reports, CLI and MCP usage counts, and timeline export for Perfetto, with no collector. |
-| **Skills** | 20 workflow skills (scope, implement, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
+| **Skills** | 15 workflow skills (scope, deliver, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
 
 ## Requirements
 
@@ -261,7 +261,7 @@ involved. Usage counters never log arguments, prompts or results.
 
 Use these to tune your setup with evidence: shift route weights towards models
 whose lanes succeed, spot commands and MCP tools nobody calls, and see where
-quota actually goes. The `retrospect` and `evaluate` skills help turn what you
+quota actually goes. The `improve` skill helps turn what you
 find into process changes and repeatable evaluations.
 
 ## Documentation
@@ -275,6 +275,7 @@ find into process changes and repeatable evaluations.
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |
 | [Routing and templates](docs/runbooks/routing-and-templates.md) | Pools, pacing, model policy, review panels and templates |
 | [Providers](docs/runbooks/providers.md) | Launch notes for each provider |
+| [Cloud launch](docs/runbooks/cloud-launch.md) | Hand a brief to a provider cloud session and collect its branch |
 | [Fabric hosts](docs/runbooks/fabric-hosts.md) | Peer hosts and remote dispatch |
 | [Worktrees](docs/worktrees.md) | Worktree policy and writer dispatch |
 | [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |
@@ -282,7 +283,6 @@ find into process changes and repeatable evaluations.
 | [Claude hooks](docs/runbooks/claude-hooks.md) | Managed Claude Code session and worktree hooks |
 | [Disk and garbage collection](docs/runbooks/gc.md) | Inspecting storage; collecting caches and expired provider state |
 | [CI](docs/runbooks/ci.md) | Checks, test inventory and reproducing failures |
-| [PR reconciler](docs/runbooks/pr-reconciler.md) | Pull request work records |
 | [Replay bench](docs/runbooks/bench.md) | Mining, verifying and running replay tasks |
 | [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |

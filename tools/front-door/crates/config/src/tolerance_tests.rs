@@ -236,38 +236,89 @@ fn inspection_keeps_warnings_alongside_a_boundary_error() {
 }
 
 #[test]
-fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
+fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
-    // `lanes.publish` hands an open-network writer the gh login: a malformed
-    // value must refuse rather than recover to either side.
-    for value in [
-        "'lanes.publish'='false'",
-        "'lanes.publish'=0",
-        "'fabric.accept_handoff'='true'",
-        "'chair.auto_switch'=1",
-        "'chair.switch_accounts'='pro'",
-        "'lanes.max_depth'=0",
+    // `lanes.publish` defaults on and hands an open-network writer the gh
+    // login, so a malformed entry must take the restrictive value (off), not
+    // the default and not a permissive reading of the entry.
+    for (value, name, rule, restrictive) in [
+        (
+            "'lanes.publish'='false'",
+            "lanes.publish",
+            "type",
+            serde_json::json!(false),
+        ),
+        (
+            "'lanes.publish'=0",
+            "lanes.publish",
+            "type",
+            serde_json::json!(false),
+        ),
+        (
+            "'fabric.accept_handoff'='true'",
+            "fabric.accept_handoff",
+            "type",
+            serde_json::json!(false),
+        ),
+        (
+            "'chair.auto_switch'=1",
+            "chair.auto_switch",
+            "type",
+            serde_json::json!(false),
+        ),
+        (
+            "'chair.switch_accounts'='pro'",
+            "chair.switch_accounts",
+            "type",
+            serde_json::json!([]),
+        ),
+        (
+            "'lanes.max_depth'=0",
+            "lanes.max_depth",
+            "outside_allowed_range",
+            serde_json::json!(1),
+        ),
     ] {
         let text = format!("schema_version=1\n[knobs]\n{value}\n");
-        let error = load(&roots, Some(text.as_bytes())).unwrap_err();
-        let name = value.split('\'').nth(1).unwrap();
-        assert!(error.to_string().contains(name), "{value}: {error}");
+        let config = load(&roots, Some(text.as_bytes())).unwrap();
+        assert_eq!(config.knobs[name].value, restrictive, "{value}");
+        assert_eq!(config.warnings.len(), 1, "{value}");
+        assert_eq!(config.warnings[0].rule, rule, "{value}");
+        assert_eq!(config.warnings[0].line, 3, "{value}");
         std::fs::write(dir.path().join("config.toml"), &text).unwrap();
-        assert!(
-            inspect_config(&roots, &crate::domains::NO_DOMAINS)
-                .unwrap()
-                .error
-                .is_some()
-        );
+        let inspection = inspect_config(&roots, &crate::domains::NO_DOMAINS).unwrap();
+        assert!(inspection.error.is_none());
+        assert_eq!(inspection.check.count, 1);
     }
-    // A malformed knobs container holds authority knobs, so it refuses too.
+    // A malformed knobs container holds strict knobs with no restrictive value
+    // (the exclusion lists), so it refuses rather than dropping them.
     for text in [
         "schema_version=1\nknobs=false\n",
         "schema_version=1\nknobs='strict'\n",
     ] {
         let error = load(&roots, Some(text.as_bytes())).unwrap_err();
-        assert!(error.to_string().contains("knobs"), "{text}: {error}");
+        assert!(
+            matches!(&error, ConfigError::Schema { location, rule: "type" } if location.key_path == "knobs" && location.line == 2),
+            "{text}: {error:?}"
+        );
+    }
+    // A strict knob with no restrictive value refuses an invalid entry,
+    // naming the key and line, so an exclusion is never silently dropped.
+    for name in [
+        "routing.exclude",
+        "routing.flag_exclude",
+        "routing.graph_exclude",
+    ] {
+        for value in ["['claude', 5]", "'claude'", "7"] {
+            let text = format!("schema_version=1\n[knobs]\n'{name}'={value}\n");
+            let error = load(&roots, Some(text.as_bytes())).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Schema { location, rule: "type" }
+                    if location.key_path == format!("knobs.{name}") && location.line == 3),
+                "{text}: {error:?}"
+            );
+        }
     }
     let config = load(
         &roots,
@@ -275,16 +326,93 @@ fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
     )
     .unwrap();
     assert_eq!(config.knobs["lanes.publish"].value, true);
-    // A non-authority knob still recovers with a warning naming it.
+    assert!(config.warnings.is_empty());
+    // A non-authority knob recovers to its default with one warning.
     let config = load(
         &roots,
         Some(&b"schema_version=1\n[knobs]\n'lanes.silence_seconds'='soon'\n"[..]),
     )
     .unwrap();
     assert_eq!(config.knobs["lanes.silence_seconds"].value, 1800);
+    assert_eq!(
+        config.knobs["lanes.silence_seconds"].source,
+        KnobSource::Default
+    );
+    assert_eq!(config.warnings.len(), 1);
+    assert_eq!(config.warnings[0].rule, "type");
+}
+
+#[test]
+fn a_misspelt_knob_warns_once_with_the_nearest_name_and_keeps_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    let text = "schema_version = 1\n\n[knobs]\n\"lanes.max_concurency\" = 4\n";
+    let config = load(&roots, Some(text.as_bytes())).unwrap();
+    assert_eq!(config.warnings.len(), 1);
+    assert_eq!(config.warnings[0].rule, "unknown_key");
+    assert_eq!(config.warnings[0].line, 4);
+    assert_eq!(
+        config.knobs["lanes.max_concurrency"].source,
+        KnobSource::Default
+    );
+    assert_eq!(
+        crate::knobs::nearest_knobs("lanes.max_concurency"),
+        ["lanes.max_concurrency"]
+    );
+    // The location prints as plain text, never as a Debug rendering.
+    let error = load(&roots, Some(&b"schema_version=1\n[knobs]\nx=[\n"[..])).unwrap_err();
+    let ConfigError::Syntax { location } = &error else {
+        panic!("expected a syntax error, got {error:?}");
+    };
+    let shown = location.to_string();
     assert!(
-        config.warnings[0]
-            .message
-            .starts_with("knobs.lanes.silence_seconds:")
+        !shown.contains("PathWire") && !shown.contains("RelativePath"),
+        "{shown}"
+    );
+    // `config show` reads the same file without failing.
+    std::fs::write(dir.path().join("config.toml"), text).unwrap();
+    assert_eq!(
+        config_show(&roots, &crate::domains::NO_DOMAINS)
+            .unwrap()
+            .warnings
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn unquoted_dotted_knob_names_are_the_knob() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    // TOML reads `lanes.publish = false` as `lanes = { publish = false }`; the
+    // restriction must still apply, not be dropped as an unknown key.
+    let text = "schema_version=1\n[knobs]\nlanes.publish = false\nlanes.max_depth = 3\nchair.auto_switch = true\n";
+    let config = load(&roots, Some(text.as_bytes())).unwrap();
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert_eq!(config.knobs["lanes.publish"].value, false);
+    assert_eq!(config.knobs["lanes.publish"].source, KnobSource::Override);
+    assert_eq!(config.knobs["lanes.max_depth"].value, 3);
+    assert_eq!(config.knobs["chair.auto_switch"].value, true);
+    // Each flattened name gets the normal validation.
+    let config = load(
+        &roots,
+        Some(&b"schema_version=1\n[knobs]\nlanes.publish = 'no'\n"[..]),
+    )
+    .unwrap();
+    assert_eq!(config.knobs["lanes.publish"].value, false);
+    assert_eq!(config.warnings.len(), 1);
+    assert_eq!(config.warnings[0].rule, "type");
+    // An unknown nested name warns once, and the nearest valid name is known.
+    let config = load(
+        &roots,
+        Some(&b"schema_version=1\n[knobs]\nlanes.max_concurency = 4\n"[..]),
+    )
+    .unwrap();
+    assert_eq!(config.warnings.len(), 1);
+    assert_eq!(config.warnings[0].rule, "unknown_key");
+    assert_eq!(config.warnings[0].line, 3);
+    assert_eq!(
+        crate::knobs::nearest_knobs("lanes.max_concurency"),
+        ["lanes.max_concurrency"]
     );
 }

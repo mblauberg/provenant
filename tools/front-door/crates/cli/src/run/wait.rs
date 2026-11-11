@@ -9,21 +9,8 @@ pub(super) fn settled(state: &run::AttemptState) -> (bool, bool) {
     }
 }
 
-pub(super) fn cloud_observed_at(lane: &run::AttemptRecord) -> Option<WallTime> {
-    lane.cloud_observation
-        .0
-        .filter(|state| state.is_terminal())?;
-    lane.extra
-        .get("cloud_observed_at")?
-        .as_str()
-        .and_then(|time| WallTime::parse_rfc3339(time).ok())
-}
-
 pub(super) fn lane_settled(lane: &run::AttemptRecord) -> (bool, bool) {
-    lane.cloud_observation.0.map_or_else(
-        || settled(&lane.state),
-        |state| (state.is_terminal(), false),
-    )
+    settled(&lane.state)
 }
 
 /// Whether a lane selection satisfies a wait condition. Input required ends
@@ -128,7 +115,7 @@ impl Backlog {
         self.newest.push(lane);
         self.newest.sort_by_key(|lane| match lane.state {
             run::AttemptState::Terminal { finished_at, .. } => std::cmp::Reverse(finished_at),
-            _ => std::cmp::Reverse(cloud_observed_at(lane).unwrap_or(lane.queued_at)),
+            _ => std::cmp::Reverse(lane.queued_at),
         });
         self.newest.truncate(BACKLOG_SAMPLE);
         Ok(())
@@ -153,25 +140,7 @@ fn select_unseen(
         query.owner = Some(owner);
         query.unseen_after = Some(seen);
         let page = session.service().lanes(&query, call)?;
-        for mut lane in page.lanes {
-            cloud_owner::hydrate(
-                &Roots {
-                    state: session.context.state_root.clone(),
-                },
-                &session.store,
-                std::slice::from_mut(&mut lane),
-                call,
-            )
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
-            if lane
-                .cloud_observation
-                .0
-                .is_some_and(|state| state.is_terminal())
-                && !tracked.contains(&lane.attempt_id)
-                && session.store.last_event_sequence(lane.attempt_id, call)? <= seen
-            {
-                continue;
-            }
+        for lane in page.lanes {
             if !lane_settled(&lane).0 {
                 tracked.insert(lane.attempt_id);
             }
@@ -333,15 +302,6 @@ fn candidates_with_backlog<'a>(
                 lanes.push(lane);
             }
         }
-        cloud_owner::hydrate(
-            &Roots {
-                state: session.context.state_root.clone(),
-            },
-            &session.store,
-            &mut lanes,
-            &call,
-        )
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
         let waits = session.store.lane_waits(&lanes, &call);
         apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
@@ -365,11 +325,6 @@ pub(super) fn render_settled(
             cancel: &cancel,
         },
     );
-    let call = run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-
     let (mut data, mut human) = render_lanes(
         lanes,
         &waits,
@@ -379,7 +334,6 @@ pub(super) fn render_settled(
     );
     append_provider_errors(session, lanes, &mut data, &mut human);
     attach_handoffs(session, lanes, &mut data);
-    status::attach_cloud_jobs(&session.store, lanes, &mut data, &mut human, &call)?;
     Ok((data, human))
 }
 

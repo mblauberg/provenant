@@ -1095,12 +1095,6 @@ fn legacy_import_rows_are_deliberately_dropped_and_all_stores_read_cleanly() {
             .items
             .is_empty()
     );
-    assert!(
-        store
-            .landing(project(), "refs/heads/main", &request)
-            .unwrap()
-            .is_none()
-    );
     assert_eq!(
         store
             .coordination_receipt::<SentReceipt>(

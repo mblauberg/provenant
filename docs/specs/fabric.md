@@ -167,7 +167,8 @@ succeeds only once the chair merges at the pinned head.
 
 Settled nodes record bounded outputs: a digest of the full stored result, a
 redacted excerpt, and optional verdict, findings, branch and commit. A verdict
-is valid only as one final `VERDICT: TOKEN` line, and invalid evidence fails a
+is valid only as exactly one `VERDICT: TOKEN` line outside fenced blocks,
+wherever it sits; a rejection names what was seen. Invalid evidence fails a
 consuming gate; a matched `required_verdict` cannot override it. Selected
 outputs reach dependants as delimited untrusted data that must fit the prompt
 budget, or the node fails before launch.
@@ -208,17 +209,6 @@ succeeds and custody is released; settlement advances only the matching graph.
 - Why: a partial graph must never publish, and settlement must not scan unrelated graphs.
 - Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
   `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
-
-## Landing
-
-Landing runs on the home host under a per-ref lock and pushes with a lease on
-the expected OID. After a lost reply the outcome stays unknown, and the fence
-held, until the remote is reconciled. The fence token comes from the
-environment, never argv.
-- Why: two landers must never overwrite each other, and argv is visible host-wide.
-- Test: `crates/fabric-runtime/src/landing_tests.rs::lost_push_reply_keeps_successor_fenced_until_remote_reconciliation`;
-  `tests/fabric.rs::landing_fence_reads_secret_from_environment_without_a_token_argument`
-- Owner: `crates/fabric-runtime/src/coordination.rs`
 
 ## Peer hosts
 

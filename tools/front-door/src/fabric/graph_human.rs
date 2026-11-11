@@ -5,6 +5,7 @@
 )]
 pub(crate) use test_presentation::{graph_human, graph_human_full};
 
+#[cfg(test)]
 pub(super) fn graph_ci_waiting<'a>(
     elapsed_seconds: u64,
     check_names: impl Iterator<Item = &'a str>,
@@ -27,6 +28,11 @@ pub(super) fn graph_ci_waiting<'a>(
 
 /// Counts of nodes by state, then the nodes that need attention (failed,
 /// paused, running), then the command that shows the rest.
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
     let text = |value: &serde_json::Value, key: &str| {
         value
@@ -252,6 +258,7 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
 }
 
 /// Sanitise and bound even pause reasons from older checkpoints before printing.
+#[cfg(test)]
 fn bounded_reason(reason: &str) -> String {
     provenant_fabric_runtime::hosts::plain_text(reason, 1024)
 }

@@ -615,35 +615,6 @@ pub struct LanesSettings {
     pub skill_stage_max_bytes: u64,
     #[serde(default)]
     pub projects: std::collections::BTreeMap<String, ProjectLanesConfig>,
-    /// Named provider environments available to projects.
-    #[serde(default)]
-    pub cloud_targets: std::collections::BTreeMap<String, CloudTarget>,
-}
-
-/// Configuration only; credentials belong to the provider's authentication mechanism.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CloudTarget {
-    pub provider: String,
-    pub environment: String,
-    pub model: String,
-    pub effort: Option<String>,
-    pub repository: String,
-    pub branch: String,
-    pub deadline_seconds: u64,
-}
-impl Default for CloudTarget {
-    fn default() -> Self {
-        Self {
-            provider: String::new(),
-            environment: String::new(),
-            model: String::new(),
-            effort: None,
-            repository: String::new(),
-            branch: "main".into(),
-            deadline_seconds: 3600,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -658,8 +629,6 @@ pub struct ProjectLanesConfig {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub exec_roots: Vec<PathBuf>,
-    #[serde(default)]
-    pub cloud_target: Option<String>,
 }
 
 impl Default for LanesSettings {
@@ -668,7 +637,6 @@ impl Default for LanesSettings {
             user_skills: UserSkillsMode::default(),
             skill_stage_max_bytes: 16 * 1024 * 1024,
             projects: Default::default(),
-            cloud_targets: Default::default(),
         }
     }
 }
@@ -699,14 +667,6 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.shared_paths", "array"),
     FieldMetadata::new("projects.{project}.capabilities", "array"),
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
-    FieldMetadata::new("projects.{project}.cloud_target", "string"),
-    FieldMetadata::new("cloud_targets.{target}.provider", "string"),
-    FieldMetadata::new("cloud_targets.{target}.environment", "string"),
-    FieldMetadata::new("cloud_targets.{target}.model", "string"),
-    FieldMetadata::new("cloud_targets.{target}.effort", "string"),
-    FieldMetadata::new("cloud_targets.{target}.repository", "string"),
-    FieldMetadata::new("cloud_targets.{target}.branch", "string"),
-    FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
 ]);
 
 static ENTRIES: [DomainSection; 9] = [
@@ -755,48 +715,6 @@ mod tests {
         ] {
             assert!(edit(&roots, patch).is_err());
         }
-    }
-
-    #[test]
-    fn cloud_targets_round_trip_with_project_selection() {
-        let settings: LanesSettings = toml_edit::de::from_str(
-            r#"
-            [cloud_targets.build]
-            provider = "example"
-            environment = "env-1"
-            model = "small"
-            effort = "low"
-            repository = "owner/repo"
-            [projects.sample]
-            cloud_target = "build"
-        "#,
-        )
-        .unwrap();
-        assert_eq!(
-            settings.projects["sample"].cloud_target.as_deref(),
-            Some("build")
-        );
-        assert_eq!(settings.cloud_targets["build"].environment, "env-1");
-        let encoded = serde_json::to_string(&settings).unwrap();
-        assert_eq!(
-            serde_json::from_str::<LanesSettings>(&encoded).unwrap(),
-            settings
-        );
-        let temp = tempfile::tempdir().unwrap();
-        let roots = roots(&temp);
-        let edited = edit(
-            &roots,
-            json!({
-                "domains.lanes.cloud_targets.build.provider": "example",
-                "domains.lanes.cloud_targets.build.environment": "env-1",
-                "domains.lanes.cloud_targets.build.model": "small",
-                "domains.lanes.cloud_targets.build.effort": "low",
-                "domains.lanes.cloud_targets.build.repository": "owner/repo",
-                "domains.lanes.projects.sample.cloud_target": "build"
-            }),
-        )
-        .unwrap();
-        assert_eq!(edited.config.domains.lanes, settings);
     }
 
     struct Resolver;
@@ -1028,6 +946,34 @@ mod tests {
             edited.config.domains.quota.polling_intervals["claude"].timer_seconds,
             Some(17)
         );
+    }
+
+    #[test]
+    fn retired_cloud_keys_warn_and_do_not_refuse_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let text = "schema_version = 1\n[providers.codex.cloud]\ntransport = 'x'\ncommand = ['y']\n[domains.lanes.cloud_targets.main]\nid = 'z'\n[projects.demo]\ncloud_target = 'main'\n";
+        let config = provenant_config::load_with_domains(
+            &roots,
+            Some(std::io::Cursor::new(text.as_bytes())),
+            &SECTIONS,
+        )
+        .unwrap();
+        assert!(
+            config
+                .warnings
+                .iter()
+                .all(|warning| warning.rule == "unknown_key"),
+            "{:?}",
+            config.warnings
+        );
+        for line in [2, 5, 7] {
+            assert!(
+                config.warnings.iter().any(|warning| warning.line == line),
+                "no warning at line {line}: {:?}",
+                config.warnings
+            );
+        }
     }
 
     #[test]

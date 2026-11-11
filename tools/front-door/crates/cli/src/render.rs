@@ -240,10 +240,11 @@ pub fn exit_status(outcome: &Outcome) -> u8 {
 struct Buffer {
     bytes: Vec<u8>,
     overflow: bool,
+    limit: usize,
 }
 impl Write for Buffer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_RESULT_BYTES.saturating_sub(self.bytes.len()) {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             self.overflow = true;
             return Err(io::Error::other("result limit"));
         }
@@ -258,6 +259,17 @@ pub fn render<T: Serialize>(
     result: &CommandResult<T>,
     mode: RenderMode<'_>,
     writer: &mut impl Write,
+) -> Result<(), RenderError> {
+    render_within(result, mode, writer, MAX_RESULT_BYTES)
+}
+/// `render` with the result bound a caller chooses; the default is
+/// `MAX_RESULT_BYTES`, and a lower bound lets a test reach the overflow path
+/// without building a megabyte of real data.
+pub fn render_within<T: Serialize>(
+    result: &CommandResult<T>,
+    mode: RenderMode<'_>,
+    writer: &mut impl Write,
+    limit: usize,
 ) -> Result<(), RenderError> {
     let mut error = result.error.clone();
     if let Some(error) = &mut error {
@@ -279,6 +291,7 @@ pub fn render<T: Serialize>(
     let mut buffer = Buffer {
         bytes: Vec::new(),
         overflow: false,
+        limit,
     };
     let encoded = match mode {
         RenderMode::Json => serde_json::to_writer(&mut buffer, &result)

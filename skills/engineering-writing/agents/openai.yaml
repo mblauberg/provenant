@@ -1,4 +1,0 @@
-interface:
-  display_name: "Clear Engineering Writing"
-  short_description: "Clear AU English for engineering prose"
-  default_prompt: "Use $engineering-writing to draft or tighten engineering prose without changing technical meaning, identifiers, facts, numbers, or behaviour."

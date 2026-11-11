@@ -52,8 +52,6 @@ fn row() -> LaneRow {
         provider_seconds: None,
         handoff: None,
         provider_error: None,
-        cloud: None,
-        cloud_state: None,
         capabilities: None,
         payload: None,
     }
@@ -118,8 +116,6 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.provider_seconds = Some(1.5);
     full.handoff = Some(Value::Null);
     full.provider_error = Some("failed".into());
-    full.cloud = Some(json!({"target": "verify"}));
-    full.cloud_state = Some("cloud_passed".into());
     full.transcript = Some(LaneTranscript {
         adapter: "codex".into(),
         session: "s".into(),

@@ -2595,6 +2595,55 @@ impl Fixture {
     }
 }
 
+/// Merging skills renames some and retires others. An upgrade links the
+/// merged portfolio and removes every retired link and its receipt entry.
+#[test]
+fn an_upgrade_to_a_merged_portfolio_removes_retired_skill_links() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let old = f.release_variant("split", &["implement", "refactor", "deliver", "retrospect"]);
+    install(
+        &f.plan_for(old),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let retired = ["implement", "refactor", "retrospect"];
+    for name in retired {
+        assert!(f.skill_link(name).symlink_metadata().is_ok());
+    }
+
+    let new = f.release_variant("merged", &["deliver", "improve"]);
+    install(
+        &f.plan_for(new),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    for name in retired {
+        let link = f.skill_link(name);
+        assert!(link.symlink_metadata().is_err(), "{name} link survived");
+        assert!(
+            !receipt
+                .entries
+                .iter()
+                .any(|entry| entry.path.to_path_buf().unwrap() == link)
+        );
+    }
+    for name in ["deliver", "improve"] {
+        assert!(
+            fs::read_link(f.skill_link(name)).is_ok(),
+            "{name} not linked"
+        );
+    }
+}
+
 #[test]
 fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replacement() {
     let f = Fixture::new();

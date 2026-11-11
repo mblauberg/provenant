@@ -436,7 +436,7 @@ pub(super) fn stats_inner(
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     data["attempt_context"] = json!(attempt_context);
     data["task_context"] = task_context;
-    human.push_str("context coverage: inspect attempt_context and task_context with --json; missing observations remain unknown\n");
+    human.push_str("context coverage: inspect attempt_context and task_context with --detail --json; missing observations remain unknown\n");
     human.push_str("comparability: release, harness experiments, task difficulty and user activity cannot be separated when observations are missing or change together\n");
     human.push_str(&format!(
         "accepted outcomes: {} (distinct delivery IDs with recorded accepted workflow receipts among selected attempts)\n",
@@ -459,7 +459,11 @@ pub(super) fn stats_inner(
         let native = provenant_telemetry::native_attempts::read(edge.roots);
         let mut rows = provenant_telemetry::ingest::read_rows(
             edge.roots,
-            &provenant_telemetry::ingest::RowFilter::default(),
+            &provenant_telemetry::ingest::RowFilter {
+                since: command.since.map(|time| time.as_second()),
+                until: command.until.map(|time| time.as_second()),
+                ..Default::default()
+            },
         );
         if let Ok(rows) = &mut rows {
             rows.retain(|row| {
@@ -531,7 +535,7 @@ pub(super) fn stats_inner(
                     human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
                     if !command.detail {
                         human.push_str(&format!(
-                            "  {} attempts; per-attempt rows with --detail or --json\n",
+                            "  {} attempts; per-attempt rows with --detail\n",
                             native.attempts.len()
                         ));
                     }
@@ -663,6 +667,9 @@ pub(super) fn stats_inner(
     }
     // Cost has one producer: `telemetry cost` reads it from the usage ledger.
     strip_cost(&mut data);
+    if !command.detail {
+        omit_per_attempt_rows(&mut data);
+    }
     Ok((data, human))
 }
 
@@ -720,6 +727,26 @@ fn strip_cost(value: &mut Value) {
         }
         Value::Array(items) => items.iter_mut().for_each(strip_cost),
         _ => {}
+    }
+}
+
+/// The rows that grow with every attempt. A result carries them only with
+/// `--detail`; otherwise each array is replaced by its length under
+/// `<name>_omitted`, so the default is the same summary the human view shows
+/// and does not outgrow the result limit as history does.
+fn omit_per_attempt_rows(data: &mut Value) {
+    for (section, rows) in [
+        ("attempt_context", "attempts"),
+        ("task_context", "rows"),
+        ("task_context", "graph_outcomes"),
+        ("cache_read_share", "lanes"),
+        ("native_subagents", "attempts"),
+    ] {
+        if let Some(Value::Object(map)) = data.get_mut(section)
+            && let Some(Value::Array(items)) = map.remove(rows)
+        {
+            map.insert(format!("{rows}_omitted"), json!(items.len()));
+        }
     }
 }
 

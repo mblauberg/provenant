@@ -13,13 +13,18 @@ validation, `apply --expect-revision`); tables outside `[knobs]`, such as
 ## Precedence and refusals
 
 A knob in `[knobs]` beats the `profile` preset (`balanced` or `economy`), which
-beats the registry default; there is no project overlay. Unknown knobs are
-refused; other unknown keys and invalid optional values warn and fall back,
-naming the key. Recovery never widens a restriction, so these refuse the whole
-file: `strict` knobs (`lanes.publish`, `fabric.accept_handoff`,
+beats the registry default; there is no project overlay. Unknown keys and
+invalid values warn and fall back, naming the file, line and key; a misspelt
+knob is ignored and the warning suggests the nearest name; an unquoted
+`lanes.publish = false` is the knob `lanes.publish`. Recovery never widens
+a restriction: a `strict` knob (`lanes.publish`, `fabric.accept_handoff`,
 `chair.auto_switch`, `chair.switch_accounts`, `lanes.max_depth`,
-`confinement.census_ignore_unreadable`), invalid credential, authority,
-confinement and Git-boundary settings, enforced model policy, Fabric protocol
+`confinement.*`, `routing.allow_unknown_partial_headroom`) takes its
+restrictive value when its entry is invalid, but one with no restrictive value
+(the `routing.*exclude` lists), or a `knobs` that is not a table, refuses the
+file, naming the line and key. These also
+refuse the whole file: invalid credential, authority, confinement and
+Git-boundary settings outside `[knobs]`, enforced model policy, Fabric protocol
 caps, `graph.allowed_read_roots`, `home_hosts`, executable overrides, and syntax
 or schema-version errors. A malformed model-policy rule or pacing override is
 dropped whole.

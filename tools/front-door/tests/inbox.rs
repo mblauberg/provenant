@@ -632,7 +632,6 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
             lane_depth: 1,
             parent_attempt: None,
             tasks: vec![DispatchTask {
-                cloud: None,
                 context: None,
                 build_heavy: false,
                 title: None,

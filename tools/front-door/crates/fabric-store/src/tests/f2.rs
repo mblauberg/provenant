@@ -45,20 +45,6 @@ fn canonical_overlap_expiry_release_and_generation() {
     assert_eq!(third.generation, second.generation + 1);
 }
 
-fn landing(who: u8) -> LandingRequest {
-    LandingRequest {
-        extra: Default::default(),
-        id: provenant_core::ClaimId::from_bytes([10; 16]),
-        project: project(),
-        actor: actor(who),
-        token: [who; 16],
-        reference: "refs/heads/main".into(),
-        expected: provenant_core::GitOid::parse(&"1".repeat(40)).unwrap(),
-        candidate: provenant_core::GitOid::parse(&"2".repeat(40)).unwrap(),
-        lease: DurationMicros::from_seconds(1).unwrap(),
-    }
-}
-
 #[test]
 fn work_claim_unknown_fields_survive_load_update_and_save() {
     let mut f = Fixture::new();
@@ -93,106 +79,6 @@ fn work_claim_unknown_fields_survive_load_update_and_save() {
         .unwrap();
     let next = store.acquire_claim(&work(&f, 4), &f.request()).unwrap();
     assert_future_member(&store.verify_claim(project(), &next, &f.request()).unwrap());
-}
-
-#[test]
-fn landing_unknown_fields_survive_load_update_and_save() {
-    let mut f = Fixture::new();
-    let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    add_future_member(&store, "claims");
-    assert_future_member(&store.verify_landing(&guard, &fence, &f.request()).unwrap());
-    store
-        .renew_landing(
-            &guard,
-            &fence,
-            DurationMicros::from_seconds(2).unwrap(),
-            &f.request(),
-        )
-        .unwrap();
-    drop(guard);
-    drop(store);
-    let store = f.open();
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let saved = store.verify_landing(&guard, &fence, &f.request()).unwrap();
-    assert_eq!(
-        saved.expires_at,
-        Some(
-            f.now()
-                .checked_add(DurationMicros::from_seconds(2).unwrap())
-                .unwrap()
-        )
-    );
-    assert_future_member(&saved);
-    f.clock
-        .advance(DurationMicros::from_seconds(2).unwrap())
-        .unwrap();
-    let next = store
-        .acquire_landing(&guard, &landing(4), &f.request())
-        .unwrap();
-    assert_future_member(&store.verify_landing(&guard, &next, &f.request()).unwrap());
-}
-
-#[test]
-fn pushing_survives_expiry_and_unknown_until_reconciliation() {
-    let mut f = Fixture::new();
-    let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    let id = provenant_core::OperationId::parse("push-1").unwrap();
-    store
-        .prepare_push(&guard, &fence, &id, "/fixture/origin", &f.request())
-        .unwrap();
-    store
-        .change_push(&guard, &fence, &id, PushAction::Begin, &f.request())
-        .unwrap();
-    f.clock
-        .advance(DurationMicros::from_seconds(1).unwrap())
-        .unwrap();
-    assert!(matches!(
-        store.acquire_landing(&guard, &landing(4), &f.request()),
-        Err(Error::PushUnresolved { .. })
-    ));
-    assert!(matches!(
-        store.release_landing(&guard, &fence, &f.request()),
-        Err(Error::PushUnresolved { .. })
-    ));
-    store
-        .change_push(&guard, &fence, &id, PushAction::Uncertain, &f.request())
-        .unwrap();
-    assert!(matches!(
-        store.acquire_landing(&guard, &landing(4), &f.request()),
-        Err(Error::PushUnresolved { .. })
-    ));
-    let result = store
-        .change_push(
-            &guard,
-            &fence,
-            &id,
-            PushAction::Reconcile {
-                remote: Some(input.candidate),
-            },
-            &f.request(),
-        )
-        .unwrap();
-    assert_eq!(result.phase, PushPhase::Committed);
-    store.release_landing(&guard, &fence, &f.request()).unwrap();
-    assert_eq!(
-        store
-            .acquire_landing(&guard, &landing(4), &f.request())
-            .unwrap()
-            .generation,
-        fence.generation + 1
-    );
 }
 
 #[test]
@@ -331,234 +217,10 @@ fn two_connection_claim_and_exact_expiry_takeover_races_have_one_winner() {
 }
 
 #[test]
-fn landing_os_lock_serialises_connections_and_ref_and_store_are_bound() {
-    let f = Fixture::new();
-    let store = f.open();
-    let input = landing(3);
-    let ready = Arc::new(Barrier::new(2));
-    let proceed = Arc::new(Barrier::new(2));
-    std::thread::scope(|s| {
-        let ready2 = ready.clone();
-        let proceed2 = proceed.clone();
-        let f = &f;
-        let input = &input;
-        let contender = s.spawn(move || {
-            let second = f.open();
-            ready2.wait();
-            proceed2.wait();
-            let guard = second
-                .lock_landing(project(), &input.reference, &f.request())
-                .unwrap();
-            second.acquire_landing(&guard, &landing(4), &f.request())
-        });
-        ready.wait();
-        let guard = store
-            .lock_landing(project(), &input.reference, &f.request())
-            .unwrap();
-        let fence = store.acquire_landing(&guard, input, &f.request()).unwrap();
-        let name = crate::landing::landing_lock_name(project(), &input.reference).unwrap();
-        assert!(
-            store
-                .locks
-                .as_ref()
-                .unwrap()
-                .try_lock(
-                    std::ffi::OsStr::new(&name),
-                    provenant_os::fs::LockMode::Exclusive
-                )
-                .is_err()
-        );
-        let other = Fixture::new();
-        let other_store = other.open();
-        assert!(matches!(
-            other_store.verify_landing(&guard, &fence, &other.request()),
-            Err(Error::Invalid(_))
-        ));
-        let different = store
-            .lock_landing(project(), "refs/heads/other", &f.request())
-            .unwrap();
-        assert!(matches!(
-            store.verify_landing(&different, &fence, &f.request()),
-            Err(Error::StaleFence)
-        ));
-        proceed.wait();
-        drop(guard);
-        assert!(matches!(contender.join().unwrap(), Err(Error::Conflict)));
-    });
-}
-
-fn operation_id() -> provenant_core::OperationId {
-    provenant_core::OperationId::parse("push-1").unwrap()
-}
-fn setup_phase(
-    store: &Store,
-    f: &Fixture,
-    guard: &LandingGuard,
-    fence: &ClaimFence,
-    phase: PushPhase,
-) {
-    let id = operation_id();
-    store
-        .prepare_push(guard, fence, &id, "/fixture/origin", &f.request())
-        .unwrap();
-    if phase == PushPhase::Prepared {
-        return;
-    }
-    store
-        .change_push(guard, fence, &id, PushAction::Begin, &f.request())
-        .unwrap();
-    let action = match phase {
-        PushPhase::Prepared | PushPhase::Pushing => return,
-        PushPhase::Unknown => PushAction::Uncertain,
-        PushPhase::Committed => PushAction::Confirmed,
-        PushPhase::Retryable => PushAction::Reconcile {
-            remote: Some(landing(3).expected),
-        },
-        PushPhase::Conflict => PushAction::Reconcile {
-            remote: Some(provenant_core::GitOid::parse(&"3".repeat(40)).unwrap()),
-        },
-    };
-    store
-        .change_push(guard, fence, &id, action, &f.request())
-        .unwrap();
-}
-#[test]
-fn push_transition_matrix_and_frozen_operation_identity() {
-    use PushPhase::*;
-    for from in [Prepared, Pushing, Unknown, Committed, Retryable, Conflict] {
-        for action in [
-            PushAction::Begin,
-            PushAction::Uncertain,
-            PushAction::Confirmed,
-            PushAction::Reconcile { remote: None },
-            PushAction::Reconcile {
-                remote: Some(landing(3).candidate),
-            },
-            PushAction::Reconcile {
-                remote: Some(landing(3).expected),
-            },
-            PushAction::Reconcile {
-                remote: Some(provenant_core::GitOid::parse(&"3".repeat(40)).unwrap()),
-            },
-        ] {
-            let f = Fixture::new();
-            let store = f.open();
-            let input = landing(3);
-            let guard = store
-                .lock_landing(project(), &input.reference, &f.request())
-                .unwrap();
-            let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-            setup_phase(&store, &f, &guard, &fence, from);
-            let before = store
-                .push_operation(project(), &operation_id(), &f.request())
-                .unwrap();
-            // Replaying preparation preserves all later phase/result evidence.
-            assert_eq!(
-                store
-                    .prepare_push(
-                        &guard,
-                        &fence,
-                        &operation_id(),
-                        "/fixture/origin",
-                        &f.request()
-                    )
-                    .unwrap(),
-                before
-            );
-            let expected = match (from, action) {
-                (Prepared | Retryable, PushAction::Begin) => Some(Pushing),
-                (Pushing, PushAction::Uncertain) => Some(Unknown),
-                (Pushing, PushAction::Confirmed) => Some(Committed),
-                (Pushing | Unknown, PushAction::Reconcile { remote }) => Some(match remote {
-                    None => Unknown,
-                    Some(oid) if oid == input.candidate => Committed,
-                    Some(oid) if oid == input.expected => Retryable,
-                    Some(_) => Conflict,
-                }),
-                _ => None,
-            };
-            let result = store.change_push(&guard, &fence, &operation_id(), action, &f.request());
-            if let Some(expected) = expected {
-                let operation = result.unwrap();
-                assert_eq!(operation.phase, expected, "{from:?} {action:?}");
-                let observed = match action {
-                    PushAction::Confirmed => Some(input.candidate),
-                    PushAction::Reconcile { remote } => remote,
-                    PushAction::Begin | PushAction::Uncertain => None,
-                };
-                assert_eq!(operation.observed_remote, observed, "{from:?} {action:?}");
-            } else {
-                assert!(
-                    matches!(result, Err(Error::PushTransition { .. })),
-                    "{from:?} {action:?}"
-                );
-                assert_eq!(
-                    store
-                        .push_operation(project(), &operation_id(), &f.request())
-                        .unwrap(),
-                    before
-                );
-            }
-        }
-    }
+fn expired_claim_refuses_renewal_but_allows_release() {
     let mut f = Fixture::new();
     let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let first = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    store
-        .prepare_push(
-            &guard,
-            &first,
-            &operation_id(),
-            "/fixture/origin",
-            &f.request(),
-        )
-        .unwrap();
-    assert!(matches!(
-        store.prepare_push(
-            &guard,
-            &first,
-            &provenant_core::OperationId::parse("different").unwrap(),
-            "/fixture/origin",
-            &f.request()
-        ),
-        Err(Error::Conflict)
-    ));
-    f.clock
-        .advance(DurationMicros::from_seconds(1).unwrap())
-        .unwrap();
-    let second = store
-        .acquire_landing(&guard, &landing(4), &f.request())
-        .unwrap();
-    assert!(matches!(
-        store.prepare_push(
-            &guard,
-            &second,
-            &operation_id(),
-            "/fixture/origin",
-            &f.request()
-        ),
-        Err(Error::Conflict)
-    ));
-    assert!(matches!(
-        store.release_landing(&guard, &first, &f.request()),
-        Err(Error::StaleFence)
-    ));
-}
-
-#[test]
-fn expired_claim_and_landing_refuse_renewal_but_allow_release() {
-    let mut f = Fixture::new();
-    let store = f.open();
-    let input = landing(3);
     let work = store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
     f.clock
         .advance(DurationMicros::from_seconds(1).unwrap())
         .unwrap();
@@ -571,128 +233,35 @@ fn expired_claim_and_landing_refuse_renewal_but_allow_release() {
         ),
         Err(Error::StaleFence)
     ));
-    assert!(matches!(
-        store.verify_landing(&guard, &fence, &f.request()),
-        Err(Error::StaleFence)
-    ));
-    assert!(matches!(
-        store.renew_landing(&guard, &fence, input.lease, &f.request()),
-        Err(Error::StaleFence)
-    ));
     store.release_claim(project(), &work, &f.request()).unwrap();
-    store.release_landing(&guard, &fence, &f.request()).unwrap();
 }
 
 // Each stage runs with real SQLite allocation failure or a second connection's
 // RESERVED lock. Successful writes after the fault prove the connection recovers.
 #[derive(Debug, Clone, Copy)]
 enum Mutation {
-    WorkAcquire,
-    WorkRenew,
-    WorkRelease,
-    LandingAcquire,
-    LandingRenew,
-    LandingRelease,
-    Prepare,
-    Begin,
-    Uncertain,
-    Confirm,
-    Reconcile,
+    Acquire,
+    Renew,
+    Release,
 }
 fn exercise_fault(stage: Mutation, full: bool) {
     let f = Fixture::new();
     let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let work_fence = if matches!(stage, Mutation::WorkAcquire) {
+    let work_fence = if matches!(stage, Mutation::Acquire) {
         None
     } else {
         Some(store.acquire_claim(&work(&f, 3), &f.request()).unwrap())
     };
-    let landing_fence = if matches!(stage, Mutation::LandingAcquire) {
-        None
-    } else {
-        Some(store.acquire_landing(&guard, &input, &f.request()).unwrap())
-    };
-    if matches!(
-        stage,
-        Mutation::Begin | Mutation::Uncertain | Mutation::Confirm | Mutation::Reconcile
-    ) {
-        store
-            .prepare_push(
-                &guard,
-                landing_fence.as_ref().unwrap(),
-                &operation_id(),
-                "/fixture/origin",
-                &f.request(),
-            )
-            .unwrap();
-    }
-    if matches!(
-        stage,
-        Mutation::Uncertain | Mutation::Confirm | Mutation::Reconcile
-    ) {
-        store
-            .change_push(
-                &guard,
-                landing_fence.as_ref().unwrap(),
-                &operation_id(),
-                PushAction::Begin,
-                &f.request(),
-            )
-            .unwrap();
-    }
     let action = |req: &Request<'_>| -> Result<()> {
         match stage {
-            Mutation::WorkAcquire => store.acquire_claim(&work(&f, 3), req).map(|_| ()),
-            Mutation::WorkRenew => store.renew_claim(
+            Mutation::Acquire => store.acquire_claim(&work(&f, 3), req).map(|_| ()),
+            Mutation::Renew => store.renew_claim(
                 project(),
                 work_fence.as_ref().unwrap(),
                 DurationMicros::from_seconds(2).unwrap(),
                 req,
             ),
-            Mutation::WorkRelease => {
-                store.release_claim(project(), work_fence.as_ref().unwrap(), req)
-            }
-            Mutation::LandingAcquire => store.acquire_landing(&guard, &input, req).map(|_| ()),
-            Mutation::LandingRenew => store.renew_landing(
-                &guard,
-                landing_fence.as_ref().unwrap(),
-                DurationMicros::from_seconds(2).unwrap(),
-                req,
-            ),
-            Mutation::LandingRelease => {
-                store.release_landing(&guard, landing_fence.as_ref().unwrap(), req)
-            }
-            Mutation::Prepare => store
-                .prepare_push(
-                    &guard,
-                    landing_fence.as_ref().unwrap(),
-                    &operation_id(),
-                    "/fixture/origin",
-                    req,
-                )
-                .map(|_| ()),
-            Mutation::Begin | Mutation::Uncertain | Mutation::Confirm | Mutation::Reconcile => {
-                store
-                    .change_push(
-                        &guard,
-                        landing_fence.as_ref().unwrap(),
-                        &operation_id(),
-                        match stage {
-                            Mutation::Begin => PushAction::Begin,
-                            Mutation::Uncertain => PushAction::Uncertain,
-                            Mutation::Confirm => PushAction::Confirmed,
-                            _ => PushAction::Reconcile {
-                                remote: Some(input.candidate),
-                            },
-                        },
-                        req,
-                    )
-                    .map(|_| ())
-            }
+            Mutation::Release => store.release_claim(project(), work_fence.as_ref().unwrap(), req),
         }
     };
     let before = database_records(&store);
@@ -768,19 +337,7 @@ fn database_records(store: &Store) -> Vec<Vec<u8>> {
 #[test]
 fn full_and_busy_roll_back_every_new_mutation_and_its_event() {
     for full in [false, true] {
-        for stage in [
-            Mutation::WorkAcquire,
-            Mutation::WorkRenew,
-            Mutation::WorkRelease,
-            Mutation::LandingAcquire,
-            Mutation::LandingRenew,
-            Mutation::LandingRelease,
-            Mutation::Prepare,
-            Mutation::Begin,
-            Mutation::Uncertain,
-            Mutation::Confirm,
-            Mutation::Reconcile,
-        ] {
+        for stage in [Mutation::Acquire, Mutation::Renew, Mutation::Release] {
             exercise_fault(stage, full);
         }
     }
@@ -819,146 +376,27 @@ fn invalid_inputs_tokens_generations_and_cancellation_leave_no_mutation() {
             Err(Error::Invalid(_))
         ));
     }
-    for branch in [
-        "main",
-        "refs/heads/../main",
-        "refs/heads/a.lock",
-        "refs/heads/a:b",
-        "refs/heads/a\n",
-        "refs/heads/.a",
-        "refs/heads/a@{b",
-    ] {
-        assert!(matches!(
-            store.lock_landing(project(), branch, &f.request()),
-            Err(Error::Invalid(_))
-        ));
-    }
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
+    let fence = store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
     let before = database_records(&store);
-    for wrong in [
-        ClaimFence {
-            token: [0; 16],
-            ..fence.clone()
-        },
-        ClaimFence {
-            generation: 99,
-            ..fence.clone()
-        },
-        ClaimFence {
-            actor: actor(9),
-            ..fence.clone()
-        },
-    ] {
-        assert!(matches!(
-            store.renew_landing(&guard, &wrong, input.lease, &f.request()),
-            Err(Error::StaleFence)
-        ));
-        assert!(matches!(
-            store.release_landing(&guard, &wrong, &f.request()),
-            Err(Error::StaleFence)
-        ));
-        assert!(matches!(
-            store.prepare_push(
-                &guard,
-                &wrong,
-                &operation_id(),
-                "/fixture/origin",
-                &f.request()
-            ),
-            Err(Error::StaleFence)
-        ));
-    }
     f.cancel.cancel();
     assert!(matches!(
-        store.release_landing(&guard, &fence, &f.request()),
+        store.release_claim(project(), &fence, &f.request()),
         Err(Error::Cancelled)
     ));
     assert!(matches!(
-        store.acquire_claim(&work(&f, 3), &f.request()),
+        store.renew_claim(
+            project(),
+            &fence,
+            DurationMicros::from_seconds(1).unwrap(),
+            &f.request()
+        ),
+        Err(Error::Cancelled)
+    ));
+    assert!(matches!(
+        store.acquire_claim(&work(&f, 4), &f.request()),
         Err(Error::Cancelled)
     ));
     assert_eq!(database_records(&store), before);
-}
-
-#[test]
-fn reopened_store_keeps_unknown_push_pinned_after_owner_lock_closes() {
-    let mut f = Fixture::new();
-    let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    setup_phase(&store, &f, &guard, &fence, PushPhase::Unknown);
-    drop(guard);
-    drop(store);
-    f.clock
-        .advance(DurationMicros::from_seconds(1).unwrap())
-        .unwrap();
-    let store = f.open();
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    assert!(matches!(
-        store.acquire_landing(&guard, &landing(4), &f.request()),
-        Err(Error::PushUnresolved { .. })
-    ));
-    let unknown = store
-        .change_push(
-            &guard,
-            &fence,
-            &operation_id(),
-            PushAction::Reconcile { remote: None },
-            &f.request(),
-        )
-        .unwrap();
-    assert_eq!(unknown.phase, PushPhase::Unknown);
-    assert!(matches!(
-        store.release_landing(&guard, &fence, &f.request()),
-        Err(Error::PushUnresolved { .. })
-    ));
-    store
-        .change_push(
-            &guard,
-            &fence,
-            &operation_id(),
-            PushAction::Reconcile {
-                remote: Some(input.expected),
-            },
-            &f.request(),
-        )
-        .unwrap();
-    assert!(matches!(
-        store.change_push(
-            &guard,
-            &fence,
-            &operation_id(),
-            PushAction::Begin,
-            &f.request()
-        ),
-        Err(Error::StaleFence)
-    ));
-    assert!(matches!(
-        store.renew_landing(&guard, &fence, input.lease, &f.request()),
-        Err(Error::StaleFence)
-    ));
-    store.release_landing(&guard, &fence, &f.request()).unwrap();
-    let next = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    assert_eq!(next.generation, fence.generation + 1);
-    let retry = provenant_core::OperationId::parse("push-retry").unwrap();
-    store
-        .prepare_push(&guard, &next, &retry, "/fixture/origin", &f.request())
-        .unwrap();
-    store
-        .change_push(&guard, &next, &retry, PushAction::Begin, &f.request())
-        .unwrap();
-    store
-        .change_push(&guard, &next, &retry, PushAction::Confirmed, &f.request())
-        .unwrap();
 }
 
 #[test]
@@ -1000,49 +438,25 @@ fn acquire_retries_return_live_fences_without_renewal_or_events() {
     let store = f.open();
     let work_input = work(&f, 3);
     let work = store.acquire_claim(&work_input, &f.request()).unwrap();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    for phase in [None, Some(PushPhase::Unknown)] {
-        if let Some(phase) = phase {
-            setup_phase(&store, &f, &guard, &fence, phase);
-        }
-        let before = database_records(&store);
-        assert_eq!(
-            store.acquire_claim(&work_input, &f.request()).unwrap(),
-            work
-        );
-        assert_eq!(
-            store.acquire_landing(&guard, &input, &f.request()).unwrap(),
-            fence
-        );
-        assert_eq!(database_records(&store), before);
-        let mut changed = input.clone();
-        changed.candidate = provenant_core::GitOid::parse(&"3".repeat(40)).unwrap();
-        assert!(matches!(
-            store.acquire_landing(&guard, &changed, &f.request()),
-            Err(Error::Conflict)
-        ));
-        let mut changed = work_input.clone();
-        changed.token = [8; 16];
-        assert!(matches!(
-            store.acquire_claim(&changed, &f.request()),
-            Err(Error::Overlap { .. })
-        ));
-        changed.token = work_input.token;
-        changed.actor = actor(8);
-        assert!(matches!(
-            store.acquire_claim(&changed, &f.request()),
-            Err(Error::Overlap { .. })
-        ));
-    }
-    f.clock.advance(input.lease).unwrap();
+    let before = database_records(&store);
+    assert_eq!(
+        store.acquire_claim(&work_input, &f.request()).unwrap(),
+        work
+    );
+    assert_eq!(database_records(&store), before);
+    let mut changed = work_input.clone();
+    changed.token = [8; 16];
     assert!(matches!(
-        store.acquire_landing(&guard, &input, &f.request()),
-        Err(Error::PushUnresolved { .. })
+        store.acquire_claim(&changed, &f.request()),
+        Err(Error::Overlap { .. })
     ));
+    changed.token = work_input.token;
+    changed.actor = actor(8);
+    assert!(matches!(
+        store.acquire_claim(&changed, &f.request()),
+        Err(Error::Overlap { .. })
+    ));
+    f.clock.advance(work_input.lease).unwrap();
     let next = store.acquire_claim(&work_input, &f.request()).unwrap();
     assert_eq!(next.generation, work.generation + 1);
 }
@@ -1066,34 +480,19 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
     }
     let f = Fixture::new();
     let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    let work = store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
+    let work_input = work(&f, 3);
+    let work = store.acquire_claim(&work_input, &f.request()).unwrap();
     let clock = TickingClock(std::sync::Mutex::new(f.now().as_micros()));
     let mut req = f.request();
     req.clock = &clock;
-    for renew in 0..2 {
-        let (at, expires) = match renew {
-            0 => {
-                store
-                    .renew_claim(project(), &work, input.lease, &req)
-                    .unwrap();
-                let row = store.verify_claim(project(), &work, &req).unwrap();
-                (row.updated_at, row.expires_at)
-            }
-            _ => {
-                store
-                    .renew_landing(&guard, &fence, input.lease, &req)
-                    .unwrap();
-                let row = store.verify_landing(&guard, &fence, &req).unwrap();
-                (row.updated_at, row.expires_at)
-            }
-        };
-        assert_eq!(expires, Some(at.checked_add(input.lease).unwrap()));
-    }
+    store
+        .renew_claim(project(), &work, work_input.lease, &req)
+        .unwrap();
+    let row = store.verify_claim(project(), &work, &req).unwrap();
+    assert_eq!(
+        row.expires_at,
+        Some(row.updated_at.checked_add(work_input.lease).unwrap())
+    );
 }
 
 #[test]
@@ -1153,32 +552,14 @@ fn acquire_prunes_only_bounded_released_unreferenced_rows_and_keeps_counters() {
 }
 
 #[test]
-fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_held_rows() {
+fn migration_four_preserves_all_claim_rows_and_pruning_retains_held_rows() {
     let mut f = Fixture::new();
     let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let landing_fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    store
-        .prepare_push(
-            &guard,
-            &landing_fence,
-            &operation_id(),
-            "/fixture/origin",
-            &f.request(),
-        )
-        .unwrap();
-    store
-        .release_landing(&guard, &landing_fence, &f.request())
-        .unwrap();
     let mut input = work(&f, 3);
     let work_fence = store.acquire_claim(&input, &f.request()).unwrap();
     let before = database_records(&store);
     downgrade_to_six(&store, "");
     store.db.execute_batch("DROP TABLE peer_operations; DROP TABLE run_event_cursors; DROP TABLE coordination_operations; DROP TABLE claim_counters; DROP INDEX claim_path_lookup; DROP INDEX released_claims; PRAGMA user_version=3;").unwrap();
-    drop(guard);
     drop(store);
     let store = f.open();
     assert_eq!(database_records(&store), before);
@@ -1189,7 +570,7 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
         .db
         .query_row("SELECT count(*) FROM claim_counters", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(counters, 2);
+    assert_eq!(counters, 1);
     // Expired but unreleased owners are retained too.
     f.clock.advance(input.lease).unwrap();
     input.id = provenant_core::ClaimId::from_bytes([20; 16]);
@@ -1199,12 +580,6 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
     };
     let live = store.acquire_claim(&input, &f.request()).unwrap();
     store.verify_claim(project(), &live, &f.request()).unwrap();
-    assert!(
-        store
-            .landing(project(), "refs/heads/main", &f.request())
-            .unwrap()
-            .is_some()
-    );
     store
         .release_claim(project(), &work_fence, &f.request())
         .unwrap();
@@ -1358,30 +733,4 @@ fn pruned_paths_and_counters_roll_back_if_acquire_event_fails() {
     ));
     let next = store.acquire_claim(&old_input, &f.request()).unwrap();
     assert_eq!(next.generation, fence.generation + 1);
-}
-
-#[test]
-fn pruned_landing_observation_is_absent_and_reacquire_keeps_its_counter() {
-    let f = Fixture::new();
-    let store = f.open();
-    let input = landing(3);
-    let guard = store
-        .lock_landing(project(), &input.reference, &f.request())
-        .unwrap();
-    let fence = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    store.release_landing(&guard, &fence, &f.request()).unwrap();
-    store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
-    assert_eq!(
-        store
-            .landing(project(), &input.reference, &f.request())
-            .unwrap(),
-        None
-    );
-    let next = store.acquire_landing(&guard, &input, &f.request()).unwrap();
-    assert_eq!(next.id, fence.id);
-    assert_eq!(next.generation, fence.generation + 1);
-    assert!(matches!(
-        store.verify_landing(&guard, &fence, &f.request()),
-        Err(Error::StaleFence)
-    ));
 }

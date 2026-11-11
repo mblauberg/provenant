@@ -10,7 +10,6 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
         let requested = run::TaskRequest {
-            cloud: None,
             context: None,
             extra: Default::default(),
             build_heavy: false,
@@ -645,7 +644,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         serde_json::to_vec(&stale)?,
     )?;
     let task = run::TaskRequest {
-        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,
@@ -841,7 +839,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     }
     let prompt = "fake OpenCode login recovery";
     let task = run::TaskRequest {
-        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,
@@ -1062,7 +1059,6 @@ fn prepare_over_two_accounts(
     }
     let prompt = "exhausted account walk";
     let task = run::TaskRequest {
-        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,

@@ -161,7 +161,7 @@ fn is_product_asset(path: &Path) -> bool {
 }
 
 fn is_release_binary(path: &Path) -> bool {
-    matches!(path.to_str(), Some("bin/provenant" | "bin/pr-reconciler"))
+    matches!(path.to_str(), Some("bin/provenant"))
 }
 
 /// Asset modes are normalized for installation: executables become 0700 and

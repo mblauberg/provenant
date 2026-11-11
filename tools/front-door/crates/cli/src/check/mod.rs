@@ -464,11 +464,6 @@ pub fn config_page(
                 location.line,
                 "configuration violates the typed TOML schema; repair: delete the line or run `provenant config migrate`".to_owned(),
             ),
-            ConfigError::MisplacedDomainKnob { name, location } => (
-                "config.schema",
-                location.line,
-                format!("set {name} outside [knobs]; repair: delete the line or run `provenant config migrate`"),
-            ),
             ConfigError::Domain {
                 location, source, ..
             } => {

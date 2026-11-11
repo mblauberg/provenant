@@ -7,7 +7,6 @@ mod db;
 mod events;
 mod federation;
 mod human_inbox;
-mod landing;
 mod local_delivery;
 mod messages;
 mod operations;
@@ -20,7 +19,6 @@ pub use federation::*;
 pub use human_inbox::{
     HumanAcknowledgement, HumanClosure, PendingHumanRequest, PendingHumanRequests,
 };
-pub use landing::*;
 pub use messages::*;
 
 use provenant_core::{ActorId, ProjectId, WallTime};
@@ -62,12 +60,6 @@ pub enum Error {
     NotFound,
     #[error("record conflicts with existing state")]
     Conflict,
-    #[error("push operation {operation} requires reconciliation")]
-    PushUnresolved {
-        operation: provenant_core::OperationId,
-    },
-    #[error("invalid push transition from {from:?} using {action:?}")]
-    PushTransition { from: PushPhase, action: PushAction },
     #[error("claim overlaps active ownership {claim}")]
     Overlap { claim: provenant_core::ClaimId },
     #[error("path cannot be represented as UTF-8")]

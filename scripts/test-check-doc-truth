@@ -410,27 +410,6 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
 
-    def intake(self, rows, code):
-        source = self.root / "tools/front-door/src/bin/event-intake.rs"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(code)
-        (self.root / "docs/runbooks/event-intake-configuration.md").write_text(
-            "# Event intake\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n## Configure\n\n"
-            "| Variable | Meaning |\n|---|---|\n" + rows)
-
-    def test_event_intake_table_matches_the_variables_read(self):
-        code = ('env::var("PROVENANT_INTAKE_DIR");\n'
-                'env::var("PROVENANT_INTAKE_SWEEP_SECONDS").unwrap_or_else(|_| "300".into());\n')
-        self.intake("| `PROVENANT_INTAKE_DIR` | State. |\n| `PROVENANT_INTAKE_SWEEP_SECONDS` | Default `300`. |\n", code)
-        result = self.check("--inventory-only", "--strict-inventory", source=False)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.intake("| `PROVENANT_INTAKE_SWEEP_SECONDS` | Default `60`. |\n| `PROVENANT_INTAKE_GONE` | Old. |\n", code)
-        result = self.check("--inventory-only", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("PROVENANT_INTAKE_DIR is read by event-intake but not documented", result.stdout)
-        self.assertIn("PROVENANT_INTAKE_GONE is documented but not read", result.stdout)
-        self.assertIn("sweep default is 300", result.stdout)
-
     def delivery(self, rows):
         specs = self.root / "tools/front-door/crates/records/src/adapters.rs"
         hooks = self.root / "tools/front-door/crates/cli/src/hooks.rs"

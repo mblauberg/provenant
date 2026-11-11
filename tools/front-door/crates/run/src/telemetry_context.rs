@@ -142,21 +142,18 @@ pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> ExtraFields {
             at,
         ));
     }
-    // Cloud execution does not observe the local checkout as its instructions.
-    if task.cloud.is_none() {
-        let root = task
-            .access
-            .source_root
-            .as_deref()
-            .or_else(|| task.writer.as_ref().map(|writer| writer.project.as_path()));
-        if let Some(instructions) = root.and_then(|root| bytes(&root.join("AGENTS.md"), 1 << 20)) {
-            context.instructions = Some(observe(
-                hash(&instructions),
-                "source_checkout",
-                "observed source-root AGENTS.md bytes; not full effective session instructions",
-                at,
-            ));
-        }
+    let root = task
+        .access
+        .source_root
+        .as_deref()
+        .or_else(|| task.writer.as_ref().map(|writer| writer.project.as_path()));
+    if let Some(instructions) = root.and_then(|root| bytes(&root.join("AGENTS.md"), 1 << 20)) {
+        context.instructions = Some(observe(
+            hash(&instructions),
+            "source_checkout",
+            "observed source-root AGENTS.md bytes; not full effective session instructions",
+            at,
+        ));
     }
     let mut extra = ExtraFields::new();
     if let Ok(value) = serde_json::to_value(context) {
