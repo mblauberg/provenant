@@ -2881,14 +2881,6 @@ pub(super) fn prepare_candidates(
                 &private_state,
             ) {
                 Ok(continuation) => Some(continuation),
-                Err(error)
-                    if task.extra.get("automatic_continuation")
-                        == Some(&serde_json::json!(true))
-                        && error.boundary_class()
-                            == provenant_records::diagnostic::BoundaryClass::None =>
-                {
-                    None
-                }
                 Err(error) => {
                     let class = error.boundary_class();
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -2983,7 +2975,6 @@ pub(super) fn prepare_candidates(
                     .providers
                     .get(adapter.id())
                     .and_then(|provider| provider.runtime_deadline_seconds),
-                continuations: model_policy.lane.max_continuations,
             },
         );
         let text = format!(
@@ -3479,10 +3470,6 @@ pub(super) fn prepare_candidates(
         provider.extra.insert(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
-        );
-        provider.extra.insert(
-            "resume_continuations".into(),
-            serde_json::json!(model_policy.lane.resume_continuations.unwrap_or(false)),
         );
         if refreshed
             .as_ref()

@@ -871,7 +871,7 @@ impl GraphJournal for FileJournal {
 
 fn stored_pending(stored: &StoredCheckpoint) -> bool {
     let checkpoint = &stored.checkpoint;
-    no_work::pending(&stored.execution.document, checkpoint)
+    next_step::pending(checkpoint)
         || checkpoint
             .nodes
             .iter()

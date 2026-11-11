@@ -493,6 +493,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 }]
                 .into(),
                 ..Default::default()

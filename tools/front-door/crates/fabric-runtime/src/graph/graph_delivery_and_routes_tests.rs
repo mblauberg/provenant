@@ -186,7 +186,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route("fourth"),
     ];
     let document = graph(vec![GraphNode {
-        auto_continue_no_work: None,
+        on_stop: Default::default(),
         attempt: None,
         attachments: Vec::new(),
         family_group: None,
@@ -484,7 +484,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     ] {
         let routes = vec![route("first"), route("second")];
         let document = graph(vec![GraphNode {
-            auto_continue_no_work: None,
+            on_stop: Default::default(),
             attempt: None,
             attachments: Vec::new(),
             family_group: None,
@@ -550,7 +550,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
 }
 
 #[test]
-fn writer_limit_after_launch_never_tries_a_second_route() {
+fn writer_limit_after_launch_restarts_in_place_on_the_second_route() {
     let mut writer = node("writer", route("first"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("/private/tmp/writer".into());
@@ -566,8 +566,9 @@ fn writer_limit_after_launch_never_tries_a_second_route() {
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 1, "a launched writer cannot be retried");
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[1].1, route("second"));
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
 }
 
 #[test]
@@ -755,6 +756,7 @@ fn launched_reader_fallback_respects_retry_budget() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         ..FakeOwner::default()
     };
@@ -780,6 +782,7 @@ fn launched_reader_reports_pinned_route() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         ..FakeOwner::default()
     };
@@ -815,6 +818,7 @@ fn launched_reader_fallback_keeps_account_pin() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         ..FakeOwner::default()
     };
@@ -847,6 +851,7 @@ fn fallback_reports_unreadable_evidence() {
             result_path: None,
             branch: None,
             commit: None,
+            stop: None,
         }]),
         ..FakeOwner::default()
     };
@@ -907,6 +912,7 @@ fn resumed_fallback_requires_current_local_custody_evidence() {
         result_path: None,
         branch: None,
         commit: None,
+        stop: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),

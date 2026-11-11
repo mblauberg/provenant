@@ -1487,17 +1487,13 @@ impl RunStore {
             .and_then(|r| r.provider.as_deref())
             == Some("codex")
         {
-            let prior_id = if record.continuation.as_deref() == Some("automatic") {
-                Ok(record.retry_of)
-            } else {
-                self.request(record.run_id, call).map(|request| {
-                    if request.fresh_continuation.is_none() {
-                        request.parent
-                    } else {
-                        None
-                    }
-                })
-            };
+            let prior_id = self.request(record.run_id, call).map(|request| {
+                if request.fresh_continuation.is_none() {
+                    request.parent
+                } else {
+                    None
+                }
+            });
             let prior = prior_id.and_then(|id| id.map(|id| self.record(id, call)).transpose());
             let baseline_unknown = prior.is_err();
             let prior = prior.ok().flatten();
@@ -2355,25 +2351,6 @@ impl RunStore {
         ) {
             decoded.terminal_cause = None;
         }
-        self.seal_automatic_continuation(
-            &record,
-            attempt,
-            matches!(
-                decoded.outcome,
-                Outcome::ReviewRequired | Outcome::Uncommitted
-            ) && decoded.complete
-                && !cancelled
-                && !import_failed
-                && !import_stopped
-                && !redaction_failed
-                && exit.stop_reason.is_none()
-                && !exit.unresolved_cleanup
-                && exit.unresolved_pids.is_empty()
-                && exit.settlement_evidence != custody::SettlementEvidence::LeftoverNotProven
-                && exit.publication == custody::PublicationState::Durable,
-            handoff.as_ref(),
-            call,
-        )?;
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let stop = provenant_records::Stop::sealed(decoded.terminal_cause, handoff.clone())
             .map_err(|_| RunError::Validation("stop could not be sealed"))?;
@@ -3455,14 +3432,7 @@ mod writer_recovery_tests {
             run.request.tasks[0].writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
             let id = run.attempts[0].attempt_id;
-            let limits = provenant_records::LaneLimits {
-                continuations: Some(provenant_records::Limit::new(
-                    2,
-                    provenant_records::LimitSource::Host,
-                    provenant_records::LimitStrength::Default,
-                )),
-                ..Default::default()
-            };
+            let limits = provenant_records::LaneLimits::default();
             store.mark_starting_with_priority(
                 &store.record(id, &call)?,
                 &route(),
@@ -3563,7 +3533,7 @@ mod writer_recovery_tests {
             ));
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             if blocked {
-                // A blocked writer seals one typed stop and restarts nothing.
+                // A blocked writer seals one typed stop.
                 let AttemptState::Terminal { extra, .. } = &finished.state else {
                     panic!("not terminal")
                 };
@@ -3578,11 +3548,9 @@ mod writer_recovery_tests {
                 assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
                 continue;
             }
-            let successor = store.pending_attempts(run.run_id, &call)?;
-            assert_eq!(successor.len(), 1);
-            assert_eq!(finished.superseded_by, Some(successor[0].attempt_id));
-            assert_eq!(successor[0].retry_of, Some(id));
-            assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Open);
+            assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
+            assert_eq!(finished.superseded_by, None);
+            assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
             if dirty {
                 assert!(matches!(
                     finished.state,
@@ -3974,10 +3942,10 @@ mod writer_recovery_tests {
 
     /// A Claude writer whose launch-time token copy was lost mid-run (the
     /// host renewed the account login) settles as a declared stop on its
-    /// latest handoff and seals one automatic continuation; its uncommitted
-    /// edit stays, and the reason stays the lane-token one, not a login.
+    /// latest handoff; its uncommitted edit stays, and the reason stays the
+    /// lane-token one, not a login.
     #[test]
-    fn writer_that_lost_its_lane_token_is_continued_from_its_handoff()
+    fn writer_that_lost_its_lane_token_settles_on_its_handoff()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         let fixture = PrepareFixture::new()?;
@@ -3989,11 +3957,9 @@ mod writer_recovery_tests {
         run.request.tasks[0].writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
-        let mut applied = route();
-        applied.extra.insert("max_continuations".into(), 2.into());
         store.mark_starting(
             &store.record(id, &call)?,
-            &applied,
+            &route(),
             &[],
             &Default::default(),
             None,
@@ -4085,7 +4051,7 @@ mod writer_recovery_tests {
         let handoff =
             provenant_records::handoff::Handoff::from_result(&result)?.ok_or("result handoff")?;
         assert_eq!(handoff.note, "Parser done; renderer next");
-        assert!(store.automatic_continuation(&finished)?.is_some());
+        assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
         assert_eq!(
             std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
             "uncommitted work before the token was lost\n"

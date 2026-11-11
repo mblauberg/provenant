@@ -129,9 +129,6 @@ pub struct LaneLimits {
     /// Wall-clock seconds before the lane is stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_seconds: Option<Limit>,
-    /// Continuations after a stop, shared across the graph.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuations: Option<Limit>,
     /// Review and repair rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_cycles: Option<Limit>,
@@ -144,7 +141,6 @@ impl LaneLimits {
             ("token_budget", &self.token_budget),
             ("context_handoff", &self.context_handoff),
             ("deadline_seconds", &self.deadline_seconds),
-            ("continuations", &self.continuations),
             ("repair_cycles", &self.repair_cycles),
         ]
         .into_iter()
@@ -158,7 +154,6 @@ impl LaneLimits {
             "token_budget" => &mut self.token_budget,
             "context_handoff" => &mut self.context_handoff,
             "deadline_seconds" => &mut self.deadline_seconds,
-            "continuations" => &mut self.continuations,
             "repair_cycles" => &mut self.repair_cycles,
             _ => return None,
         };
@@ -182,7 +177,6 @@ impl LaneLimits {
                 "deadline_seconds" => {
                     format!("The host stops this lane after {} seconds.", limit.value)
                 }
-                "continuations" => format!("At most {} continuations follow a stop.", limit.value),
                 _ => format!("At most {} review and repair rounds run.", limit.value),
             };
             text.push_str(&line);

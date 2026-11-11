@@ -44,6 +44,7 @@ impl AttemptOwner for Provider {
                 result_path: None,
                 branch: None,
                 commit: None,
+                stop: None,
             })
         } else {
             assert!(replay.stored_ref.is_none());

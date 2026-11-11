@@ -682,7 +682,7 @@ fn writer_template_can_disable_no_work_continuation() {
         tier = "junior"
         access = "worktree_write"
         [node]
-        auto_continue_no_work = false
+        on_stop = { stopped_early = "chair" }
     "#,
     )
     .unwrap();
@@ -695,10 +695,17 @@ fn writer_template_can_disable_no_work_continuation() {
     let compiled = Compiler::new(&templates)
         .compile(&json!({"id":"work", "use":"custom-writer", "worktree":".worktrees/work"}))
         .unwrap();
-    assert_eq!(compiled.auto_continue_no_work, Some(false));
+    assert_eq!(
+        compiled
+            .on_stop
+            .get(provenant_records::StopCause::StoppedEarly),
+        Some(provenant_records::NextStep::Chair)
+    );
     assert!(
         Compiler::new(&templates)
-            .compile(&json!({"id":"work", "use":"custom-writer", "auto_continue_no_work":"false"}))
+            .compile(
+                &json!({"id":"work", "use":"custom-writer", "on_stop":{"stopped_early":"later"}})
+            )
             .is_err()
     );
 }

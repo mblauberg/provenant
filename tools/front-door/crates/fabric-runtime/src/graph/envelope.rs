@@ -529,6 +529,8 @@ fn node_bound(
             },
             route: route.clone(),
             state: AttemptState::Unresolved,
+            // The longest stop cause name.
+            stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
             attempt_ref: Some(String::new()),
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),

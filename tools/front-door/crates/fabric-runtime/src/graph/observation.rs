@@ -58,5 +58,7 @@ pub enum AttemptObservation {
         result_path: Option<String>,
         branch: Option<String>,
         commit: Option<String>,
+        /// The stop cause the run sealed, if the attempt stopped.
+        stop: Option<provenant_records::StopCause>,
     },
 }

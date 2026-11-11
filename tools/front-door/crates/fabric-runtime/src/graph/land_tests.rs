@@ -303,6 +303,7 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch,
             commit: commit.map(str::to_owned),
+            stop: None,
         })
     }
 }

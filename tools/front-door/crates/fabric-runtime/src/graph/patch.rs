@@ -156,6 +156,19 @@ pub struct PatchRecord {
     /// unjournaled record (a planner fragment) is journaled at save instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub journaled: bool,
+    /// Present when the host restarted a stopped node: the stop it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<Restart>,
+}
+
+/// The stop a host restart answered and the step it took. Restarts count
+/// against the graph-wide `limits.continuations`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restart {
+    pub node: String,
+    pub cause: provenant_records::StopCause,
+    #[serde(flatten)]
+    pub step: provenant_records::NextStep,
 }
 
 /// The node field naming the parent node whose patch added a node.
@@ -351,6 +364,7 @@ fn admit_patch_for_retry(
             skipped: Vec::new(),
             replaced: Vec::new(),
             journaled: false,
+            restart: None,
         };
         if let Some(journal) = context.journal {
             journal(&record).map_err(|reason| PatchError::new("journal", reason))?;
@@ -359,7 +373,6 @@ fn admit_patch_for_retry(
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
             source: String::new(),
-            continuation: false,
             nodes: Vec::new(),
             uses,
             patch: Some(record),
@@ -456,34 +469,27 @@ pub fn retry_node(
     retry_node_scope(graph, id, brief, context, false, None, None)
 }
 
-/// Host continuation uses the same checked, journalled reset as an explicit retry.
-pub(super) fn continue_no_work(
+/// A host restart after a stop uses the same checked, journalled reset as an
+/// explicit retry, and records the stop it answered.
+pub(super) fn restart_stopped(
     graph: &mut LiveGraph<'_>,
     id: &str,
-    brief: &str,
+    brief: Option<&str>,
     routes: &[GraphRoute],
+    restart: Restart,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
+    let reason = format!("restart node {id} after a {} stop", restart.cause);
+    debug_assert_eq!(restart.node, id);
     retry_node_scope(
         graph,
         id,
-        Some(brief),
+        brief,
         context,
         false,
-        Some(&no_work_reason(id)),
+        Some((&reason, Some(restart))),
         Some(routes),
     )
-}
-
-pub(super) fn no_work_reason(id: &str) -> String {
-    format!("continue node {id} after stop with no work")
-}
-
-pub(super) fn is_no_work_continuation(record: &PatchRecord) -> bool {
-    record
-        .replaced
-        .iter()
-        .any(|node| record.reason.as_deref() == Some(no_work_reason(&node.id).as_str()))
 }
 
 fn retry_node_scope(
@@ -492,7 +498,7 @@ fn retry_node_scope(
     brief: Option<&str>,
     context: &PatchContext<'_>,
     dependants: bool,
-    reason: Option<&str>,
+    reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
@@ -716,7 +722,8 @@ fn retry_node_scope(
         expected_revision: Some(revision(graph.checkpoint)),
         reason: Some(
             reason
-                .map(str::to_owned)
+                .as_ref()
+                .map(|(reason, _)| (*reason).to_owned())
                 .unwrap_or_else(|| format!("retry node {id}")),
         ),
         replace: vec![serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?],
@@ -732,6 +739,14 @@ fn retry_node_scope(
         context,
         Some(id),
     )?;
+    if let Some((_, Some(restart))) = reason
+        && let Some(record) = candidate
+            .expansions
+            .last_mut()
+            .and_then(|expansion| expansion.patch.as_mut())
+    {
+        record.restart = Some(restart);
+    }
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
@@ -1348,7 +1363,6 @@ pub(super) fn prepare(
     let mut expansion = Expansion {
         extra: Default::default(),
         source: parent.map(|node| node.id.clone()).unwrap_or_default(),
-        continuation: false,
         nodes: std::mem::take(&mut nodes),
         uses,
         patch: Some(PatchRecord {
@@ -1361,6 +1375,7 @@ pub(super) fn prepare(
             skipped: patch.skip.clone(),
             replaced,
             journaled: false,
+            restart: None,
         }),
     };
     if matches!(mode, Preparation::FinalFragment) {
@@ -1466,7 +1481,7 @@ pub(super) fn correct_review_verdict(
         Some(brief),
         context,
         false,
-        Some(&format!("correct review verdict {id}")),
+        Some((&format!("correct review verdict {id}"), None)),
         None,
     )
 }

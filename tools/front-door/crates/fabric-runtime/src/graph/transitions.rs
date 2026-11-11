@@ -215,10 +215,12 @@ pub(super) fn apply_attempt_observation(
                 result_path,
                 branch,
                 commit,
+                stop,
             } => {
                 settled_result = result.clone();
                 attempt.usage = usage;
                 attempt.launched = launched;
+                attempt.stop = stop;
                 attempt.state = AttemptState::Terminal;
                 attempt.attempt_ref = attempt_ref;
                 // Provider success alone does not satisfy an explicit result contract.
@@ -389,6 +391,19 @@ pub(super) fn apply_attempt_observation(
                         .iter()
                         .any(|warning| warning.starts_with(FINDINGS_INVALID))
                     && disposition_error.is_none();
+                // A writer that reports success with an unfinished handoff
+                // declared a stop; the one next-step decision answers it.
+                let outcome = if outcome == AttemptOutcome::Succeeded
+                    && launched
+                    && node.access == AccessMode::WorktreeWrite
+                    && result
+                        .as_ref()
+                        .is_some_and(|capture| plans::handoff(capture).ok().flatten().is_some())
+                {
+                    AttemptOutcome::DeclaredStop
+                } else {
+                    outcome
+                };
                 let outcome = if matches!(
                     outcome,
                     AttemptOutcome::Succeeded
@@ -409,7 +424,7 @@ pub(super) fn apply_attempt_observation(
                 {
                     // One rule for every writer stop, committed, clean or with
                     // uncommitted edits: restart in place on the retained
-                    // worktree, or return to the chair (see `no_work`).
+                    // worktree, or return to the chair (see `next_step`).
                     progress.advance_error_code = Some("stopped_no_work".into());
                     progress.advance_error = Some(
                         if outcome == AttemptOutcome::StoppedNoWork {
@@ -439,6 +454,11 @@ pub(super) fn apply_attempt_observation(
                     outcome
                 };
                 attempt.outcome = Some(outcome);
+                // An integrity or disposition failure is not the stop the
+                // owner sealed, so no restart answers it.
+                if warned || disposition_error.is_some() {
+                    attempt.stop = None;
+                }
                 if outcome == AttemptOutcome::TaskFailed
                     && let Some((code, reason)) = disposition_error
                 {
@@ -958,6 +978,7 @@ pub(super) fn begin_attempt(
         key: key.clone(),
         route: route.clone(),
         state: AttemptState::Starting,
+        stop: None,
         attempt_ref: None,
         outcome: None,
         launched: true,
@@ -1763,6 +1784,7 @@ mod tests {
                     result_path: None,
                     branch: None,
                     commit: None,
+                    stop: None,
                 },
                 ObservationFacts {
                     route_index: 0,

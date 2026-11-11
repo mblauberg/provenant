@@ -2,8 +2,8 @@
 use crate::handoff::{Handoff, HandoffStatus};
 use crate::{
     CanonicalV1, Continuation, FindingDecision, FindingDisposition, Limit, LimitSource,
-    LimitStrength, Limits, NextStep, Pause, PauseCause, STOP_TABLE, Stop, StopCause, WorkKey,
-    decode,
+    LimitStrength, Limits, NextStep, OnStop, Pause, PauseCause, STOP_TABLE, Stop, StopCause,
+    StopFacts, WorkKey, decode,
 };
 use provenant_core::{GitOid, ProjectId};
 use serde::{Serialize, de::DeserializeOwned};
@@ -31,7 +31,7 @@ fn the_spec_table_matches_the_stop_table() {
     )
     .unwrap();
     let (_, section) = spec.split_once("## What follows a stop").unwrap();
-    let rows: Vec<(String, String, bool)> = section
+    let rows: Vec<(String, String, bool, u8)> = section
         .lines()
         .take_while(|line| !line.starts_with("## "))
         .filter_map(|line| {
@@ -41,10 +41,15 @@ fn the_spec_table_matches_the_stop_table() {
                 .split('|')
                 .map(|cell| cell.trim().trim_matches('`'))
                 .collect();
-            Some((cells[0].into(), cells[1].into(), cells[2] == "yes"))
+            Some((
+                cells[0].into(),
+                cells[1].into(),
+                cells[2] == "yes",
+                cells[3].parse().unwrap(),
+            ))
         })
         .collect();
-    let expected: Vec<(String, String, bool)> = STOP_TABLE
+    let expected: Vec<(String, String, bool, u8)> = STOP_TABLE
         .iter()
         .map(|rule| {
             let step = serde_json::to_value(rule.default).unwrap();
@@ -52,10 +57,20 @@ fn the_spec_table_matches_the_stop_table() {
                 rule.cause.as_str().into(),
                 step["step"].as_str().unwrap().into(),
                 rule.pinned,
+                rule.retries,
             )
         })
         .collect();
     assert_eq!(rows, expected);
+}
+
+const RELEASED: StopFacts = StopFacts {
+    retries: 0,
+    custody_released: true,
+};
+
+fn override_of(cause: StopCause, step: NextStep) -> OnStop {
+    OnStop::new([(cause, step)].into())
 }
 
 #[test]
@@ -63,19 +78,115 @@ fn an_override_moves_only_an_unpinned_cause() {
     let resume = NextStep::SameRoute {
         continuation: Continuation::Resume,
     };
-    assert_eq!(StopCause::StoppedEarly.next_step(None), NextStep::NewRoute);
-    assert_eq!(StopCause::StoppedEarly.next_step(Some(resume)), resume);
+    let none = OnStop::default();
+    assert_eq!(
+        StopCause::StoppedEarly.next_step(&none, RELEASED),
+        NextStep::NewRoute
+    );
+    assert_eq!(
+        StopCause::StoppedEarly.next_step(&override_of(StopCause::StoppedEarly, resume), RELEASED),
+        resume
+    );
     for pinned in [
         StopCause::Blocked,
         StopCause::InputRequired,
         StopCause::Cancelled,
     ] {
         assert!(pinned.rule().pinned);
-        assert_eq!(pinned.next_step(Some(resume)), NextStep::Chair);
+        assert_eq!(
+            pinned.next_step(&override_of(pinned, resume), RELEASED),
+            NextStep::Chair
+        );
     }
     assert_eq!(NextStep::NewRoute.continuation(), Some(Continuation::Fresh));
     assert_eq!(resume.continuation(), Some(Continuation::Resume));
     assert_eq!(NextStep::Chair.continuation(), None);
+}
+
+/// Every cause, derived from the enum: its default after its same-route
+/// retries, one override, and the chair while custody is unproved.
+#[test]
+fn every_cause_takes_its_default_its_override_and_the_chair_without_custody() {
+    let fresh = NextStep::SameRoute {
+        continuation: Continuation::Fresh,
+    };
+    let none = OnStop::default();
+    for cause in StopCause::ALL {
+        let rule = cause.rule();
+        for retries in 0..rule.retries {
+            let facts = StopFacts {
+                retries,
+                custody_released: true,
+            };
+            assert_eq!(
+                cause.next_step(&none, facts),
+                fresh,
+                "{cause} retry {retries}"
+            );
+        }
+        let spent = StopFacts {
+            retries: rule.retries,
+            custody_released: true,
+        };
+        assert_eq!(
+            cause.next_step(&none, spent),
+            rule.default,
+            "{cause} default"
+        );
+        let other = if rule.default == NextStep::Chair {
+            NextStep::NewRoute
+        } else {
+            NextStep::Chair
+        };
+        let overridden = cause.next_step(&override_of(cause, other), RELEASED);
+        assert_eq!(
+            overridden,
+            if rule.pinned { rule.default } else { other },
+            "{cause} override"
+        );
+        // An override of another cause leaves this one alone.
+        let elsewhere = StopCause::ALL
+            .into_iter()
+            .find(|candidate| *candidate != cause)
+            .unwrap();
+        assert_eq!(
+            cause.next_step(&override_of(elsewhere, other), spent),
+            rule.default
+        );
+        for on_stop in [none.clone(), override_of(cause, fresh)] {
+            assert_eq!(
+                cause.next_step(&on_stop, StopFacts::default()),
+                NextStep::Chair,
+                "{cause} without released custody"
+            );
+        }
+    }
+}
+
+#[test]
+fn on_stop_reads_a_step_object_or_its_name() {
+    let on_stop: OnStop = serde_json::from_value(json!({
+        "usage_limited": "chair",
+        "process_crash": "same_route",
+        "provider_stop": {"step": "new_route"},
+        "lost": {"step": "same_route", "continuation": "fresh"},
+    }))
+    .unwrap();
+    assert_eq!(on_stop.get(StopCause::UsageLimited), Some(NextStep::Chair));
+    let fresh = NextStep::SameRoute {
+        continuation: Continuation::Fresh,
+    };
+    assert_eq!(on_stop.get(StopCause::ProcessCrash), Some(fresh));
+    assert_eq!(
+        on_stop.get(StopCause::ProviderStop),
+        Some(NextStep::NewRoute)
+    );
+    assert_eq!(on_stop.get(StopCause::Lost), Some(fresh));
+    assert_eq!(on_stop.get(StopCause::Deadline), None);
+    let encoded = serde_json::to_value(&on_stop).unwrap();
+    assert_eq!(serde_json::from_value::<OnStop>(encoded).unwrap(), on_stop);
+    assert!(serde_json::from_value::<OnStop>(json!({"not_a_cause": "chair"})).is_err());
+    assert!(serde_json::from_value::<OnStop>(json!({"lost": "park"})).is_err());
 }
 
 fn handoff(status: HandoffStatus, note: &str) -> Handoff {
@@ -97,7 +208,10 @@ fn a_declared_stop_needs_the_handoff_that_declared_it() {
     let stop = Stop::declared(blocked.clone()).unwrap().unwrap();
     assert_eq!(stop.cause(), StopCause::Blocked);
     assert_eq!(stop.note(), Some("Needs the owner to pick a schema."));
-    assert_eq!(stop.next_step(None), NextStep::Chair);
+    assert_eq!(
+        stop.next_step(&OnStop::default(), RELEASED),
+        NextStep::Chair
+    );
     assert!(
         Stop::declared(handoff(HandoffStatus::Done, "Finished."))
             .unwrap()

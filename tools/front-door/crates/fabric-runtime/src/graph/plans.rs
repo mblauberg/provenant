@@ -109,7 +109,6 @@ pub struct Expansion {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub source: String,
-    pub continuation: bool,
     #[serde(with = "expanded_nodes")]
     pub nodes: Vec<GraphNode>,
     /// Template uses whose boundaries this expansion retains.
@@ -690,7 +689,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     .map(|n| n.id.clone()),
             );
 
-            if !expansion.continuation && expansion.closes_producer() {
+            if expansion.closes_producer() {
                 wire_exports(node, &expansion.source, &exported);
                 if let Some(composite) = &mut node.composite
                     && (composite.reduce_verdict || review_minimum.is_some())
@@ -719,23 +718,6 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                         .retain(|member| member != &expansion.source);
                     node.composite_members
                         .extend(exported.iter().map(|item| item.node.clone()));
-                }
-            }
-            if expansion.continuation {
-                if let Some(composite) = &mut node.composite {
-                    for export in &mut composite.exports {
-                        if export.node == expansion.source {
-                            export.node = expansion.nodes[0].id.clone();
-                        }
-                    }
-                }
-                for input in &mut node.inputs {
-                    if input.node == expansion.source {
-                        input.node = expansion.nodes[0].id.clone();
-                        if !node.depends_on.contains(&input.node) {
-                            node.depends_on.push(input.node.clone());
-                        }
-                    }
                 }
             }
         }
@@ -1710,101 +1692,18 @@ pub(super) fn generous() -> crate::config::GraphLimits {
     }
 }
 
-/// Automatic retries and added continuation nodes share the host allowance.
+/// Host restarts after a stop share the graph-wide allowance.
 pub(super) fn continuation_count(checkpoint: &GraphCheckpoint) -> usize {
     checkpoint
         .expansions
         .iter()
         .filter(|expansion| {
-            expansion.continuation
-                || expansion
-                    .patch
-                    .as_ref()
-                    .is_some_and(patch::is_no_work_continuation)
+            expansion
+                .patch
+                .as_ref()
+                .is_some_and(|record| record.restart.is_some())
         })
         .count()
-}
-
-fn continuation(
-    node: &PlannedNode,
-    document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-    handoff: &provenant_records::handoff::Handoff,
-    blocked: bool,
-    limits: &crate::config::GraphLimits,
-) -> Result<Expansion, String> {
-    if continuation_count(checkpoint) >= limits.continuations {
-        return Err(format!(
-            "limits.continuations={} reached; extend the continuation budget",
-            limits.continuations
-        ));
-    }
-    if blocked {
-        return Err(
-            "writer needs an owner decision, capability or external change; inspect its handoff"
-                .into(),
-        );
-    }
-    let progress = checkpoint
-        .nodes
-        .iter()
-        .find(|row| row.id == node.id)
-        .ok_or("continuation progress missing")?;
-    let routes = no_work::restart_routes(node, progress);
-    if routes.is_empty() {
-        return Err("writer stopped; no different route is available; return to the chair".into());
-    }
-    let mut child = document
-        .nodes
-        .iter()
-        .find(|n| n.id == node.id)
-        .cloned()
-        .ok_or("continuation source missing")?;
-    let generation = checkpoint
-        .nodes
-        .iter()
-        .find(|n| n.id == node.id)
-        .and_then(|n| n.extra.get("retry_generation"));
-    child.id = format!("{}--continue", generation_namespace(&node.id, generation));
-    if child.id.len() > 200 {
-        return Err(format!(
-            "continuation {} exceeds the node ID limit of 200 bytes; shorten the source ID",
-            child.id
-        ));
-    }
-    child.route = None;
-    child.routes = Some(routes);
-    child.title = None;
-    child.depends_on = vec![node.id.clone()];
-    child.after_expansion.clear();
-    child.inputs.clear();
-    if child.access == AccessMode::WorktreeWrite && child.source.is_some() {
-        child.source = Some(SourceBinding::Node {
-            node: node.id.clone(),
-        });
-    }
-    child.prompt.push_str(&format!(
-        "\n\nContinue this work in the same worktree. Stopped-early handoff:\n{}",
-        handoff.fenced()
-    ));
-    // Integrate retains the shared checkout and leaves the graph owning its PR.
-    if child.delivery == Some(provenant_records::run::DeliveryMode::Pr) {
-        return Err("honest-stop continuation requires integrate or no delivery".into());
-    }
-    if let Some(target) = &document.integration_branch {
-        child.delivery = Some(provenant_records::run::DeliveryMode::Integrate(
-            target.clone(),
-        ));
-    }
-    child.round = None;
-    Ok(Expansion {
-        extra: Default::default(),
-        source: node.id.clone(),
-        continuation: true,
-        nodes: vec![child],
-        uses: Vec::new(),
-        patch: None,
-    })
 }
 
 pub(super) fn remaining(
@@ -2000,33 +1899,15 @@ pub(super) fn settle(
                 &mut safe_reason,
             )
         })
-    } else if writer(node) {
-        let handoff = capture
-            .map(handoff)
-            .unwrap_or_else(|| Ok(checkpoint.nodes[index].handoff.clone()));
-        let blocked = capture.map_or(checkpoint.nodes[index].blocked, |capture| {
-            matches!(&capture.handoff, Ok(Some(handoff))
-                if handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
-        });
-        match handoff {
-            Ok(Some(note)) => {
-                checkpoint.nodes[index].handoff = Some(note.clone());
-                checkpoint.nodes[index].blocked = blocked;
-                continuation(node, document, checkpoint, &note, blocked, limits).inspect_err(|_| {
-                    safe_reason = PlanFailureFact::InvalidContinuation;
-                })
-            }
-            Ok(None) => return None,
-            Err(_) => {
-                if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
-                    outputs.warnings.push(
-                        "ignored optional handoff: invalid handoff; inspect the result".into(),
-                    );
-                }
-                return None;
-            }
-        }
     } else {
+        if writer(node)
+            && capture.is_some_and(|capture| handoff(capture).is_err())
+            && let Some(outputs) = &mut checkpoint.nodes[index].outputs
+        {
+            outputs
+                .warnings
+                .push("ignored optional handoff: invalid handoff; inspect the result".into());
+        }
         return None;
     };
     let result = addition.and_then(|mut addition| {
@@ -2279,7 +2160,6 @@ pub(super) fn fallback_expansion(
     Ok(Expansion {
         extra: Default::default(),
         source: node_id.to_owned(),
-        continuation: false,
         nodes: expanded
             .nodes
             .into_iter()

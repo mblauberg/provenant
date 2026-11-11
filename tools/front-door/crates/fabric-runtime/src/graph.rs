@@ -35,7 +35,7 @@ mod land_tests;
 mod loops;
 mod model;
 mod next_attempt;
-mod no_work;
+mod next_step;
 mod observation;
 mod outputs;
 pub mod patch;
@@ -744,8 +744,8 @@ struct PlannedGraph {
 struct PlannedNode {
     #[serde(skip)]
     review_launch: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auto_continue_no_work: Option<bool>,
+    #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    on_stop: provenant_records::OnStop,
     #[serde(skip_serializing_if = "Option::is_none")]
     family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1058,7 +1058,7 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
     )>,
     GraphError<R::Error, J::Error>,
 > {
-    let Some(next) = no_work::continue_stopped(document, plan, checkpoint, limits) else {
+    let Some(next) = next_step::settle_stop(document, plan, checkpoint, limits) else {
         return Ok(None);
     };
     let planned =
@@ -1074,7 +1074,7 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
         Ok(planned) => (next, planned),
         Err(reason) => {
             // The pause keeps the saved expansions, which already planned.
-            let paused = no_work::refused(plan, checkpoint, &reason);
+            let paused = next_step::refused(plan, checkpoint, limits, &reason);
             let expanded = plans::expand(document, &paused.extensions, &paused.expansions, limits)
                 .map_err(GraphError::Invalid)?;
             let (plan, positions) = validate_flat_plan(&expanded, limits)
@@ -1098,7 +1098,7 @@ pub fn cancel_node_subtree(
         .ok_or_else(|| format!("unknown node {id}"))?;
     let mut effect = relay::cancel_subtree(document, checkpoint, id)?;
     let node = &mut checkpoint.nodes[index];
-    no_work::fence_stopped(node);
+    next_step::fence_stopped(node);
     if !node.state.settled() {
         if node
             .attempts
@@ -2713,32 +2713,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 }
-                // Read continuation lineage from the durable expansion journal,
-                // including graphs saved before restart routing was introduced.
-                // The alias draw excludes the actual models used by every
-                // predecessor, rather than repeating the original hash draw.
-                let mut predecessors = Vec::new();
-                let mut ancestor = node.id.as_str();
-                while let Some(expansion) = checkpoint.expansions.iter().find(|expansion| {
-                    expansion.continuation
-                        && expansion.nodes.iter().any(|child| child.id == ancestor)
-                }) {
-                    if let Some(progress) = checkpoint
-                        .nodes
-                        .iter()
-                        .find(|row| row.id == expansion.source)
-                    {
-                        predecessors.extend(
-                            progress
-                                .recorded_attempts()
-                                .filter_map(|attempt| attempt.attempt_ref.clone()),
-                        );
-                    }
-                    ancestor = &expansion.source;
-                }
-                let mut prior_attempts = owner
-                    .attempt_models(&predecessors)
-                    .map_err(GraphError::Run)?;
+                // A restart is in place: its archived attempts below carry the
+                // models the alias draw excludes.
+                let mut prior_attempts = Vec::new();
                 for attempt in checkpoint.nodes[node_index]
                     .previous_attempts
                     .iter()
