@@ -300,11 +300,20 @@ fn cli_failure_uses_stderr_without_structured_json() {
 
 #[cfg(test)]
 #[test]
-fn scratch_prepare_io_error_retains_its_cause() {
-    let error = scratch_prepare_error("exclude lock timed out");
-    assert!(error.to_string().contains("exclude lock timed out"));
+fn scratch_prepare_lock_timeout_keeps_a_fixed_cause() {
+    use provenant_confinement::worktrees::WorktreeError;
+    let error = scratch_prepare_error(WorktreeError::Filesystem(
+        provenant_os::fs::FsError::LockTimeout {
+            path: "info/provenant-exclude.lock".into(),
+            timeout: std::time::Duration::ZERO,
+        },
+    ));
     assert!(error.to_string().contains("prepare project scratch"));
     assert!(error.to_string().contains(".provenant/scratch"));
+    assert_eq!(error.code(), "io");
+    assert!(error.cause().is_some());
+    let projection = error.diagnostic();
+    assert_eq!(projection.detail.as_deref(), error.cause());
     assert!(matches!(error, FacadeError::Io { path: Some(path), .. }
         if path == ".provenant/scratch"));
 }

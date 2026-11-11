@@ -10,20 +10,15 @@ stable.
 | [0007](0007-defer-universal-retention-and-deletion.md) | Deletion requires custody of disposable state |
 | [0019](0019-installed-file-class-ownership.md) | Separate product, user and machine-local installation ownership |
 | [0020](0020-retire-the-daemon-fabric.md) | Daemonless project coordination in SQLite |
-| [0021](0021-configured-workspace-dispatch-boundaries.md) | Configured-workspace access and one execution owner |
-| [0022](0022-thin-fabric-mcp-execution-facade.md) | Thin Fabric MCP execution façade |
+| [0021](0021-configured-workspace-dispatch-boundaries.md) | Crate layering, one execution owner and delegation bounds |
 | [0025](0025-broker-upstream-family-attribution.md) | Verified upstream lineage for brokered providers |
 | [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate the user's own hosts over SSH |
-| [0027](0027-rust-front-door.md) | One Rust binary and domain-owned workspace |
 | [0028](0028-rust-port-dependencies.md) | A small allowlist of major Rust dependencies |
 | [0031](0031-retain-provider-history-and-expire-resume-state.md) | Retain provider history and expire resume state |
 | [0033](0033-weighted-route-pools-are-the-routing-unit.md) | Weighted route pools are the routing unit |
 | [0034](0034-refusals-carry-stable-typed-codes.md) | Refusals carry stable typed codes |
 | [0035](0035-four-hard-boundaries-and-flexible-everything-else.md) | Four hard boundaries, flexible everything else |
-| [0036](0036-one-owner-per-mechanism.md) | One owner per mechanism: backoff, transient failure, time, expiry, durations and Git discovery |
 | [0037](0037-batched-exact-candidate-landing.md) | Gate an exact batched landing candidate |
 | [0038](0038-cloud-job-ownership.md) | Own cloud jobs without a local process (superseded by `provenant cloud launch`) |
 | [0039](0039-graph-of-templates.md) | One graph of template nodes: a plain lane is one node, composites are data, one patch path changes a graph |
 | [0040](0040-open-lane-policy-with-explicit-boundaries.md) | Ambient lane access with explicit mandatory boundaries |
-
-Run `scripts/check-adr-index` to check file coverage and index targets.

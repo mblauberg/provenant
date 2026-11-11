@@ -69,8 +69,7 @@ CLI and Fabric MCP use the same execution services. Confinement compiles the
 host-derived access plan, providers prepare launches, supervisor owns process
 custody, and run owns attempts and terminal evidence. Neither the transport nor
 the provider's success certifies delivery acceptance. See
-[ADR 0021](adr/0021-configured-workspace-dispatch-boundaries.md) and
-[ADR 0022](adr/0022-thin-fabric-mcp-execution-facade.md).
+[ADR 0021](adr/0021-configured-workspace-dispatch-boundaries.md).
 
 A graph coordinates attempts and deterministic actions through one patch and
 checkpoint owner. Replay prevents duplicate launches. Children undergo ordinary
