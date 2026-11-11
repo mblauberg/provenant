@@ -795,7 +795,7 @@ impl<'a> Service<'a> {
 }
 
 /// One declaration per kind keeps the enum, its stable code and its catalogue
-/// summary together; the CLI help catalogue and generated reference read them.
+/// summary together; the CLI help catalogue reads them.
 macro_rules! error_kinds {
     ($($kind:ident => $code:literal, $summary:literal;)*) => {
         /// Refusal categories stay typed until an edge renders its stable code.

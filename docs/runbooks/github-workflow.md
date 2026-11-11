@@ -2,221 +2,34 @@
 Owner: repository maintainers
 Anchor: [`.github/ISSUE_TEMPLATE/work-item.yml`](../../.github/ISSUE_TEMPLATE/work-item.yml); [`landing::driver::run`](../../tools/front-door/src/pr/landing/driver.rs)
 
-Use this process for user- and agent-originated repository work. Project
-Status is the sole workflow state; labels describe content or gates, not
-progress. The label taxonomy is declarative in
-[`.github/labels.yml`](../../.github/labels.yml) and synced with pruning, so a
-label missing from that file is deleted on the next sync; never hand-create
-one. Issues come from the forms under `.github/ISSUE_TEMPLATE/`; blank issues
-are disabled.
+Project Status is the sole workflow state; labels describe content or gates,
+never progress. [`.github/labels.yml`](../../.github/labels.yml) is synced with
+pruning, so a label missing from it is deleted on the next sync: never
+hand-create one. Issues come from the forms under `.github/ISSUE_TEMPLATE/`.
+Filing, triage and sub-issue mechanics are in the
+[`tracker`](../../skills/tracker/SKILL.md) skill; specs in
+[`scope`](../../skills/scope/SKILL.md).
 
-To deliver through Fabric, save `delivery.toml` for the `deliver` template
-([example](presets.md)), run
-`provenant run --use deliver --file delivery.toml --explain`, inspect its
-authority and gates, then submit without `--explain`. Use `batch` for parallel
-slices merged into one integration branch; see [templates](presets.md).
-
-## Scheduled tracker upkeep
-
-Opt in on one scheduling host per repository:
-
-```toml
-[domains.steward.repositories.tracker]
-directory = "/absolute/path/to/checkout"
-cadence_seconds = 86400
-```
-
-`provenant tick` then launches the bundled `steward` graph when due, one sweep
-per project at a time; without the section it reports `steward=idle`. Proposal
-mode only posts marked duplicate comments on the newer issue; it never closes
-issues or applies parent links. See the [tracker skill](../../skills/tracker/SKILL.md)
-for inspection, recovery and disabling.
-
-## Statuses
+## Status
 
 | Status | Meaning |
 |---|---|
-| Backlog | Untriaged or explicitly deferred. |
+| Backlog | Untriaged or deferred. |
 | Ready | Accepted with bounded scope, authority and acceptance evidence. |
 | In progress | An owner is executing the accepted work. |
 | In review | The pull request, checks or independent review is active. |
-| Awaiting user | A user decision remains, including explicit acceptance for terminal work or approved scope. |
-| Done | The item is integrated, or closed with its terminal reason recorded. |
+| Awaiting user | A user decision remains, including explicit acceptance for `terminal` work. |
+| Done | Integrated, or closed with its terminal reason recorded. |
 
-Objective checks and tier-required review meet delivery acceptance; the user
-may still reject the outcome. Explicit user acceptance is required only for
-`terminal` work or when the approved scope asks for it. A project may name its
-landing gate as acceptance; that grants no merge or promotion authority.
+The implementing agent moves `Ready` to `In progress` to `In review` and, when
+machine gates pass but a user decision remains, to `Awaiting user`. The
+project's workflows set `Done` when the issue closes or its pull request
+merges; setting `Done` closes an open issue, so never set it on work that must
+stay open. Link a pull request with `Closes #N` only when merge leaves no user
+or external-action gate; otherwise `References #N`. Commits never carry a
+closing keyword.
 
-## Change spec
-
-The issue body owns the ephemeral change spec. Its authority ends with the
-delivering PR, and any rule it settles moves to its durable home in that PR.
-Write it with the [`scope`](../../skills/scope/SKILL.md) skill: the owner
-approves one digest, and implementers cannot change the acceptance criteria.
-At acceptance the reviewer checks spec drift and records any mismatch; this is
-judgement, not an automatic gate. `scripts/check-scratch-paths` warns about
-possible scratch citations in tracked Markdown and issue templates.
-
-## Agent filing
-
-Filing follows the [`tracker`](../../skills/tracker/SKILL.md) skill: recorded
-duplicate searches, one issue per outcome, `source:agent`, the `Filed-by:`
-trailer and evidence for every agent-filed defect. Issues are Epic, Feature,
-Task or Bug. Only architecture becomes an ADR; other settled calls go to the
-doc they change, and owner-only questions go through `provenant ask`. This
-repository's advisory Ready cap is about three times the concurrent writer
-lanes; at the cap, deliver or reconcile existing work before filing more.
-
-Re-check an issue when a referenced PR merges, a dependency closes or evidence
-moves. Age, silence and `updatedAt` never establish staleness or completion.
-
-## Triage
-
-1. Check the evidence, desired outcome, scope, acceptance evidence,
-   dependencies, risk, authority and user gates.
-2. Record one result in a comment:
-   - **Accepted:** state the bounded scope, authority and remaining gates; set
-     `Ready`.
-   - **Rejected:** give an evidence-based reason and a condition that would
-     justify reopening; set `Done` and close as not planned.
-   - **Deferred:** give the reason and reconsideration condition; leave open in
-     `Backlog`.
-   - **Duplicate:** link the canonical item; set `Done` and close as not planned.
-3. Agents triage only inside their granted authority. A spec, one-way-door
-   choice, required explicit acceptance or release decision moves to
-   `Awaiting user`; an agent never infers it.
-
-### Native sub-issues
-
-The parent issue owns change scope, story and remaining gates; native child
-issues own independently deliverable slices. Link a child with
-`gh issue create --parent N` (and `--blocked-by` for ordering) or, with an older
-`gh`, the `sub_issues` API; never with a checklist or title. Linking needs
-explicit external-write authority; without it, return the proposed relation.
-
-```sh
-child_id=$(gh api repos/OWNER/REPO/issues/CHILD_NUMBER --jq .id)
-gh api --method POST repos/OWNER/REPO/issues/PARENT_NUMBER/sub_issues \
-  -F sub_issue_id="$child_id"
-```
-
-A parent URL in a child body is navigation only. Closing the parent stays gated
-until its children and every parent-level gate are handled.
-
-## Execute and review
-
-1. Set `In progress` when an owner starts the accepted scope.
-2. Link the pull request with `Closes #N` only when merge leaves no user or
-   external-action gate; otherwise use `References #N` and keep the issue open.
-3. Set `In review` while exact-head checks and independent review run. A new
-   head needs CI and a review of its delta.
-4. If machine gates pass but a user gate remains, set `Awaiting user`. The
-   user's decision comment names the choice, artefact or exact head, its
-   evidence and every remaining gate.
-5. Set `Done` only when no gate remains and the terminal reason or integrated
-   pull request is recorded.
-
-Use a small, captioned Mermaid diagram in an issue or PR when it saves the
-reviewer time: flows, before-and-after refactors, state machines and
-cross-issue dependencies. Use a table for tabular data.
-
-## Mechanics
-
-This runbook is Provenant-local process. The worktree authority it relies on,
-the standing envelope in `HARNESS.md` and the helper contract in
-[`docs/worktrees.md`](../worktrees.md), is harness doctrine. The examples use
-issue `148`.
-
-### Branch and worktree
-
-Name the branch `<type>/<area>-<slug>`, at most 48 characters, where `<type>` is
-`feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `ci` or `build`.
-Use no issue number and no run vocabulary such as batch, wave, lane or model
-name. The standing `HARNESS.md` envelope covers branch and worktree creation.
-
-```sh
-provenant worktree create fix/repo-runbook-mechanics --base main
-```
-
-To record the issue-to-branch link on GitHub, create the branch with
-`gh issue develop 148 --name BRANCH --base main`, fetch it, create a tracking
-branch and then run `provenant worktree create BRANCH`. `provenant worktree
-list` inspects worktrees; `provenant worktree remove NAME` removes an eligible
-one and its merged branch, and `--discard` also deletes an unmerged branch for
-superseded work. Dirty worktrees are refused.
-
-### Commit and push
-
-Reference each covered issue from a commit body with `Refs #N`; never put a
-closing keyword in a commit, because the pull request owns closure. Push with
-an upstream: `git push -u origin BRANCH`. A Fabric writer with open network can
-push its own branch and run `gh` unless `lanes.publish=false` (see
-[lane lifecycle](lane-lifecycle.md)); otherwise the `deliver` template's host
-delivery pushes the verified commit and opens the pull request.
-
-### Pull request
-
-Open the pull request against `main`, or its stack base, and link the issue as
-in [Execute and review](#execute-and-review). `gh pr create --body` bypasses
-the [template](../../.github/pull_request_template.md), so fill a copy, with
-evidence rows bound to the exact head and the independent-review block, and
-pass it with `--body-file`.
-
-To build the body from recorded attempts instead:
-
-```sh
-provenant pr open --from-attempt <writer-attempt> --review <review-attempt> \
-  --summary-file summary.md --issue 148 --dry-run
-```
-
-The summary file's first line is the title and the rest is the Summary. The
-writer attempt must be local, `succeeded` or `review_required`, with its head
-on the remote; read-only reviews supply the reviewer rows. Complete the rows
-marked `pending` before asking for review, then drop `--dry-run`.
-`provenant pr status 148 149` prints one line per PR, such as
-`#148 OPEN <head> checks=3/4 pending=1 merge=blocked review=none`;
-`--wait=5m` blocks until a snapshot changes and exits 124 if none does.
-`pr status`, `pr watch` and `land` read CI through one observer per
-repository (ADR 0037), so concurrent waiters on a head share one read per poll
-and a rate limit pauses them all until its named reset.
-
-### Stacked pull requests
-
-Stack dependent slices of one outcome that merit separate review: a shared seam
-and its consumers, or a large refactor in reviewable steps. Independent changes
-get separate PRs off `main`, and a slice that cannot pass CI alone is not
-stacked. GitHub stacks are a linear chain in one repository: the bottom PR
-targets `main` and each later PR the branch below. Each PR carries its own
-issue link and is reviewed against the branch below.
-
-With `gh extension install github/gh-stack`, use `gh stack init`, `add BRANCH`,
-`submit`, `view`, `rebase [--upstack|--downstack]`, `sync` and `unstack`. A
-completed stack cannot be extended. A writer may rebase and force-push with
-lease its own unmerged branches, a whole stack included, never `main` or another
-writer's branch. Recheck changed heads and their review evidence afterwards.
-
-Required checks apply to every PR in a stack. Land bottom-first with
-`provenant land`; an upper PR waits for its lower members, and after
-retargeting its new head needs its own CI and review. See GitHub's
-[stacked PRs overview](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs)
-and [CLI reference](https://docs.github.com/en/pull-requests/reference/stacked-prs-cli-commands).
-
-### Project status
-
-Project `2` (owner `mblauberg`) holds Status:
-
-| Transition | Owner | When |
-|---|---|---|
-| `Backlog` to `Ready`, `Done` or unchanged | Triage: user, or an agent inside granted authority | The triage result is recorded in an issue comment |
-| `Ready` to `In progress` | Implementing agent | Work on the accepted scope starts |
-| `In progress` to `In review` | Implementing agent | The pull request, exact-head checks or independent review is active |
-| `In review` to `Awaiting user` | Implementing agent | Machine gates pass; a required user decision remains |
-| Any later state to `Done` | Project workflow, when the issue closes or its pull request merges | No gate remains; the terminal reason or integrated pull request is recorded |
-
-The project's workflows also move items when a pull request links, merges or an
-issue closes, and setting `Done` closes an open issue, so never set `Done` on
-work that should stay open.
+Project `2` (owner `mblauberg`) holds Status. To set it:
 
 ```sh
 item=$(gh project item-list 2 --owner mblauberg --limit 200 --format json \
@@ -225,184 +38,124 @@ gh project item-edit --project-id PVT_kwHOBiwkrc4BdU1c --id "$item" \
   --field-id PVTSSF_lAHOBiwkrc4BdU1czhX3Kn4 --single-select-option-id 5c9ddb06
 ```
 
-Status option IDs: `Backlog` `c764d63a`, `Ready` `a5ebd55b`, `In progress`
+Option IDs: `Backlog` `c764d63a`, `Ready` `a5ebd55b`, `In progress`
 `5c9ddb06`, `In review` `27873f75`, `Awaiting user` `129da224`, `Done`
-`93d6cd26`. If an ID stops matching, re-derive it with
-`gh project field-list 2 --owner mblauberg --format json --jq '.fields[] | select(.name == "Status")'`.
+`93d6cd26`. If one stops matching, re-derive it with `gh project field-list 2
+--owner mblauberg --format json`.
+
+## Branch, commit, pull request
+
+Name the branch `<type>/<area>-<slug>`, at most 48 characters, `<type>` one of
+`feat fix refactor perf test docs chore ci build`; no issue number and no run
+vocabulary (batch, wave, lane, model name). Create it with
+`provenant worktree create BRANCH --base main`; to record the issue link on
+GitHub, create the branch first with `gh issue develop N --name BRANCH`.
+`worktree remove NAME` refuses dirty worktrees; `--discard` also deletes an
+unmerged branch.
+
+Push with `git push -u origin BRANCH`; a writer pushes its own branch unless
+`lanes.publish=false`, when the `deliver` template's host delivery does it.
+
+`gh pr create --body` bypasses
+[the template](../../.github/pull_request_template.md): fill a copy (evidence
+rows bound to the exact head, the independent-review block) and pass it with
+`--body-file`, or build it from recorded attempts with
+`provenant pr open --from-attempt A --review B --summary-file summary.md --issue N --dry-run`.
+Complete rows marked `pending` before asking for review.
+
+A stack is a linear chain of dependent slices: the bottom PR targets `main`,
+each later PR the branch below, each with its own issue link (`gh stack --help`).
+Rebase and force-push with lease only your own unmerged branches, then recheck
+heads and review evidence. Land bottom-first with `provenant land`.
 
 ## Merge
 
-Merge authority is repository-based. By user directive, auto-merge is enabled
-and agents merge directly: once a pull request has its tier's planned
-independent review under the
-[`HARNESS.md` review ladder](../../HARNESS.md#review-ladder) and `ci-status` is
-green on the exact head (or on the candidate, for batch landing), an agent
-merges without waiting for the user. Forge-required checks stay mandatory.
-Before merging a substantial software change, confirm its delivery receipt
-(`provenant workflow receipt show <id>`) is current.
-
-A change that only repairs CI or restores a red `main` is a hotfix: an agent
-merges it as soon as `ci-status` is green on its head, without the planned
-review, so one breakage does not stall every other pull request. A change that
-skips or weakens a check, or touches a path on a crucial review floor, is not a
-hotfix and takes its normal review.
+Agents merge directly: once a pull request has the lens review its risk
+requires (`provenant run --use review`) and `ci-status`
+is green on the exact head, merge without waiting for the user. A change that
+only repairs CI or restores a red `main` merges on green `ci-status` alone; one
+that skips or weakens a check takes its normal review. Before merging a
+substantial change, confirm its receipt is current
+(`provenant workflow receipt show ID`).
 
 `ci-status` is the single required check: the aggregate job at the end of
-[`ci.yml`](../../.github/workflows/ci.yml) succeeds only when every job it needs
-succeeded or was path-skipped. "CI is green" means exactly that context. The
-`Protect main` ruleset does not require heads to be up to date with `main`, so
-land each pull request on its own green head. Do not merge `main` into a branch
-to land it; update a branch only to resolve a conflict. Each update costs a CI
-run and moves the reviewed head. Batch landing (`provenant land A B`) tests the
-combination when several pull requests overlap. A combined break that shows on
-`main` is fixed forward as a hotfix.
-
-The user review or merge gate applies only when an agent is stuck: split
-verdicts it cannot settle with primary evidence, or a decision outside its
-authority. Standing user gates are credential or connector setup, rewrites of
-or pushes to shared branches outside authorised merges. A chair may lower risk
-outside protected boundaries with a recorded reason; boundary floors remain
-binding even with owner approval.
+[`ci.yml`](../../.github/workflows/ci.yml). `Protect main` does not require
+heads up to date with `main`, so land each pull request on its own green head and
+merge `main` into a branch only to resolve a conflict (it costs a CI run and
+moves the reviewed head). A combined break on `main` is fixed forward. Standing
+user gates: credential or connector setup, and rewrites of or pushes to shared
+branches outside authorised merges.
 
 ### Land
 
 ```sh
 provenant land 148 149              # ordered batch
-provenant land 148 --batch          # batch of one
-provenant land 148 149 --shadow     # gate and record without publishing
+provenant land 148 --shadow         # gate and record without publishing
 provenant land 148 --wait=30m       # single-PR path
 provenant land --tier substantial --explain --json
 ```
 
-With the default `integration = "batch"`, any `land` builds one merge commit per
-PR onto the fetched target, gates the exact candidate and publishes it; see
-[ADR 0037](../adr/0037-batched-exact-candidate-landing.md) for the design and
-its guarantees. `--wait`, `--head` or `integration = "single"` select the
-single-PR path. `--explain --json` reports the effective policy and its
-sources. Settings live under `[domains.pr.land]`, with `projects.<project>` and
-`tiers.<tier>` overrides; the
-[generated reference](../reference/config-keys-all.md#host-land-settings) lists
-each key. The bundled CI trigger covers `land/**`, so changing
-`candidate_ref_prefix` needs a matching CI trigger. `forge_queue` is rejected
-at runtime. A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
-`GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them, though Git
-credential helpers and keychains stay available. `post_merge.revert_forward`
-needs `post_merge.bisect` to name a culprit. Unknown cost never refuses;
-`budget.cap_micros` refuses only priced spend.
+By default (`integration = "batch"`) `land` builds one merge commit per PR onto
+the fetched target, gates the exact candidate and publishes it
+([ADR 0037](../adr/0037-batched-exact-candidate-landing.md)). `--wait`,
+`--head` or `integration = "single"` select the single-PR path, which waits for
+CI (up to four hours) and merges over REST at the verified head. `--explain
+--json` shows the effective policy and its sources; settings live under
+`[domains.pr.land]` (`config schema` lists the keys).
 
-`approval_tier` sets how much approval a pull request needs: `none` is CI
-only, `carry` is the receipt rules below, and `delta` also wants a review of
-every change after the review. `auto`, the default, is `none` for a pull
-request that touches only tests, docs or review-exempt paths and `carry`
-otherwise. Single and batch landing decide alike. A change after a review that
-touches only tests, docs or review-exempt paths keeps it, and the landing
-receipt lists the paths. Any other change needs a review of just that delta:
-save a receipt whose `subject` adds `delta_from`, the reviewed head, so its base
-is that head. `provenant land N --accept-delta REASON` lands without one; it
-warns and records the reason and your forge login in the receipt.
+Sharp edges:
 
-`approval` names what stands as a pull request's approval. `forge`, the
-default, needs an approving forge review at the head. `receipt` takes an
-accepted delivery receipt for the pull request instead; this repository's
-reviews are such receipts, so its host sets
-`domains.pr.land.projects.<project>.approval = "receipt"`. Save the receipt
-before landing, with a `pr` subject naming the pull request `number` and the
-reviewed `head`. The save reads the rest from the forge: the repository, and
-the base, which is the head's merge base with the branch the pull request
-merges into (for a stacked pull request, the head of the branch below). The
-changed paths and their risk floors come from that base, so a receipt for a
-delta review still covers the whole pull request. The lander proves each head
-against the fetched target: the reviewed head on the reviewed base, a
-merge-in from the target, or a rebase with an unchanged delta keeps the
-review. An unchanged head retargeted past the branch below it does not,
-because that branch's changes were never reviewed; any other change
-excludes the pull request until a new receipt covers it. A receipt whose proof
-cannot be read excludes only its pull request, as `unprovable`, and one saved
-before this shape is reported as `receipt shape retired: save it again`. Forge rules
-and required checks still apply.
-
-Every PR gets an outcome receipt under the project state's
-`landing/receipts/`: landed, red, conflicted, excluded or pending-unknown, with
-each unmet check named. Batch errors distinguish `LAND_CONTENTION`,
-`LAND_CONFLICT`, `LAND_GATE_UNMET`, `LAND_PUBLICATION_UNKNOWN` and
-`LAND_SPENDING_CAP`.
+- Changing `candidate_ref_prefix` needs a matching CI trigger (the bundled one
+  covers `land/**`). A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
+  `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them.
+- Approval. `approval = "forge"` (default) needs an approving forge review at
+  the head; `receipt` takes an accepted delivery receipt instead. This
+  repository's host uses `receipt`: save it before landing, with a `pr` subject
+  naming `number` and the reviewed `head`. A merge-in from the target, or a
+  rebase with an unchanged delta, keeps the review; an unchanged head retargeted
+  past the branch below does not. Any other change needs a receipt whose
+  `subject` adds `delta_from` (the reviewed head), or
+  `land N --accept-delta REASON`, which warns and records the reason.
+  `approval_tier = "auto"` needs no review for changes touching only tests,
+  docs or review-exempt paths.
+- Single-PR exits: 124 is a CI timeout (nothing merged), 5 is `pending`
+  (rerun with `--wait`). `CI_CONFLICT`: the PR conflicts with its base, so CI
+  never starts; rebase or merge, then push. `MERGE_STATE_UNKNOWN`: rerun `land`.
+- Cleanup after merge (fast-forward base, delete build output, worktree and
+  local branch) runs only when the local tip is exactly the merged head. A
+  refused step reports `cleanup_pending` and the merge still exits 0; fix the
+  cause and rerun.
 
 #### Recover an interrupted landing
 
-The lander writes a marker under the project state's `landing/pending/` before
-publishing. An ambiguous outcome, such as a timeout or 5xx, keeps it, and the
-error names its path. Do not remove it to force a retry. Instead:
+The lander writes a marker under `landing/pending/` before publishing; an
+ambiguous outcome (timeout, 5xx) keeps it and the error names it. Never delete
+it to force a retry.
 
-1. Restore access to the forge and target.
-2. Run `git fetch origin <target>` and
-   `git merge-base --is-ancestor <candidate> origin/<target>` for the recorded
-   candidate.
-3. Check each PR with
-   `gh pr view <number> --json state,headRefOid,mergeCommit,baseRefName`.
-4. After the in-flight window (`publish_settle_seconds`), rerun
-   `provenant land <number>` without `--shadow`. Recovery observes the outcome,
-   finishes receipts and cleanup, and deletes the marker last.
+Restore forge access, check `git merge-base --is-ancestor CANDIDATE origin/TARGET`
+after fetching and `gh pr view N --json state,headRefOid,mergeCommit` per PR,
+then after `publish_settle_seconds` rerun `provenant land N` without `--shadow`:
+recovery observes the outcome, finishes receipts and deletes the marker last.
 
-A refused local cleanup reports `cleanup_pending` with its steps and does not
-block later landings.
-
-#### Single-PR landing
-
-`provenant land 148 --wait` waits up to an hour for CI (`--wait=30m` changes
-it, up to four hours) and merges over REST at the verified head; `--head SHA`
-pins the reviewed head. A CI timeout exits 124 without merging, and a queued or
-auto-merge exits 5 (`pending`). Rerun with `--wait` after `CI_PENDING`.
-`CI_CONFLICT` means the PR conflicts with its base, so CI never starts: merge
-`main` or rebase, then push. `CI_NOT_SCHEDULED` means no check registered for
-the head. `RATE_LIMITED` reports the reset and a retry command;
-`MERGE_STATE_UNKNOWN` means rerun `land` to confirm the state.
-
-After a merge, `land` fetches the base, fast-forwards the local base, deletes
-the branch's declared build output and worktree, and deletes the local branch,
-but only when the local branch tip is exactly the merged head. A refused step
-reports `cleanup_pending: true` in `data.steps` and the merge still exits 0;
-fix the cause and rerun, and an already-merged PR retries only the cleanup.
-`land 148 --full` shows every step.
-
-### Merge author identity
-
-REST merges use the authenticated GitHub account's commit email; local
-`user.email` does not apply. Configure that email in GitHub before an
-agent-initiated land, then check the merge commit's author:
-
-```sh
-pr=<number>
-merge_sha="$(gh api "repos/{owner}/{repo}/pulls/$pr" --jq '.merge_commit_sha')"
-gh api "repos/{owner}/{repo}/commits/$merge_sha" --jq '.commit.author.email'
-```
-
-An unexpected author is a publication failure: stop before claiming the merge
-is ready and record the evidence.
-
-### Dependabot auto-merge
-
-A Dependabot patch or minor bump that changes only manifests and lockfiles
-auto-merges once `ci-status` is green, through
-[`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml).
-A major bump, a new dependency or any other change takes at least one
-`routine` reviewer.
+REST merges use the authenticated GitHub account's commit email, not local
+`user.email`: configure it in GitHub first and check the merge commit's author;
+an unexpected author is a publication failure, so stop and record it.
 
 ### After merge
 
-1. For a software delivery, sync the primary checkout. Unless the receipt
-   already stood as the landing approval, record the accepted receipt with
-   `provenant workflow receipt save` after the merge commit's `ci-status` on
-   `main` succeeds. Never fabricate user approval.
-2. Confirm the issue closed, or close it with its terminal reason, and confirm
-   Status is `Done`.
-3. Prune the merged branch's artefacts as the last step of the merge.
-   [Post-merge pruning](../worktrees.md#ownership-and-cleanup) owns the authority,
-   proof gates and commands. `delete_branch_on_merge=true` usually removes the
-   remote head already; `git remote prune origin` clears the stale tracking ref.
-   Forced deletion, and deleting an unmerged branch on either side, is a user
-   gate.
+Sync the primary checkout. Unless the receipt already stood as the landing
+approval, record it with `provenant workflow receipt save` after `ci-status`
+on `main` succeeds; never fabricate user approval. Confirm the issue closed and
+Status is `Done`. Prune the branch's artefacts per
+[`docs/worktrees.md`](../worktrees.md#ownership-and-cleanup);
+`git remote prune origin` clears the stale tracking ref. Deleting an unmerged
+branch on either side is a user gate.
 
-CI behaviour, local reproduction of CI failures and advisory test signals are
-in the [CI runbook](ci.md). The [PR reconciler](pr-reconciler.md) and
-[event intake](event-intake-configuration.md) workers observe pull request
-and CI events outside a session.
+Dependabot patch and minor bumps that change only manifests and lockfiles
+auto-merge on green `ci-status`; anything else takes a `routine` reviewer.
+
+## Scheduled tracker upkeep
+
+On one scheduling host per repository, opt in with
+`[domains.steward.repositories.tracker]` (`directory`, `cadence_seconds`);
+`provenant tick` then launches the `steward` graph when due.

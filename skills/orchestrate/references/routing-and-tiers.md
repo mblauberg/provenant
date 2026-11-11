@@ -16,12 +16,12 @@ from the requested tier.
 
 Use a clean-context reviewer to reduce anchoring. Give it the approved spec,
 base and immutable subject; keep the author's diagnosis out. Use a second
-family when the HARNESS review ladder requires it or when a weak oracle
+family when the review panel requires it or when a weak oracle
 justifies an additional independent view. Different model names alone do not
 prove different answering families.
 
 Use `run --use review` for a pinned review. Resolve a panel over named lenses;
-validate coverage against HARNESS floors and record routes and substitutions.
+validate coverage against the path floors and record routes and substitutions.
 Use `verify` to falsify findings and `synthesise` to reconcile evidence.
 `code-review` owns severities and dispositions. For an unsettled design use
 `design`, adding independent critique where the oracle is weak.
@@ -29,8 +29,8 @@ Use `verify` to falsify findings and `synthesise` to reconcile evidence.
 In a tiered council, cheaper scouts can gather claims; stronger judges test
 them and a chair resolves what remains. A cheap finding is useful evidence
 without satisfying a required review leg. Count review independence and tier
-against HARNESS, including its same-family replacement when a required family
-is unavailable. A majority vote cannot overrule a failing criterion.
+against the path floors; a fresh same-family reviewer for the same lens
+replaces a required family that is unavailable. A majority vote cannot overrule a failing criterion.
 
 Paired-primary work still has one chair and one acting owner per stage.
 Record stage, base revision, scope, expected output, peer and reserved gates
@@ -48,8 +48,8 @@ missing.
 A missing `verifier` route can substitute `senior`; a missing `web` route
 can substitute `junior`. Neither substitution proves the requested family or
 external research capability. Confirm the evidence actually obtained.
-For an unavailable required review leg, follow the HARNESS review ladder
-(an independent same-family reviewer for the same lens); report any remaining gap.
+For an unavailable required review leg, substitute an independent same-family
+reviewer for the same lens without reducing the count; report any remaining gap.
 
 Keep unsupported effort values out of requests. Prefer per-run controls;
 changing global provider configuration requires authority for that path and

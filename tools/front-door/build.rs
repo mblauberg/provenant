@@ -258,7 +258,6 @@ fn main() -> BuildResult<()> {
     }
     for (source, release_name) in [
         ("GLOBAL-AGENTS.md", "instructions/AGENTS.md"),
-        ("HARNESS.md", "instructions/HARNESS.md"),
         ("install.sh", "scripts/install.sh"),
     ] {
         let path = repository.join(source);

@@ -92,8 +92,16 @@ jobs:
       - name: Test retrospective analysis
         run: python3 -m unittest discover -s skills/retrospect/scripts/tests -v
 
-      - name: Check generated contract reference
-        run: scripts/generate-reference --check
+      # Generated reference is not tracked: this proves it still renders, and
+      # leaves the output for download. It never compares against a checkout.
+      - name: Generate contract reference
+        run: scripts/generate-reference --strict
+      - name: Upload contract reference
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: contract-reference
+          path: docs/reference
+          if-no-files-found: error
       - name: Require documentation inventory and resolvable evidence
         run: scripts/check-doc-truth --inventory-only --strict-inventory --strict-citations
       # Commands and non-evidence inline references remain advisory.

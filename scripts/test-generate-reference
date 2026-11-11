@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Focused controls for reference sources, regeneration and drift detection."""
+"""Focused controls for reference sources and regeneration."""
 
-from contextlib import redirect_stdout
-import io
 import json
 from pathlib import Path
 import runpy
@@ -69,15 +67,6 @@ class ReferenceTests(unittest.TestCase):
         self.assertIn('## `provenant core`', files['cli.md'])
         self.assertNotIn('## `provenant advanced`', files['cli.md'])
         self.assertIn('## `provenant advanced`', files['cli-all.md'])
-        expected, actual = self.root / 'expected', self.root / 'actual'
-        GEN['write_files'](expected, files)
-        GEN['write_files'](actual, files)
-        with redirect_stdout(io.StringIO()):
-            self.assertFalse(GEN['differences'](expected, actual))
-            for name in ('cli.md', 'cli-all.md'):
-                (actual / name).write_text('drift\n')
-                self.assertTrue(GEN['differences'](expected, actual))
-                GEN['write_files'](actual, files)
 
     def test_cli_reference_lists_error_codes_with_their_meaning(self):
         text = GEN['cli_reference']({'commands': [], 'error_codes': [
@@ -157,21 +146,7 @@ class ReferenceTests(unittest.TestCase):
             GEN['catalogue'](self.root, self.root / 'built-cli')
             globals_['cargo'].assert_not_called()
 
-    def test_diff_detects_edits_and_both_missing_and_extra_files(self):
-        actual, expected = self.root / 'actual', self.root / 'expected'
-        GEN['write_files'](expected, {'cli.md': 'expected\n'})
-        GEN['write_files'](actual, {'cli.md': 'expected\n'})
-        with redirect_stdout(io.StringIO()):
-            self.assertFalse(GEN['differences'](expected, actual))
-            (actual / 'cli.md').write_text('hand edit\n')
-            self.assertTrue(GEN['differences'](expected, actual))
-            (actual / 'cli.md').unlink()
-            self.assertTrue(GEN['differences'](expected, actual))
-            GEN['write_files'](actual, {'cli.md': 'expected\n', 'extra.md': ''})
-            self.assertTrue(GEN['differences'](expected, actual))
-
-
-    def test_published_schemas_are_generated_files_and_drift_fails_the_check(self):
+    def test_published_schemas_are_generated_files(self):
         schema = {'$schema': 'https://json-schema.org/draft/2020-12/schema', 'title': 'fixture',
                   'type': 'object'}
         data = {'lanes.schema.json': schema, 'mcp/fabric_run.schema.json': schema,
@@ -182,16 +157,6 @@ class ReferenceTests(unittest.TestCase):
         self.assertIn('scripts/generate-reference', files['schemas.md'].splitlines()[0])
         self.assertIn('| `PR` | umbrella | A &#124; b. |', files['schemas.md'])
         self.assertEqual(json.loads(files['schemas/lanes.schema.json']), schema)
-        actual, expected = self.root / 'actual', self.root / 'expected'
-        GEN['write_files'](expected, files)
-        GEN['write_files'](actual, files)
-        with redirect_stdout(io.StringIO()):
-            self.assertFalse(GEN['differences'](expected, actual))
-            (actual / 'schemas/lanes.schema.json').write_text('{}\n')
-            self.assertTrue(GEN['differences'](expected, actual))
-            GEN['write_files'](actual, files)
-            (actual / 'schemas/mcp/fabric_run.schema.json').unlink()
-            self.assertTrue(GEN['differences'](expected, actual))
 
     def test_generate_includes_schemas_and_names_an_unavailable_generator(self):
         workspace = self.root / GEN['WORKSPACE']
@@ -210,11 +175,10 @@ class ReferenceTests(unittest.TestCase):
         self.assertTrue(any('print-wire-schemas' in gap for gap in gaps))
         self.assertIn('Source gap', files['schemas.md'])
         destination = self.root / 'reference'
-        GEN['write_files'](destination, {'schemas/lanes.schema.json': 'existing\n',
-                                         'schemas/mcp/fabric_run.schema.json': 'existing mcp\n'})
-        GEN['update_files'](destination, files, gaps)
-        self.assertEqual((destination / 'schemas/lanes.schema.json').read_text(), 'existing\n')
-        self.assertEqual((destination / 'schemas/mcp/fabric_run.schema.json').read_text(), 'existing mcp\n')
+        GEN['write_files'](destination, {'stale.md': 'old\n'})
+        GEN['update_files'](destination, files)
+        self.assertFalse((destination / 'stale.md').exists())
+        self.assertIn('Source gap', (destination / 'schemas.md').read_text())
         with self.assertRaises(ValueError):
             with patch.dict(GLOBALS, cargo=lambda *_: '{"error-codes": 1}'):
                 GEN['wire_schemas'](self.root)

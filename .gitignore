@@ -35,3 +35,6 @@ config/installation.json
 *.orig
 *.rej
 target/
+
+# Generated contract reference (scripts/generate-reference); not tracked.
+/docs/reference/

@@ -3,26 +3,18 @@
 Owner: `crates/fabric-runtime`, `crates/cli`, `crates/fabric-mcp`
 Anchor: [`tests/inbox.rs`](../../tools/front-door/tests/inbox.rs), [`inbox/tests.rs`](../../tools/front-door/crates/fabric-runtime/src/inbox/tests.rs)
 
-Use the inbox from a chair or a human-controlled session, with both apps closed.
-The records use the same project binding as Fabric. Worker lanes cannot post,
-answer, close or acknowledge requests; bounded viewer presentation updates are
-available through `provenant chair viewer set-request`. List, show and answer
-also support configured peer owners; delivery uses the owner’s local Fabric mail.
-The complete console specification and remaining delivery scope live in
-[#1968](https://github.com/mblauberg/provenant/issues/1968).
+How a chair asks the owner for a decision and consumes the answer. Only a chair
+or human-controlled session can post, answer, close or acknowledge; worker lanes
+cannot. Field-level syntax is `provenant ask --help`, `inbox --help` and
+`answer --help`; the request contract is in the
+[Fabric spec](../specs/fabric.md#human-requests). The `session` skill owns
+mission continuation: post one-way-door choices with a recommended option and
+park only that branch of work; reversible assumptions stay inside the envelope.
 
-## Decisions during continuing work
+## Post, answer, acknowledge
 
-The `session` skill owns mission continuation. Post unresolved one-way-door
-choices with a recommended option and the affected branch of work. Park that
-branch while independent authorised work continues. Reversible assumptions
-stay within the existing envelope. A checkpoint or rebinding does not transfer
-pending answers: preserve the original host, project, session and actor.
-
-## Post and answer
-
-Save request content as JSON. Do not supply project, host, actor, answer or
-delivery fields:
+Save the request as JSON without project, host, actor, answer or delivery
+fields:
 
 ```json
 {
@@ -30,9 +22,7 @@ delivery fields:
   "title": "Choose the repair",
   "body": "The affected check can be repaired within the approved scope.",
   "blocking": true,
-  "options": [
-    {"id": "repair", "label": "Repair", "description": "Repair the failing check."}
-  ],
+  "options": [{"id": "repair", "label": "Repair", "description": "Repair the failing check."}],
   "recommended_option_id": "repair"
 }
 ```
@@ -40,233 +30,57 @@ delivery fields:
 ```sh
 provenant ask --file request.json --session HOST_SESSION_ID --operation-id ask-1 --json
 provenant inbox --session HOST_SESSION_ID --json
-provenant inbox REQUEST_ID --json
 provenant answer REQUEST_ID --action choose --option repair \
   --expect-revision 1 --channel cli --operation-id answer-1 --json
-```
-
-For a peer owner, use `--host HOST` for list, show or answer, or qualify a
-request ID as `HOST_ID:REQUEST_ID`. Preserve the operation ID for retries.
-
-`provenant inbox --all-projects --json` lists requests in registered projects
-on this host, regardless of the current directory. `data.projects` maps each
-request's `project_id` to its `label` and `path`. Pass `--cursor` to follow
-`next_cursor`, and use `--session` to filter before paging. Use `--all-projects`
-with `inbox REQUEST_ID`, `answer`, or `inbox close` to locate the owning project
-by request ID. Without it, these commands use the current project; if no project
-resolves, `no_project` reports the cause and names `--all-projects` as a repair.
-Close and acknowledgement must run on the owner host or in the owning chair
-session; remote attempts return `OWNER_LOCAL_ONLY`.
-
-`provenant inbox --all-projects --hosts all|LABEL,… --json` also reads each
-chosen peer's first page of requests (`local` is skipped; an unknown label is
-refused as in `console board --hosts`, on a cursor page too). Peer rows are
-appended after the local rows, each with its `owner_host`; the local
-`next_cursor` and the string `coverage` are unchanged (the string does not
-describe peers; read `data.peers`), and `data.projects` gains
-`"<host>:<project_id>"` entries with `label` (display text, at most 128
-characters, or null) and `host`. Without `--hosts` the output is unchanged.
-`--hosts` needs `--all-projects` and a listing of this host. It is refused with
-a remote `--host`, and with `--session`, because a peer page is not
-session-filtered. With `--cursor` the peer read is skipped: `peers` is absent
-and the Console keeps the first page's peer data.
-
-`data.peers` has one entry per peer: `{host, label, state, included,
-invalid_rows, duplicate_rows, truncated, reason?}`. `state` is:
-
-- `complete`: the whole first page was read and every row was valid.
-- `partial`: the page was truncated, or rows were duplicate, invalid, or named
-  another host or no `project_key`; or the peer answered but gave no page, with
-  `reason` `project_unknown` (the peer knows none of this host's registered
-  projects), `limit_refused` (`--limit` exceeds the peer's `page_rows`; lower
-  it), `invalid_request` (the peer refused the request for another reason, so
-  lowering `--limit` will not help), `invalid_page` (an unexpected reply) or
-  `duplicate_host`. `project_unknown` is best-effort: it is recognised from the
-  first line of the peer's error output, so an unrecognised message reads as
-  `unreachable` with reason `error`.
-- `unreachable`: no usable answer, with `reason` `timeout` (the shared
-  `peer_seconds` budget ran out), `error` (any other transport or peer
-  failure) or `no_project` (no registered project to ask through). Local rows
-  still show.
-- `unsupported`: the peer predates this listing, so update it.
-
-A peer that is down never fails the listing. All attempts at one peer share a
-single `peer_seconds` budget.
-
-To answer or show a peer's request under `--all-projects`, pass `--host H` (or
-a qualified ID) and `--project-key KEY`, the listed request's `project_key`. The
-CLI routes through the local project with that key, so the answer reaches the
-owner through the normal remote path with a frozen operation ID, and an unknown
-key returns `no_project`. A key that matches more than one registered project is
-refused, and `--host` must name the same host as a qualified ID. Close stays
-`OWNER_LOCAL_ONLY`.
-
-The Console shows peer requests labelled by host and groups projects by host
-and project ID. It asks for peers on the first page only. A peer that gave no
-page (`unreachable`, or `partial` with a `reason` and no rows) keeps its last
-rows, marked "stale since" the last good read, and answering stays allowed; an
-`owner_unavailable` failure is shown if the owner cannot be reached. A `partial`
-peer without a `reason` shows the rows it gave, with a note that some are
-missing. The Console drops a peer's kept rows when the peer is `complete` or
-`unsupported` (a line says to update it), or no longer listed. Each non-complete
-peer gets one coverage line.
-The MCP `fabric_inbox` tool accepts `host` for list, answer, close and
-acknowledge; list with an ID shows one request. The same owner-local restriction
-applies to close and acknowledgement.
-
-Use the explicit originating session ID. It is a declared delivery target;
-posting does not discover, register or authenticate a live provider session.
-Ownership comes from this host's current Fabric project and inbox actor.
-Change the agent label only deliberately: acknowledgement must use the request's
-original actor as well as its exact host/project/session.
-MCP and the terminal may use different labels by default. Inspect
-`fabric_context` (`op: inspect`) in the originating MCP session and retain
-`inbox.agent` with its checkpoint. For CLI acknowledgement, set
-`PROVENANT_AGENT_LABEL` to that same label for the command; a similar label or
-the same session ID alone is insufficient.
-
-Use `kind: question` for information, or `kind: assumption` with a non-empty
-`proceeding_with` string for a reversible working position. Only decisions can
-set `blocking: true`. Decisions/questions accept `choose` or `reply`; assumptions
-accept `confirm` or `override`. `reply` and `override` read exact UTF-8 text via
-`--text-file reply.md` or piped `--text-stdin`, capped at 4 KiB. Compose human
-replies in a file; piped input must finish, including EOF, within five seconds.
-The two text sources are mutually exclusive.
-`confirm` records acceptance of the saved `proceeding_with` value
-and takes no option or text. Record `chat`, `console`, `phone_remote`, `cli` or
-`unknown` explicitly; phone use is never inferred.
-
-Every successful mutation returns an operation ID. Preserve the ID, input and
-viewed revision when retrying after an uncertain reply. A changed operation or
-actor conflicts. For a new answer after a conflict, inspect the item first.
-To replace a viewed item, add `"supersedes":{"id":"REQUEST_ID","expect_revision":N}`
-to the new request JSON. Posting creates the replacement and supersedes that
-revision in one transaction, including the operation receipt. Host, project,
-chair actor and chair session must match. Stale revisions and already closed
-items conflict. Concurrent replacements have one winner. Saved answers, their
-delivery state and historical request revisions remain visible; supersession
-does not retract an answer already queued or consumed. The old item's closure
-reason names the replacement; the new request retains the backward link. See generated
-[CLI](../reference/cli-all.md) and [MCP](../reference/mcp-tools.md) references for syntax.
-
-## Work links
-
-The request JSON for CLI `ask --file` and MCP `fabric_inbox` `ask` accepts
-optional `work`, containing required `run_id` and optional `task_id`,
-`attempt_id`, `repository` and `head`. Repository uses the existing absolute-path
-wire format, for example
-`{"relative_to_root":{"encoding":"utf8","path":"repo/.git"}}` for `/repo/.git`.
-Supply the canonical Git common directory, shared by linked worktrees. Head is
-an exact 40- or 64-character Git object ID observed at launch.
-
-Creation validates these claims through Run's host-sealed membership lookup for
-the current project. A lookup result of `mismatch` is refused. The saved
-`work_coverage` reports the lookup result: `verified`, `partial`, `unindexed`,
-`repository_unavailable`, `head_unavailable` or `limit`. It is omitted when no work
-was supplied. Run-only selection is at best partial. Observed contradictions are refused,
-including run-only and capped lookups. A limit without an observed contradiction
-leaves remaining candidates unknown. Nested, historical and unprepared
-work may be unindexed. Neither case establishes membership or grants authority.
-No Git probes, child-store traversal or later promotion of coverage occurs.
-Item, history and list JSON preserve the links and creation-time coverage;
-callers cannot supply coverage. `request.work` always contains claims; only
-`verified` coverage permits a work link or task-label join. Other results must be
-labelled unverified and must not become navigable work. Use the records owner's
-`verified_work()` accessor and the binding [Fabric contract](../specs/fabric.md#human-requests).
-Task labels remain a future overview concern.
-
-## Consume once
-
-An answer atomically queues a `human_answer` Fabric response to the original
-actor with the host, session, request and immutable answer IDs. This Fabric-mail
-copy is independent of live hook injection. Consume it at an existing
-orchestration boundary or explicit continuation, check its exact target and
-deduplicate by answer ID. Never spend model turns polling.
-
-After consuming an answer, acknowledge it before acting:
-
-```sh
 provenant inbox acknowledge REQUEST_ID --answer ANSWER_ID \
   --session HOST_SESSION_ID --operation-id ack-1 --json
 ```
 
-Reading or marking Fabric mail read does not acknowledge it. For this transport,
-an explicit consumption acknowledgement can move `queued` directly to
-`acknowledged`; no live offer was observed. Delivery state is independent of
-resolution. Repeated acknowledgement is harmless and never repeats an action.
-Neither the answer nor acknowledgement grants new authority or replaces review.
+- `kind` is `decision`, `question` or `assumption` (needs a non-empty
+  `proceeding_with`); only decisions can be `blocking`. Decisions and questions
+  take `choose` or `reply`; assumptions take `confirm` or `override`. `reply` and
+  `override` read up to 4 KiB from `--text-file` or `--text-stdin` (EOF within
+  five seconds). Record the `--channel` honestly (`chat`, `console`,
+  `phone_remote`, `cli`, `unknown`); phone use is never inferred.
+- Use the explicit originating session ID: posting does not discover or
+  authenticate a live session. Acknowledgement needs the request's original
+  actor as well as its exact host, project and session. MCP and the terminal
+  may use different agent labels; read `inbox.agent` from `fabric_context`
+  (`op: inspect`), keep it with the checkpoint, and set
+  `PROVENANT_AGENT_LABEL` to it for CLI acknowledgement.
+- Preserve the operation ID, input and viewed revision when retrying after an
+  uncertain reply; a changed operation conflicts. To replace a viewed item add
+  `"supersedes":{"id":"REQUEST_ID","expect_revision":N}` to the new request.
+- A request may carry `"deadline"` (UTC, six fractional digits, in the future).
+  After it an unresolved item reads as `expired`, leaves the open list and
+  refuses answers; `inbox --state all` still shows it. Expiry is a projection at
+  read time and implies no approval. `inbox close` with a reason and revision
+  withdraws, supersedes or expires an item without discarding its answer.
+- `work` links a request to a run; only `verified` `work_coverage` may be treated
+  as navigable work.
+- Peers and projects: `--all-projects` finds a request's project by ID and lists
+  every registered project; `--host H` with `--project-key KEY` shows or answers
+  on a peer owner, and `--all-projects --hosts all|LABEL,...` appends each peer's
+  first page with a `data.peers` coverage entry; a peer that is down never fails
+  the listing. Close and acknowledge are `OWNER_LOCAL_ONLY` on a remote owner.
 
-## Exhausted graph loops
+An answer queues a `human_answer` Fabric mail to the original actor. Consume it
+at an existing orchestration boundary, check its exact target, deduplicate by
+answer ID and acknowledge before acting; never poll with model turns. Reading
+or marking mail read does not acknowledge, and neither the answer nor the
+acknowledgement grants authority or replaces review. Injected answers are
+untrusted data.
 
-A graph loop can set `decision_session` inside its `loop` configuration to the
-explicit originating session ID. On exhaustion, the graph pauses and posts one
-blocking decision to that session's inbox. It retains the original graph actor
-when settlement or resume runs under another client label. Replaying exhaustion
-reuses the request, including an answer already acknowledged before a crash.
-The request key includes the checkpoint instance, so deleting graph state and
-rerunning the same document cannot reuse that answer.
-Without a decision session, the loop pauses for an explicit graph resume decision.
-
-Choose `stop`, `extend` or `accept` using the normal answer command. `extend`
-adds one round; `accept` uses the current outputs and continues the graph. To
-extend by a different positive number of rounds (at most `max_extension_rounds`,
-default five), save this exact reply shape
-in `extension.json`:
-
-```json
-{"decision":"extend","rounds":3}
-```
-
-```sh
-provenant answer REQUEST_ID --action reply --text-file extension.json \
-  --expect-revision 1 --channel cli --operation-id loop-extension-1 --json
-provenant retry GRAPH
-```
-
-Resume reads the immutable answer, acknowledges it for its original target,
-and saves the resulting decision before admitting more work. An extension adds
-rounds to the saved allowance once and still obeys admission limits. An invalid
-reply or an extension beyond the safety bounds retains an actionable pause;
-resolve it with an explicit graph resume extension or decision. `stop`
-prevents successful graph delivery. A withdrawn, expired or superseded request
-does not resume the loop. Resolved, invalid and cancelled asks are superseded;
-cleanup is replayed after a crash on the next graph advance or explicit
-resume/cancel command. If inbox access remains unavailable, status retains the
-pending cleanup and its error. Resuming a cancelled, exhausted loop requires an
-explicit stop, extension or acceptance because its old ask has been closed. Inbox errors leave a visible pause and an
-explicit-resume hint while other running attempts continue to be observed.
-The [Fabric spec](../specs/fabric.md) describes loop
-declarations, previous-round inputs and explicit resume extensions.
+A graph loop with `decision_session` posts one blocking decision when its
+rounds are exhausted. Answer `stop`, `extend` (one round) or `accept`, or reply
+`{"decision":"extend","rounds":3}` via `--action reply --text-file` (at most
+`max_extension_rounds`, default 5), then `provenant retry GRAPH`.
 
 ## Delivery service
 
-The local `offer_until_ack` API is available to delivery adapters. Adapters must resolve the target using authoritative session discovery and fail closed on missing or unreadable registration. Identity mismatches return `conflict`; discovery failures return `inbox_unavailable`.
-It selects one explicitly registered checkpoint session using its exact host,
-project and chair actor. Missing registration or a different binding is refused;
-a similarly labelled session does not receive the answer. Discovery identifies
-the chair, not provider liveness. A changed or missing checkpoint does not
-transfer its registered identity. Explicit rebinding does not retarget old
-answers: those stay addressed to their original host/session/actor.
-
-Each batch contains immutable answers and delivery records, with request and
-answer IDs. Batches cap at 100 answers and 8 KiB of compact JSON, including the
-envelope and escaping. Adapters may request smaller limits and must reserve
-space for their own protocol envelope. `truncated` identifies overflow; omitted
-answers keep their previous delivery state. An answer that does not fit a smaller requested budget is skipped and remains queued; use the full 8 KiB boundary to offer it. Answers that cannot fit that boundary are refused when submitted, including JSON escaping and envelope overhead.
-
-Offers atomically set `offered`, increment `attempts` and set `last_attempt_at`.
-Newly queued answers start at zero offers. Default offers repeat across service restarts
-until explicit acknowledgement by the exact target; acknowledgement retains
-its original timestamp on retries. Neither offering nor mail-read success proves
-model consumption. Deduplicate by answer ID before taking action. An adapter
-failure after an offer commits leaves it eligible for default adapters to offer again.
-
-[`delivery_capabilities()`](../../tools/front-door/crates/cli/src/hooks.rs)
-describes adapter readiness, not individual delivery state. Every adapter
-receives answers through Fabric mail; the rows below are the exceptions, and
-`scripts/check-doc-truth` compares them with that function and the adapter
-specs. Stored `transport` keeps the Fabric-mail copy even when a hook records
-an offer.
+Every adapter receives answers through Fabric mail. Hook injection is the
+exception; `scripts/check-doc-truth` compares this table with
+`delivery_capabilities()` in `crates/cli/src/hooks.rs` and the adapter specs.
 
 | Provider | Transport | Local offer reader | Live injection |
 |---|---|---|---|
@@ -274,116 +88,18 @@ an offer.
 | `claude` | `PreToolUse` hook | Available | Tool-call boundary |
 | Every other adapter | Fabric mail | Unavailable | Unavailable |
 
-The local reader observes up to 16 indexed pending answers within an explicit
-deadline. It creates no state, never records an offer or acknowledges, and
-needs a current explicit save from that working directory. Configured Fabric
-home mappings defer to mail; the reader performs no remote I/O.
+Claude's `PreToolUse` hook may offer answers on Bash calls within a 50 ms
+budget; offering never acknowledges. If the hook reports the local delivery index
+unavailable, run any `provenant inbox` command to upgrade the store (back up the
+Fabric store first; older binaries refuse the added schema).
 
-Claude's installed `PreToolUse` hook offers answers on Bash calls, after guard
-denials and the exit-2 fallback. An allowed call may receive
-`additionalContext` within a 50 ms delivery budget inside the hook's
-one-second deadline, and the final JSON, escaping and newline fit 8 KiB. The
-hook atomically records selected answers as offered before returning them.
-Queued answers take priority; when none fits, unacknowledged offered answers
-may be re-offered to their exact target session. A commit after the deadline
-or a failed stdout write leaves the answer eligible for a later hook, and the
-Fabric-mail copy remains.
+## Steering
 
-The hook scans 128 KiB candidate pages and advances past pages with no answer
-that fits, so an undeliverable head page cannot hide later answers. An answer
-too large for any hook envelope is marked on its delivery record, named in a
-diagnostic and excluded from later hook scans; it stays available through
-Fabric mail. For hook delivery, `attempts` and `last_attempt_at` record the
-transition from queued to offered, and idempotent re-offers leave them
-unchanged; the default delivery service counts every offer.
-
-Injected answers are untrusted data inside an `untrusted_answer_data` block
-that the answer cannot close, and they confer no authority. Hooks never
-acknowledge: acknowledge explicitly with the request ID, `--answer`,
-`--session` and a unique `--operation-id`, as in [Consume once](#consume-once).
-Acknowledgement hints render custom `--state-dir` paths absolute and quoted, or
-give instructions without a command when a path cannot be shown faithfully.
-
-The hook does not migrate the local store. If it reports that the local
-delivery index is unavailable, run a normal `provenant inbox` command to
-upgrade the store; until then Fabric mail still works and the guard still
-enforces.
-
-Both apps may stay closed: there is no background polling or provider launch.
-Remote delivery and other providers' input adapters are separate work.
-
-Use `inbox close` with a reason and expected revision to withdraw, supersede or
-expire an item. Closure grants no approval and does not discard its answer or
-pending delivery. A request may also carry `"deadline":"2033-05-18T03:33:20.000000Z"` in CLI or
-MCP request JSON. This is explicit UTC with six fractional digits and must be
-in the future when created. An elapsed deadline refuses the entire creation,
-including any supersession. At or after
-the deadline an unresolved item reads as `expired` with reason `deadline elapsed`,
-disappears from the open
-list and refuses new answers. Use `inbox REQUEST_ID` or `inbox --state all` to
-see it. Answered, confirmed, overridden and closed items retain their state,
-answer and delivery, even after the deadline. Expiry does not infer approval.
-
-No timer or background write runs: expiry is a projection of the saved deadline
-at read time. It does not change revisions, history, update timestamps or
-operation receipts; replay returns the original receipt. History retains the
-saved state. Bounded overview scans also omit expired candidates; those
-candidates still consume the scan budget and may leave coverage partial. Refresh explicitly to observe elapsed deadlines. Manual closure
-remains available, and a replacement can supersede an unresolved item whose
-deadline has elapsed. Requests without deadlines behave as before.
-
-## Provider control
-
-`provenant help --all --json` publishes `provider_controls`: one row per adapter
-and launch kind (`lane` or `chair`) with `support` (`live_injection`,
-`mail_only`, `continuation_only` or `unsupported`), the `transport` and a
-`reason`. Each row also lists wire actions `cancel`, `resume` and `land` with `supported` and
-a `reason`, so a console can disable what a provider cannot take. The table is
-declared per adapter in `LaunchCapabilities::control`.
-
-```
-provenant steer ATTEMPT --text-stdin [--operation-id ID] --json
-provenant chair message SESSION --text-stdin --channel CHANNEL [--operation-id ID] --json
-```
-
-Text is at most 4 KiB and must not be blank. Neither command reads a transcript
-or calls a model, and neither can approve a gate, merge or landing: the text is
-guidance recorded as Fabric mail, labelled as carrying no authority. Both are
-refused inside a lane and are local to the host; the MCP form is `fabric_inbox`
-`steer` and `chair_message`.
-
-`chair message` resolves SESSION to the exact registered host and project, queues
-one Fabric mail message to that session's own mailbox and returns `state: queued`
-with `transport: fabric_mail`. A chair session records no provider, so its path
-is the provider-neutral mail path. Sessions that share an agent label share an
-actor, so the message is not addressed to that actor. The session reads it with
-`provenant fabric mail read --session SESSION` (MCP `fabric_mail` `read` with
-`session`) and marks it read with `mark-read --session`, which keeps its own
-cursor. The agent's default mailbox and other sessions do not show it. The hook
-does not inject these messages.
-
-`steer` reads the attempt's recorded adapter and refuses with
-`state: unsupported`, outcome `refused` and error code `control_unsupported`
-when the lane row does not deliver. Over MCP the same refusal is an error
-response with that code and the receipt as its data, not a successful reply. No lane adapter delivers today (live steering
-is a gap; `retry` is terminal continuation), so `steer` records nothing and its
-receipt names the reason. Nothing is recorded for a refusal, so its operation ID
-stays free.
-
-A recorded request replays its original receipt under the same operation ID and
-input. Reusing the ID with different content returns `operation_conflict`.
-
-## Limits and recovery
-
-Pages default to 50 and cap at 100. Pass `next_cursor` back as `--cursor` with
-the same filters/page size. A request change invalidates the cursor; restart
-without it. `--host` selects `local`, the local host ID, or a configured peer
-label or ID. An unconfigured or unavailable owner returns `owner_unavailable`;
-no local mirror is created. Close and acknowledgement on a remote owner return
-`OWNER_LOCAL_ONLY` and must be run on the owner.
-
-Request/log retention and migration behaviour are documented by the
-[store owner](../../tools/front-door/crates/fabric-store/README.md). No request
-history or pending delivery is automatically pruned. Back up the private Fabric
-store with its existing owner procedure before upgrading; older binaries refuse
-the added schema. Do not lower the schema version manually.
+`provenant steer ATTEMPT --text-stdin` and `provenant chair message SESSION
+--text-stdin --channel CHANNEL` record up to 4 KiB of guidance as Fabric mail
+with no authority; both are refused inside a lane. `chair message` queues to
+that session's own mailbox, read with `provenant fabric mail read --session
+SESSION`. No lane adapter delivers `steer` live today: it refuses with
+`control_unsupported` and records nothing (`retry` is the continuation). Per-
+adapter support is published as `provider_controls` in `provenant help --all
+--json`.

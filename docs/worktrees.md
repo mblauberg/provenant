@@ -2,7 +2,7 @@
 Owner: confinement worktree lifecycle and supervisor custody
 Anchor: [`lifecycle.rs`](../tools/front-door/crates/confinement/src/worktrees/lifecycle.rs), [`custody.rs#Recovery`](../tools/front-door/crates/supervisor/src/custody.rs)
 
-The [constitution](../HARNESS.md) pre-authorises implementation branches and
+The [constitution](../GLOBAL-AGENTS.md) pre-authorises implementation branches and
 linked worktrees. Each worktree has one writer. Worktrees isolate changes;
 they do not expand authority. The [repository workflow](runbooks/github-workflow.md)
 owns integration and landing.
@@ -27,7 +27,7 @@ provenant worktree list
 provenant worktree remove fix-repo-example
 ```
 
-The [generated command reference](reference/cli-all.md) owns flags and result
+`provenant help --all` owns flags and result
 fields. New branch names must avoid case, Unicode-normalisation and branch-path
 prefix collisions. Remote bases are pinned to the advertised commit, not a
 possibly stale tracking ref. Unreachable or ambiguous remote bases refuse
@@ -56,8 +56,7 @@ Collection preserves live or unobservable custody, tracked files, configured
 keep paths and unknown recovery evidence. Standalone output collection has an
 age threshold; settlement and removal of a proven merged tree can collect its
 declared regenerable output immediately. The [GC runbook](runbooks/gc.md) owns
-collection operations and [configuration](runbooks/configuration.md#lane-cache-collection)
-owns eligibility settings. Stable lock files remain outside disposable trees:
+collection operations and eligibility settings. Stable lock files remain outside disposable trees:
 unlinking and recreating a lock name can split exclusion across inodes.
 
 Confined writers use private Git objects, refs and merge state. The shared branch
@@ -71,7 +70,7 @@ owns recovery and upstream integration.
 Fabric supplies the lane Cargo home and build directories. Keep those bindings;
 confinement may deny other paths. Cargo seed and cache mechanisms belong to the
 [run spec](specs/run.md#cargo-target-seed), retention settings to
-[configuration](runbooks/configuration.md#lane-build-output).
+[GC](runbooks/gc.md#what-is-removed-and-when).
 [`measure-cargo-target-seed`](../scripts/measure-cargo-target-seed) is a host-only measurement tool; experimental timing
 results belong in their issue, not this policy.
 

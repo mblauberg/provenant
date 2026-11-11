@@ -1,10 +1,10 @@
 # Maintaining Provenant
 
-Read [`AGENTS.md`](AGENTS.md), [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md),
-[`HARNESS.md`](HARNESS.md) and
+Read [`AGENTS.md`](AGENTS.md), [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
-Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
-risk, authority, orchestration, review policy and user gates;
+Inspect the live diff and preserve unrelated work. `GLOBAL-AGENTS.md` owns
+authority, the real boundaries and user gates; code owns risk tiers and review
+floors, and skills own orchestration;
 [`docs/worktrees.md`](docs/worktrees.md) owns branch and linked-worktree
 operation. Use the repository process declaration below for issue intake,
 workflow state and pull-request linking.
@@ -62,7 +62,8 @@ cross-tracker routes, not a second current-work owner.
 
 - Owns: `non-derivable-intent`
 - Drift gate: `scripts/check-doc-truth` checks spec indexes, Owner/Anchor
-  headers, Anchor paths, Test citations and diagram metadata; harness asset
+  headers, Anchor paths, Test citations and diagram metadata, and warns when a
+  spec passes 2,000 words; harness asset
   checks cover retained runtime-graph projections. Other prose is review-checked
 
 ### Merge policy
@@ -77,7 +78,7 @@ This repository is loaded by multiple agent platforms. A convenient
 Claude-only or Codex-only change is a regression unless the approved scope is
 platform-specific.
 
-Changes to the ambient `GLOBAL-AGENTS.md` or `HARNESS.md` apply from the next session.
+Changes to the ambient `GLOBAL-AGENTS.md` apply from the next session.
 A live session retains the prior constitution until restart.
 
 ## Documentation tiers
@@ -94,8 +95,8 @@ Documentation claims sit in three tiers, and the third is deliberate:
    maintained from current files and code; no harness check binds those regions
    to a source file. Specification prose, fenced commands, placeholders,
    unbound projections and other links remain review-owned.
-   `HARNESS.md` stays compact because it is read before cross-provider dispatch,
-   risk-tier, authority or memory decisions; see [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md).
+   [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) stays under 800 words because every
+   session of every project loads it.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
 
@@ -104,29 +105,26 @@ Documentation claims sit in three tiers, and the third is deliberate:
 These rules keep the always-loaded files small. They are review-owned; the
 Harness asset checks enforce the machine-checkable subset.
 
-1. `GLOBAL-AGENTS.md` and `HARNESS.md` are the ambient doctrine sources,
-   installed as `AGENTS.md` and `HARNESS.md`.
-   `GLOBAL-AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
-   topology, lifecycle, user gates, risk, Git, routing and memory. A
-   provider-bootstrap import shim, such as `CLAUDE.md`, may point only to
-   those owners and adds no policy.
+1. `GLOBAL-AGENTS.md` is the one ambient doctrine source, installed as
+   `AGENTS.md`. It holds the standing rules a skill, `--help` or code does not
+   already own. A provider-bootstrap import shim, such as `CLAUDE.md`, may
+   point only to it and adds no policy.
 2. Operational depth has one skill owner: compaction and checkpoints in
    `session`, routing and degradation in `orchestrate`, and receipt detail in
    `deliver`. Ambient files name skills, then load depth only when triggered.
 3. Nothing outside an owning skill names a file under its `references/`
    directory. Cross-skill references use the skill name only.
-4. `GLOBAL-AGENTS.md` and `HARNESS.md` contain no repository-relative `docs/`,
-   `config/` or `scripts/` paths and do not name `MAINTAINING.md`. Installed skills
+4. `GLOBAL-AGENTS.md` contains no repository-relative `docs/`, `config/` or
+   `scripts/` paths and does not name `MAINTAINING.md`. Installed skills
    keep local Markdown links within their own directory; use a skill-local
    reference, a `provenant` command or the consuming repository's runbook for
    other guidance. `scripts/check-harness` enforces this for skill entrypoints and
    supporting Markdown. Runnable commands are PATH-resolved. Fabric
    identity derives from the working directory.
-5. `HARNESS.md` is the sole ambient skill resolver. It states that skills
-   install into each configured harness's skills directory and names no
-   harness root; `GLOBAL-AGENTS.md` names neither an installed root nor an instance
-   skill directory. A named skill loads its `SKILL.md` and is
-   binding, while provider-native discovery may implement resolution.
+5. `GLOBAL-AGENTS.md` is the sole ambient skill resolver and names neither an
+   installed root nor an instance skill directory. A named skill loads its
+   `SKILL.md` and is binding, while provider-native discovery may implement
+   resolution.
 6. Ambient files carry no dates. Git records revision provenance.
 7. `orchestrate` remains one skill. Skill changes use targeted,
    evidence-backed pruning; no new catalogue entry or duplicate policy is
@@ -281,6 +279,11 @@ scripts/check-harness
 provenant check release
 git diff --check
 ```
+
+Generated contract reference is not tracked. Read `provenant help --all`,
+`provenant config schema` and `--json` output; `scripts/generate-reference`
+renders the same sources into the ignored `docs/reference/`, and CI runs it
+(`--strict`) to prove they still render and uploads the result as an artefact.
 
 The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.
 

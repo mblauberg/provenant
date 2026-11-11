@@ -82,7 +82,7 @@ jobs:
       - name: Lint
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Check generated reference
-        run: scripts/generate-reference --check
+      - name: Generate contract reference
+        run: scripts/generate-reference --strict
       - name: Check documentation headers and blob sizes
         run: scripts/pre-push
