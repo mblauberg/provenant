@@ -17,11 +17,6 @@ slow-timeout = { period = "10s", terminate-after = 3 }
 filter = 'package(=provenant-run) & test(=delivery_tests::restart::delivery_restart_drives_pending_retryable_and_uncertain_receipts)'
 slow-timeout = { period = "10s", terminate-after = 9 }
 
-# Three independent Git/worktree fixtures each launch and continue a provider.
-[[profile.ci.overrides]]
-filter = 'test(=graph_writer_automatically_continues_retained_or_fresh)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 [profile.ci.junit]
 path = "junit.xml"
 

@@ -209,7 +209,7 @@ fn refusal(error: template::CompileError) -> template::ParameterRefusal {
 fn a_mistyped_condition_name_is_refused_with_the_name() {
     let error = compile(
         &resolvers("f0-v0-s0"),
-        json!({"id":"x","use":"task","brief":"b","when":{"review-fram":true}}),
+        json!({"id":"x","use":"task","brief":"b","when":{"review-frames":true}}),
     )
     .unwrap_err();
     let refusal = refusal(error);
@@ -218,7 +218,7 @@ fn a_mistyped_condition_name_is_refused_with_the_name() {
         &refusal.fault,
         template::ParameterFault::When(when)
             if when.reason == template::WhenFault::Unknown
-                && when.key.as_deref() == Some("review-fram")
+                && when.key.as_deref() == Some("review-frames")
                 && when.suggestion.as_deref() == Some("review-frame")
     ));
     let wire = serde_json::to_value(&refusal).unwrap();
