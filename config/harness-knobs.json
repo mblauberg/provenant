@@ -426,6 +426,12 @@
       "effect": "The exclusion list a graph passes to each node it launches, set from graph routing policy. Same selectors as `routing.exclude`; refusals and `--explain` name the graph as the source.",
       "trade_off": "Applies to every node's named-route pool; a node's pinned model is never affected."
     },
+    "routing.depletion_wait_seconds": {
+      "type": "int", "min": 0, "max": 604800, "default": 0, "status": "wired",
+      "reader": "tools/front-door/crates/routing/src/ladder.rs",
+      "effect": "Longest quota reset, in seconds, a depleted writer waits for instead of handing its work to another agent. 0 never waits: a usage-limited, model-unavailable or login-expired stop moves to the next eligible route at once (same model on another account, another provider or family at the same tier, an adjacent tier, a host-native sub-agent), and reaches the chair only when none is eligible. The order and the tier adjacency are `domains.routing.depletion`.",
+      "trade_off": "A wait keeps one account's session and cache but idles the node until the reset; the hand-off starts a fresh attempt on another route immediately. A reset beyond the bound never waits."
+    },
     "usage.project_attribution": {
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/usage.rs",

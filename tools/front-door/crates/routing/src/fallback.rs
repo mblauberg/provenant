@@ -5,6 +5,9 @@
 pub enum FallbackOutcome {
     AuthRequired,
     UsageLimited,
+    /// The provider does not serve the model for this account, or the model is
+    /// not verified there. Another account or route may.
+    ModelUnavailable,
     AdapterUnavailable,
     Other,
 }
@@ -23,6 +26,7 @@ impl FallbackOutcome {
             }
             // The route cannot run here now and nothing has started, so a later
             // route may. One account with stale evidence must not strand the rest.
+            Reason::UnverifiedModel => Self::ModelUnavailable,
             Reason::MissingExecutable
             | Reason::ProviderUpdating
             | Reason::Disabled
@@ -31,8 +35,7 @@ impl FallbackOutcome {
             | Reason::UnknownAccount
             | Reason::UnknownPartialHeadroom
             | Reason::ConfinementUnavailable
-            | Reason::UnsupportedEffort
-            | Reason::UnverifiedModel => Self::AdapterUnavailable,
+            | Reason::UnsupportedEffort => Self::AdapterUnavailable,
             _ => Self::Other,
         }
     }
@@ -67,6 +70,7 @@ impl FallbackPolicy {
             self.outcome,
             FallbackOutcome::AuthRequired
                 | FallbackOutcome::UsageLimited
+                | FallbackOutcome::ModelUnavailable
                 | FallbackOutcome::AdapterUnavailable
         ) && ((self.handoff == FallbackHandoff::Local && self.custody_released)
             || (self.handoff == FallbackHandoff::Launched
@@ -113,9 +117,16 @@ mod tests {
             ),
             FallbackOutcome::AuthRequired
         );
+        assert_eq!(
+            FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::UnverifiedModel,
+            ),
+            FallbackOutcome::ModelUnavailable
+        );
         for reason in [
             provenant_records::RouteExclusionReason::UnknownAvailability,
             provenant_records::RouteExclusionReason::StaleAvailability,
+            provenant_records::RouteExclusionReason::UnverifiedModel,
         ] {
             let outcome = FallbackOutcome::from_exclusion(&reason);
             assert!(
@@ -164,6 +175,7 @@ mod tests {
         for outcome in [
             FallbackOutcome::AuthRequired,
             FallbackOutcome::UsageLimited,
+            FallbackOutcome::ModelUnavailable,
             FallbackOutcome::AdapterUnavailable,
             FallbackOutcome::from_exclusion(
                 &provenant_records::RouteExclusionReason::ProviderUpdating,
@@ -209,15 +221,20 @@ mod tests {
                 .allows_switch()
             );
         }
-        assert!(
-            !FallbackPolicy {
-                outcome: FallbackOutcome::AdapterUnavailable,
-                handoff: FallbackHandoff::Launched,
-                read_only: true,
-                ..base
-            }
-            .allows_switch()
-        );
+        for outcome in [
+            FallbackOutcome::AdapterUnavailable,
+            FallbackOutcome::ModelUnavailable,
+        ] {
+            assert!(
+                !FallbackPolicy {
+                    outcome,
+                    handoff: FallbackHandoff::Launched,
+                    read_only: true,
+                    ..base
+                }
+                .allows_switch()
+            );
+        }
         for policy in [
             FallbackPolicy {
                 outcome: FallbackOutcome::Other,
