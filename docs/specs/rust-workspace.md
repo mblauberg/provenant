@@ -4,7 +4,7 @@ Owner: the chairs; manifests in `tools/front-door/Cargo.toml`
 Anchor: `tools/front-door/tests/workspace_policy.rs`
 
 Engineering rules for the Rust workspace under `tools/front-door/`, the sole
-runtime ([ADR 0027](../adr/0027-rust-front-door.md)). Paths are relative to
+runtime ([ADR 0021](../adr/0021-configured-workspace-dispatch-boundaries.md)). Paths are relative to
 `tools/front-door/`.
 
 ## Crate layering
@@ -74,6 +74,27 @@ clocks and handshakes, never sleeps; code reads wall time through an injected
 - Test: `crates/cli/src/check/dates.rs::workspace_rust_test_dates_use_injected_clocks`;
   clippy `disallowed_methods`. Home isolation has no guard test (gap).
 - Owner: `tests/support/mod.rs`
+
+## One owner per mechanism
+
+Each mechanism has one implementation, and other code calls it rather than
+copying it. Owners hold mechanism only: callers choose their own budgets,
+retry targets and deadlines.
+- Backoff and transient failure: `provenant_core::retry::Backoff` and
+  `retry::is_transient` over a typed `RetryCause`. Callers supply the first
+  delay, factor, cap, attempt and cause.
+- Time: `provenant_core::Clock`, with `provenant_os::clock::SystemClock` as the
+  production clock. Expiry reads RFC 3339 through `provenant_core::time::rfc3339`.
+  Callers never read system time.
+- Duration suffixes: `providers::duration::suffix_seconds`.
+- Git path discovery: `provenant_os::git` (`repository_path`,
+  `repository_marker`). Descriptor-bound walks in
+  `crates/confinement/src/repo.rs` read the gitfile themselves, because identity
+  checks must cover that read.
+- Why: copies drifted, and a fix to one copy left the others wrong. Inherited
+  Git directory redirects were trusted in several places.
+- Test: `clippy.toml` `disallowed-methods`; unit tests in each owner crate.
+- Owner: `crates/core/src/retry.rs`, `crates/os/src/git.rs`, `clippy.toml`
 
 ## Simple first
 
