@@ -192,6 +192,9 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
+/// The refusal for a graph, node or `--set` value that names cloud placement.
+pub const CLOUD_PLACEMENT_REMOVED: &str = "invalid input field `attempt.cloud`: cloud placement was removed. Launch a cloud session with `provenant cloud launch --file BRIEF`";
+
 /// Execution specification for an attempt, carrying what a plain lane expresses.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptSpec {
@@ -209,9 +212,6 @@ pub struct AttemptSpec {
     pub provider_timeout: Option<u64>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
-    /// Placement override for cloud execution.
-    #[serde(default, alias = "cloud", skip_serializing_if = "Option::is_none")]
-    pub placement: Option<provenant_records::run::CloudPlacement>,
     /// A writer worktree branch created from base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_worktree: Option<crate::coordination::facade::NewWorktree>,
@@ -309,12 +309,19 @@ impl AttemptSpec {
         knobs
     }
 
+    /// Whether the spec still names the removed cloud placement. Such a node
+    /// is refused rather than run locally.
+    pub fn names_cloud_placement(&self) -> bool {
+        ["cloud", "placement"]
+            .iter()
+            .any(|field| self.extra.contains_key(*field))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.host.is_none()
             && self.directory.is_none()
             && !self.confidential
             && self.provider_timeout.is_none()
-            && self.placement.is_none()
             && self.new_worktree.is_none()
             && self.account.is_none()
             && self.capabilities.is_empty()
@@ -330,15 +337,18 @@ impl AttemptSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
-    /// Continue once automatically when this writer stops without a new commit.
-    /// Omission enables continuation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_continue_no_work: Option<bool>,
+    /// The step to take after a stop with a given cause instead of the stop
+    /// table's default (`docs/specs/run.md#what-follows-a-stop`).
+    #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
     /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_group: Option<String>,
+    /// Launch conditions resolved at submission; the node is skipped unless every term holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<WhenTerm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
@@ -609,6 +619,15 @@ impl GraphDocument {
         validate_schema(self)?;
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
+        // Refused at admission only. A graph persisted before the removal
+        // still replays, and its node launch blocks with the same refusal.
+        if expanded.nodes.iter().any(|node| {
+            node.attempt
+                .as_ref()
+                .is_some_and(AttemptSpec::names_cloud_placement)
+        }) {
+            return Err(AdmissionError::Plan(CLOUD_PLACEMENT_REMOVED.into()));
+        }
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
@@ -1063,9 +1082,10 @@ pub struct GraphCheckpoint {
     pub settlements: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
-    /// Inbox decisions raised by loops, decide nodes and pauses, by ask ID.
+    /// Links to the inbox requests raised by loops, decide nodes, lands and
+    /// pauses, by ask ID. The inbox holds the question and the answer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub asks: Vec<NodeAsk>,
+    pub asks: Vec<AskLink>,
     /// Actor every ask is raised under, recorded before the first ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_actor: Option<String>,
@@ -1300,6 +1320,9 @@ pub struct GraphAttempt {
     /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub settled: u64,
+    /// The stop cause the run sealed for this attempt, read at settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<provenant_records::StopCause>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

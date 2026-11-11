@@ -230,6 +230,7 @@ fn process_limit_keeps_io_code_and_omits_source_text() {
             },
         )),
         input_failure: None,
+        cause: None,
     };
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
@@ -250,6 +251,7 @@ fn unreadable_input_io_projects_safe_reason() {
         delivery_stage: None,
         resource: None,
         input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
+        cause: None,
     };
     let decoded: FacadeError =
         serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
@@ -389,10 +391,6 @@ fn every_mcp_observation_wait_uses_the_transport_cap() {
         (
             "fabric_events",
             json!({"op":"read","limit":1,"wait_seconds":crate::MAX_WAIT_SECONDS}),
-        ),
-        (
-            "fabric_lease",
-            json!({"op":"landing_wait","reference":"main","generation":1,"wait_seconds":crate::MAX_WAIT_SECONDS}),
         ),
         (
             "fabric_run",
@@ -659,15 +657,10 @@ fn removed_tools_are_unknown_and_merged_operations_are_typed() {
         ToolCall::parse("fabric_context", json!({"op":"hosts","limit":1})),
         Ok(ToolCall::Hosts(_))
     ));
-    for operation in ["claim_acquire", "landing_acquire"] {
-        let input = if operation == "claim_acquire" {
-            json!({"op":operation,"scope":{"kind":"issue","key":"1571"},"lease_seconds":1})
-        } else {
-            json!({"op":operation,"reference":"refs/heads/main","expected":"a".repeat(40),"candidate":"b".repeat(40),"lease_seconds":1})
-        };
-        let call = ToolCall::parse("fabric_lease", input).unwrap();
-        assert_eq!(call.name(), "fabric_lease");
-    }
+    let input =
+        json!({"op":"claim_acquire","scope":{"kind":"issue","key":"1571"},"lease_seconds":1});
+    let call = ToolCall::parse("fabric_lease", input).unwrap();
+    assert_eq!(call.name(), "fabric_lease");
 }
 
 #[test]
@@ -853,6 +846,7 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         operation: "TOKEN_SENTINEL\u{1b}".into(),
         path: Some("/private/host".into()),
     })

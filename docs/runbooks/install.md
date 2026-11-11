@@ -434,7 +434,7 @@ when the state root stayed in place. To finish,
 run `launchctl bootout gui/$UID/dev.provenant.peer`, move
 `~/Library/LaunchAgents/dev.provenant.peer.plist` aside, and delete links under
 `~/.local/bin` and the harness skills directories, plus harness instruction
-links such as `AGENTS.md` and `HARNESS.md`, that point into the old state root.
+links such as `AGENTS.md`, that point into the old state root.
 Then rerun install with `--adopt-existing` to replace managed MCP entries that
 still name the old binary and state. Stopping the agent and removing these
 links remain manual steps.

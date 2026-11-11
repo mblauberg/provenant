@@ -93,6 +93,7 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch: self.branch.clone(),
             commit: self.commit.clone(),
+            stop: None,
         })
     }
 }
@@ -331,7 +332,7 @@ fn ci_and_ask_deadlines_share_the_earliest_wake() {
     let decision = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(decision.checkpoint.wake_at.unwrap().as_micros(), 60_000_000);
     assert_eq!(owner.targets.len(), 1);
-    assert!(decision.checkpoint.asks.iter().all(|ask| ask.resolved));
+    assert!(decision.checkpoint.asks.is_empty());
     owner.wall_seconds = 60;
     let done = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(done.status, GraphStatus::Complete);

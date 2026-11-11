@@ -1,5 +1,5 @@
 //! Every bound on what the CLI prints, in one place. Specs, help constraints
-//! and the generated reference quote these values rather than repeating them.
+//! and the help catalogue quote these values rather than repeating them.
 
 /// A whole encoded result; larger results are published as an artifact.
 pub const MAX_RESULT_BYTES: usize = 1024 * 1024;

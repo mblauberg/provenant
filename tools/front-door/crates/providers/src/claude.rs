@@ -110,13 +110,19 @@ const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
 /// it while this much life remains.
 const MIN_LIFETIME_MS: u64 = 60 * 1000;
 
+/// The owner's long-lived lane token (`claude setup-token`) for one account,
+/// kept in that account's own config directory. It belongs to its own grant,
+/// so the host renewing the account login never revokes it; lanes prefer it.
+pub const LANE_TOKEN_FILE: &str = "provenant-lane-token";
+
 /// A short-lived OAuth access token for the default identity, read by the host
 /// outside the sandbox. It is never logged, persisted or printed: `Debug` is
 /// redacted and the refresh token is never retained.
 pub struct OauthToken {
-    access: String,
+    pub(crate) access: String,
     expires_at_ms: u64,
     account: Option<(String, std::path::PathBuf)>,
+    pub(crate) lane_token: bool,
 }
 
 impl std::fmt::Debug for OauthToken {
@@ -126,6 +132,11 @@ impl std::fmt::Debug for OauthToken {
 }
 
 impl OauthToken {
+    /// True when this credential is a registered long-lived lane token,
+    /// rather than a rotating login access token.
+    pub fn is_lane_token(&self) -> bool {
+        self.lane_token
+    }
     /// Construct an in-memory token for cross-crate fixtures.
     #[cfg(feature = "fixture")]
     pub fn fixture() -> Result<Self, ProviderError> {
@@ -170,6 +181,7 @@ impl OauthToken {
             access: oauth.access,
             expires_at_ms: oauth.expires_at_ms,
             account: None,
+            lane_token: false,
         })
     }
 
@@ -285,6 +297,57 @@ fn keychain_source(login: &Login<'_>) -> CredentialSource {
         service,
         account: login.user.to_string_lossy().into_owned(),
     }
+}
+
+/// Reads the account's long-lived lane token when the owner registered one.
+/// It must be a single regular file that only its owner can read.
+pub(crate) fn lane_token(login: &Login<'_>) -> Result<Option<OauthToken>, ProviderError> {
+    let directory = Directory::open_anchor(login.config_dir)
+        .map_err(|_| ProviderError::CredentialUnavailable)?;
+    let name = OsStr::new(LANE_TOKEN_FILE);
+    let mut file = match directory.open_read(name) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error)
+            if error.is_symlink()
+                || matches!(error, provenant_os::fs::FsError::NotRegular { .. }) =>
+        {
+            return Err(ProviderError::CredentialReadFailed(format!(
+                "{LANE_TOKEN_FILE} must be a single regular file with mode 0600"
+            )));
+        }
+        Err(_) => {
+            return Err(ProviderError::CredentialReadFailed(format!(
+                "cannot inspect {LANE_TOKEN_FILE}"
+            )));
+        }
+    };
+    let meta = file.metadata().map_err(|_| {
+        ProviderError::CredentialReadFailed(format!("cannot inspect {LANE_TOKEN_FILE}"))
+    })?;
+    if meta.kind != provenant_os::fs::FileKind::Regular
+        || meta.uid != provenant_os::fs::effective_uid()
+        || meta.links != 1
+        || meta.mode & 0o077 != 0
+    {
+        return Err(ProviderError::CredentialReadFailed(format!(
+            "{LANE_TOKEN_FILE} must be a single regular file with mode 0600"
+        )));
+    }
+    let bytes = file.read_bounded(4096).map_err(|_| {
+        ProviderError::CredentialReadFailed(format!("cannot read {LANE_TOKEN_FILE}"))
+    })?;
+    let access = std::str::from_utf8(bytes.trim_ascii()).map_err(|_| ProviderError::Malformed)?;
+    if access.is_empty() || access.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ProviderError::Malformed);
+    }
+    Ok(Some(OauthToken {
+        access: access.into(),
+        // The owner renews it yearly; the host never refreshes it.
+        expires_at_ms: u64::MAX,
+        account: None,
+        lane_token: true,
+    }))
 }
 
 fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderError> {
@@ -575,7 +638,10 @@ fn refresh_account(
         Ok(())
     };
     check()?;
-    let mut token = refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?;
+    let mut token = match lane_token(login)? {
+        Some(token) => token,
+        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?,
+    };
     check()?;
     token.account = Some((account.key().into(), account.directory().to_owned()));
     Ok(token)
@@ -1178,6 +1244,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         "provider rate limited (HTTP 429)",
                     ));
                 } else {
+                    if let Some(result) = result.filter(|message| !message.is_empty()) {
+                        events.push(E::Text(result));
+                    }
                     events.push(E::Error);
                 }
             } else {

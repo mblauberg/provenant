@@ -156,6 +156,32 @@ pub struct PatchRecord {
     /// unjournaled record (a planner fragment) is journaled at save instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub journaled: bool,
+    /// Present when the host restarted a stopped node: the stop it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<Restart>,
+}
+
+/// The stop a host restart answered and the step it took. Restarts count
+/// against the graph-wide `limits.continuations`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restart {
+    pub node: String,
+    pub cause: provenant_records::StopCause,
+    #[serde(flatten)]
+    pub step: provenant_records::NextStep,
+    /// The routing ladder's choice, when a depleted stop was handed off by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<LadderChoice>,
+}
+
+/// The rung, target and tier the depletion ladder chose for a restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LadderChoice {
+    pub rung: provenant_routing::Rung,
+    /// `adapter/model` with its account, or `host-native/name`.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// The node field naming the parent node whose patch added a node.
@@ -298,11 +324,13 @@ fn admit_patch_for_retry(
             };
         }
         if revision(graph.checkpoint) != 0
-            || graph
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.state != NodeState::Pending || !node.attempts.is_empty())
+            || graph.checkpoint.nodes.iter().any(|node| {
+                // A row a `when` condition skipped at submission has not started.
+                let skipped_at_submission =
+                    node.state == NodeState::Skipped && node.skip_reason.is_some();
+                (node.state != NodeState::Pending && !skipped_at_submission)
+                    || !node.attempts.is_empty()
+            })
         {
             return Err(PatchError::new(
                 "started",
@@ -351,6 +379,7 @@ fn admit_patch_for_retry(
             skipped: Vec::new(),
             replaced: Vec::new(),
             journaled: false,
+            restart: None,
         };
         if let Some(journal) = context.journal {
             journal(&record).map_err(|reason| PatchError::new("journal", reason))?;
@@ -359,7 +388,6 @@ fn admit_patch_for_retry(
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
             source: String::new(),
-            continuation: false,
             nodes: Vec::new(),
             uses,
             patch: Some(record),
@@ -456,34 +484,27 @@ pub fn retry_node(
     retry_node_scope(graph, id, brief, context, false, None, None)
 }
 
-/// Host continuation uses the same checked, journalled reset as an explicit retry.
-pub(super) fn continue_no_work(
+/// A host restart after a stop uses the same checked, journalled reset as an
+/// explicit retry, and records the stop it answered.
+pub(super) fn restart_stopped(
     graph: &mut LiveGraph<'_>,
     id: &str,
-    brief: &str,
+    brief: Option<&str>,
     routes: &[GraphRoute],
+    restart: Restart,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
+    let reason = format!("restart node {id} after a {} stop", restart.cause);
+    debug_assert_eq!(restart.node, id);
     retry_node_scope(
         graph,
         id,
-        Some(brief),
+        brief,
         context,
         false,
-        Some(&no_work_reason(id)),
+        Some((&reason, Some(restart))),
         Some(routes),
     )
-}
-
-pub(super) fn no_work_reason(id: &str) -> String {
-    format!("continue node {id} after stop with no work")
-}
-
-pub(super) fn is_no_work_continuation(record: &PatchRecord) -> bool {
-    record
-        .replaced
-        .iter()
-        .any(|node| record.reason.as_deref() == Some(no_work_reason(&node.id).as_str()))
 }
 
 fn retry_node_scope(
@@ -492,7 +513,7 @@ fn retry_node_scope(
     brief: Option<&str>,
     context: &PatchContext<'_>,
     dependants: bool,
-    reason: Option<&str>,
+    reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
@@ -515,9 +536,7 @@ fn retry_node_scope(
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
     let container = node.composite.is_some() || node.loop_body.is_some();
     if container && brief.is_some() {
-        return Err(PatchError::invalid(
-            "container retry requires per-leaf brief edits",
-        ));
+        return Err(container_brief_refusal(graph.checkpoint, id, context));
     }
     // Enclosing joins depend on their members, but redoing one member must
     // only recompute those joins, rather than retiring the selected member.
@@ -590,7 +609,7 @@ fn retry_node_scope(
         ));
     }
     if let Some(brief) = brief {
-        node.prompt = brief.to_owned();
+        replace_brief(&mut node, brief);
     }
     let mut candidate = graph.checkpoint.clone();
     if candidate.cancelled {
@@ -682,7 +701,7 @@ fn retry_node_scope(
         .find(|node| node.id == id)
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
         if let Some(brief) = brief {
-            node.prompt = brief.to_owned();
+            replace_brief(&mut node, brief);
         }
     }
     if let Some(routes) = replacement_routes {
@@ -718,7 +737,8 @@ fn retry_node_scope(
         expected_revision: Some(revision(graph.checkpoint)),
         reason: Some(
             reason
-                .map(str::to_owned)
+                .as_ref()
+                .map(|(reason, _)| (*reason).to_owned())
                 .unwrap_or_else(|| format!("retry node {id}")),
         ),
         replace: vec![serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?],
@@ -734,9 +754,57 @@ fn retry_node_scope(
         context,
         Some(id),
     )?;
+    if let Some((_, Some(restart))) = reason
+        && let Some(record) = candidate
+            .expansions
+            .last_mut()
+            .and_then(|expansion| expansion.patch.as_mut())
+    {
+        record.restart = Some(restart);
+    }
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
+}
+
+/// Replace a leaf's brief. A template derives its single acceptance check
+/// from the brief, so a check still equal to the old brief follows it.
+fn replace_brief(node: &mut GraphNode, brief: &str) {
+    if node.acceptance_checks.len() == 1 && node.acceptance_checks[0] == node.prompt {
+        node.acceptance_checks = vec![brief.to_owned()];
+    }
+    node.prompt = brief.to_owned();
+}
+
+/// A container's brief lives in its member nodes. When the template it was
+/// built from declares no `brief` parameter, the refusal names that field and
+/// template as the same typed fault a bad `with` produces.
+fn container_brief_refusal(
+    checkpoint: &GraphCheckpoint,
+    id: &str,
+    context: &PatchContext<'_>,
+) -> PatchError {
+    let mut error = PatchError::invalid("container retry requires per-leaf brief edits");
+    let used = checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.uses)
+        .find(|used| used.id == id);
+    if let Some(used) = used
+        && let Ok(template) = context.library.resolve(&used.name)
+        && !template.parameters.contains_key("brief")
+    {
+        error.parameter = Some(Box::new(ParameterRefusal {
+            node: Some(id.to_owned()),
+            template: used.name.clone(),
+            fault: template::ParameterFault::Unknown {
+                key: Some("brief".into()),
+                accepted: template.parameters.keys().cloned().collect(),
+                suggestion: None,
+            },
+        }));
+    }
+    error
 }
 
 // An explicit host-proven refusal leaves a Starting row but no process to
@@ -1310,7 +1378,6 @@ pub(super) fn prepare(
     let mut expansion = Expansion {
         extra: Default::default(),
         source: parent.map(|node| node.id.clone()).unwrap_or_default(),
-        continuation: false,
         nodes: std::mem::take(&mut nodes),
         uses,
         patch: Some(PatchRecord {
@@ -1323,6 +1390,7 @@ pub(super) fn prepare(
             skipped: patch.skip.clone(),
             replaced,
             journaled: false,
+            restart: None,
         }),
     };
     if matches!(mode, Preparation::FinalFragment) {
@@ -1428,7 +1496,7 @@ pub(super) fn correct_review_verdict(
         Some(brief),
         context,
         false,
-        Some(&format!("correct review verdict {id}")),
+        Some((&format!("correct review verdict {id}"), None)),
         None,
     )
 }

@@ -86,13 +86,14 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
 #[test]
 fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
-        auto_continue_no_work: None,
+        on_stop: Default::default(),
         attempt: None,
         attachments: Vec::new(),
         family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        when: Vec::new(),
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
@@ -392,6 +393,7 @@ fn review_substitute_keeps_writer_chain_exclusion() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
+        stop: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([

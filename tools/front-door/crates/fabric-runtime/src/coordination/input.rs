@@ -1,5 +1,5 @@
 use super::facade::{GraphInput, HostsInput, IdentityInput, OutputInput, RunInput, SubmitInput};
-use super::{ArtifactRef, ClaimInput, EventsInput, LandingInput, MailInput, WorkScope};
+use super::{ArtifactRef, ClaimInput, EventsInput, MailInput, WorkScope};
 use provenant_core::WaitTransport;
 use provenant_records::run::RequestedRoute;
 
@@ -258,10 +258,6 @@ fn scope(scope: &WorkScope) -> Result<(), InputError> {
     }
 }
 
-fn landing_reference(reference: &str, path: &str) -> Result<(), InputError> {
-    bounded_text(reference, path, MAX_REFERENCE_BYTES)
-}
-
 fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
     let effort = match route {
         RequestedRoute::Adapter { provider, name, .. } => {
@@ -384,40 +380,6 @@ impl ValidateInput for ClaimInput {
             Self::Renew { lease_seconds, .. } => lease(*lease_seconds),
             Self::Verify { .. } | Self::Release { .. } => Ok(()),
             Self::List { limit, .. } => page(*limit, "limit"),
-        }
-    }
-}
-
-impl ValidateInput for LandingInput {
-    fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
-        match self {
-            Self::Acquire {
-                reference,
-                lease_seconds,
-                ..
-            } => {
-                landing_reference(reference, "reference")?;
-                lease(*lease_seconds)
-            }
-            Self::Renew {
-                proof,
-                lease_seconds,
-                ..
-            } => {
-                landing_reference(&proof.reference, "proof.reference")?;
-                lease(*lease_seconds)
-            }
-            Self::Verify { proof, .. } | Self::Release { proof, .. } => {
-                landing_reference(&proof.reference, "proof.reference")
-            }
-            Self::Wait {
-                reference,
-                wait_seconds,
-                ..
-            } => {
-                landing_reference(reference, "reference")?;
-                wait(*wait_seconds, transport)
-            }
         }
     }
 }
@@ -599,9 +561,7 @@ impl ValidateInput for HostsInput {
 #[cfg(test)]
 mod tests {
     use super::super::facade::{GraphInput, OutputInput, RunInput, SubmitInput};
-    use super::super::{
-        ClaimInput, CoordinationApi, CoordinationError, CoordinationService, LandingInput,
-    };
+    use super::super::{ClaimInput, CoordinationApi, CoordinationError, CoordinationService};
     use provenant_core::ThreadPause;
     use provenant_core::{
         ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,
@@ -791,16 +751,6 @@ mod tests {
 
     #[test]
     fn serde_rejects_bounds_on_nested_string_fields() {
-        rejects::<LandingInput>(
-            json!({
-                "op":"landing_acquire",
-                "reference":"r".repeat(1_025),
-                "expected":"0123456789012345678901234567890123456789",
-                "candidate":"abcdefabcdefabcdefabcdefabcdefabcdefabcd",
-                "lease_seconds":1
-            }),
-            "reference",
-        );
         rejects::<ClaimInput>(
             json!({"op":"claim_acquire","scope":{"kind":"issue","key":"k".repeat(1_025)},"lease_seconds":1}),
             "scope.key",
@@ -842,13 +792,6 @@ mod tests {
                 "max_bytes":1
             }),
             "artifact.path.path",
-        );
-        rejects::<LandingInput>(
-            json!({
-                "op":"landing_verify","proof":{"reference":"r".repeat(1_025),"id":"00000000000000000000000000000001",
-                    "generation":0,"token":"00000000000000000000000000000000"}
-            }),
-            "proof.reference",
         );
     }
 

@@ -788,3 +788,87 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
 mod cancellation_tests {
     include!("peer_cancellation_tests.rs");
 }
+
+#[test]
+fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::retry_output_names_the_recorded_refusal_route_and_reason",
+    )? {
+        return Ok(());
+    }
+    use graph::GraphJournal;
+    struct Allowance;
+    impl provenant_run::Providers for Allowance {
+        fn prepare(
+            &self,
+            _: &provenant_run::TaskRequest,
+            _: &str,
+            _: &provenant_run::LaunchPaths,
+            _: Option<&provenant_run::AttemptRecord>,
+        ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+            let mut refusal = provenant_run::PrepareRefusal::new(
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                "allowance spent",
+            );
+            refusal.skipped_routes.push(provenant_records::run::SkippedRoute {
+                extra: Default::default(),
+                route: "codex/gpt".into(),
+                kind: provenant_records::run::SkipKind::Unavailable,
+                cause: None,
+                detail: "allowance spent".into(),
+            });
+            Err(refusal)
+        }
+        fn decode(
+            &self,
+            _: &provenant_run::RouteRecord,
+            _: &[u8],
+            _: &provenant_supervisor::custody::ExitObservation,
+            _: &std::path::Path,
+        ) -> Result<provenant_run::Decoded, String> {
+            Err("refused provider must never decode".into())
+        }
+    }
+    let (_rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let receipt = submit_parent(&factory, "refused-allowance-parent", &cancel)?;
+    let graph = receipt.extra["peer_graph"]["graph_id"]
+        .as_str()
+        .ok_or("graph pointer")?;
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+        budget,
+        &cancel,
+        &factory.clock,
+    )?;
+    let checkpoint = journal.load(graph)?.ok_or("receiver graph")?;
+    let attempt = receipt.targets[0].attempt;
+    {
+        let owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: false,
+            actor: Some(checkpoint.nodes[0].attempts[0].launch_actor.parse()?),
+            chair: None,
+        };
+        let session = owner.session(&cancel)?;
+        let call = owner.call(&cancel);
+        let record = session.store.record(attempt, &call)?;
+        let _ = session
+            .store
+            .start(record.run_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
+    }
+    let mut result = json!({"checkpoint":{"nodes":[{
+        "id":"parent", "advance_error_code":"preparation_refused",
+        "advance_error":"The launch was refused before admission.",
+        "attempts":[{"attempt_ref": format!("{}/{attempt}", factory.context.identity.host)}]
+    }]}});
+    factory.name_refusal_causes(&mut result);
+    let message = result["checkpoint"]["nodes"][0]["advance_error"]
+        .as_str()
+        .ok_or("advance_error")?;
+    assert!(message.contains("codex/gpt: allowance spent"), "{message}");
+    Ok(())
+}

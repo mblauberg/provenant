@@ -10,8 +10,7 @@ prompt, route and result of each, so completion and cancellation survive a
 disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
 stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
-itself. Grammar and bounds are in the generated [CLI
-reference](../reference/cli-all.md). Paths are relative to `tools/front-door/`.
+itself. Grammar and bounds are in `provenant help --all`. Paths are relative to `tools/front-door/`.
 
 Templates bind route and access controls before admission. The receipt reports
 the applied effort and effective network access.
@@ -359,8 +358,7 @@ Admission and operation insertion commit together; the immutable request is
 published before acknowledgement. Transactions contain no launches, probes,
 waits or supervisor calls. Optional total and writer-specific host/project caps
 are independent. Build slots gate compiling Cargo commands rather than idle
-writers. Configuration and bounds belong to the generated
-[configuration reference](../reference/config-keys-all.md).
+writers. Configuration and bounds belong to `provenant config schema --all`.
 
 Known kernel memory pressure may defer either class. Low available memory alone
 is advisory. The disk floor holds lanes with write authority, including prepared
@@ -422,11 +420,13 @@ differs.
 Terminal attempts are immutable; a retry or continued turn is a new attempt
 linked by `retry_of`, and the latest is the highest attempt number, never
 the latest timestamp. Read-only fallback needs explicit opt-in and a typed
-transient failure. A writer (an attempt that may edit files) is never replayed automatically, and two writers
-never share a worktree.
+transient failure. A writer (an attempt that may edit files) is never replayed
+over its own edits: only the graph's stop decision restarts it, as a fresh
+attempt that continues in the same worktree once custody is released, and two
+writers never share a worktree.
 - Why (default): evidence must not be rewritten, and replaying a writer clobbers edits.
 - Test: `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
-  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::writer_limit_after_launch_never_tries_a_second_route`
+  `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::writer_limit_after_launch_restarts_in_place_on_the_second_route`
 - Owner: `crates/run/src/store.rs`, `crates/run/src/launch.rs`
 
 ## Publication order
@@ -467,6 +467,14 @@ terminal settlement.
 | `record` | Seal the result and terminal decision before acquiring the publication lock and committing the attempt, summary, operation state and event. A lock timeout leaves the exact scoped decision replayable. Retention-ref cleanup follows the transaction outside the publication lock. |
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
+
+A worktree-write lane edits the bound worktree's files while its commits stay
+in private Git, so until publication the files are ahead of HEAD and the index.
+When settlement cannot publish, it moves back every file that still holds the
+lane's own content to the branch the host holds, keeps any other file as found,
+and names the lane's commit and branch in the settlement reason. A later
+successful publication moves those files forward again, so files, index and HEAD
+always describe one commit.
 
 A chair can release an unsettleable writer fence with
 `provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
@@ -718,31 +726,24 @@ settlement. Known secret shapes are redacted from every snapshot field,
 including forward fields, before retention or reuse; composed retry prompts pass the disclosure
 scan. The host snapshot survives provider-state and temporary cleanup.
 Recovery and fresh manual continuation carry this bounded snapshot with the
-original brief and worktree state, rather than a result transcript. Policy
-continuations use `stopped_early`; `blocked` needs a decision or external change.
-For graph writers, the graph owns fresh restarts. One rule covers every
+original brief and worktree state, rather than a result transcript. A handoff
+declares `stopped_early` when work remains; `blocked` needs a decision or
+external change. A run never restarts itself: what follows a stop is the
+graph's, under [What follows a stop](#what-follows-a-stop). A graph writer's
 declared stop, whether the writer committed, left nothing or left uncommitted
-edits: the node restarts in place on its retained worktree with its edits
-intact, under the shared continuation budget. The successor's brief includes
-the handoff, and a pool draw excludes previously used models. A dirty
-settlement without a declared stop still fails to the chair.
-An exact selector requires another declared route; without one the graph pauses
-for the chair. A `blocked` handoff means an owner decision, a missing capability
-or an external change and never launches a successor. The `decisions[]` array
-records decisions already made; its presence alone does not block a restart.
-Run policy may retain session continuation only when the applied model explicitly
-selects `resume_continuations = true`. Standalone runs retain their model policy
-continuation allowance. Sealed continuation decisions replay unchanged after
-upgrade, and graph lineage is read from its existing expansion journal.
+edits, restarts the node in place on its retained worktree with its edits
+intact. The restart's brief carries the original brief and the handoff, and a
+pool draw excludes previously used models. A dirty settlement without a
+declared stop still fails to the chair. A `blocked` handoff means an owner
+decision, a missing capability or an external change and never launches a
+successor. The `decisions[]` array records decisions already made; its
+presence alone does not block a restart.
 - Test: `crates/fabric-runtime/src/graph/retry_tests.rs::stopped_writer_restarts_fresh_on_another_route_with_its_handoff`;
-  `tests/graph_provider.rs::graph_writer_automatically_continues_retained_or_fresh`;
+  `tests/graph_provider.rs::graph_writer_restarts_fresh`;
   `crates/fabric-runtime/src/graph/retry_tests.rs::stopped_writer_without_another_route_returns_to_the_chair`;
   `crates/fabric-runtime/src/graph/retry_tests.rs::writer_owner_decision_or_missing_capability_returns_to_chair_without_launch`;
   `crates/fabric-runtime/src/graph/plan_tests.rs::declared_writer_stop_restarts_with_handoff_and_excludes_the_used_pool_model`;
-  `crates/fabric-runtime/src/graph/plan_tests.rs::pending_writer_continuation_reopens_and_excludes_its_predecessor_model`;
-  `crates/run/src/automatic.rs::tests::stopped_early_queues_one_visible_successor_in_the_terminal_transaction`
-The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
-an unfinished result; the initial attempt is separate.
+  `crates/fabric-runtime/src/graph/plan_tests.rs::pending_writer_continuation_reopens_and_excludes_its_predecessor_model`
 - Why (default): a lane that did part of its brief must not read as one that did all of it.
 - Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`;
   `crates/run/src/completion.rs::tests`;
@@ -806,11 +807,11 @@ settles `review_required` with `terminal_cause: context_handoff` and a declared
 stop. Its result carries the lane's latest progress handoff, marked
 `stopped_early`. A done claim in that handoff loses its status, and a missing
 one becomes a stopped-early handoff naming the gap. The host commits nothing;
-commits and uncommitted edits stay on the worktree. The graph then takes the
-stopped-writer path: the one automatic continuation starts a fresh attempt on
-the same worktree with that handoff in its brief, on another eligible route as
-for any stopped writer. A second stop returns to the chair. A token budget stop
-takes precedence when both are due.
+commits and uncommitted edits stay on the worktree. The graph then restarts
+the node in place, fresh, on the same worktree with that handoff in its brief,
+on another eligible route as for any stopped writer; each restart spends the
+graph's continuation budget. A token budget stop takes precedence when both
+are due.
 - Why (default off): whether a fresh restart keeps enough working state is
   untested, so restart stays off until a trial shows it does not lower
   completion.
@@ -819,7 +820,7 @@ takes precedence when both are due.
   `crates/run/src/holder.rs::writer_context_handoff_stop_settles_as_a_declared_stop_with_its_handoff`;
   `crates/fabric-runtime/src/graph/retry_tests.rs::stopped_writer_restarts_fresh_on_another_route_with_its_handoff`
 - Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/holder.rs`,
-  `crates/fabric-runtime/src/graph/no_work.rs`
+  `crates/fabric-runtime/src/graph/next_step.rs`
 
 ## Host inputs fail before launch
 
@@ -1316,9 +1317,8 @@ sealed owner and lineage; a changed owner or a live predecessor refuses reuse.
 An uninitialised gitlink is acceptable, while an initialised nested repository
 requires review because Git could follow lane-controlled configuration.
 
-Owned settlement atomically queues intent under a non-blocking per-request lock.
-The lock holder owns the receipt; a successful holder records `cleanup_deferred: true`.
-A queue failure records a retryable retained receipt with a warning.
+Owned settlement records `cleanup_deferred: true`, unless a worker already
+began pruning, and then spawns one detached collection. A failed spawn records nothing.
 It performs no network operations, recursive output survey or worktree removal.
 Deferred-intent receipts are never final. A detached worker can remove only its
 own clean checkout after successful
@@ -1397,21 +1397,14 @@ once, and judges local branches on those targets and the fetched default.
 Each artefact reports one `ArtefactOutcome` (`artefact`, `name`, `remote`,
 `outcome`, `reason`, `head`): under `artefacts` in the settlement receipt and
 `worktree_cleanup[].refs` in `gc --json`. A failure warns and never fails the
-settlement or the pass. Completion requests with a final retention reason
-leave the queue even if output cleanup warned. Dirty trees, absent worktrees
-and unlanded work without requested delivery are final retentions. Transient
-failures retry at most five times with durable exponential backoff starting
-at ten minutes, with at most four dispatches per host tick. Exhausted requests
-move from `gc/completions` to `gc/completion-exhausted` for diagnosis.
-Settlement atomically publishes only its own request, using a non-blocking per-request lock.
-Only the host tick enumerates and dispatches the queue. Each request contains
-its identity payload, attempt count, next-retry time and last cause; the filename
-hash covers only identity. A worker claims the entire record by rename to the
-same filename with `.claim` appended, under a non-blocking OS lock. The host tick
-retries abandoned claims after their durable backoff. Requeuing publishes fresh
-pending intent independently of any claimed record, including an exhausted one.
-Exhaustion renames the complete claimed record into diagnostics in one operation;
-there is no separate retry file or orphan reconciliation.
+settlement or the pass. Completion cleanup is one detached attempt per
+settlement and keeps no queue or retry state. A transient failure leaves a
+non-final receipt. The next applied `gc` sweep runs the same owner-bound
+collection, under the collection lock it holds, for each terminal lane whose
+receipt is deferred, retryable or pruning and whose worktree exists, landing
+against the fetched default branch (falling back to the owner's base when the
+fetch fails, there is no origin, or the sweep is a pressure sweep, matching
+settlement); dirty trees and unlanded work are retained by both.
 - Why (default): finished lanes leave nothing behind once their work has landed, and
   never take a ref Provenant did not make.
 - Test: `crates/confinement/src/worktrees/lifecycle_tests/ref_ownership.rs`
@@ -1490,45 +1483,10 @@ action where the host has an identifiable PR.
   `crates/run/src/delivery_tests/host_commands.rs::existing_pr_delivery_only_creates_after_positive_absence`
 - Owner: `crates/run/src/delivery.rs`, `crates/records/src/run.rs`, `crates/cli/src/run.rs`
 
-## Cloud writers
-
-A task with `attempt.cloud` runs on a provider VM instead of a local
-supervisor ([ADR 0038](../adr/0038-cloud-job-ownership.md); operator steps in
-[providers](../runbooks/providers.md#cloud-placement)). Any access mode may
-use it, including `worktree-write` and a delivery target. Dispatch seals the
-placement with the request. For a writer it also seals the named branch
-`work_branch`: an explicit `attempt.cloud.work_branch`, else the delivery
-branch, else the writer's own branch. It refuses a writer without a named
-branch, a named branch equal to the base branch, and a `work_branch` on a
-task without a writer.
-
-The job starts from the task's pinned full commit on the named branch. It may
-merge the base branch, commits and pushes without force to the named branch,
-and may run heavy proof there. Changed tracked files are a writer's normal
-output and never fail a result. Where the platform restricts branch names,
-as hosted Claude does with `claude/*`, the job pushes the branch it is allowed
-and the result names that branch.
-
-The owner settles a writer only after it verifies the push on `origin`: the
-reported branch exists, its head is the reported full head, and that head
-descends from the starting commit. A refused check fails the job with its
-reason; an unreadable or failed remote read settles nothing and is observed
-again. The verified branch and head become the graph node's `branch` and
-`commit` outputs, so pull request and land nodes work on the remote branch.
-The owner does not push, open a pull request or integrate for a cloud writer.
-A verification job without a writer has no named branch; Claude's
-result-only branch is deleted after the result is saved.
-
-Status and `cloud_jobs` show the base branch, named branch, pushed branch and
-head, session URL where the provider has one, and the requested and observed
-model with `observed_model_status` (`matches`, `differs` or `unknown`). A
-difference is shown, never hidden. Credentials never enter the prompt,
-placement or record. A cloud result never replaces required CI on the exact
-head; the push is what starts that CI.
-
 ## Fresh continuation fallback
 
-Resume defaults to a fresh attempt when no provider/session was launched or
+This section covers a manual `provenant retry` of a terminal attempt. What follows a stop without
+one is decided under [What follows a stop](#what-follows-a-stop). Resume defaults to a fresh attempt when no provider/session was launched or
 retained continuation state is missing, expired or cannot be searched within
 its bound. `--no-fallback` gives a typed continuation refusal instead. The
 new attempt preserves the parent, route, account, access, writer worktree,
@@ -1653,7 +1611,7 @@ rather than the head commit (#3132). A graph `Pause` records a typed cause
 
 ## What follows a stop
 
-Target behaviour for the format-2 cut-over (#3078). One table,
+One table,
 `crates/records/src/stop.rs#STOP_TABLE`, gives every stop cause exactly one
 default next step: `same_route`, `new_route` or `chair`. A same-route step
 carries its continuation, `resume` (the stopped provider session continues)
@@ -1662,65 +1620,106 @@ session never crosses routes, so `new_route` is always fresh: another declared
 route, or a redraw of an alias pool without the routes that stopped.
 
 The override point is the node's `on_stop` entry for a cause in the graph
-document, applied by `StopCause::next_step`. A pinned cause ignores it. The
-runtime's one decision function then applies route availability and the
-continuation budget, which can only turn a step into `chair`: a `new_route`
-with no other route, or any step once `limits.continuations` is spent, pauses
-the graph for the chair with the stop's cause. The defaults keep today's
-behaviour: a writer that stops early, or at its context threshold, restarts
-fresh on another route once; a route that could not start falls back to
-another; everything else returns to the chair.
+document, applied by `StopCause::next_step`. A pinned cause ignores it. A graph
+restart is always a fresh session, so validation refuses an `on_stop` entry
+that asks for `resume`.
 
-| Cause | Default | Pinned |
-| --- | --- | --- |
-| `stopped_early` | `new_route` | no |
-| `blocked` | `chair` | yes |
-| `handoff_missing` | `chair` | no |
-| `empty_result` | `chair` | no |
-| `uncommitted` | `chair` | no |
-| `input_required` | `chair` | yes |
-| `context_handoff` | `new_route` | no |
-| `token_budget` | `chair` | no |
-| `deadline` | `chair` | no |
-| `cancelled` | `chair` | yes |
-| `provider_stop` | `chair` | no |
-| `process_crash` | `chair` | no |
-| `auth_required` | `new_route` | no |
-| `usage_limited` | `new_route` | no |
-| `model_unavailable` | `new_route` | no |
-| `adapter_unavailable` | `new_route` | no |
-| `permission_denied` | `chair` | no |
-| `identity_unobserved` | `chair` | no |
-| `source_view_refused` | `chair` | no |
-| `route_refused` | `chair` | no |
-| `access_policy_refused` | `chair` | no |
-| `disk_floor` | `chair` | no |
-| `disk_unobserved` | `chair` | no |
-| `prompt_unreadable` | `chair` | no |
-| `write_grants_refused` | `chair` | no |
-| `worktree_busy` | `chair` | no |
-| `launch_handoff_refused` | `chair` | no |
-| `retained_writer_import` | `chair` | no |
-| `unsupported_platform` | `chair` | no |
-| `unknown_pacing_account` | `chair` | no |
-| `unregistered_account` | `chair` | no |
-| `credential_helper_failed` | `chair` | no |
-| `command_unavailable` | `chair` | no |
-| `host_native_unconfigured` | `chair` | no |
-| `spawn_failure` | `chair` | no |
-| `settlement_failed` | `chair` | no |
-| `lost` | `chair` | no |
-| `unsettled` | `chair` | no |
-| `quarantined` | `chair` | no |
+The graph's one decision, `crates/fabric-runtime/src/graph/next_step.rs`, reads
+the stop of a failed node's last launched attempt: its sealed cause, or the
+cause its outcome names. It applies the table as follows.
+
+- A cause with retries left goes back to the route that stopped, then takes
+  its default. The count is this node's same-route restarts for that cause.
+- A `lost`, `unsettled`, `settlement_failed` or `quarantined` stop may still
+  hold its worktree, so custody is not proved released and the stop goes to the
+  chair whatever `on_stop` says. Uncertain custody never starts another writer.
+- A depleted route (`usage_limited`, `model_unavailable`, `auth_required`)
+  hands the work at once to the next rung of the routing depletion ladder
+  (`crates/routing/src/ladder.rs`) through `depletion_successor`. The host
+  supplies the ladder's facts through `AttemptOwner::depletion_facts`: the
+  readiness the stopped attempt's preparation probed, the routing
+  configuration, the host-native routes and the exclusions the stopped attempt
+  carried. No route the node already ran is offered again. The work waits for
+  the stopped route's reset only when `routing.depletion_wait_seconds` is set
+  and the reset falls inside it; when no rung yields a route, the stop goes to
+  the chair. A host that keeps no routing facts restarts on the node's
+  declared routes instead.
+- A restart patches the node in place: the worktree and its edits stay, prior
+  attempts are archived, and the patch record names the node, the cause and the
+  step. The stop is saved in one checkpoint with its restart or its chair pause,
+  so no reader sees a stop without what follows it.
+- Bounds can only turn a step into `chair`: a `new_route` with no other route,
+  the graph-wide `limits.continuations` (default 2), which every restart spends,
+  and, after a provider stop, the node's sealed settlement retry allowance. A
+  declared writer stop then pauses the graph with the reason; any other stop
+  leaves the node failed for the chair.
+- A reader's fallback across its declared routes, and any fallback after a
+  refusal before launch, stays in the next-attempt decision, which reads the
+  same table. The stop decision acts only after a launched attempt.
+
+So by default a writer that stops early, reaches its context threshold or loses
+its lane token restarts fresh on another route; a transient failure retries
+once on its route, then moves; a depleted route hands over at once; everything
+else returns to the chair.
+
+| Cause | Default | Pinned | Retries |
+| --- | --- | --- | --- |
+| `stopped_early` | `new_route` | no | 0 |
+| `blocked` | `chair` | yes | 0 |
+| `handoff_missing` | `chair` | no | 0 |
+| `empty_result` | `new_route` | no | 1 |
+| `uncommitted` | `chair` | no | 0 |
+| `input_required` | `chair` | yes | 0 |
+| `context_handoff` | `new_route` | no | 0 |
+| `token_budget` | `chair` | no | 0 |
+| `deadline` | `chair` | no | 0 |
+| `cancelled` | `chair` | yes | 0 |
+| `provider_stop` | `new_route` | no | 1 |
+| `process_crash` | `new_route` | no | 1 |
+| `auth_required` | `new_route` | no | 0 |
+| `usage_limited` | `new_route` | no | 0 |
+| `model_unavailable` | `new_route` | no | 0 |
+| `adapter_unavailable` | `new_route` | no | 0 |
+| `permission_denied` | `chair` | no | 0 |
+| `identity_unobserved` | `chair` | no | 0 |
+| `lane_token_lost` | `new_route` | no | 0 |
+| `source_view_refused` | `chair` | no | 0 |
+| `route_refused` | `chair` | no | 0 |
+| `access_policy_refused` | `chair` | no | 0 |
+| `disk_floor` | `chair` | no | 0 |
+| `disk_unobserved` | `new_route` | no | 1 |
+| `prompt_unreadable` | `chair` | no | 0 |
+| `cloud_placement_removed` | `chair` | no | 0 |
+| `write_grants_refused` | `chair` | no | 0 |
+| `worktree_busy` | `chair` | no | 0 |
+| `launch_handoff_refused` | `chair` | no | 0 |
+| `retained_writer_import` | `chair` | no | 0 |
+| `unsupported_platform` | `chair` | no | 0 |
+| `unknown_pacing_account` | `chair` | no | 0 |
+| `unregistered_account` | `chair` | no | 0 |
+| `credential_helper_failed` | `chair` | no | 0 |
+| `command_unavailable` | `chair` | no | 0 |
+| `host_native_unconfigured` | `chair` | no | 0 |
+| `spawn_failure` | `new_route` | no | 1 |
+| `settlement_failed` | `chair` | no | 0 |
+| `lost` | `chair` | no | 0 |
+| `unsettled` | `chair` | no | 0 |
+| `quarantined` | `chair` | no | 0 |
 
 `blocked`, `input_required` and `cancelled` are pinned because each already
 names the person who acts next: the owner who decides, the owner who answers
 or the person who cancelled.
 - Why: what followed a stop was decided in four places (the run-level
   automatic continuation, the graph's stopped-writer restart, next-attempt
-  fallback and plan continuations); one table with one override point makes a
-  policy change one edit.
+  fallback and plan continuations), and most stops ended with the chair. One
+  table with one override point makes a policy change one edit, and handing
+  depleted work over at once keeps it off the chair.
 - Test: `crates/records/src/format2_tests.rs::every_stop_cause_has_exactly_one_default`;
   `crates/records/src/format2_tests.rs::the_spec_table_matches_the_stop_table`;
-  `crates/records/src/format2_tests.rs::an_override_moves_only_an_unpinned_cause`
-- Owner: `crates/records/src/stop.rs`
+  `crates/records/src/format2_tests.rs::an_override_moves_only_an_unpinned_cause`;
+  `crates/fabric-runtime/src/graph/next_step_tests.rs::a_transient_stop_retries_once_on_its_route_then_takes_a_new_route`;
+  `crates/fabric-runtime/src/graph/next_step_tests.rs::a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree`;
+  `crates/fabric-runtime/src/graph/next_step_tests.rs::a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route`;
+  `crates/fabric-runtime/src/graph/next_step_tests.rs::on_stop_sends_a_stop_to_the_chair_and_unproved_custody_always_goes_there`;
+  `crates/fabric-runtime/src/graph/next_step_tests.rs::restarts_stop_at_the_graph_wide_continuation_budget`
+- Owner: `crates/records/src/stop.rs`, `crates/fabric-runtime/src/graph/next_step.rs`

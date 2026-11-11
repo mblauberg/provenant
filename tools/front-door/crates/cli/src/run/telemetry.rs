@@ -235,7 +235,7 @@ pub(super) fn stats_inner(
                 .is_none_or(|record| !record.partial_signals.is_empty()),
         });
     }
-    let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence, &prices)
+    let route_outcomes = provenant_telemetry::route_outcomes::report(route_evidence)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let mut chair_bindings = BTreeMap::new();
     // This is the explicit real-time deadline of the read-only Fabric boundary.
@@ -261,7 +261,7 @@ pub(super) fn stats_inner(
     }
     let attempt_context = provenant_telemetry::context::report(&selected, &chair_bindings, &prices)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let task_context = super::telemetry_context::report(&selected, &graph_quality, edge, &prices)?;
+    let task_context = super::telemetry_context::report(&selected, &graph_quality, edge)?;
     let decision_ids = command.detail.then(|| {
         selected
             .iter()
@@ -278,7 +278,6 @@ pub(super) fn stats_inner(
     let pipeline = if command.outcomes || command.suggest {
         Some(pipeline_report(
             &selected,
-            &prices,
             &command.pipeline,
             edge,
             context.project_id,
@@ -405,9 +404,9 @@ pub(super) fn stats_inner(
                 &provenant_telemetry::TokenTotal::default(),
             );
             human.push_str(&format!(
-                "{}  input={input} output={output}  {}\n",
+                "{}  input={input} output={output}  {} attempts\n",
                 plain_text(label, 256),
-                cost_summary(&group.totals).trim()
+                group.totals.attempts
             ));
         }
         human.push_str("next: inspect group totals with --json\n");
@@ -437,10 +436,10 @@ pub(super) fn stats_inner(
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     data["attempt_context"] = json!(attempt_context);
     data["task_context"] = task_context;
-    human.push_str("context coverage: inspect attempt_context and task_context with --json; missing observations remain unknown\n");
+    human.push_str("context coverage: inspect attempt_context and task_context with --detail --json; missing observations remain unknown\n");
     human.push_str("comparability: release, harness experiments, task difficulty and user activity cannot be separated when observations are missing or change together\n");
     human.push_str(&format!(
-        "accepted outcomes: {} (distinct delivery IDs with recorded accepted workflow receipts among selected attempts; cost includes linked attempts only)\n",
+        "accepted outcomes: {} (distinct delivery IDs with recorded accepted workflow receipts among selected attempts)\n",
         data["task_context"]["accepted_outcomes"]["denominator"]
     ));
     match provenant_telemetry::usage::ergonomics(edge.roots, command.since, command.until, None) {
@@ -460,7 +459,11 @@ pub(super) fn stats_inner(
         let native = provenant_telemetry::native_attempts::read(edge.roots);
         let mut rows = provenant_telemetry::ingest::read_rows(
             edge.roots,
-            &provenant_telemetry::ingest::RowFilter::default(),
+            &provenant_telemetry::ingest::RowFilter {
+                since: command.since.map(|time| time.as_second()),
+                until: command.until.map(|time| time.as_second()),
+                ..Default::default()
+            },
         );
         if let Ok(rows) = &mut rows {
             rows.retain(|row| {
@@ -503,7 +506,7 @@ pub(super) fn stats_inner(
                 Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string())
             })?;
             human.push_str(
-                "spend by context band (host native replies; context = input + cached reads + cache writes):\n",
+                "usage by context band (host native replies; context = input + cached reads + cache writes):\n",
             );
             for band in &bands {
                 let range = match band.below_tokens {
@@ -513,10 +516,9 @@ pub(super) fn stats_inner(
                 let source = serde_json::to_value(band.source)
                     .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
                 human.push_str(&format!(
-                    "  {} {range}: {} replies  {}\n",
+                    "  {} {range}: {} replies\n",
                     source.as_str().unwrap_or("unknown"),
-                    band.totals.attempts,
-                    cost_summary(&band.totals).trim()
+                    band.totals.attempts
                 ));
             }
             data["context_bands"] = json!({
@@ -533,7 +535,7 @@ pub(super) fn stats_inner(
                     human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
                     if !command.detail {
                         human.push_str(&format!(
-                            "  {} attempts; per-attempt rows with --detail or --json\n",
+                            "  {} attempts; per-attempt rows with --detail\n",
                             native.attempts.len()
                         ));
                     }
@@ -600,37 +602,6 @@ pub(super) fn stats_inner(
     }
     data["cache_read_share"] = cache_kpis;
     data["cache_read_share"]["overall"] = json!(total_share);
-    let plan_value =
-        plan_value_rows(&report, &config.domains.accounts, edge).unwrap_or_else(|cause| {
-            data["plan_value_unavailable"] = json!(cause);
-            Vec::new()
-        });
-    if !plan_value.is_empty() {
-        human.push_str(&format!("plan value: {} accounts\n", plan_value.len()));
-        for row in &plan_value {
-            let account = row["account"].as_str().unwrap_or("unknown");
-            let price = &row["monthly_price"];
-            let amount = price["amount"].as_f64().unwrap_or(0.0);
-            let currency = price["currency"].as_str().unwrap_or("USD");
-            let value = row["api_equivalent_usd_in_selected_window"]
-                .as_str()
-                .map_or_else(|| "unknown".to_owned(), |value| format!("${value}"));
-            let bound = if row["api_equivalent_complete"] == true {
-                ""
-            } else {
-                " at least"
-            };
-            human.push_str(&format!(
-                "{}: plan {} {:.2} {}/mo; API-equivalent{bound} {value} in selected window\n",
-                plain_text(account, 128),
-                row["plan"].as_str().unwrap_or("unknown"),
-                amount,
-                currency
-            ));
-        }
-        human.push_str("next: compare a full billing period with quota history\n");
-    }
-    data["plan_value"] = json!(plan_value);
     data["graph_quality"] = json!(graph_quality);
     for row in &route_outcomes {
         let number = |value: Option<f64>| {
@@ -639,11 +610,11 @@ pub(super) fn stats_inner(
                 .unwrap_or_else(|| "unknown".into())
         };
         human.push_str(&format!(
-            "outcomes {} access={} effort={} n={} successes={} success_rate={} cost/success_microdollars={} time/success_ms={} comparison={} pool={} cost_basis={}\n",
+            "outcomes {} access={} effort={} n={} successes={} success_rate={} time/success_ms={} comparison={} pool={}\n",
             plain_text(&row.route, 256), row.access, row.effort,
             row.samples, row.successes, number(row.success_rate),
-            number(row.cost_per_success_microdollars), number(row.time_per_success_ms),
-            row.comparison, row.pool.as_deref().unwrap_or("none"), row.cost_basis,
+            number(row.time_per_success_ms),
+            row.comparison, row.pool.as_deref().unwrap_or("none"),
         ));
     }
     data["route_outcomes"] = json!(route_outcomes);
@@ -694,14 +665,95 @@ pub(super) fn stats_inner(
         ));
         data["chair_error"] = Value::String(error);
     }
+    // Cost has one producer: `telemetry cost` reads it from the usage ledger.
+    strip_cost(&mut data);
+    if !command.detail {
+        omit_per_attempt_rows(&mut data);
+    }
     Ok((data, human))
+}
+
+/// This project's finished attempts since `since` whose delivery has an
+/// accepted receipt. `telemetry value` prices them from the usage ledger.
+pub(crate) struct AcceptedAttempts {
+    pub(crate) project: provenant_core::ProjectId,
+    pub(crate) definition: &'static str,
+    pub(crate) denominator: usize,
+    pub(crate) attempts: std::collections::BTreeSet<String>,
+}
+
+pub(crate) fn accepted_attempts(edge: &Edge<'_>, since: i64) -> Result<AcceptedAttempts, Fail> {
+    use run::AttemptReader;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let facts = store
+        .as_ref()
+        .map(|store| {
+            store
+                .attempts(
+                    run::AttemptFilter {
+                        run_id: None,
+                        task_id: None,
+                    },
+                    &call,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let selected: Vec<_> = facts
+        .iter()
+        .filter(|fact| fact.finished_at.as_timestamp().as_second() >= since)
+        .collect();
+    let (denominator, attempts) =
+        super::telemetry_context::accepted_attempts_among(&selected, edge);
+    Ok(AcceptedAttempts {
+        project: context.project_id,
+        definition: super::telemetry_context::ACCEPTED_DEFINITION,
+        denominator,
+        attempts,
+    })
+}
+
+fn strip_cost(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in ["cost", "cost_microdollars", "missing_cost"] {
+                map.remove(key);
+            }
+            map.values_mut().for_each(strip_cost);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_cost),
+        _ => {}
+    }
+}
+
+/// The rows that grow with every attempt. A result carries them only with
+/// `--detail`; otherwise each array is replaced by its length under
+/// `<name>_omitted`, so the default is the same summary the human view shows
+/// and does not outgrow the result limit as history does.
+fn omit_per_attempt_rows(data: &mut Value) {
+    for (section, rows) in [
+        ("attempt_context", "attempts"),
+        ("task_context", "rows"),
+        ("task_context", "graph_outcomes"),
+        ("cache_read_share", "lanes"),
+        ("native_subagents", "attempts"),
+    ] {
+        if let Some(Value::Object(map)) = data.get_mut(section)
+            && let Some(Value::Array(items)) = map.remove(rows)
+        {
+            map.insert(format!("{rows}_omitted"), json!(items.len()));
+        }
+    }
 }
 
 /// Read retained facts and checkpoints only. Source findings receive verifier
 /// decisions by graph-local finding identity; synthesis copies never add value.
 pub(super) fn pipeline_report(
     facts: &[&provenant_records::AttemptFact],
-    prices: &provenant_telemetry::PriceTable,
     options: &crate::PipelineOptions,
     edge: &Edge<'_>,
     project: provenant_core::ProjectId,
@@ -773,7 +825,7 @@ pub(super) fn pipeline_report(
             .and_then(|s| s.rsplit(['#', '/']).next())
             .and_then(|s| s.parse().ok());
         let (confirmed, false_positives) = pipeline_dispositions(checkpoint, &node);
-        let mut row = Evidence {
+        let row = Evidence {
             sample: json!([graph, node]).to_string(),
             graph,
             pr,
@@ -787,14 +839,9 @@ pub(super) fn pipeline_report(
             task_kind: context
                 .and_then(|c| c.task_kind.clone())
                 .or_else(|| extra("task_kind")),
-            cost_microdollars: None,
             confirmed,
             false_positives,
         };
-        let report =
-            provenant_telemetry::stats(facts, prices, provenant_telemetry::Window::default())
-                .map_err(|e| invalid(e.to_string()))?;
-        row.cost_microdollars = report.totals.cost.complete.map(|m| m.microdollars);
         evidence.push(row);
     }
     let ci: Option<Vec<provenant_telemetry::outcome::CiRun>> = options

@@ -284,6 +284,33 @@ pub enum ParameterFault {
         key: String,
         expected: String,
     },
+    /// A node's `when` that cannot be resolved at submission. `key` is the
+    /// condition name, or `None` when it is not an identifier.
+    When(Box<WhenRefusal>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhenRefusal {
+    pub reason: WhenFault,
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+/// Why a `when` was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenFault {
+    /// `when` is not a table of `name = value` pairs.
+    NotTable,
+    /// The name is neither a template parameter nor a single-valued launch resolver.
+    Unknown,
+    /// The expected value is not a string, number or boolean.
+    NotScalar,
+    /// `when` cannot be combined with this construct.
+    Unsupported,
 }
 
 impl ParameterRefusal {
@@ -326,6 +353,13 @@ impl ParameterRefusal {
             ParameterFault::Shape { key, expected } => {
                 *key = clean(key);
                 *expected = clean(expected);
+            }
+            ParameterFault::When(refusal) => {
+                refusal.key = refusal.key.as_deref().map(clean);
+                for name in &mut refusal.accepted {
+                    *name = clean(name);
+                }
+                refusal.suggestion = refusal.suggestion.as_deref().map(clean);
             }
         }
         safe
@@ -430,6 +464,39 @@ impl std::fmt::Display for ParameterRefusal {
             }
             ParameterFault::Shape { key, expected } => {
                 write!(f, "template {template} parameter {key} expects {expected}")
+            }
+            ParameterFault::When(refusal) => {
+                let WhenRefusal {
+                    reason,
+                    key,
+                    accepted,
+                    suggestion,
+                } = &**refusal;
+                let name = key.as_deref().unwrap_or("a name");
+                match reason {
+                    WhenFault::NotTable => {
+                        write!(f, "when must be a table of name = value conditions")
+                    }
+                    WhenFault::Unknown => {
+                        write!(
+                            f,
+                            "when names {name}, which is not a parameter or launch value here"
+                        )?;
+                        if !accepted.is_empty() {
+                            write!(f, "; available: {}", accepted.join(", "))?;
+                        }
+                        match suggestion {
+                            Some(near) => write!(f, "; did you mean {near}?"),
+                            None => Ok(()),
+                        }
+                    }
+                    WhenFault::NotScalar => {
+                        write!(f, "when {name} must expect a string, number or boolean")
+                    }
+                    WhenFault::Unsupported => {
+                        write!(f, "when cannot be combined with this node's construct")
+                    }
+                }
             }
         }
     }
@@ -1293,7 +1360,11 @@ impl<'a> Compiler<'a> {
                 true,
             )?;
         }
+        self.resolve_when(&mut node, bindings, stack)?;
         if let Some(repeat) = node.remove("repeat") {
+            if node.contains_key("when") {
+                return Err(self.when_refusal(&node, stack, WhenFault::Unsupported, None, None));
+            }
             return self.lower_repeat(node, repeat, stack);
         }
         if let Some(name) = node.remove("use") {
@@ -1366,6 +1437,107 @@ impl<'a> Compiler<'a> {
         self.finish(node, stack)
     }
 
+    fn when_refusal(
+        &self,
+        node: &Map<String, Value>,
+        stack: &[String],
+        reason: WhenFault,
+        key: Option<String>,
+        accepted: Option<Vec<String>>,
+    ) -> CompileError {
+        let suggestion = key
+            .as_deref()
+            .and_then(|key| nearest_name(key, accepted.iter().flatten().map(String::as_str)));
+        CompileError::Parameter(ParameterRefusal {
+            node: node.get("id").and_then(Value::as_str).map(str::to_owned),
+            template: stack.last().cloned().unwrap_or_default(),
+            fault: ParameterFault::When(Box::new(WhenRefusal {
+                reason,
+                key: key.filter(|key| valid_identifier(key)),
+                accepted: accepted.unwrap_or_default(),
+                suggestion,
+            })),
+        })
+    }
+
+    /// Turn an authored `when` table into resolved terms. Each name is a
+    /// parameter of the enclosing template or a launch resolver holding one
+    /// value; a list already in resolved form passes through unchanged.
+    fn resolve_when(
+        &self,
+        node: &mut Map<String, Value>,
+        bindings: &Map<String, Value>,
+        stack: &[String],
+    ) -> Result<(), CompileError> {
+        let table = match node.get("when") {
+            None | Some(Value::Array(_)) => return Ok(()),
+            Some(Value::Null) => {
+                node.remove("when");
+                return Ok(());
+            }
+            Some(Value::Object(table)) => table.clone(),
+            Some(_) => {
+                return Err(self.when_refusal(node, stack, WhenFault::NotTable, None, None));
+            }
+        };
+        let available = || -> Vec<String> {
+            let mut names: Vec<String> = bindings
+                .keys()
+                .filter(|name| name.as_str() != ITEM)
+                .cloned()
+                .chain(
+                    self.resolvers
+                        .iter()
+                        .filter(|(_, values)| values.len() == 1)
+                        .map(|(name, _)| name.clone()),
+                )
+                .collect();
+            names.sort();
+            names.dedup();
+            names.truncate(64);
+            names
+        };
+        let text = |value: &Value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        };
+        let mut terms = Vec::with_capacity(table.len());
+        for (name, expected) in &table {
+            let expected = text(expected).ok_or_else(|| {
+                self.when_refusal(node, stack, WhenFault::NotScalar, Some(name.clone()), None)
+            })?;
+            let actual = match bindings.get(name).filter(|_| name != ITEM) {
+                Some(value) => text(value),
+                None => self
+                    .resolvers
+                    .get(name)
+                    .filter(|values| values.len() == 1)
+                    .map(|values| values[0].clone()),
+            }
+            .ok_or_else(|| {
+                self.when_refusal(
+                    node,
+                    stack,
+                    WhenFault::Unknown,
+                    Some(name.clone()),
+                    Some(available()),
+                )
+            })?;
+            terms.push(WhenTerm {
+                name: name.clone(),
+                expected,
+                actual,
+            });
+        }
+        node.insert(
+            "when".into(),
+            serde_json::to_value(terms).map_err(|error| error.to_string())?,
+        );
+        Ok(())
+    }
+
     /// `over` copies the node once per item inside a composite boundary, which
     /// keeps the node's identity, dependencies and inputs.
     fn lower_over(
@@ -1375,10 +1547,29 @@ impl<'a> Compiler<'a> {
         bindings: &Map<String, Value>,
         stack: &mut Vec<String>,
     ) -> Result<Value, CompileError> {
-        let items = self.items(over)?;
         let mut copy = object.clone();
         copy.remove("over");
+        self.resolve_when(&mut copy, bindings, stack)?;
+        // A stage whose condition does not hold never runs, so what it fans out
+        // over need not be bound at this launch; one placeholder keeps the
+        // skipped boundary well formed.
+        let skipped = copy
+            .get("when")
+            .and_then(Value::as_array)
+            .is_some_and(|terms| {
+                serde_json::from_value::<Vec<WhenTerm>>(Value::Array(terms.clone()))
+                    .is_ok_and(|terms| !when::holds(&terms))
+            });
+        let items = match self.items(over) {
+            Ok(items) => items,
+            Err(_) if skipped => vec!["skipped".to_owned()],
+            Err(error) => return Err(error.into()),
+        };
         let mut boundary = Map::new();
+        // The boundary and every copy share one condition.
+        if let Some(when) = copy.get("when") {
+            boundary.insert("when".into(), when.clone());
+        }
         for key in [
             "id",
             "title",
@@ -1747,10 +1938,28 @@ impl<'a> Compiler<'a> {
             let exports = if template.exports.is_empty() {
                 default_exports(&children)
             } else {
-                serde_json::to_value(&template.exports)
+                // An export may carry its own `when`, resolved like a node's.
+                let mut kept = Vec::new();
+                for mut export in serde_json::to_value(&template.exports)
                     .ok()
                     .and_then(|value| value.as_array().cloned())
                     .unwrap_or_default()
+                {
+                    if let Some(table) = export.as_object_mut().and_then(|map| map.remove("when")) {
+                        let mut holder = Map::new();
+                        holder.insert("id".into(), export["node"].clone());
+                        holder.insert("when".into(), table);
+                        self.resolve_when(&mut holder, parameters, stack)?;
+                        let terms: Vec<WhenTerm> =
+                            serde_json::from_value(holder.remove("when").unwrap_or(Value::Null))
+                                .unwrap_or_default();
+                        if !terms.iter().all(WhenTerm::holds) {
+                            continue;
+                        }
+                    }
+                    kept.push(export);
+                }
+                kept
             };
             let mut composite = Map::new();
             composite.insert("nodes".into(), Value::Array(children));
@@ -1859,6 +2068,18 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+        // A skipped composite skips everything inside it.
+        if let Some(Value::Array(terms)) = node.get("when").cloned()
+            && !terms.is_empty()
+            && let Some(members) = node
+                .get_mut("composite")
+                .and_then(|spec| spec.get_mut("nodes"))
+                .and_then(Value::as_array_mut)
+        {
+            for member in members {
+                inherit_when(member, &terms);
+            }
+        }
         self.finish_shallow(node)
     }
 
@@ -1896,6 +2117,32 @@ impl<'a> Compiler<'a> {
     }
 }
 
+/// Add a composite's conditions to a member and, in turn, to its own members.
+fn inherit_when(member: &mut Value, terms: &[Value]) {
+    let Some(fields) = member.as_object_mut() else {
+        return;
+    };
+    let own = fields
+        .entry("when")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(own) = own.as_array_mut() {
+        for term in terms {
+            if !own.contains(term) {
+                own.push(term.clone());
+            }
+        }
+    }
+    if let Some(members) = fields
+        .get_mut("composite")
+        .and_then(|spec| spec.get_mut("nodes"))
+        .and_then(Value::as_array_mut)
+    {
+        for member in members {
+            inherit_when(member, terms);
+        }
+    }
+}
+
 /// Raw passthrough nodes (as presets lower them) stay byte-identical.
 fn needs_lowering(node: &Value) -> bool {
     node.as_object().is_some_and(|object| {
@@ -1910,6 +2157,8 @@ fn needs_lowering(node: &Value) -> bool {
         ]
         .iter()
         .any(|key| object.contains_key(*key))
+            // A resolved `when` is a list; only the authored table needs lowering.
+            || object.get("when").is_some_and(|when| !when.is_array())
             || object
                 .get("composite")
                 .and_then(|spec| spec.get("nodes"))

@@ -737,7 +737,6 @@ mod tests {
             bytes
         });
         let task = |task_id: TaskId| run::TaskRequest {
-            cloud: None,
             context: None,
             extra: Default::default(),
             build_heavy: false,

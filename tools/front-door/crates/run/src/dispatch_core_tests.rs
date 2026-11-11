@@ -42,50 +42,6 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     Ok(())
 }
 #[test]
-fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut input = two_tasks(2);
-    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
-        target: "target".into(),
-        provider: "fake".into(),
-        environment: "env".into(),
-        repository: "owner/repo".into(),
-        branch: "main".into(),
-        model: "model".into(),
-        effort: None,
-        deadline_seconds: 3600,
-        work_branch: None,
-    });
-    store.create(&input, &call)?;
-    let fake = Fake {
-        refuse: true,
-        ..Fake::default()
-    };
-    let started = store.start_checked(
-        input.run_id,
-        &input.request,
-        &fake,
-        &|_, _| unreachable!(),
-        &call,
-    )?;
-    assert!(
-        matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == input.attempts[1].attempt_id)
-    );
-    assert_eq!(fake.prepared.get(), 1);
-    assert!(matches!(
-        store.cancel(input.attempts[0].attempt_id, "stop", &call)?,
-        CancelReceipt::Unobservable { .. }
-    ));
-    assert!(matches!(
-        store.record(input.attempts[0].attempt_id, &call)?.state,
-        AttemptState::Queued { .. }
-    ));
-    Ok(())
-}
-#[test]
 fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -1308,52 +1264,6 @@ fn ledger_observes_without_locking_and_reclaims_without_a_new_guardian() -> Test
     Ok(())
 }
 
-#[test]
-fn missing_prior_record_does_not_prevent_codex_finish() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
-    let id = run.attempts[0].attempt_id;
-    store.create(&run, &call)?;
-    let mut codex = route();
-    codex.provider = Some("codex".into());
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &codex,
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    let mut record = store.claim(id, &clock, &call)?.ok_or("claim")?;
-    record.continuation = Some("automatic".into());
-    record.retry_of = Some(AttemptId::from_bytes([99; 16]));
-    store.db.execute(
-        "UPDATE attempts SET record=?1 WHERE id=?2",
-        rusqlite::params![crate::db::attempt_bytes(&record)?, id.to_string()],
-    )?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
-    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
-    let observed = ExitObservation {
-        scope: RunStore::scope(&record),
-        ..exit()
-    };
-    seal_exit(&store, &observed)?;
-    let fake = Fake {
-        codex_usage: Some(UsageRecord {
-            uncached_input: Some(42),
-            ..Default::default()
-        }),
-        ..Fake::default()
-    };
-    let finished = store.finish(id, &dir, &observed, &fake, &call)?;
-    assert!(matches!(finished.state, AttemptState::Terminal { .. }));
-    assert_eq!(finished.usage.uncached_input, None);
-    assert_eq!(finished.usage.extra["session_total"]["uncached_input"], 42);
-    Ok(())
-}
 /// Listing must touch directories for the rows it shows, not for the retained
 /// history of the host. The count is of directory enumerations, not time.
 #[test]

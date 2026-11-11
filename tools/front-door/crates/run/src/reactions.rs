@@ -72,7 +72,6 @@ pub struct Line<'a> {
     pub outcome: &'a str,
     pub partial: bool,
     pub model: Option<&'a str>,
-    pub staged: Option<&'a str>,
     pub head: Option<&'a str>,
     pub pull_request: Option<&'a str>,
 }
@@ -99,7 +98,6 @@ pub fn notice_line(line: &Line<'_>) -> String {
     }
     for (label, value, budget) in [
         ("model", line.model, 56),
-        ("next", line.staged, 40),
         ("head", line.head, 12),
         ("pr", line.pull_request, 90),
     ] {
@@ -118,12 +116,7 @@ fn number(text: &str) -> Option<String> {
 
 impl RunStore {
     /// Freeze the reaction payload from the terminal record about to commit.
-    pub(crate) fn freeze_reaction(
-        &self,
-        next: &AttemptRecord,
-        writer: bool,
-        staged: Option<&str>,
-    ) -> Result<Reaction> {
+    pub(crate) fn freeze_reaction(&self, next: &AttemptRecord, writer: bool) -> Result<Reaction> {
         let AttemptState::Terminal {
             outcome,
             finished_at,
@@ -153,7 +146,6 @@ impl RunStore {
             outcome: outcome.as_str().unwrap_or("unknown"),
             partial: !next.partial_signals.is_empty(),
             model: route.and_then(|route| route.model.as_deref()),
-            staged,
             head: head.as_deref().map(|head| clip(head, 12)),
             pull_request: pull_request.as_deref(),
         });
@@ -343,7 +335,6 @@ mod tests {
             outcome: "quota_limited",
             partial: true,
             model: Some(model),
-            staged: Some("policy_fallback_with_a_long_name_that_overruns_it"),
             head: Some("0123456789abcdef"),
             pull_request: Some("https://github.com/example/example/pull/2125"),
         }
@@ -354,12 +345,7 @@ mod tests {
         let model = "m".repeat(512);
         let text = notice_line(&line(&model));
         assert!(text.len() <= NOTICE_BYTES, "{}", text.len());
-        for needle in [
-            "(partial)",
-            " next=policy_fallback",
-            " head=0123456789ab",
-            " pr=https://",
-        ] {
+        for needle in ["(partial)", " head=0123456789ab", " pr=https://"] {
             assert!(text.contains(needle), "{needle} in {text}");
         }
     }

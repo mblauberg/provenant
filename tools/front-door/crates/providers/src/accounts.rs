@@ -481,7 +481,7 @@ fn detect_with_org_inner(
         }
         crate::agy::forget_identity(probe_root, directory);
         let stamp_before = crate::agy::keychain_stamp(directory);
-        let key = detect_agy(
+        let (key, models) = detect_agy(
             &guarded,
             executable,
             probe_home.path(),
@@ -489,7 +489,7 @@ fn detect_with_org_inner(
             cwd,
             probe_root,
         )?;
-        crate::agy::remember_identity(probe_root, directory, &key, now, stamp_before);
+        crate::agy::remember_identity(probe_root, directory, &key, now, stamp_before, &models);
         return Ok((key, None));
     }
     if adapter == "codex" {
@@ -624,7 +624,7 @@ fn detect_agy(
     user: &OsStr,
     cwd: &Path,
     probe_root: &Path,
-) -> Result<String, ProviderError> {
+) -> Result<(String, Vec<String>), ProviderError> {
     // Production callers construct HostProbeExecutor first, which sweeps
     // directories left by crashed owners under this same host state root.
     let scratch = crate::host::HostProbeDir::create(probe_root)
@@ -685,9 +685,12 @@ fn detect_agy(
     }
     let bytes = read_following(&log, ReadOptions { limit: 1024 * 1024 })
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    crate::identity::agy_fingerprint(&bytes)
+    let key = crate::identity::agy_fingerprint(&bytes)
         .map(|fingerprint| format!("agy-{fingerprint}"))
-        .ok_or(ProviderError::UnknownIdentity)
+        .ok_or(ProviderError::UnknownIdentity)?;
+    let stderr_str = std::str::from_utf8(&out.stderr.bytes).ok();
+    let models = crate::quota::extract_agy_models(Some(&payload), stderr_str);
+    Ok((key, models))
 }
 
 #[cfg(test)]

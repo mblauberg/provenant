@@ -15,8 +15,6 @@ apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures/inbox-peers-unsupported.j
 apps/quota-menubar/Tests/QuotaMenuBarTests/ConsoleAppTests.swift release.home-path 2c3436e27c6e0d0e
 bench/tasks/routing-effort.patch release.home-path ba642492100016a8
 bench/tasks/run-follow-dispatch.patch release.github-token 99c270f8f6f93d02
-docs/runbooks/configuration.md release.home-path db06b785162bef40
-docs/runbooks/fabric-hosts.md release.home-path e2af7abfbdb20bbc
 docs/runbooks/install.md release.home-path ca4f050fa11812ca
 tools/front-door/crates/cli/src/check/release.rs release.home-path 7ac5d8b144c08f35
 tools/front-door/crates/cli/src/check/release.rs release.home-path b585a28c0d7c738a

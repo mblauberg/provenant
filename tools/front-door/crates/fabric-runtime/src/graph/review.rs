@@ -89,22 +89,32 @@ pub(super) fn contract_error(
     node: &PlannedNode,
     upstream: &[Finding],
     outputs: &NodeOutputs,
+    result: Option<&provenant_records::result_capture::CapturedResult>,
 ) -> Option<(&'static str, String)> {
     let repair_triage = node.extra.get("repair_triage") == Some(&serde_json::Value::Bool(true));
     if template::review_behaviour(node).is_none() && !repair_triage {
         return None;
     }
-    // ResultCapture has already validated uniqueness and final position while
-    // allowing the shared trailing handoff fence. `verdict_error` also carries
-    // source truncation, which is diagnosed by findings availability below;
-    // do not misreport a captured verdict as malformed for that reason.
+    // ResultCapture has already counted `VERDICT:` lines outside fenced
+    // blocks. `verdict_error` also carries source truncation, which is
+    // diagnosed by findings availability below; a captured verdict is not
+    // reported as malformed for that reason.
     if !matches!(
         outputs.verdict.as_deref(),
         Some("VERDICT: PASS" | "VERDICT: FAIL" | "VERDICT: INCONCLUSIVE")
     ) {
+        let cause = match outputs.verdict.as_deref() {
+            Some(other) => format!("`{other}` is not VERDICT: PASS, FAIL or INCONCLUSIVE"),
+            None => result
+                .and_then(|capture| capture.verdict_cause.clone())
+                .or_else(|| outputs.verdict_error.clone())
+                .unwrap_or_else(|| "no VERDICT: line outside fenced blocks".to_owned()),
+        };
         return Some((
             "review_verdict_invalid",
-            "review needs exactly one final verdict: PASS, FAIL or INCONCLUSIVE".into(),
+            format!(
+                "review needs exactly one VERDICT: PASS, FAIL or INCONCLUSIVE line outside fenced blocks: {cause}"
+            ),
         ));
     }
     if outputs.findings_available != Some(true) {

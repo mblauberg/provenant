@@ -1,93 +1,69 @@
 ---
 name: scope
-description: "Use when work is new or unsettled and needs a spec: acceptance criteria, risk tier, authority, one-way-door approval, a grill-me interview, a feasibility spike or a kept prototype. Not for implementing approved scope; use implement."
+description: "Use to turn a rough or unsettled request into a spec, interview, spike or prototype."
 ---
 
 # Scope
 
-Scope settles intent and authority so a fresh agent can build and verify the work.
+Scope settles intent and authority so a fresh agent can build and verify the
+work without asking.
 
-## Spec gate
+## Digest
 
-Produce a one-screen digest and ask for one approval:
+Post a one-screen digest with `provenant ask` as recorded assumptions, then
+proceed:
 
 - outcome, and the number of criteria
 - risk tier and authority (paths, effects, expiry)
 - one-way doors: release, publish, send, spend, destroy, widening authority
-- assumptions made, and open calls with a recommended default for each
-- the structural option beside the small one, a recommendation, and whether the
-  idea is weak or a better one exists
+- assumptions, and open calls with a recommended default for each
+- the structural option beside the small one, and a recommendation
 
-Approval covers the digest. A spec is the best current statement of the outcome,
-and it can be wrong. An implementer may not silently weaken it, and raises a flaw
-with evidence in handoff `decisions`, including an insight that is not a failure.
-The chair may amend or drop an agent-written criterion on that evidence through a
-dated revision that cites it, with no new approval (format in `tracker`). Criteria
-the owner wrote, one-way doors, widened authority and tightened acceptance still
-need the owner.
+Block only on what the always-loaded rules reserve for the owner: a one-way
+door, new authority, or acceptance you cannot infer. Park that branch and carry
+on with the rest.
+
+A spec is the best current statement of the outcome and can be wrong. An
+implementer may not silently weaken it; it raises a flaw with evidence in the
+handoff `decisions`. The chair may amend or drop an agent-written criterion on
+that evidence by editing the spec and adding `Revised YYYY-MM-DD: <change>;
+<evidence>`. Owner-written criteria, one-way doors, widened authority and
+tightened acceptance still need the owner; when authorship is unclear, treat a
+criterion as the owner's.
 
 ## Size to the class
 
 A bug is repro, expected, observed and a regression check. A task has 2 to 5
 criteria, a feature about 10. Anything larger is an epic: a `Done when` plus
-backlog lines, not a mega-spec. Over-specifying a small change is a defect.
+backlog lines. Over-specifying a small change is a defect.
 
-State what and why, plus one-way-door constraints. Leave design to the implementer
-unless a decision has a rejected alternative. An architectural one becomes an
-ADR; record any other settled decision in the durable doc that owns the area.
-
-Write each criterion as one observable statement, `When <event>, <behaviour>`,
-tagged with how it is verified: `[test]`, `[command]`, `[capture]` or `[review]`.
-Check premises against the tree, give each deletion or move one owner, and say
-how verification catches a wrong implementation; test behaviour, not wording.
-A verification step beyond the stated outcome names the failure it prevents and
-how likely that failure is; otherwise do not write it, because every later
-implementer must honour it.
-Add the verify command and any Boundaries, each citing a recorded hard boundary
-or its reason. The readiness test: could a
-fresh agent build and verify this without asking? If not, it is not ready.
-
-## Questions
-
-Ask only when uncertainty and stakes are both high. The ladder:
-
-1. Engineering call: decide and record `Decided (<source>): <reason>`.
-2. Reversible owner call: assume, record, flag in the digest.
-3. Irreversible owner call: `provenant ask --file Q.json --session S` with options and
-   a recommendation (file shape in the human-inbox runbook). Park only that
-   branch; continue the rest.
-
-Never leave a `Spec gap:` line or a guess.
+State what and why, plus one-way-door constraints, and leave design to the
+implementer unless a decision has a rejected alternative. Write each criterion
+as one observable statement, `When <event>, <behaviour>`, tagged `[test]`,
+`[command]`, `[capture]` or `[review]`. Say how verification catches a wrong
+implementation; test behaviour, not wording. Give each deletion or move one
+owner. A verification step beyond the stated outcome names the failure it
+prevents and how likely that is, or it is left out, because every later
+implementer must honour it. Boundaries cite a recorded real boundary or their
+reason.
 
 ## Modes
 
 - **Interview** (the user asks to be grilled): one question at a time, highest
   leverage first, each with evidence and a recommendation. Answer from the
-  workspace instead of asking. Stop when criteria are clear.
-- **Spike**: one falsifiable question, a timebox, kill criteria, a registered scratch
-  worktree. Harvest the answer into the spec and discard the code. Read
+  workspace instead of asking.
+- **Spike:** one falsifiable question, a timebox, kill criteria and a scratch
+  worktree. Harvest the answer into the spec and discard the code. See
   [interview and spike](references/interview-and-spike.md).
-- **Kept prototype**: when it is a reference, own the repo file and index it
-  through engineering-docs. Publishing a private Claude artifact copy is fine; the
-  repo file stays the source. For UI, see ui-ux-design.
+- **Kept prototype:** the repository file is the source, indexed through
+  `engineering-docs`; a private artifact copy may present it.
 
-## Fan-out
+Shape open work with the `plan`, `explore`, `research` and `design` templates;
+the briefs in `references/` supply scouting, research, architecture,
+acceptance and critique questions. Read-only scoping grants no build authority.
 
-Use `plan` by default to shape unsettled work, `explore` over named areas to
-map evidence, `research` for dated primary sources and `design` for options:
+## Home
 
-```sh
-provenant run --use plan --file brief.md --explain
-provenant run --use explore --route junior --over src --file questions.md --explain
-```
-
-Compose nodes with `after` and `inputs`; use `synthesise` to reconcile returns.
-Read-only scoping grants no build authority. A later `implement` node starts
-only after scope and write authority hold. The briefs in `references/` supply
-scouting, research, architecture, acceptance and critique questions.
-
-## Land
-
-The spec lives where the repository's process says: by default the issue body,
-which dies with the delivering PR (tracker owns the template); a repository with
-project docs or no tracker names its own spec home. Cite `path#Symbol`, never scratch files.
+The spec lives where the repository's process says: by default the issue body
+(`tracker`), which dies with the delivering pull request. Cite `path#Symbol`,
+never scratch files.

@@ -134,6 +134,72 @@ fn run_headline(
     format!("{graph} {state} model={model} worktree={worktree}")
 }
 
+/// The full `GRAPH/NODE/ATTEMPT` ID of each node's newest launched attempt.
+fn lane_ids(checkpoint: &Value) -> Vec<String> {
+    let graph = checkpoint["graph_id"].as_str().unwrap_or_default();
+    checkpoint["nodes"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(|node| {
+            let attempt = node["attempts"]
+                .as_array()?
+                .iter()
+                .rev()
+                .find_map(|attempt| attempt["attempt_ref"].as_str())?;
+            Some(format!(
+                "{graph}/{}/{}",
+                node["id"].as_str()?,
+                attempt.rsplit('/').next()?
+            ))
+        })
+        .collect()
+}
+
+/// One line per launched lane, within the receipt's row budget.
+fn lane_lines(checkpoint: &Value) -> String {
+    let ids = lane_ids(checkpoint);
+    let mut text: String = ids
+        .iter()
+        .take(provenant_cli::limits::SUMMARY_ROWS)
+        .map(|id| format!("lane: {id}\n"))
+        .collect();
+    if ids.len() > provenant_cli::limits::SUMMARY_ROWS {
+        text += &format!(
+            "{} more lanes in --json\n",
+            ids.len() - provenant_cli::limits::SUMMARY_ROWS
+        );
+    }
+    let refused: Vec<String> = checkpoint["nodes"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter(|node| node["advance_error_code"] == "preparation_refused")
+        .filter_map(|node| {
+            let message = node["advance_error"].as_str()?;
+            let line = format!(
+                "refused {}: {}",
+                node["id"].as_str().unwrap_or_default(),
+                message.split_whitespace().collect::<Vec<_>>().join(" ")
+            );
+            Some(provenant_cli::bounded_text(
+                &line,
+                provenant_cli::limits::SUMMARY_ROW_BYTES,
+            ))
+        })
+        .collect();
+    for line in refused.iter().take(provenant_cli::limits::SUMMARY_ROWS) {
+        text += &format!("{line}\n");
+    }
+    if refused.len() > provenant_cli::limits::SUMMARY_ROWS {
+        text += &format!(
+            "{} more refused lanes in --json\n",
+            refused.len() - provenant_cli::limits::SUMMARY_ROWS
+        );
+    }
+    text
+}
+
 /// The compact `run` result: the headline, unless it was already announced,
 /// then the one next command.
 fn run_human(data: &Value, input: &Value, announced: bool) -> String {
@@ -145,11 +211,12 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
     };
     let status = data["status"].as_str().unwrap_or("pending");
     let document = input.get("document");
+    let lanes = lane_lines(&data["checkpoint"]);
     if announced {
-        format!("next: {next}\n")
+        format!("{lanes}next: {next}\n")
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        format!("{headline}\nnext: {next}\n")
+        format!("{headline}\n{lanes}next: {next}\n")
     }
 }
 
@@ -233,6 +300,10 @@ fn invoke(
         {
             result["local_worktree_remedy"] = json!(action);
         }
+        factory.name_refusal_causes(&mut result);
+        if command == "run" && result["checkpoint"]["graph_id"].is_string() {
+            result["lane_ids"] = json!(lane_ids(&result["checkpoint"]));
+        }
         Ok(result)
     })();
     match result {
@@ -272,8 +343,9 @@ fn invoke(
             )
         }
         Err(error) => {
-            let projection = error
-                .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
+            let facade =
+                error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>();
+            let projection = facade
                 .map(|error| error.diagnostic())
                 .or_else(|| {
                     error
@@ -281,12 +353,10 @@ fn invoke(
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
                 .unwrap_or_else(|| *cli_input_error("graph input could not be processed"));
-            let outcome = error
-                .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
-                .map_or(
-                    Outcome::Invalid,
-                    provenant_cli::fabric::coordination_outcome,
-                );
+            let outcome = facade.map_or(
+                Outcome::Invalid,
+                provenant_cli::fabric::coordination_outcome,
+            );
             let mut result = CommandResult::new(command, outcome, Value::Null);
             result.error = Some(provenant_records::CommandError {
                 diagnostic: Some((&projection).into()),
@@ -295,7 +365,7 @@ fn invoke(
                     .detail
                     .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
-                cause: None,
+                cause: facade.and_then(|error| error.cause()).map(str::to_owned),
                 repair: projection.next,
             });
             crate::emit(&result, globals, "", false)
@@ -458,8 +528,6 @@ fn run_input(
                     let safe = matches!(
                         key,
                         "attempt"
-                            | "attempt.cloud"
-                            | "attempt.placement"
                             | "attempt.host"
                             | "attempt.account"
                             | "attempt.confidential"
@@ -518,11 +586,12 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         "branch" | "base" | "new_worktree" => Err(cli_input_error(
             "use --branch B --base REF for a new writer worktree",
         )),
-        "host" | "account" | "confidential" | "provider_timeout" | "placement" | "cloud"
-        | "capabilities" | "capability" | "build_heavy" | "build_weight" | "write_roots"
-        | "write_root" | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" => {
-            Ok(())
-        }
+        "placement" | "cloud" => Err(cli_input_error(
+            provenant_fabric_runtime::graph::CLOUD_PLACEMENT_REMOVED,
+        )),
+        "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
+        | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
+        | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
         }
@@ -776,21 +845,23 @@ mod tests {
     }
 
     #[test]
-    fn attempt_cloud_alias_passes_in_both_set_forms() {
-        let cloud = "{target='t',provider='p',environment='e',repository='r',branch='b',model='m',deadline_seconds=60}";
+    fn attempt_cloud_placement_is_refused_in_both_set_forms() {
+        let cloud = "{target='t',provider='p'}";
         for setting in [
             format!("attempt.cloud={cloud}"),
             format!("attempt={{cloud={cloud}}}"),
+            format!("attempt.placement={cloud}"),
         ] {
             let mut request = run_request();
-            request.set.push(setting);
-            let input = run_input(request).expect("cloud placement is applied");
-            let value = input["set"]
-                .get("attempt.cloud")
-                .unwrap_or(&input["set"]["attempt"]["cloud"]);
-            let attempt: provenant_fabric_runtime::graph::AttemptSpec =
-                serde_json::from_value(serde_json::json!({"cloud": value})).unwrap();
-            assert_eq!(attempt.placement.unwrap().target, "t");
+            request.set.push(setting.clone());
+            let error = run_input(request).expect_err("cloud placement must refuse");
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("cloud launch")),
+                "{setting}: {error:?}"
+            );
         }
     }
 
@@ -849,16 +920,46 @@ mod tests {
         assert_eq!(
             human,
             "g-1 running model=claude/claude-opus-5-5 worktree=/repo/.worktrees/lane\n\
+             lane: g-1/task/b\n\
              next: provenant status g-1 --wait\n"
         );
-        assert!(human.lines().count() <= 2);
+        assert!(human.lines().count() <= 3);
         assert_eq!(
             run_human(&data, &input, true),
-            "next: provenant status g-1 --wait\n"
+            "lane: g-1/task/b\nnext: provenant status g-1 --wait\n"
         );
+        assert_eq!(lane_ids(&data["checkpoint"]), ["g-1/task/b"]);
         let mut complete = data.clone();
         complete["status"] = json!("complete");
         assert!(run_human(&complete, &input, true).ends_with("next: provenant output g-1\n"));
+    }
+
+    #[test]
+    fn receipt_lists_refused_cause_and_bounds_lane_lines() {
+        let nodes: Vec<_> = (0..15)
+            .map(|n| json!({"id":format!("n{n}"), "state":"running", "attempts":[{"attempt_ref":format!("h/a{n}")}]}))
+            .collect();
+        let text = lane_lines(&json!({"graph_id":"g", "nodes":nodes}));
+        assert_eq!(text.lines().count(), 13, "{text}");
+        assert!(text.contains("lane: g/n0/a0\n"));
+        let refused = json!({"graph_id":"g", "nodes":[
+            {"id":"r", "state":"failed", "advance_error_code":"preparation_refused",
+             "advance_error":"refused. Refused: codex/gpt: allowance spent", "attempts":[]}
+        ]});
+        assert!(lane_lines(&refused).contains("allowance spent"));
+        let many: Vec<_> = (0..15)
+            .map(|n| {
+                json!({"id":format!("r{n}"), "advance_error_code":"preparation_refused",
+                "advance_error":"x".repeat(1000), "attempts":[]})
+            })
+            .collect();
+        let text = lane_lines(&json!({"graph_id":"g", "nodes":many}));
+        assert_eq!(text.lines().count(), 13, "{text}");
+        assert!(text.ends_with("3 more refused lanes in --json\n"));
+        assert!(
+            text.lines()
+                .all(|line| line.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES)
+        );
     }
 
     #[test]

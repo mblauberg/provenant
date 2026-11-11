@@ -46,8 +46,7 @@ for quiet in 'state/<state>/runs/<run>/attempts/x' '/tmp/<name>' \
 done
 git rm -q -f --cached docs/placeholder.md
 printf '%s\n' 'Specs may cite /tmp/state and Plan code: x on purpose.' > docs/specs/state.md
-printf '%s\n' 'Specs may cite /tmp/state on purpose.' > HARNESS.md
-git add docs/specs/state.md HARNESS.md
+git add docs/specs/state.md
 "$script" > "$tmp/out" 2> "$tmp/err"
 test ! -s "$tmp/err"
 

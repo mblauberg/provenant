@@ -72,8 +72,6 @@ const INSTALL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("targets.{harness}.config", "string"),
 ];
 const PROVIDER_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata::enumeration("codex.cloud.transport", &["official", "thread"]),
-    FieldMetadata::new("codex.cloud.command", "string"),
     FieldMetadata::new("{provider}.update", "bool"),
     FieldMetadata::int("{provider}.update_interval_seconds", 1, i64::MAX),
     FieldMetadata::int("{provider}.update_timeout_seconds", 1, i64::MAX),
@@ -354,9 +352,15 @@ pub fn apply_patch<T: Serialize>(
     let registry = registry()?;
     for (path, value) in patch {
         if !editable_path(path) {
-            return Err(ConfigError::Refused(format!(
-                "{path} is not an editable field"
-            )));
+            let near = crate::knobs::nearest(path, known.keys().copied());
+            return Err(ConfigError::Refused(if near.is_empty() {
+                format!("{path} is not an editable field")
+            } else {
+                format!(
+                    "{path} is not an editable field; did you mean {}?",
+                    near.join(", ")
+                )
+            }));
         }
         if path == "profile" || registry.knobs.contains_key(path) {
             let text = match value {

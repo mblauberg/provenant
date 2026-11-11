@@ -122,7 +122,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             if let Some(error) = data["provider_error"].as_str() {
                 lines.push(format!(
                     "provider error: {}",
-                    crate::bounded_text(error, 160)
+                    crate::bounded_text(error, PROVIDER_ERROR_BYTES)
                 ));
             }
             if let Some(path) = structured_path_text(&data["result_path"]) {
@@ -398,14 +398,7 @@ fn output_read(
                 "output has no attempt identity",
             )
         })?;
-    let mut record = session.service().status(id, call)?;
-    cloud_owner::hydrate(
-        edge.roots,
-        &session.store,
-        std::slice::from_mut(&mut record),
-        call,
-    )
-    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+    let record = session.service().status(id, call)?;
     let waits = session
         .store
         .lane_waits(std::slice::from_ref(&record), call);
@@ -478,66 +471,6 @@ fn output_read_part(
             ErrorKind::NotFound,
             "attempt is not in that run/task",
         ));
-    }
-    if !command.trace
-        && matches!(command.part, Part::Result | Part::Receipt)
-        && let Some(placement) = cloud_owner::placement(&session.store, &record, call)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-    {
-        let job = cloud_owner::load(&session.store, id, call)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
-        if command.path {
-            if !matches!(command.part, Part::Result) {
-                return Err(Fail::new(
-                    Status::Invalid,
-                    ErrorKind::Invalid,
-                    "--path needs --part result, prompt or stderr",
-                ));
-            }
-            if job.is_none() {
-                return Err(Fail::new(
-                    Status::Invalid,
-                    ErrorKind::NotFound,
-                    "cloud job has no recorded result path",
-                ));
-            }
-            let path = artifact(
-                session.context.state_root.as_path(),
-                &record,
-                "cloud/cloud-job.json",
-            );
-            return Ok((
-                json!({"attempt_id": id, "part": "result", "path": path.display().to_string()}),
-                format!("{}\n", path.display()),
-            ));
-        }
-        let view = job.as_ref().map(cloud_owner::view).unwrap_or_else(
-            || json!({"target": placement.target, "state": {"state": "submitting"}}),
-        );
-        let encoded = serde_json::to_vec_pretty(&view)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-        let safe = provenant_confinement::redact::known_shapes(&encoded)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-        if command.offset > safe.len() as u64 {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Invalid,
-                "offset past cloud result",
-            ));
-        }
-        let start = if let Some(lines) = command.tail {
-            let base = safe.len().saturating_sub(command.max_bytes as usize);
-            base + tail_start(&safe[base..], lines.min(TAIL_MAX))
-        } else {
-            command.offset as usize
-        };
-        let end = start
-            .saturating_add(command.max_bytes as usize)
-            .min(safe.len());
-        let bytes = safe[start..end].to_vec();
-        let human = String::from_utf8_lossy(&bytes).into_owned();
-        let data = json!({"attempt_id": id, "cloud": view, "part": "result", "offset": start, "next_offset": end, "length": safe.len(), "eof": end == safe.len(), "clipped": end < safe.len(), "complete": job.as_ref().is_some_and(|job| job.state.is_terminal()), "digest": provenant_records::CanonicalV1::file_digest(&safe), "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(bytes)});
-        return Ok((data, human));
     }
     if command.trace {
         let grants = json!({
@@ -873,6 +806,20 @@ pub(super) fn provider_error_line(
     call: &run::Request<'_>,
 ) -> Option<String> {
     const TAIL_BYTES: u64 = 8192;
+    // A structured provider error (the result's own message) outranks the
+    // last stderr line, which may be only the tail of a longer explanation.
+    if let Ok(chunk) = session.service().output(
+        id,
+        run::ArtifactPart::Result,
+        run::ByteRange {
+            offset: 0,
+            max_bytes: PROVIDER_ERROR_BYTES as u64,
+        },
+        call,
+    ) && let Some(message) = provider_error_from_result(&chunk.bytes)
+    {
+        return Some(message);
+    }
     let length = session
         .service()
         .output(
@@ -899,6 +846,27 @@ pub(super) fn provider_error_line(
         )
         .ok()?;
     provider_error_from_stderr(&tail.bytes)
+}
+
+const PROVIDER_ERROR_BYTES: usize = 1024;
+
+/// The provider's whole error message from a failed attempt's result, with its
+/// lines joined and the text redacted and bounded.
+fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let joined = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if joined.is_empty() {
+        return None;
+    }
+    let redacted = provenant_confinement::redact::known_shapes(joined.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
 }
 
 /// Select a cause from captured stderr without promoting known Codex skill
@@ -1206,7 +1174,8 @@ pub fn attempt_provider(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_planner_fallback, fallback_reason_for_graph, output_summary, provider_error_from_stderr,
+        add_planner_fallback, fallback_reason_for_graph, output_summary,
+        provider_error_from_result, provider_error_from_stderr,
     };
     use serde_json::json;
 
@@ -1255,7 +1224,7 @@ mod tests {
                 {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
                 {"id":"synthesis", "state":"succeeded", "attempts":[]}
             ],
-            "expansions":[{"source":"planner","continuation":false,"nodes":[{
+            "expansions":[{"source":"planner","nodes":[{
                 "id":"planner--fallback--static","access":"read_only","prompt":"Static stage","route":{"alias":"junior"}
             }]}]
         }))
@@ -1275,6 +1244,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(fallback_reason_for_graph(&checkpoint), None);
+    }
+
+    #[test]
+    fn provider_error_from_result_keeps_the_whole_multiline_message() {
+        let message = provider_error_from_result(
+            b"Model not recognized: gemini-3.8-pro\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
+        )
+        .unwrap();
+        assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
+        assert!(message.ends_with("GPT-OSS 120B (Medium)"));
+        assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 
     #[test]

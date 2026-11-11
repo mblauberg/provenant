@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 mod admission;
 mod artifacts;
-mod automatic;
 mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
@@ -304,6 +303,39 @@ impl std::fmt::Display for ArtifactProvenance {
         }
     }
 }
+
+/// A source error whose fixed cause the run diagnostic may disclose. Its
+/// text, which can name paths or Git output, stays in the error chain only.
+#[derive(Debug)]
+pub(crate) struct CausedSource {
+    text: String,
+    cause: &'static str,
+}
+
+impl CausedSource {
+    /// An I/O source carrying `text`, which remembers `cause` when given.
+    pub(crate) fn io(text: String, cause: Option<&'static str>) -> std::io::Error {
+        match cause {
+            Some(cause) => std::io::Error::other(Self { text, cause }),
+            None => std::io::Error::other(text),
+        }
+    }
+
+    fn cause(source: &std::io::Error) -> Option<&'static str> {
+        source
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<Self>())
+            .map(|caused| caused.cause)
+    }
+}
+
+impl std::fmt::Display for CausedSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for CausedSource {}
 
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -718,9 +750,14 @@ impl RunError {
             Self::Io(_) => {
                 diagnostic = diagnostic.next("inspect the host I/O failure before retrying");
             }
-            Self::OperationIo { operation, .. } => {
+            Self::OperationIo {
+                operation, source, ..
+            } => {
                 diagnostic = diagnostic
-                    .fact(DiagnosticFact::Filesystem { operation })
+                    .fact(DiagnosticFact::Filesystem {
+                        operation,
+                        cause: CausedSource::cause(source),
+                    })
                     .next("inspect the host I/O failure before retrying");
             }
             Self::Filesystem(error) | Self::Publication(error) => {
@@ -735,7 +772,10 @@ impl RunError {
                     FsError::LockDeadlineOverflow { .. } => "set lock deadline",
                     _ => "verify filesystem entry",
                 };
-                diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
+                diagnostic = diagnostic.fact(DiagnosticFact::Filesystem {
+                    operation,
+                    cause: None,
+                });
             }
             Self::Admission(error) => {
                 if let Some(fact) = error.resource_fact() {
@@ -1336,7 +1376,8 @@ mod diagnostic_projection_tests {
         assert!(matches!(
             projection.fact,
             Some(provenant_records::diagnostic::DiagnosticFact::Filesystem {
-                operation: "read file"
+                operation: "read file",
+                cause: None,
             })
         ));
         assert!(

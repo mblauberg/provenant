@@ -303,7 +303,9 @@ fn overlapping_path(
 }
 fn prune_released(tx: &rusqlite::Connection, project: ProjectId) -> Result<()> {
     let project = project.to_string();
-    let mut statement = tx.prepare("SELECT c.id FROM claims c WHERE c.project=? AND c.holder IS NULL AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.project=c.project AND o.claim=c.id) ORDER BY c.id LIMIT 100")?;
+    let mut statement = tx.prepare(
+        "SELECT c.id FROM claims c WHERE c.project=? AND c.holder IS NULL ORDER BY c.id LIMIT 100",
+    )?;
     let ids = statement
         .query_map([&project], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

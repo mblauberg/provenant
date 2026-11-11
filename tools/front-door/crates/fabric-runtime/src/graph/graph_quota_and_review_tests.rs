@@ -44,7 +44,19 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
                 ..Default::default()
             };
             let mut journal = MemoryJournal::default();
-            let status = advance(&document, &mut owner, &mut journal).unwrap();
+            // No restart budget, so the redraw bound alone settles the node.
+            let limits = crate::config::GraphLimits {
+                continuations: 0,
+                ..Default::default()
+            };
+            let status = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &limits,
+                &Default::default(),
+            )
+            .unwrap();
             assert_eq!(status.checkpoint.nodes[0].state, NodeState::Failed);
             assert_eq!(owner.calls.len(), 3);
             assert!(owner.calls.iter().all(|(_, route)| route == &alias));

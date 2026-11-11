@@ -35,3 +35,18 @@ MCP exposes fan-out and checkpoint control without adding a daemon, provider
 session database, transcript copy or delivery acceptance authority. Execution
 and access boundaries remain those of
 [ADR 0021](0021-configured-workspace-dispatch-boundaries.md).
+
+## Addendum: opt-in registration (epic #3078)
+
+The facade stays, but no default session or lane carries it. Every tool has a
+`provenant` CLI command, so a client with a shell loses nothing. The knob
+`fabric.mcp_server` (default `false`) registers the stdio server for clients
+without a shell:
+
+- Install and upgrade write the owned `fabric` MCP entry only when the knob is
+  on. When it is off they remove the entry they own, if it still matches the
+  receipt value; an edited or foreign entry stays.
+  Turning the knob on again over an edited entry is a conflict, not an
+  overwrite.
+- Confined lanes pass the server to their provider only when the knob is on.
+- `provenant fabric mcp` serves the same tools whenever a client starts it.

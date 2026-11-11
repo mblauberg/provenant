@@ -3,9 +3,9 @@
 
 mod adapters;
 pub use adapters::{
-    ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, CloudTransport, GithubAuth,
-    LaunchCapabilities, LaunchField, LaunchRequest, LoginObservation, LoginReprobe,
-    ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
+    ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, GithubAuth, LaunchCapabilities,
+    LaunchField, LaunchRequest, LoginObservation, LoginReprobe, ModelObservation, NamedEntry,
+    QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
 };
 mod artifact_ref;
 mod attempt_fact;
@@ -76,7 +76,7 @@ pub mod work_key;
 pub use finding_decision::{FindingDecision, FindingDisposition};
 pub use limit::{CeilingError, LaneLimits, Limit, LimitSource, LimitStrength};
 pub use pause::{Pause, PauseCause};
-pub use stop::{Continuation, NextStep, STOP_TABLE, Stop, StopCause, StopRule};
+pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, StopFacts, StopRule};
 pub use work_key::WorkKey;
 #[cfg(test)]
 mod format2_tests;

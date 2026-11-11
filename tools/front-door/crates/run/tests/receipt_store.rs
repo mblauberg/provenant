@@ -34,7 +34,6 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
-                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,

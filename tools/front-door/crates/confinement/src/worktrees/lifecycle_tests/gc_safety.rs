@@ -317,6 +317,40 @@ fn remove_declared_ignored_output_but_names_undeclared_env() -> Result<(), Box<d
 }
 
 #[test]
+fn remove_lane_scratch_without_declaration() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".gitignore"), ".provenant/scratch/\n")?;
+    fixture.run(&["add", ".gitignore"])?;
+    fixture.run(&["commit", "-m", "scratch rules"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "remove-scratch".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    fs::create_dir_all(created.path.join(".provenant/scratch/graphs"))?;
+    fs::write(created.path.join(".provenant/scratch/graphs/x.json"), "{}")?;
+    let result = remove_with_output(
+        &context,
+        WorktreeRemove::Name {
+            name: "remove-scratch".into(),
+            discard: false,
+            integration: None,
+            expected_head: None,
+        },
+        &cancel(),
+        &provenant_config::ProjectGcSettings::default(),
+    )?;
+    assert_eq!(result.removed.len(), 1);
+    assert!(!created.path.exists());
+    Ok(())
+}
+
+#[test]
 fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
 -> Result<(), Box<dyn Error>> {
     for scenario in [

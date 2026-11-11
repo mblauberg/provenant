@@ -487,6 +487,8 @@ pub enum DiagnosticFact {
     WorktreeUnregistered,
     Filesystem {
         operation: &'static str,
+        /// The source error's fixed text, when it names no path or value.
+        cause: Option<&'static str>,
     },
     DiskPressure {
         available: u64,

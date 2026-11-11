@@ -143,26 +143,24 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
     outputs
 }
 
-/// An ask holding the longest deadline, answer and inbox error it can store.
-fn filled_ask(mut ask: NodeAsk) -> NodeAsk {
-    ask.wake_at = Some(envelope::latest());
-    ask.answer = Some(AskAnswer {
+/// The link an ask leaves in the checkpoint, holding the longest deadline and
+/// request ID it can store.
+fn filled_ask(ask: AskRequest) -> AskLink {
+    AskLink {
         extra: Default::default(),
-        source: AnswerSource::Answered,
-        option: Some(worst(asks::OPTION_BYTES)),
-        text: Some(worst(asks::ANSWER_BYTES)),
-        actor: Some(worst(HOST_ID_BYTES)),
-        at: Some(envelope::latest()),
-        rejected: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
-        rejection_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
-    });
-    ask.inbox_error = Some(worst(MAX_ADVANCE_ERROR_BYTES));
-    ask
+        ask_id: ask.ask_id,
+        kind: ask.kind,
+        node: ask.node,
+        rounds: ask.rounds,
+        session: ask.session,
+        wake_at: Some(envelope::latest()),
+        request: "f".repeat(asks::REQUEST_ID_BYTES),
+    }
 }
 
-/// Every ask the plan can hold at once: each loop round, each decide node and
-/// the pause history with one open and one awaiting its close.
-fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
+/// Every link the plan can hold at once: each loop round, each decide node and
+/// the one open pause.
+fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
     let mut asks = Vec::new();
     for node in &plan.nodes {
         if let Some(session) = node
@@ -182,12 +180,14 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 .max()
                 .unwrap_or(0);
             asks.extend((1..=rounds).map(|round| {
-                filled_ask(asks::loop_ask(
+                let mut ask = asks::loop_ask(
                     &plan.graph_id,
                     &node.id,
                     usize::MAX - round,
                     session,
-                ))
+                );
+                ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
+                filled_ask(ask)
             }));
         }
         if let Some(spec) = &node.land {
@@ -196,10 +196,11 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 node,
                 &filled_land(spec.tier),
                 land::session(spec, plan).unwrap(),
+                1,
+                u64::MAX,
             )));
         }
         if let Some(spec) = &node.decide {
-            let scope = node.extra.get("repair_scope_gate") == Some(&json!(true));
             let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id);
             let mut ask = asks::decide_ask(
                 &plan.graph_id,
@@ -210,20 +211,19 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 None,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
             );
-            if scope { ask.body = worst(provenant_records::inbox::REQUEST_BODY_BYTES); }
+            // A node raised again after a retry carries the generation.
+            ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
             asks.push(filled_ask(ask));
         }
     }
     if let Some(session) = &plan.decision_session {
-        asks.extend((0..asks::MAX_PAUSE_ASKS as u64 + 2).map(|index| {
-            filled_ask(asks::pause_ask(
-                &plan.graph_id,
-                u64::MAX - index,
-                session,
-                &worst(PAUSE_REASON_BYTES),
-                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
-            ))
-        }));
+        asks.push(filled_ask(asks::pause_ask(
+            &plan.graph_id,
+            u64::MAX,
+            session,
+            &worst(PAUSE_REASON_BYTES),
+            Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+        )));
     }
     asks
 }
@@ -374,6 +374,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         },
                         route: route.clone(),
                         state: AttemptState::Unresolved,
+                        stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
                         attempt_ref: Some(worst(HOST_ID_BYTES)),
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
@@ -1138,7 +1139,7 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
     let plan = planned(&document);
     let before = envelope::checkpoint_bound(&document, &[], &[], &plan);
     let live: Expansion = serde_json::from_value(json!({
-        "source":"plan", "continuation":false, "nodes":[],
+        "source":"plan",  "nodes":[],
         "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
     })).unwrap();
     let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);

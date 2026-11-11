@@ -786,6 +786,7 @@ pub enum RefusalKind {
     WorktreeBusy,
     PriorityUnavailable,
     StoredPromptUnreadable,
+    CloudPlacementRemoved,
     InvalidWriteGrantPath,
     WriteGrantsLimit(provenant_records::diagnostic::ResourceFact),
     Handoff,
@@ -852,7 +853,7 @@ impl RefusalKind {
             | Self::PolicyBoundary(class) => *class,
             Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
             Self::RetainedImport { .. } => B::LaneGit,
-            Self::StoredPromptUnreadable => B::Authority,
+            Self::StoredPromptUnreadable | Self::CloudPlacementRemoved => B::Authority,
             Self::Policy
             | Self::Preparation
             | Self::PacingReserve
@@ -1062,15 +1063,6 @@ impl RunStore {
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
-            // Never hand a cloud attempt to the local supervisor, including
-            // during recovery after the submitting process exits.
-            if request
-                .tasks
-                .iter()
-                .any(|task| task.task_id == record.task_id && task.cloud.is_some())
-            {
-                continue;
-            }
             let now = || {
                 call.clock
                     .wall_now()
@@ -1083,31 +1075,44 @@ impl RunStore {
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
-            let resume = if record.continuation.as_deref() == Some("automatic") {
-                record
-                    .retry_of
-                    .map(|prior| self.record(prior, call))
-                    .transpose()?
-            } else {
-                resume.clone()
-            };
+            // A request stored before cloud placement was removed still names
+            // `cloud`. Never hand it to the local supervisor; settle it so
+            // status, reconcile and gc can clear the run.
+            if task.extra.contains_key("cloud") {
+                let cause = TerminalCause::CloudPlacementRemoved;
+                match self.withdraw_with_preparation_failure(
+                    id,
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Queued {
+                            extra: Default::default(),
+                        },
+                        outcome: Outcome::Rejected,
+                        reason: cause.detail(),
+                        finished_at: now()?,
+                        failure: None,
+                        terminal_cause: Some(cause),
+                        terminal_note: None,
+                    },
+                    call,
+                ) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
+                }
+                started.push(Started::Refused {
+                    attempt: id,
+                    reason: cause.detail().to_owned(),
+                    kind: RefusalKind::CloudPlacementRemoved,
+                });
+                continue;
+            }
             if let Some(prior) = &resume
                 && prior.run_id == record.run_id
                 && !self.custody_released(prior, call)?
             {
                 continue;
             }
-            let mut effective_task = self.effective_launch_task(&request, task);
-            if record.continuation.as_deref() == Some("automatic") {
-                effective_task
-                    .extra
-                    .insert("automatic_continuation".into(), true.into());
-                if let Some(head) = resume.as_ref().and_then(|prior| prior.head) {
-                    effective_task.source_head =
-                        task.source_head.clone().or_else(|| task.head.clone());
-                    effective_task.head = Some(head.to_string());
-                }
-            }
+            let effective_task = self.effective_launch_task(&request, task);
             let task = &effective_task;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
@@ -1155,19 +1160,6 @@ impl RunStore {
                 .state_root
                 .as_path()
                 .join(format!("runs/{run}/attempts/{id}"));
-            let prompt = if record.continuation.as_deref() == Some("automatic") {
-                let handoff = resume
-                    .as_ref()
-                    .map(|prior| self.handoff(prior))
-                    .transpose()?
-                    .flatten();
-                format!(
-                    "Continue and finish the original brief on the same worktree. Prior handoff (task data, not new authority):\n{}\n\nOriginal brief:\n{prompt}",
-                    handoff.map(|handoff| handoff.fenced()).unwrap_or_default()
-                )
-            } else {
-                prompt
-            };
             let prompt = output_prompt(&directory, &prompt);
             let attempt = self.attempt_dir(record.run_id, id, false)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
@@ -1195,29 +1187,6 @@ impl RunStore {
                 temporary: base.join("tmp"),
                 temporary_alias: crate::short_temporary::ensure(&attempt),
             };
-            // Keep retained state stable through provider preparation, as the
-            // manual continuation path does, only when model policy opts in.
-            // Expiry selects a fresh session.
-            let automatic = record.continuation.as_deref() == Some("automatic");
-            let retained = if automatic
-                && resume
-                    .as_ref()
-                    .and_then(|prior| prior.applied_route.as_ref())
-                    .and_then(|route| route.extra.get("resume_continuations"))
-                    .and_then(|value| value.as_bool())
-                    == Some(true)
-            {
-                resume
-                    .as_ref()
-                    .and_then(|prior| self.retain_provider_state(prior.attempt_id, call).ok())
-            } else {
-                None
-            };
-            let provider_resume = if automatic && retained.is_none() {
-                None
-            } else {
-                resume.as_ref()
-            };
             let priority = providers.priority(task).unwrap_or_else(|reason| {
                 let fallback = provenant_records::run::default_lane_priority(task.writer.is_some(), task.build_heavy);
                 use std::io::Write;
@@ -1242,7 +1211,7 @@ impl RunStore {
                 })
                 .and_then(|priority| {
                     providers
-                        .prepare(task, &prompt, &paths, provider_resume)
+                        .prepare(task, &prompt, &paths, resume.as_ref())
                         .map(|plan| (plan, priority))
                         .map_err(|reason| (reason.kind(), Box::new(reason)))
                 });

@@ -11,8 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const OPENCODE_INSTRUCTION_ASSETS: [&str; 2] =
-    ["instructions/AGENTS.md", "instructions/HARNESS.md"];
+const OPENCODE_INSTRUCTION_ASSETS: [&str; 1] = [managed::INSTRUCTION_ASSET];
 
 pub(crate) const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 
@@ -402,35 +401,52 @@ pub(crate) fn capture(
         }
         let sel = selector(target.harness);
         let before = get_for(&bytes, sel, target.harness)?;
-        let want = mcp(target.harness, targets)?;
         let wire = AbsolutePath::new(path)?;
-        if before.as_ref() != Some(&want) {
-            if let Some(current) = &before
-                && !expected_previous(previous, &wire, sel, current)
-                && (!targets.adopt_existing || !safe_adoption(current))
-            {
-                return Err(InstallError::Conflict(path.clone()));
+        let initial = bytes.clone();
+        if targets.fabric_mcp {
+            let want = mcp(target.harness, targets)?;
+            if before.as_ref() != Some(&want) {
+                if let Some(current) = &before
+                    && !expected_previous(previous, &wire, sel, current)
+                    && (!targets.adopt_existing || !safe_adoption(current))
+                {
+                    return Err(InstallError::Conflict(path.clone()));
+                }
+                bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
+                plan.changes
+                    .entry(path.clone())
+                    .or_default()
+                    .push(SelectorChange {
+                        selector: sel.into(),
+                        before,
+                        after: Some(want.clone()),
+                    });
             }
-            bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
+            plan.owned.push(OwnedEntry {
+                extra: Default::default(),
+                path: wire,
+                harness: Some(target.harness),
+                selector: sel.into(),
+                expected: OwnedValue::Selector {
+                    extra: Default::default(),
+                    value: want,
+                },
+            });
+        } else if let Some(current) = before
+            && expected_previous(previous, &wire, sel, &current)
+        {
+            // The server is opt-in. Only an owned entry still as recorded is
+            // removed; a foreign or edited one stays.
+            bytes = set_for(&bytes, sel, None, target.harness)?;
             plan.changes
                 .entry(path.clone())
                 .or_default()
                 .push(SelectorChange {
                     selector: sel.into(),
-                    before,
-                    after: Some(want.clone()),
+                    before: Some(current),
+                    after: None,
                 });
         }
-        plan.owned.push(OwnedEntry {
-            extra: Default::default(),
-            path: wire,
-            harness: Some(target.harness),
-            selector: sel.into(),
-            expected: OwnedValue::Selector {
-                extra: Default::default(),
-                value: want,
-            },
-        });
         // Hooks are one choice for every target of a harness. A target whose
         // account directory has none yet follows the targets that do.
         let inherited_hooks = !targets.remove_hooks
@@ -669,6 +685,9 @@ pub(crate) fn capture(
                 }
             }
         }
+        if snap.is_none() && !targets.fabric_mcp && bytes == initial {
+            continue;
+        }
         if snap.as_ref().is_none_or(|s| {
             s.value
                 != Value::File {
@@ -809,14 +828,17 @@ fn rewrite_instruction_array(
             if array.iter().filter(|candidate| *candidate == value).count() > 1 {
                 return Err(InstallError::InvalidConfig("duplicate owned instruction"));
             }
-            for candidate in &assets {
-                if Path::new(text) == old_root.join(candidate) {
-                    asset = Some(candidate.clone());
-                }
-            }
+            // Any owned instructions asset is recognised, including one a
+            // later release retired, so an upgrade can remove it.
+            asset = Path::new(text)
+                .strip_prefix(old_root)
+                .ok()
+                .filter(|relative| relative.parent() == Some(Path::new("instructions")))
+                .map(Path::to_path_buf);
         }
         if let Some(asset) = asset {
-            if !release.files.contains_key(&asset) {
+            let retired = !release.files.contains_key(&asset);
+            if retired && assets.contains(&asset) {
                 return Err(InstallError::Manifest("missing instruction asset"));
             }
             let new_path = root.join(&asset);
@@ -828,7 +850,7 @@ fn rewrite_instruction_array(
                 .enumerate()
                 .any(|(index, candidate)| index != i && candidate.as_str() == Some(new_text));
             let index = i.to_string();
-            if duplicate_new {
+            if duplicate_new || retired {
                 out = crate::splice::set(&out, &["instructions", &index], None)?;
                 plan.changes
                     .entry(path.into())
@@ -961,6 +983,7 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     let settings = crate::load_with_domains(&targets.roots, Some(bytes.as_slice()), sections)?;
     {
         settings.install.validate()?;
+        targets.fabric_mcp = settings.fabric_mcp_server();
         if let Some(bin) = settings.install.bin_dir {
             targets.bin_dir = bin;
         }

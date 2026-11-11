@@ -1,15 +1,18 @@
 //! The format-2 stop: one typed cause and the writer's handoff, sealed at
 //! settlement, and the one table of what follows each cause.
 //!
-//! [`STOP_TABLE`] owns the default next step of every cause. The override
-//! point is the graph node's `on_stop` entry for a cause, applied by
-//! [`StopCause::next_step`]; a pinned cause ignores it. Route availability and
-//! the continuation budget are applied after this, by the runtime's one
-//! decision function, and can only turn a step into [`NextStep::Chair`].
-//! `docs/specs/run.md#what-follows-a-stop` mirrors the table and a test keeps
-//! the two equal.
+//! [`STOP_TABLE`] owns the default next step of every cause and how many
+//! fresh same-route attempts precede it. The override point is the graph
+//! node's `on_stop` entry for a cause ([`OnStop`]), applied by
+//! [`StopCause::next_step`]; a pinned cause ignores it, and a stop whose
+//! custody is not proved released always goes to the chair. Route
+//! availability and the continuation budget are applied after this, by the
+//! graph runtime's one decision function, and can only turn a step into
+//! [`NextStep::Chair`]. `docs/specs/run.md#what-follows-a-stop` mirrors the
+//! table and a test keeps the two equal.
 use crate::handoff::{HANDOFF_BYTES, Handoff, HandoffStatus};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Why an attempt ended without finishing its brief. A finished attempt seals
 /// no stop. Each cause is one fact; facts about the worktree, such as whether
@@ -56,6 +59,10 @@ pub enum StopCause {
     AdapterUnavailable,
     PermissionDenied,
     IdentityUnobserved,
+    /// The lane's launch-time access token was revoked or expired mid-run
+    /// while the account login stayed usable. A writer continues from its
+    /// handoff on a new token; the successor's launch re-probes the account.
+    LaneTokenLost,
 
     // The host refused before the provider started.
     SourceViewRefused,
@@ -64,6 +71,9 @@ pub enum StopCause {
     DiskFloor,
     DiskUnobserved,
     PromptUnreadable,
+    /// The attempt asked for cloud placement, which was removed; cloud
+    /// sessions launch with `provenant cloud launch`.
+    CloudPlacementRemoved,
     WriteGrantsRefused,
     WorktreeBusy,
     LaunchHandoffRefused,
@@ -117,6 +127,75 @@ impl NextStep {
     }
 }
 
+/// Facts the table reads beside the cause.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StopFacts {
+    /// Fresh same-route attempts already taken after stops with this cause.
+    pub retries: u8,
+    /// No process of the stopped attempt can still write: settlement proved
+    /// its custody released. The default, `false`, sends every stop to the
+    /// chair.
+    pub custody_released: bool,
+}
+
+/// A graph node's `on_stop` policy: the step to take for a cause instead of
+/// its default. A value is a step object (`{"step": "same_route",
+/// "continuation": "fresh"}`) or its name (`"same_route"` is fresh).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OnStop(#[serde(deserialize_with = "on_stop_steps")] BTreeMap<StopCause, NextStep>);
+
+impl OnStop {
+    pub fn new(steps: BTreeMap<StopCause, NextStep>) -> Self {
+        Self(steps)
+    }
+
+    pub fn get(&self, cause: StopCause) -> Option<NextStep> {
+        self.0.get(&cause).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (StopCause, NextStep)> + '_ {
+        self.0.iter().map(|(cause, step)| (*cause, *step))
+    }
+}
+
+fn on_stop_steps<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<StopCause, NextStep>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Named {
+        SameRoute,
+        NewRoute,
+        Chair,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Named(Named),
+        Step(NextStep),
+    }
+    let wire = BTreeMap::<StopCause, Wire>::deserialize(deserializer)?;
+    Ok(wire
+        .into_iter()
+        .map(|(cause, step)| {
+            let step = match step {
+                Wire::Named(Named::SameRoute) => NextStep::SameRoute {
+                    continuation: Continuation::Fresh,
+                },
+                Wire::Named(Named::NewRoute) => NextStep::NewRoute,
+                Wire::Named(Named::Chair) => NextStep::Chair,
+                Wire::Step(step) => step,
+            };
+            (cause, step)
+        })
+        .collect())
+}
+
 /// One row of [`STOP_TABLE`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StopRule {
@@ -124,6 +203,9 @@ pub struct StopRule {
     pub default: NextStep,
     /// A pinned cause always takes its default; `on_stop` cannot move it.
     pub pinned: bool,
+    /// Fresh attempts on the same route before the default applies. A
+    /// transient cause takes one.
+    pub retries: u8,
 }
 
 const NEW: NextStep = NextStep::NewRoute;
@@ -134,6 +216,17 @@ const fn rule(cause: StopCause, default: NextStep) -> StopRule {
         cause,
         default,
         pinned: false,
+        retries: 0,
+    }
+}
+
+/// A transient cause: one fresh attempt on the same route, then `default`.
+const fn once(cause: StopCause, default: NextStep) -> StopRule {
+    StopRule {
+        cause,
+        default,
+        pinned: false,
+        retries: 1,
     }
 }
 
@@ -142,6 +235,7 @@ const fn pinned(cause: StopCause) -> StopRule {
         cause,
         default: CHAIR,
         pinned: true,
+        retries: 0,
     }
 }
 
@@ -152,27 +246,29 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(StoppedEarly, NEW),
         pinned(Blocked),
         rule(HandoffMissing, CHAIR),
-        rule(EmptyResult, CHAIR),
+        once(EmptyResult, NEW),
         rule(Uncommitted, CHAIR),
         pinned(InputRequired),
         rule(ContextHandoff, NEW),
         rule(TokenBudget, CHAIR),
         rule(Deadline, CHAIR),
         pinned(Cancelled),
-        rule(ProviderStop, CHAIR),
-        rule(ProcessCrash, CHAIR),
+        once(ProviderStop, NEW),
+        once(ProcessCrash, NEW),
         rule(AuthRequired, NEW),
         rule(UsageLimited, NEW),
         rule(ModelUnavailable, NEW),
         rule(AdapterUnavailable, NEW),
         rule(PermissionDenied, CHAIR),
         rule(IdentityUnobserved, CHAIR),
+        rule(LaneTokenLost, NEW),
         rule(SourceViewRefused, CHAIR),
         rule(RouteRefused, CHAIR),
         rule(AccessPolicyRefused, CHAIR),
         rule(DiskFloor, CHAIR),
-        rule(DiskUnobserved, CHAIR),
+        once(DiskUnobserved, NEW),
         rule(PromptUnreadable, CHAIR),
+        rule(CloudPlacementRemoved, CHAIR),
         rule(WriteGrantsRefused, CHAIR),
         rule(WorktreeBusy, CHAIR),
         rule(LaunchHandoffRefused, CHAIR),
@@ -183,7 +279,7 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(CredentialHelperFailed, CHAIR),
         rule(CommandUnavailable, CHAIR),
         rule(HostNativeUnconfigured, CHAIR),
-        rule(SpawnFailure, CHAIR),
+        once(SpawnFailure, NEW),
         rule(SettlementFailed, CHAIR),
         rule(Lost, CHAIR),
         rule(Unsettled, CHAIR),
@@ -194,7 +290,7 @@ pub const STOP_TABLE: &[StopRule] = {
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 39] = {
+    pub const ALL: [StopCause; 41] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -215,12 +311,14 @@ impl StopCause {
             AdapterUnavailable,
             PermissionDenied,
             IdentityUnobserved,
+            LaneTokenLost,
             SourceViewRefused,
             RouteRefused,
             AccessPolicyRefused,
             DiskFloor,
             DiskUnobserved,
             PromptUnreadable,
+            CloudPlacementRemoved,
             WriteGrantsRefused,
             WorktreeBusy,
             LaunchHandoffRefused,
@@ -260,27 +358,29 @@ impl StopCause {
             AdapterUnavailable => 15,
             PermissionDenied => 16,
             IdentityUnobserved => 17,
-            SourceViewRefused => 18,
-            RouteRefused => 19,
-            AccessPolicyRefused => 20,
-            DiskFloor => 21,
-            DiskUnobserved => 22,
-            PromptUnreadable => 23,
-            WriteGrantsRefused => 24,
-            WorktreeBusy => 25,
-            LaunchHandoffRefused => 26,
-            RetainedWriterImport => 27,
-            UnsupportedPlatform => 28,
-            UnknownPacingAccount => 29,
-            UnregisteredAccount => 30,
-            CredentialHelperFailed => 31,
-            CommandUnavailable => 32,
-            HostNativeUnconfigured => 33,
-            SpawnFailure => 34,
-            SettlementFailed => 35,
-            Lost => 36,
-            Unsettled => 37,
-            Quarantined => 38,
+            LaneTokenLost => 18,
+            SourceViewRefused => 19,
+            RouteRefused => 20,
+            AccessPolicyRefused => 21,
+            DiskFloor => 22,
+            DiskUnobserved => 23,
+            PromptUnreadable => 24,
+            CloudPlacementRemoved => 25,
+            WriteGrantsRefused => 26,
+            WorktreeBusy => 27,
+            LaunchHandoffRefused => 28,
+            RetainedWriterImport => 29,
+            UnsupportedPlatform => 30,
+            UnknownPacingAccount => 31,
+            UnregisteredAccount => 32,
+            CredentialHelperFailed => 33,
+            CommandUnavailable => 34,
+            HostNativeUnconfigured => 35,
+            SpawnFailure => 36,
+            SettlementFailed => 37,
+            Lost => 38,
+            Unsettled => 39,
+            Quarantined => 40,
         }
     }
 
@@ -295,6 +395,7 @@ impl StopCause {
                 cause: self,
                 default: CHAIR,
                 pinned: true,
+                retries: 0,
             })
     }
 
@@ -302,13 +403,50 @@ impl StopCause {
         self.rule().default
     }
 
-    /// The default, or the node's `on_stop` override for this cause unless
-    /// the cause is pinned.
-    pub fn next_step(self, on_stop: Option<NextStep>) -> NextStep {
+    /// What follows a stop with this cause: the chair while custody is not
+    /// proved released (one writer per worktree is a real boundary), else the
+    /// node's `on_stop` override unless the cause is pinned, else a fresh
+    /// same-route attempt while the cause's retries last, else the default.
+    pub fn next_step(self, on_stop: &OnStop, facts: StopFacts) -> NextStep {
+        if !facts.custody_released {
+            return CHAIR;
+        }
         let rule = self.rule();
-        match on_stop {
+        match on_stop.get(self) {
             Some(step) if !rule.pinned => step,
+            _ if facts.retries < rule.retries => NextStep::SameRoute {
+                continuation: Continuation::Fresh,
+            },
             _ => rule.default,
+        }
+    }
+
+    /// A usage limit, an unavailable model or a missing login: the route
+    /// cannot serve the work now, so it moves to another agent at once.
+    pub const fn depleted(self) -> bool {
+        matches!(
+            self,
+            Self::UsageLimited | Self::ModelUnavailable | Self::AuthRequired
+        )
+    }
+
+    /// The cause a terminal outcome names by itself, for an attempt that
+    /// sealed no more specific stop. A failed task is not a stop.
+    pub const fn of_outcome(outcome: crate::run::Outcome) -> Option<Self> {
+        use crate::run::Outcome as O;
+        match outcome {
+            O::Succeeded | O::ReviewRequired | O::Failed | O::Rejected => None,
+            O::Cancelled => Some(Self::Cancelled),
+            O::TimedOut => Some(Self::Deadline),
+            O::RateLimited | O::QuotaLimited => Some(Self::UsageLimited),
+            O::AuthRequired => Some(Self::AuthRequired),
+            O::ModelUnavailable => Some(Self::ModelUnavailable),
+            O::PermissionDenied => Some(Self::PermissionDenied),
+            O::Quarantined => Some(Self::Quarantined),
+            O::Lost => Some(Self::Lost),
+            O::Unsettled => Some(Self::Unsettled),
+            O::Uncommitted => Some(Self::Uncommitted),
+            O::InputRequired => Some(Self::InputRequired),
         }
     }
 
@@ -342,12 +480,14 @@ impl StopCause {
             AdapterUnavailable => "adapter_unavailable",
             PermissionDenied => "permission_denied",
             IdentityUnobserved => "identity_unobserved",
+            LaneTokenLost => "lane_token_lost",
             SourceViewRefused => "source_view_refused",
             RouteRefused => "route_refused",
             AccessPolicyRefused => "access_policy_refused",
             DiskFloor => "disk_floor",
             DiskUnobserved => "disk_unobserved",
             PromptUnreadable => "prompt_unreadable",
+            CloudPlacementRemoved => "cloud_placement_removed",
             WriteGrantsRefused => "write_grants_refused",
             WorktreeBusy => "worktree_busy",
             LaunchHandoffRefused => "launch_handoff_refused",
@@ -389,6 +529,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::DiskFloor => Self::DiskFloor,
             T::DiskObservationUnavailable => Self::DiskUnobserved,
             T::StoredPromptUnreadable => Self::PromptUnreadable,
+            T::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             T::WriteGrantsRefused => Self::WriteGrantsRefused,
             T::WorktreeBusy => Self::WorktreeBusy,
             T::HandoffRefused => Self::LaunchHandoffRefused,
@@ -410,6 +551,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::EmptyWriterResult => Self::EmptyResult,
             T::ContextHandoff => Self::ContextHandoff,
             T::Blocked => Self::Blocked,
+            T::LaneTokenLost => Self::LaneTokenLost,
         }
     }
 }
@@ -520,8 +662,8 @@ impl Stop {
         self.handoff.as_ref().map(|handoff| handoff.note.as_str())
     }
 
-    pub fn next_step(&self, on_stop: Option<NextStep>) -> NextStep {
-        self.cause.next_step(on_stop)
+    pub fn next_step(&self, on_stop: &OnStop, facts: StopFacts) -> NextStep {
+        self.cause.next_step(on_stop, facts)
     }
 }
 

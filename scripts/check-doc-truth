@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Warn on unresolved inline provenant commands, long flags, repo paths and ADRs.
+"""Check provenant commands, long flags, repo paths and ADRs against the CLI.
 
-Reference warnings are advisory. Deleted commands, research index omissions and
-projection mismatches fail; strict options enforce inventory, Anchor paths,
-diagram metadata and explicit test citations.
-Fenced examples, runtime absolute paths and templates are
-excluded. Commands scope flags to
-their own help; flags are checked only after a provenant command. Lines that
-say removed, replaced or retired are skipped. Documentation snippets are never executed.
+Unknown commands and flags in runbooks fail, inline or in fenced `provenant`
+lines; in other documents, and for paths and ADRs, they are advisory warnings.
+Deleted commands, research index omissions and projection mismatches fail;
+strict options enforce inventory, Anchor paths, diagram metadata and explicit
+test citations. Runtime absolute paths and templates are excluded. Commands
+scope flags to their own help; flags are checked only after a provenant command.
+Lines that say removed, replaced or retired are skipped. Documentation snippets
+are never executed.
 """
 
 import argparse
@@ -18,9 +19,9 @@ import shlex
 import subprocess
 
 
-def warn(path, line, kind, reference):
+def warn(path, line, kind, reference, level="warning"):
     reference = " ".join(str(reference).split())
-    print(f"{path}:{line}: warning: unresolved {kind} `{reference}`")
+    print(f"{path}:{line}: {level}: unresolved {kind} `{reference}`")
 
 
 def catalogue(args, root):
@@ -29,10 +30,10 @@ def catalogue(args, root):
             payload = json.loads(Path(args.help_json).read_text())
         else:
             command = (
-                [str(Path(args.binary).resolve()), "help", "--json"]
+                [str(Path(args.binary).resolve()), "help", "--all", "--json"]
                 if args.binary
                 else ["cargo", "run", "--quiet", "--locked", "--bin", "provenant",
-                      "--", "help", "--json"]
+                      "--", "help", "--all", "--json"]
             )
             result = subprocess.run(
                 command, cwd=root / "tools/front-door", check=True,
@@ -72,6 +73,32 @@ def inline_code(text):
         last = text.count("\n", 0, match.end())
         context = " ".join(text.splitlines()[first:last + 1])
         yield first + 1, " ".join(match[2].split()), context
+
+
+def fenced_commands(text):
+    """Yield `provenant` command lines from fenced examples, joining continuations."""
+    fence, pending = None, None
+    for number, line in enumerate(text.splitlines(), 1):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = pending = None
+                continue
+            joined = line.strip()
+            if pending:
+                pending = (pending[0], pending[1] + " " + joined)
+            elif re.match(r"^(?:\$ )?provenant\b", joined):
+                pending = (number, joined)
+            else:
+                continue
+            if pending[1].endswith("\\"):
+                pending = (pending[0], pending[1][:-1].rstrip())
+                continue
+            command = re.sub(r"\s#\s.*$", "", pending[1])
+            yield pending[0], command, command
+            pending = None
+        elif marker:
+            fence = marker[1]
 
 
 def flags(entry):
@@ -126,7 +153,7 @@ def path_reference(word):
         return None
     word = word.split("#", 1)[0].split("::", 1)[0].rstrip(":")
     if not word or re.search(r"\b[A-Z][A-Z_]+\b", word.replace(".md", "")):
-        # Uppercase Markdown filenames (AGENTS.md, HARNESS.md) are literal.
+        # Uppercase Markdown filenames (AGENTS.md, CLAUDE.md) are literal.
         if "/" in word or not word.endswith(".md"):
             return None
     if "/" not in word and not re.search(r"\.(?:md|rs|py|sh|toml|json|jsonl|ya?ml|sql|sb)$", word):
@@ -156,19 +183,31 @@ def resolves_path(root, document, reference, gone):
 
 
 def check_references(root, document, commands, adrs, gone):
+    """Report unresolved references; return the number that fail the check."""
     display = document.relative_to(root)
-    for line, reference, context in inline_code(document.read_text()):
+    text = document.read_text()
+    runbook = document.parent == root / "docs/runbooks"
+    level = "error" if runbook else "warning"
+    failures = 0
+    references = list(inline_code(text))
+    if runbook:
+        references += list(fenced_commands(text))
+    for line, reference, context in references:
         if RETIRED.search(context):
             continue
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing and missing not in HIDDEN:
-            warn(display, line, "command", missing)
+            warn(display, line, "command", missing, level)
+            failures += runbook
         if commands and scopes:
             known_flags = (set().union(*(flags(commands[scope]) for scope in scopes))
                            | flags(commands["provenant"]))
+            if re.match(r"^(?:\$ )?provenant help\b", reference):
+                known_flags.add("--all")
             for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", reference)):
                 if flag not in known_flags:
-                    warn(display, line, "flag", flag)
+                    warn(display, line, "flag", flag, level)
+                    failures += runbook
         for number in dict.fromkeys(re.findall(r"\bADR[ -]+(\d{1,4})\b", reference, re.I)):
             if int(number) not in adrs:
                 warn(display, line, "ADR", f"ADR {number}")
@@ -176,6 +215,7 @@ def check_references(root, document, commands, adrs, gone):
             path = path_reference(word)
             if path and not resolves_path(root, document, path, gone):
                 warn(display, line, "path", path)
+    return failures
 
 
 
@@ -261,6 +301,18 @@ def check_spec_index(root):
             warn(index.relative_to(root), 1, "spec index entry", spec.name)
             missing += 1
     return missing
+
+
+SPEC_WORD_CAP = 2000
+
+
+def check_spec_length(root):
+    """Specs are invariants pages; past the cap, behaviour is being narrated."""
+    for spec in sorted((root / "docs/specs").glob("*.md")):
+        words = len(spec.read_text().split())
+        if words > SPEC_WORD_CAP:
+            print(f"{spec.relative_to(root)}:1: warning: spec has {words} words, "
+                  f"over the {SPEC_WORD_CAP}-word cap; cite tests instead of narrating")
 
 
 def check_diagrams(root, document):
@@ -368,19 +420,6 @@ def table_rows(text, heading):
 def check_projections(root):
     """Compare hand-kept runbook tables with the source they project."""
     errors = []
-    intake = root / "docs/runbooks/event-intake-configuration.md"
-    source = root / "tools/front-door/src/bin/event-intake.rs"
-    if intake.exists() and source.exists():
-        code = source.read_text()
-        documented = {row[0].strip("`"): row for row in table_rows(intake.read_text(), "## Configure")}
-        read = set(re.findall(r'"(PROVENANT_INTAKE_[A-Z_]+)"', code))
-        for name in sorted(read ^ set(documented)):
-            where = "is read by event-intake but not documented" if name in read else "is documented but not read"
-            errors.append(f"{intake.relative_to(root)}: error: {name} {where}")
-        default = re.search(r'"PROVENANT_INTAKE_SWEEP_SECONDS"\)\s*\.unwrap_or_else\(\|_\| "(\d+)"', code)
-        row = documented.get("PROVENANT_INTAKE_SWEEP_SECONDS")
-        if default and row and f"`{default[1]}`" not in row[1]:
-            errors.append(f"{intake.relative_to(root)}: error: sweep default is {default[1]}")
     inbox = root / "docs/runbooks/human-inbox.md"
     specs = root / "tools/front-door/crates/records/src/adapters.rs"
     hooks = root / "tools/front-door/crates/cli/src/hooks.rs"
@@ -405,7 +444,7 @@ def check_projections(root):
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
-    "README.md", "docs/worktrees.md", "docs/reference/schemas.md",
+    "README.md", "docs/worktrees.md",
     "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
 )
 DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"
@@ -523,6 +562,7 @@ def main():
                   if document in documents or document.name == "worktrees.md")
     missing += sum(check_anchors(root, document) for document in evidence)
     missing += check_spec_index(root)
+    check_spec_length(root)
     adr_documents = sorted((root / "docs/adr").glob("*.md"))
     missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
     citations = sum(check_test_citations(root, document) for document in evidence
@@ -530,11 +570,12 @@ def main():
     missing += sum(anchors(root, document) for document in evidence
                    if document in documents)
     projection_errors = check_projections(root)
+    reference_errors = 0
     if not args.inventory_only:
         agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
         for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
-            check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or bool(projection_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
+            reference_errors += check_references(root, document, commands, adrs, gone)
+    return int(bool(command_errors) or bool(projection_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 
 
 if __name__ == "__main__":

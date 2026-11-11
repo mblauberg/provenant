@@ -427,7 +427,7 @@ impl FileJournal {
             };
             let checkpoint = &stored.checkpoint;
             if stored_pending(&stored)
-                || checkpoint.asks.iter().any(|ask| !ask.closed)
+                || !checkpoint.asks.is_empty()
                 || checkpoint.wake_at.is_some()
                 || checkpoint.nodes.iter().any(|node| {
                     node.land
@@ -871,7 +871,7 @@ impl GraphJournal for FileJournal {
 
 fn stored_pending(stored: &StoredCheckpoint) -> bool {
     let checkpoint = &stored.checkpoint;
-    no_work::pending(&stored.execution.document, checkpoint)
+    next_step::pending(checkpoint)
         || checkpoint
             .nodes
             .iter()
@@ -880,10 +880,7 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
             && !checkpoint.delivered
             && stored.execution.document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
             && checkpoint.successful()
-        || checkpoint
-            .asks
-            .iter()
-            .any(|ask| !ask.closed && (ask.resolved || checkpoint.cancelled))
+        || !checkpoint.asks.is_empty()
 }
 
 /// Remove scratch documents equal to this graph's retained document. The
@@ -1022,12 +1019,10 @@ fn checkpoint_json_settled(bytes: &[u8]) -> bool {
             Some("succeeded" | "failed" | "blocked" | "skipped")
         )
     });
+    // A link means an inbox request that is still open or unread.
     let asks_closed = match checkpoint.get("asks") {
         None => true,
-        Some(asks) => asks.as_array().is_some_and(|asks| {
-            asks.iter()
-                .all(|ask| ask.get("closed") == Some(&serde_json::Value::Bool(true)))
-        }),
+        Some(asks) => asks.as_array().is_some_and(Vec::is_empty),
     };
     if !terminal || !asks_closed {
         return false;

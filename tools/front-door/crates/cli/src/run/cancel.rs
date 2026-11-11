@@ -92,53 +92,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
             let mut receipts = Vec::new();
             let mut human = String::new();
             let mut requested = false;
-            let mut cloud_seen = false;
-            let mut local_wait_targets = Vec::new();
             for id in selected {
-                let record = session.store.record(id, &call)?;
-                if cloud_owner::placement(&session.store, &record, &call)
-                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-                    .is_some()
-                {
-                    cloud_seen = true;
-                    let cloud = cloud_owner::load(&session.store, id, &call)
-                        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
-                    let observed = match &cloud {
-                        Some(job) => cloud_owner::observe_installed(edge.roots, &session.store, id, job, &call, edge.cwd, true),
-                        None => Err("cloud submission identity is not recorded; cancellation is unconfirmed".into()),
-                    };
-                    match observed {
-                        Ok(job) => {
-                            let view = cloud_owner::view(&job);
-                            human.push_str(&format!("{id} cloud {}\n", state_tag(&job.state)));
-                            receipts.push(json!({"attempt_id": id, "cloud": view}));
-                        }
-                        Err(error) => {
-                            status = Status::Failed;
-                            let remedy = abandon_remedy(cloud.as_ref(), record.run_id, id);
-                            human.push_str(&format!(
-                                "{id} cloud cancellation unconfirmed: {}",
-                                plain_text(&error, usize::MAX)
-                            ));
-                            match &remedy {
-                                Some(remedy) => human
-                                    .push_str(&format!("; to abandon tracking, run `{remedy}`\n")),
-                                None => human.push_str(&format!(
-                                    "; retry `provenant reconcile --id {}/{id}`\n",
-                                    record.run_id
-                                )),
-                            }
-                            receipts.push(json!({"attempt_id": id, "error": {"message": error}, "cancellation_unconfirmed": true, "remedy": remedy}));
-                        }
-                    }
-                    continue;
-                }
-                local_wait_targets.push(Target {
-                    selection: None,
-                    run: None,
-                    task: None,
-                    attempt: Some(id),
-                });
                 // One failure must not hide the receipts already earned.
                 let receipt = request(&clock, &cancel)
                     .and_then(|call| Ok(session.service().cancel(id, reason, &call)?));
@@ -211,18 +165,10 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     }
                 }
             }
-            if let Some(seconds) = command
-                .wait
-                .filter(|_| !cloud_seen || !local_wait_targets.is_empty())
-            {
-                let wait_targets: &[Target] = if cloud_seen {
-                    &local_wait_targets
-                } else {
-                    &targets
-                };
+            if let Some(seconds) = command.wait {
                 let (lanes, rendered, timed_out) = wait_lanes(
                     &session,
-                    wait_targets,
+                    &targets,
                     Condition::All,
                     Duration::from_secs(seconds),
                     edge,
@@ -252,79 +198,4 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
         out.result.status = status;
     }
     out
-}
-
-/// The abandon command `stop` offers, only when abandon can settle the job:
-/// no saved job, or a submission whose remote outcome is unknown.
-fn abandon_remedy(
-    job: Option<&provenant_providers::cloud::RemoteJob>,
-    run: impl std::fmt::Display,
-    id: impl std::fmt::Display,
-) -> Option<String> {
-    let abandonable = job.is_none_or(|job| {
-        matches!(
-            job.state,
-            provenant_providers::cloud::RemoteState::Submitting
-        ) || job.is_unresolved_submission()
-    });
-    abandonable.then(|| format!("provenant reconcile --abandon {run}/{id} --reason 'REASON'"))
-}
-
-#[cfg(test)]
-mod abandon_remedy_tests {
-    use super::abandon_remedy;
-    use provenant_providers::cloud::{RemoteJob, RemoteState};
-
-    fn job(state: RemoteState, remote_id: &str) -> RemoteJob {
-        RemoteJob {
-            job_id: "j".into(),
-            nonce: "n".into(),
-            deadline_unix_seconds: 1,
-            provider: "p".into(),
-            target: "t".into(),
-            environment: "e".into(),
-            repository: "r".into(),
-            branch: "b".into(),
-            work_branch: None,
-            remote_id: remote_id.into(),
-            session_url: None,
-            commit: String::new(),
-            requested_model: "m".into(),
-            requested_effort: None,
-            state,
-            submit_error: None,
-            submit_refused: false,
-            cloud_transport: Default::default(),
-            cloud_command: None,
-        }
-    }
-
-    #[test]
-    fn stop_hint_appears_only_when_abandon_can_settle_the_job() {
-        let expected = Some("provenant reconcile --abandon run/att --reason 'REASON'".to_owned());
-        assert_eq!(abandon_remedy(None, "run", "att"), expected);
-        for state in [
-            RemoteState::Submitting,
-            RemoteState::Unknown {
-                detail: "unknown".into(),
-            },
-        ] {
-            assert_eq!(
-                abandon_remedy(Some(&job(state, "")), "run", "att"),
-                expected
-            );
-        }
-        for (state, id) in [
-            (RemoteState::Running, "remote-1"),
-            (
-                RemoteState::Unknown {
-                    detail: "unknown".into(),
-                },
-                "remote-1",
-            ),
-            (RemoteState::Failed { detail: "x".into() }, ""),
-        ] {
-            assert_eq!(abandon_remedy(Some(&job(state, id)), "run", "att"), None);
-        }
-    }
 }

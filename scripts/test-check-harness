@@ -21,11 +21,8 @@ class HarnessChecks(unittest.TestCase):
         self.root = Path(self.temp.name)
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.skill = self.root / "skills/example/SKILL.md"
-        self.fixture = self.root / "skills/example/evals/trigger_cases.json"
         self.skill.parent.mkdir(parents=True)
-        self.fixture.parent.mkdir(parents=True)
         self.skill.write_text("---\nname: example\ndescription: Example fixture skill.\n---\n# Hello\n# Hello\n[duplicate](#hello-1)\n")
-        self.fixture.write_text(json.dumps({"schema_version": 1, "target_skill": "example", "cases": [{"id": "q1", "relation": "positive", "prompt": "Use this skill", "tags": ["direct"], "expected": {"primary_skill": "example", "companion_skills": []}}]}))
         subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
 
     def tearDown(self):
@@ -36,14 +33,12 @@ class HarnessChecks(unittest.TestCase):
         self.assertEqual(output.returncode, expected, output.stdout + output.stderr)
         return output.stderr
 
-    def test_tracked_yaml_links_and_routes(self):
+    def test_tracked_links(self):
         (self.root / "untracked.md").write_text("[untracked](missing.md)")
         self.check()
         self.skill.write_text("---\nname: example\ndescription: Example fixture skill.\n---\n[bad](#missing)\n")
         warnings = self.check()
         self.assertIn("warning: skills/example/SKILL.md:5: unresolved Markdown anchor", warnings)
-        self.fixture.write_text("{}")
-        self.assertIn("invalid route fixture", self.check(1))
 
     def test_duplicate_yaml_is_rejected(self):
         self.skill.write_text("---\nname: example\nname: example\ndescription: A skill\n---\n")
@@ -86,9 +81,9 @@ class HarnessChecks(unittest.TestCase):
         self.assertIn("at least one input is required", self.check(1))
 
     def test_recorded_skill_and_sidecar(self):
-        skill = ROOT / "skills/refactor/SKILL.md"
-        sidecar = ROOT / "skills/refactor/agents/openai.yaml"
-        target = self.root / "skills/refactor"
+        skill = ROOT / "skills/improve/SKILL.md"
+        sidecar = ROOT / "skills/improve/agents/openai.yaml"
+        target = self.root / "skills/improve"
         (target / "agents").mkdir(parents=True)
         header = skill.read_text().split("---", 2)
         (target / "SKILL.md").write_text("---" + header[1] + "---\n")
@@ -120,20 +115,17 @@ class HarnessChecks(unittest.TestCase):
         self.assertIn("README.md: line 1: names", self.check(1))
 
     def test_ambient_files_name_no_repository_paths(self):
-        ambient = self.root / "HARNESS.md"
+        ambient = self.root / "GLOBAL-AGENTS.md"
         ambient.write_text("Use `orchestrate` and `~/.codex/config.toml`.\n")
         subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
         self.check()
         ambient.write_text("See `docs/runbooks/x.md`.\n")
-        self.assertIn("HARNESS.md: line 1: ambient file names repository path docs/runbooks/x.md", self.check(1))
+        self.assertIn("GLOBAL-AGENTS.md: line 1: ambient file names repository path docs/runbooks/x.md", self.check(1))
         ambient.write_text("Governed by `MAINTAINING.md`.\n")
         self.assertIn("ambient file names repository path MAINTAINING.md", self.check(1))
         ambient.write_text("See `../docs/x.md`.\n")
         self.assertIn("ambient file names repository path ../docs/x.md", self.check(1))
-        ambient.unlink()
-        rules = self.root / "GLOBAL-AGENTS.md"
-        rules.write_text("See `scripts/verify`.\n")
-        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        ambient.write_text("See `scripts/verify`.\n")
         self.assertIn("GLOBAL-AGENTS.md: line 1: ambient file names repository path scripts/verify", self.check(1))
 
     def test_skill_links_must_survive_installation(self):

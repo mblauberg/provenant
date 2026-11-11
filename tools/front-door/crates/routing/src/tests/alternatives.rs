@@ -462,8 +462,8 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     };
     let model = crate::ModelId::parse("codex/gpt-6.1-terra")?;
     for text in [
-        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only=true\nmax_continuations=9\n",
-        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\nmax_continuations=9\n",
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only=true\n[domains.routing.model_policy.defaults.cache]\nread_heavy_weight=11\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n[domains.routing.model_policy.rules.policy.cache]\nread_heavy_weight=11\n",
     ] {
         let config = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)?;
         let policy = config
@@ -477,13 +477,13 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             )
             .policy;
         assert_eq!(policy.lane.read_only, Some(true), "{text}");
-        assert_ne!(policy.lane.max_continuations, Some(9), "{text}");
+        assert_ne!(policy.cache.read_heavy_weight, Some(11), "{text}");
         assert!(!policy.permits(write), "{text}");
         assert_eq!(config.warnings.len(), 1, "{text}");
         assert!(
             config.warnings[0]
                 .message
-                .contains(".lane.max_continuations:"),
+                .contains(".cache.read_heavy_weight:"),
             "{}",
             config.warnings[0].message
         );

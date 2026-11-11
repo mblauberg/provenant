@@ -2,7 +2,7 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -112,13 +112,15 @@ fn provider_failure_boundary_depends_on_typed_cause() {
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Published per attempt as `availability.json`, which the depletion ladder
+/// reads back as the stopped attempt's observed readiness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvailabilityRecord {
     pub schema_version: u64,
     pub adapter: String,
     pub executable: String,
     pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update: Option<crate::update::UpdateRecord>,
     pub fixture_ref: String,
     pub catalogue_revision: String,
@@ -126,6 +128,37 @@ pub struct AvailabilityRecord {
     pub observed_models: Vec<String>,
     pub observed_unix_seconds: i64,
     pub expires_unix_seconds: i64,
+}
+
+/// Match a requested model against a list of offered models reported by an account.
+/// Empty offered models means no restriction is known.
+pub fn model_matches_offered(requested: &str, offered_models: &[String]) -> bool {
+    if offered_models.is_empty() {
+        return true;
+    }
+    offered_models
+        .iter()
+        .any(|offered| model_matches_single(requested, offered))
+}
+
+fn model_matches_single(requested: &str, offered: &str) -> bool {
+    fn tokens(name: &str) -> Vec<String> {
+        name.strip_prefix("agy/")
+            .unwrap_or(name)
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+    let (req, off) = (tokens(requested), tokens(offered));
+    if req.is_empty() || off.is_empty() {
+        return false;
+    }
+    // Whole tokens only: "mini" never matches inside "gemini". An offered
+    // display name ("Gemini Flash") matches a technical id that contains all of
+    // its tokens ("gemini-3.8-flash").
+    off.iter().all(|t| req.contains(t)) || req.iter().all(|t| off.contains(t))
 }
 
 pub struct Prompt {
@@ -389,4 +422,29 @@ pub trait Adapter: Sync {
         &self,
         provenance: &RouteProvenance<'_>,
     ) -> Result<VerifiedLineage, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_matches_offered() {
+        let flash_only = vec!["Gemini Flash".to_string()];
+        assert!(!model_matches_offered("gemini-3.8-pro", &flash_only));
+        assert!(!model_matches_offered("agy/gemini-3.8-pro", &flash_only));
+        assert!(model_matches_offered("gemini-3.8-flash", &flash_only));
+        assert!(model_matches_offered("agy/gemini-3.8-flash", &flash_only));
+
+        let both = vec!["Gemini Flash".to_string(), "Gemini Pro".to_string()];
+        assert!(model_matches_offered("gemini-3.8-pro", &both));
+        assert!(model_matches_offered("gemini-3.8-flash", &both));
+
+        let empty: Vec<String> = Vec::new();
+        assert!(model_matches_offered("gemini-3.8-pro", &empty));
+
+        let technical = vec!["gemini-2.5-flash".to_string()];
+        assert!(!model_matches_offered("gemini-3.8-pro", &technical));
+        assert!(model_matches_offered("agy/Gemini-2.5-Flash", &technical));
+    }
 }

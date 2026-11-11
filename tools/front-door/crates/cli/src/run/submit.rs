@@ -126,6 +126,7 @@ pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
                 delivery_stage: None,
                 resource: None,
                 input_failure: Some(fact),
+                cause: None,
             };
             let mut projection = detail.diagnostic();
             projection.code = ErrorKind::Io.code().into();
@@ -779,7 +780,6 @@ fn submit_with_launcher(
                 ));
             }
             Ok(run::DispatchTask {
-                cloud: attempt.placement,
                 context: task.context,
                 build_heavy: attempt.build_heavy,
                 profile: task_profile,

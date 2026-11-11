@@ -35,7 +35,7 @@ mod land_tests;
 mod loops;
 mod model;
 mod next_attempt;
-mod no_work;
+mod next_step;
 mod observation;
 mod outputs;
 pub mod patch;
@@ -51,13 +51,22 @@ mod template_tests;
 mod transitions;
 mod validation;
 mod wait_view;
+pub mod when;
 #[doc(hidden)]
+pub use next_step::{DepletionFacts, DepletionRequest};
 pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
+pub use when::WhenTerm;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
+mod ask_link_tests;
+#[cfg(test)]
+mod next_step_tests;
+#[cfg(test)]
 mod typed_records_tests;
+#[cfg(test)]
+mod when_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
@@ -132,7 +141,7 @@ mod file_tests;
 #[path = "graph/graph_tests.rs"]
 mod tests;
 pub use asks::{
-    AnswerSource, AskAnswer, AskKind, AskOption, AskReply, AskScope, DecideSpec, NodeAsk,
+    AskFiled, AskFiling, AskKind, AskLink, AskOption, AskReply, AskRequest, AskScope, DecideSpec,
     close_resolved_asks, loop_ask,
 };
 pub use composites::CompositeSpec;
@@ -371,6 +380,16 @@ pub trait AttemptOwner {
         Ok(false)
     }
 
+    /// The routing facts the depletion ladder reads for a writer stopped by a
+    /// spent quota, a missing model or a lost login. `None` means this host
+    /// keeps no routing facts, and the node's own declared routes stand in.
+    fn depletion_facts(
+        &mut self,
+        _request: DepletionRequest<'_>,
+    ) -> Result<Option<DepletionFacts>, Self::Error> {
+        Ok(None)
+    }
+
     /// Resolve a fresh panel for a repair whose risk or scope has grown.
     fn resolve_repair_panel(
         &mut self,
@@ -422,17 +441,29 @@ pub trait AttemptOwner {
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
 
-    /// Raise the ask if it is new, idempotently by its ask ID, and return its
-    /// answer once there is one. A host without an inbox never answers.
+    /// File the ask as an open inbox request, idempotently by the graph
+    /// instance and ask ID: a repeat returns the request it filed first, with
+    /// the deadline that request carries. A host without an inbox names the ask
+    /// itself and never has an answer.
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        Ok(AskFiled {
+            request: filing.ask.ask_id.clone(),
+            deadline: filing.ask.wake_at,
+            closed: false,
+        })
+    }
+    /// Read the answer to a filed ask, once there is one. A host without an
+    /// inbox never answers.
     fn node_ask(&mut self, _scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         Ok(None)
     }
     /// Send a durable non-blocking owner notification, idempotent by ask ID.
     /// False means the host has no notification transport yet.
-    fn notify_owner(&mut self, _scope: AskScope<'_>) -> Result<bool, Self::Error> {
+    fn notify_owner(&mut self, _filing: AskFiling<'_>) -> Result<bool, Self::Error> {
         Ok(false)
     }
-    /// Withdraw a resolved ask's inbox request. Closing never creates one.
+    /// Withdraw an unanswered ask's inbox request. Closing never creates one,
+    /// and an answered request stays answered.
     fn close_node_ask(&mut self, _scope: AskScope<'_>) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -541,6 +572,19 @@ pub trait AttemptOwner {
         tier: provenant_records::workflow::RiskTier,
     ) -> crate::config::LandChoice {
         crate::config::GraphLand::default().choose(None, tier)
+    }
+
+    /// Prove whether a review of `reviewed` covers the land `head` of
+    /// `branch` that moved after it, against a fetch of the branch its pull
+    /// request merges into. `None` means this host cannot prove carry-over,
+    /// so only the reviewed head itself may land.
+    fn review_coverage(
+        &mut self,
+        _branch: &str,
+        _reviewed: provenant_core::review_cover::Reviewed<'_>,
+        _head: &str,
+    ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {
+        Ok(None)
     }
 
     /// Merge an authorised land node's pull request through the repository's
@@ -711,8 +755,8 @@ struct PlannedGraph {
 struct PlannedNode {
     #[serde(skip)]
     review_launch: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auto_continue_no_work: Option<bool>,
+    #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    on_stop: provenant_records::OnStop,
     #[serde(skip_serializing_if = "Option::is_none")]
     family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -776,6 +820,8 @@ struct PlannedNode {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deadline_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    when: Vec<WhenTerm>,
     prompt: String,
     depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "model::is_false")]
@@ -1023,7 +1069,14 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
     )>,
     GraphError<R::Error, J::Error>,
 > {
-    let Some(next) = no_work::continue_stopped(document, plan, checkpoint, limits) else {
+    let mut ladder = |request: DepletionRequest<'_>| {
+        owner
+            .depletion_facts(request)
+            .map_err(|error| error.to_string())
+    };
+    let Some((index, next)) =
+        next_step::settle_stop(document, plan, checkpoint, limits, &mut ladder)
+    else {
         return Ok(None);
     };
     let planned =
@@ -1039,7 +1092,7 @@ fn settle_stopped_writer<R: AttemptOwner, J: GraphJournal>(
         Ok(planned) => (next, planned),
         Err(reason) => {
             // The pause keeps the saved expansions, which already planned.
-            let paused = no_work::refused(plan, checkpoint, &reason);
+            let paused = next_step::refused(plan, checkpoint, index, &reason);
             let expanded = plans::expand(document, &paused.extensions, &paused.expansions, limits)
                 .map_err(GraphError::Invalid)?;
             let (plan, positions) = validate_flat_plan(&expanded, limits)
@@ -1063,7 +1116,7 @@ pub fn cancel_node_subtree(
         .ok_or_else(|| format!("unknown node {id}"))?;
     let mut effect = relay::cancel_subtree(document, checkpoint, id)?;
     let node = &mut checkpoint.nodes[index];
-    no_work::fence_stopped(node);
+    next_step::fence_stopped(node);
     if !node.state.settled() {
         if node
             .attempts
@@ -1730,7 +1783,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &extension,
                             limits,
                         ) {
-                            transitions::reject_loop_decision(&mut checkpoint, &node.id, &reason);
                             loops::pause_invalid_decision(
                                 &mut checkpoint,
                                 &node.id,
@@ -1847,18 +1899,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let single = panel.slots.len() == 1;
                                     // Repair input needs checked dispositions even for
                                     // a single lens. Reuse the existing synthesis step.
-                                    let topology = format!(
-                                        "f{}-v{}-s1",
-                                        u8::from(panel.frame && !single),
-                                        u8::from(panel.verifiers > 0 && !single),
+                                    let verifiers = if single { 0 } else { panel.verifiers };
+                                    let stages = when::review_stages(
+                                        panel.frame && !single,
+                                        verifiers > 0,
+                                        true,
                                     );
-                                    let verifier_ids = if single {
-                                        Vec::new()
-                                    } else {
-                                        (1..=panel.verifiers)
-                                            .map(|index| index.to_string())
-                                            .collect()
-                                    };
+                                    let verifier_ids: Vec<String> = (1..=verifiers.max(1))
+                                        .map(|index| index.to_string())
+                                        .collect();
                                     let slots = panel.slots;
                                     let mut routes = Vec::with_capacity(slots.len());
                                     let mut lenses = Vec::with_capacity(slots.len());
@@ -1890,9 +1939,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     let mut resolvers = std::collections::BTreeMap::from([
                                         ("review-panel".into(), lenses.clone()),
                                         ("review-panel-routes".into(), routes),
-                                        ("review-topology".into(), vec![topology]),
                                         ("review-verifiers".into(), verifier_ids),
                                     ]);
+                                    resolvers.extend(stages);
                                     for lens in lenses {
                                         resolvers.insert(
                                             format!("review-advice-{lens}"),
@@ -2682,32 +2731,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 }
-                // Read continuation lineage from the durable expansion journal,
-                // including graphs saved before restart routing was introduced.
-                // The alias draw excludes the actual models used by every
-                // predecessor, rather than repeating the original hash draw.
-                let mut predecessors = Vec::new();
-                let mut ancestor = node.id.as_str();
-                while let Some(expansion) = checkpoint.expansions.iter().find(|expansion| {
-                    expansion.continuation
-                        && expansion.nodes.iter().any(|child| child.id == ancestor)
-                }) {
-                    if let Some(progress) = checkpoint
-                        .nodes
-                        .iter()
-                        .find(|row| row.id == expansion.source)
-                    {
-                        predecessors.extend(
-                            progress
-                                .recorded_attempts()
-                                .filter_map(|attempt| attempt.attempt_ref.clone()),
-                        );
-                    }
-                    ancestor = &expansion.source;
-                }
-                let mut prior_attempts = owner
-                    .attempt_models(&predecessors)
-                    .map_err(GraphError::Run)?;
+                // A restart is in place: its archived attempts below carry the
+                // models the alias draw excludes.
+                let mut prior_attempts = Vec::new();
                 for attempt in checkpoint.nodes[node_index]
                     .previous_attempts
                     .iter()

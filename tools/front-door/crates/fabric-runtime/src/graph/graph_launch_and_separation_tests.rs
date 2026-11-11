@@ -7,17 +7,6 @@ fn node_attempt_spec_reaches_the_launch() {
         confidential: true,
         provider_timeout: Some(42),
         account: Some("work".into()),
-        placement: Some(provenant_records::run::CloudPlacement {
-            target: "cloud".into(),
-            provider: "provider".into(),
-            environment: "env".into(),
-            repository: "repo".into(),
-            branch: "branch".into(),
-            model: "model".into(),
-            effort: None,
-            deadline_seconds: 60,
-            work_branch: None,
-        }),
         build_heavy: true,
         capabilities: vec!["postgres".into()],
         write_roots: vec!["/tmp/graph-write".into()],
@@ -184,6 +173,7 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some("3".repeat(40)),
+        stop: None,
     };
     let mut owner = FakeOwner {
         observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
@@ -767,6 +757,7 @@ fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
                 result_path: None,
                 branch: None,
                 commit: None,
+                stop: None,
             },
         ]
         .into(),

@@ -9,7 +9,7 @@ use input::bounded_input;
 pub use input::{InputError, ValidateInput};
 
 use provenant_core::{
-    ActorId, CancelToken, ClaimId, Clock, DurationMicros, GitOid, MessageId, ProjectId, StateRoot,
+    ActorId, CancelToken, ClaimId, Clock, DurationMicros, MessageId, ProjectId, StateRoot,
     WaitBudget, WaitTransport,
 };
 use provenant_os::fs::FsError;
@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use provenant_core::{Pause, ThreadPause};
-use provenant_fabric_store::{ClaimFence, ClaimRequest, LandingRequest, Request, Store};
+use provenant_fabric_store::{ClaimFence, ClaimRequest, Request, Store};
 pub use provenant_fabric_store::{
-    Delivery, Event, EventKind, EventRecord, Landing, Message, MessageKind, MessageRef, Page,
-    WorkClaim, WorkScope,
+    Delivery, Event, EventKind, EventRecord, Message, MessageKind, MessageRef, Page, WorkClaim,
+    WorkScope,
 };
 
 #[derive(Debug, Error)]
@@ -32,8 +32,6 @@ pub enum CoordinationError {
     Peer(#[from] crate::hosts::PeerError),
     #[error("invalid coordination input: {0}")]
     InvalidInput(&'static str),
-    #[error("invalid coordination input: landing lock required")]
-    LandingLockRequired,
     #[error(transparent)]
     Input(#[from] InputError),
     #[error("coordination request was cancelled")]
@@ -95,26 +93,6 @@ pub struct ClaimProof {
 impl std::fmt::Debug for ClaimProof {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaimProof")
-            .field("id", &self.id)
-            .field("generation", &self.generation)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LandingProof {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub reference: String,
-    pub id: ClaimId,
-    pub generation: u64,
-    #[serde(with = "input::hex_token")]
-    pub token: [u8; 16],
-}
-impl std::fmt::Debug for LandingProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LandingProof")
-            .field("reference", &self.reference)
             .field("id", &self.id)
             .field("generation", &self.generation)
             .finish_non_exhaustive()
@@ -240,8 +218,6 @@ fn bounded_page<T: Serialize>(
     Ok(page)
 }
 
-// Claims and landings share the `fabric_lease` tool, so each op names its kind
-// on every wire.
 bounded_input! {
     pub enum ClaimInput as WireClaimInput {
         #[serde(rename = "claim_acquire")]
@@ -288,59 +264,6 @@ pub enum ClaimResult {
     },
 }
 
-bounded_input! {
-    pub enum LandingInput as WireLandingInput {
-        #[serde(rename = "landing_acquire")]
-        Acquire {
-            reference: String,
-            expected: GitOid,
-            candidate: GitOid,
-            lease_seconds: u64,
-        },
-        #[serde(rename = "landing_renew")]
-        Renew { proof: LandingProof, lease_seconds: u64 },
-        #[serde(rename = "landing_verify")]
-        Verify { proof: LandingProof },
-        #[serde(rename = "landing_release")]
-        Release { proof: LandingProof },
-        #[serde(rename = "landing_wait")]
-        Wait { reference: String, generation: u64, wait_seconds: u64 },
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum LandingResult {
-    Acquired {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        proof: LandingProof,
-        landing: Landing,
-    },
-    Renewed {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        landing: Landing,
-    },
-    Verified {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        landing: Landing,
-    },
-    Released {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        id: ClaimId,
-        reference: String,
-    },
-    Waited {
-        #[serde(flatten)]
-        extra: provenant_records::ExtraFields,
-        landing: Option<Landing>,
-        timed_out: bool,
-    },
-}
-
 /// Narrow seam consumed by MCP and implemented by the runtime composition.
 /// The service is worker-local because each `Store` owns one SQLite connection.
 pub trait CoordinationApi {
@@ -369,12 +292,6 @@ pub trait CoordinationApi {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<ClaimResult, CoordinationError>;
-    fn landing(
-        &self,
-        input: LandingInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<LandingResult, CoordinationError>;
 }
 
 pub struct LocalCoordination<'a> {
@@ -496,29 +413,9 @@ impl<'a> LocalCoordination<'a> {
         }
     }
 
-    fn landing_fence(&self, proof: &LandingProof) -> ClaimFence {
-        ClaimFence {
-            extra: Default::default(),
-            id: proof.id,
-            actor: self.actor,
-            generation: proof.generation,
-            token: proof.token,
-        }
-    }
-
     fn claim_proof(&self, fence: ClaimFence) -> ClaimProof {
         ClaimProof {
             extra: Default::default(),
-            id: fence.id,
-            generation: fence.generation,
-            token: fence.token,
-        }
-    }
-
-    fn landing_proof(&self, reference: String, fence: ClaimFence) -> LandingProof {
-        LandingProof {
-            extra: Default::default(),
-            reference,
             id: fence.id,
             generation: fence.generation,
             token: fence.token,
@@ -796,160 +693,10 @@ impl CoordinationApi for LocalCoordination<'_> {
             }
         }
     }
-
-    fn landing(
-        &self,
-        input: LandingInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<LandingResult, CoordinationError> {
-        input.validate_input(WaitTransport::Cli)?;
-        if let Err(error) = self.ensure_active(budget, cancel) {
-            return match (&error, &input) {
-                (CoordinationError::Timeout, LandingInput::Wait { .. }) => {
-                    Ok(LandingResult::Waited {
-                        extra: Default::default(),
-                        landing: None,
-                        timed_out: true,
-                    })
-                }
-                _ => Err(error),
-            };
-        }
-        let request = self.request(cancel);
-        match input {
-            LandingInput::Wait {
-                reference,
-                generation,
-                wait_seconds,
-                ..
-            } => {
-                let poll_budget = self.observation_budget(budget, wait_seconds)?;
-                let poll_request = self.request(cancel);
-                let mut current = None;
-                loop {
-                    if cancel.is_cancelled() {
-                        return Err(CoordinationError::Cancelled);
-                    }
-                    if poll_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-                        return Ok(LandingResult::Waited {
-                            extra: Default::default(),
-                            landing: current,
-                            timed_out: true,
-                        });
-                    }
-                    current = self
-                        .store
-                        .landing(self.project, &reference, &poll_request)?;
-                    let now = self.clock.wall_now()?;
-                    let changed = current.as_ref().is_none_or(|landing| {
-                        landing.generation != generation
-                            || landing.holder.is_none()
-                            || landing
-                                .expires_at
-                                .is_some_and(|expires_at| expires_at <= now)
-                    });
-                    if changed {
-                        return Ok(LandingResult::Waited {
-                            extra: Default::default(),
-                            landing: current,
-                            timed_out: false,
-                        });
-                    }
-                    self.pause(poll_budget, cancel);
-                }
-            }
-            input => {
-                let reference = landing_reference(&input)?;
-                let guard = self.store.lock_landing(self.project, reference, &request)?;
-                self.landing_locked(input, &guard, &request)
-            }
-        }
-    }
 }
 
 impl LocalCoordination<'_> {
-    fn landing_locked(
-        &self,
-        input: LandingInput,
-        guard: &provenant_fabric_store::LandingGuard,
-        request: &Request<'_>,
-    ) -> Result<LandingResult, CoordinationError> {
-        match input {
-            LandingInput::Acquire {
-                reference,
-                expected,
-                candidate,
-                lease_seconds,
-                ..
-            } => {
-                let fence = self.store.acquire_landing(
-                    guard,
-                    &LandingRequest {
-                        extra: Default::default(),
-                        id: ClaimId::from_bytes(Self::new_id_bytes()?),
-                        project: self.project,
-                        actor: self.actor,
-                        token: Self::new_id_bytes()?,
-                        reference: reference.clone(),
-                        expected,
-                        candidate,
-                        lease: Self::lease_duration(lease_seconds),
-                    },
-                    request,
-                )?;
-                let landing = self.store.verify_landing(guard, &fence, request)?;
-                Ok(LandingResult::Acquired {
-                    extra: Default::default(),
-                    proof: self.landing_proof(reference, fence),
-                    landing,
-                })
-            }
-            LandingInput::Renew {
-                proof,
-                lease_seconds,
-                ..
-            } => {
-                let fence = self.landing_fence(&proof);
-                self.store.renew_landing(
-                    guard,
-                    &fence,
-                    Self::lease_duration(lease_seconds),
-                    request,
-                )?;
-                let landing = self.store.verify_landing(guard, &fence, request)?;
-                Ok(LandingResult::Renewed {
-                    extra: Default::default(),
-                    landing,
-                })
-            }
-            LandingInput::Verify { proof, .. } => {
-                let landing =
-                    self.store
-                        .verify_landing(guard, &self.landing_fence(&proof), request)?;
-                Ok(LandingResult::Verified {
-                    extra: Default::default(),
-                    landing,
-                })
-            }
-            LandingInput::Release { proof, .. } => {
-                let id = proof.id;
-                self.store
-                    .release_landing(guard, &self.landing_fence(&proof), request)?;
-                Ok(LandingResult::Released {
-                    extra: Default::default(),
-                    id,
-                    reference: proof.reference,
-                })
-            }
-            LandingInput::Wait { .. } => {
-                Err(CoordinationError::InvalidInput("wait is an observation"))
-            }
-        }
-    }
-
     /// Retryable, bounded mutations atomically commit their receipt and effects.
-    /// The landing OS lock is acquired before the SQLite transaction.
     pub fn mutate(
         &self,
         input: Mutation,
@@ -959,14 +706,6 @@ impl LocalCoordination<'_> {
     ) -> Result<MutationResult, CoordinationError> {
         self.ensure_active(budget, cancel)?;
         let request = self.request(cancel);
-        let guard = if let Mutation::Landing(value) = &input {
-            Some(
-                self.store
-                    .lock_landing(self.project, landing_reference(value)?, &request)?,
-            )
-        } else {
-            None
-        };
         let frozen = input.clone();
         // The frozen input identifies the result domain. Untagged result shapes
         // overlap, so replay must decode the domain's concrete result type.
@@ -982,40 +721,22 @@ impl LocalCoordination<'_> {
         match input {
             Mutation::Mail(MailInput::Read { .. })
             | Mutation::Events(EventsInput::Read { .. })
-            | Mutation::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. })
-            | Mutation::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }) => {
+            | Mutation::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. }) => {
                 Err(CoordinationError::InvalidInput("read is an observation"))
             }
             Mutation::Mail(value) => record!(Mail, self.mail(value, budget, cancel)),
             Mutation::Events(value) => record!(Events, self.events(value, budget, cancel)),
             Mutation::Claim(value) => record!(Claim, self.claim(value, budget, cancel)),
-            Mutation::Landing(value) => {
-                value.validate_input(WaitTransport::Cli)?;
-                let guard = guard
-                    .as_ref()
-                    .ok_or(CoordinationError::InvalidInput("landing lock required"))?;
-                record!(Landing, self.landing_locked(value, guard, &request))
-            }
         }
     }
 }
 
-fn landing_reference(input: &LandingInput) -> Result<&str, CoordinationError> {
-    match input {
-        LandingInput::Acquire { reference, .. } => Ok(reference),
-        LandingInput::Renew { proof, .. }
-        | LandingInput::Release { proof, .. }
-        | LandingInput::Verify { proof, .. } => Ok(&proof.reference),
-        LandingInput::Wait { .. } => Err(CoordinationError::InvalidInput("wait is an observation")),
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "domain", content = "input", rename_all = "snake_case")]
 pub enum Mutation {
     Mail(MailInput),
     Events(EventsInput),
     Claim(ClaimInput),
-    Landing(LandingInput),
 }
 // Untagged wrappers add no object layer; their inner result retains extensions.
 // Decode through the frozen input domain because result shapes overlap.
@@ -1025,7 +746,6 @@ pub enum MutationResult {
     Mail(MailResult),
     Events(EventsResult),
     Claim(ClaimResult),
-    Landing(LandingResult),
 }
 
 /// A fresh operation id, for callers that did not supply one.
@@ -1185,61 +905,20 @@ mod tests {
         );
     }
 
-    struct AdvancingClock {
-        wall: std::sync::Mutex<i64>,
-        mono: std::sync::Mutex<u64>,
-    }
-    impl AdvancingClock {
-        fn new() -> Self {
-            Self {
-                wall: std::sync::Mutex::new(2_000_000_000_000_000),
-                mono: std::sync::Mutex::new(0),
-            }
-        }
-        fn budget(&self) -> WaitBudget {
-            WaitBudget::cli(MonoTime::from_micros(*self.mono.lock().unwrap()), 10)
-                .expect("wait budget")
-        }
-    }
-    impl Clock for AdvancingClock {
-        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
-            WallTime::from_micros(*self.wall.lock().unwrap())
-        }
-        fn mono_now(&self) -> MonoTime {
-            MonoTime::from_micros(*self.mono.lock().unwrap())
-        }
-        fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            let now = self.mono_now();
-            if deadline > now {
-                let duration = DurationMicros::from_micros(deadline.as_micros() - now.as_micros());
-                let wall =
-                    WallTime::from_micros(*self.wall.lock().unwrap())?.checked_add(duration)?;
-                *self.wall.lock().unwrap() = wall.as_micros();
-                *self.mono.lock().unwrap() = deadline.as_micros();
-            }
-            Ok(())
-        }
-    }
-    impl Pause for AdvancingClock {
-        fn wait(&self, duration: DurationMicros, _: &CancelToken) {
-            *self.wall.lock().unwrap() += duration.as_micros() as i64;
-            *self.mono.lock().unwrap() += duration.as_micros();
-        }
-    }
-
     #[test]
-    fn landing_replay_keeps_its_domain_and_result_extensions() {
+    fn claim_replay_keeps_its_domain_and_result_extensions() {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
         let acquire_id = provenant_core::OperationId::parse("acquire").unwrap();
-        let MutationResult::Landing(LandingResult::Acquired { proof, .. }) = service
+        let MutationResult::Claim(ClaimResult::Acquired { proof, .. }) = service
             .mutate(
-                Mutation::Landing(LandingInput::Acquire {
+                Mutation::Claim(ClaimInput::Acquire {
                     extra: Default::default(),
-                    reference: "refs/heads/main".into(),
-                    expected: GitOid::parse(&"1".repeat(40)).unwrap(),
-                    candidate: GitOid::parse(&"2".repeat(40)).unwrap(),
+                    scope: WorkScope::Issue {
+                        extra: Default::default(),
+                        key: "PR-42".into(),
+                    },
                     lease_seconds: 60,
                 }),
                 &acquire_id,
@@ -1248,9 +927,10 @@ mod tests {
             )
             .unwrap()
         else {
-            panic!("landing acquisition");
+            panic!("claim acquisition");
         };
-        let release = Mutation::Landing(LandingInput::Release {
+        let claim_id = proof.id;
+        let release = Mutation::Claim(ClaimInput::Release {
             extra: Default::default(),
             proof,
         });
@@ -1260,7 +940,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             first,
-            MutationResult::Landing(LandingResult::Released { .. })
+            MutationResult::Claim(ClaimResult::Released { .. })
         ));
         let database =
             rusqlite::Connection::open(fixture.root.as_path().join("fabric/fabric.sqlite3"))
@@ -1269,15 +949,13 @@ mod tests {
             "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.future',json_object('revision',2)) AS BLOB) WHERE id=?1",
             [release_id.to_string()],
         ).unwrap();
-        let MutationResult::Landing(LandingResult::Released {
-            reference, extra, ..
-        }) = service
+        let MutationResult::Claim(ClaimResult::Released { id, extra }) = service
             .mutate(release, &release_id, fixture.budget(), &cancel)
             .unwrap()
         else {
-            panic!("replay must retain the landing domain");
+            panic!("replay must retain the claim domain");
         };
-        assert_eq!(reference, "refs/heads/main");
+        assert_eq!(id, claim_id);
         assert_eq!(extra["future"], serde_json::json!({"revision":2}));
         let (input, result) = service
             .store
@@ -1289,12 +967,12 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        let crate::hosts::CoordinationResult::Landing {
-            result: LandingResult::Released { extra, .. },
+        let crate::hosts::CoordinationResult::Claim {
+            result: ClaimResult::Released { extra, .. },
             ..
         } = crate::hosts::CoordinationResult::from_stored(&input, result).unwrap()
         else {
-            panic!("recovered receipt must retain the landing domain");
+            panic!("recovered receipt must retain the claim domain");
         };
         assert_eq!(extra["future"], serde_json::json!({"revision": 2}));
     }
@@ -1419,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn work_claim_and_landing_fences_are_service_scoped() {
+    fn work_claim_fences_are_service_scoped() {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
@@ -1463,105 +1141,6 @@ mod tests {
             ),
             Ok(ClaimResult::Released { .. })
         ));
-
-        let LandingResult::Acquired { proof, landing, .. } = service
-            .landing(
-                LandingInput::Acquire {
-                    extra: Default::default(),
-                    reference: "refs/heads/release".into(),
-                    expected: GitOid::parse("0123456789012345678901234567890123456789")
-                        .expect("expected OID"),
-                    candidate: GitOid::parse("abcdefabcdefabcdefabcdefabcdefabcdefabcd")
-                        .expect("candidate OID"),
-                    lease_seconds: 5,
-                },
-                fixture.budget(),
-                &cancel,
-            )
-            .expect("acquire landing lease")
-        else {
-            panic!("landing acquire result")
-        };
-        assert_eq!(landing.holder, Some(fixture.actor));
-        assert!(matches!(
-            service.landing(
-                LandingInput::Wait {
-                    extra: Default::default(),
-                    reference: proof.reference.clone(),
-                    generation: 0,
-                    wait_seconds: 1,
-                },
-                fixture.budget(),
-                &cancel
-            ),
-            Ok(LandingResult::Waited {
-                landing: Some(_),
-                timed_out: false,
-                ..
-            })
-        ));
-        assert!(matches!(
-            service.landing(
-                LandingInput::Release {
-                    extra: Default::default(),
-                    proof
-                },
-                fixture.budget(),
-                &cancel
-            ),
-            Ok(LandingResult::Released { .. })
-        ));
-    }
-
-    #[test]
-    fn landing_wait_returns_on_expired_holder() {
-        let fixture = Fixture::new();
-        let clock = AdvancingClock::new();
-        let cancel = CancelToken::new();
-        let service = LocalCoordination::open(
-            &fixture.root,
-            fixture.project,
-            fixture.actor,
-            &clock,
-            &clock,
-            &cancel,
-        )
-        .expect("open service");
-        let LandingResult::Acquired { landing, .. } = service
-            .landing(
-                LandingInput::Acquire {
-                    extra: Default::default(),
-                    reference: "refs/heads/expired-wait".into(),
-                    expected: GitOid::parse(&"a".repeat(40)).expect("expected oid"),
-                    candidate: GitOid::parse(&"b".repeat(40)).expect("candidate oid"),
-                    lease_seconds: 1,
-                },
-                clock.budget(),
-                &cancel,
-            )
-            .expect("acquire lease")
-        else {
-            panic!("landing acquire result")
-        };
-        *clock.wall.lock().unwrap() = landing.expires_at.expect("lease expiry").as_micros();
-
-        assert!(matches!(
-            service.landing(
-                LandingInput::Wait {
-                    extra: Default::default(),
-                    reference: landing.reference,
-                    generation: landing.generation,
-                    wait_seconds: 5,
-                },
-                clock.budget(),
-                &cancel,
-            ),
-            Ok(LandingResult::Waited {
-                landing: Some(_),
-                timed_out: false,
-                ..
-            })
-        ));
     }
 
     struct SimulatedClock(std::sync::Mutex<u64>);
@@ -1584,7 +1163,7 @@ mod tests {
         }
     }
     #[test]
-    fn expired_event_and_landing_waits_are_data_using_the_injected_clock() {
+    fn expired_event_waits_are_data_using_the_injected_clock() {
         let fixture = Fixture::new();
         let clock = SimulatedClock(std::sync::Mutex::new(0));
         let cancel = CancelToken::new();
@@ -1598,37 +1177,6 @@ mod tests {
             &cancel,
         )
         .expect("service");
-        let acquired = service
-            .landing(
-                LandingInput::Acquire {
-                    extra: Default::default(),
-                    reference: "refs/heads/main".into(),
-                    expected: GitOid::parse(&"a".repeat(40)).expect("oid"),
-                    candidate: GitOid::parse(&"b".repeat(40)).expect("oid"),
-                    lease_seconds: 5,
-                },
-                budget(),
-                &cancel,
-            )
-            .expect("acquire");
-        let LandingResult::Acquired { landing, .. } = acquired else {
-            panic!("landing");
-        };
-        let result = service
-            .landing(
-                LandingInput::Wait {
-                    extra: Default::default(),
-                    reference: "refs/heads/main".into(),
-                    generation: landing.generation,
-                    wait_seconds: 1,
-                },
-                budget(),
-                &cancel,
-            )
-            .expect("expired wait is data");
-        let value = serde_json::to_value(result).expect("result");
-        assert_eq!(value["timed_out"], true);
-        assert_eq!(*clock.0.lock().unwrap(), 1_000_000);
         let EventsResult::Read { cursor, .. } = service
             .events(
                 EventsInput::Read {
@@ -1660,7 +1208,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(*clock.0.lock().unwrap(), 2_000_000);
+        assert_eq!(*clock.0.lock().unwrap(), 1_000_000);
         let expired = budget();
         *clock.0.lock().unwrap() = 7_000_000;
         assert!(matches!(
@@ -1675,22 +1223,6 @@ mod tests {
                 &cancel
             ),
             Ok(EventsResult::Read {
-                timed_out: true,
-                ..
-            })
-        ));
-        assert!(matches!(
-            service.landing(
-                LandingInput::Wait {
-                    extra: Default::default(),
-                    reference: "refs/heads/main".into(),
-                    generation: landing.generation,
-                    wait_seconds: 1,
-                },
-                expired,
-                &cancel
-            ),
-            Ok(LandingResult::Waited {
                 timed_out: true,
                 ..
             })

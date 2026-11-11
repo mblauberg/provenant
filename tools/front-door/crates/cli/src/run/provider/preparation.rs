@@ -1298,6 +1298,27 @@ fn stale_observation_index(
     })
 }
 
+/// The models a route's account reports when the requested model is not among
+/// them. Accounts that report no models place no restriction.
+fn unoffered_model(
+    availability: &[provenant_providers::AvailabilityRecord],
+    route: &ResolvedRoute,
+    now: i64,
+) -> Option<Vec<String>> {
+    let key = route.account_key.as_deref()?;
+    if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
+        return None;
+    }
+    let record = availability.iter().find(|record| {
+        record.adapter == route.adapter
+            && record.account_key.as_deref() == Some(key)
+            && record.expires_unix_seconds > now
+            && !record.observed_models.is_empty()
+    })?;
+    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models))
+        .then(|| record.observed_models.clone())
+}
+
 fn retry_stale_selected(
     availability: &mut [provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
@@ -1356,6 +1377,46 @@ fn same_selected_ready(route: &ResolvedRoute, next: ResolvedRoute) -> Option<Res
 mod stale_readiness_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn model_outside_the_accounts_offered_list_is_refused_with_that_list() {
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "adapter":"agy", "model":"gemini-3.8-pro", "effort":null,
+            "catalogue_revision":"revision", "account_key":"account", "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))
+        .unwrap();
+        let record = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "agy".into(),
+            executable: "/bin/agy".into(),
+            version: "1".into(),
+            last_update: None,
+            fixture_ref: "installed/agy/version".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some("account".into()),
+            observed_models: vec!["Gemini Flash".into(), "GPT-OSS 120B (Medium)".into()],
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 400,
+        };
+        assert_eq!(
+            unoffered_model(std::slice::from_ref(&record), &route, 20),
+            Some(record.observed_models.clone())
+        );
+        let mut flash = route.clone();
+        flash.model = "gemini-3.8-flash".into();
+        assert_eq!(
+            unoffered_model(std::slice::from_ref(&record), &flash, 20),
+            None
+        );
+        let unknown = provenant_providers::AvailabilityRecord {
+            observed_models: vec![],
+            ..record
+        };
+        assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+    }
 
     #[test]
     fn stale_selected_account_is_reprobed_once_without_changing_route() {
@@ -1693,6 +1754,24 @@ fn next_permitted_candidate(
     Ok(None)
 }
 
+/// Availability left once every account that admission refused for its
+/// allowance is removed, so a redraw can only land on an untried account.
+fn without_refused_accounts(
+    availability: &[provenant_providers::AvailabilityRecord],
+    refused: &std::collections::BTreeSet<(String, String)>,
+) -> Vec<provenant_providers::AvailabilityRecord> {
+    availability
+        .iter()
+        .filter(|record| {
+            !refused.contains(&(
+                record.adapter.clone(),
+                record.account_key.clone().unwrap_or_default(),
+            ))
+        })
+        .cloned()
+        .collect()
+}
+
 fn redraw_candidates(
     result: Result<provenant_records::ResolvedRoute, crate::route::DispatchError>,
     reasons: &mut Vec<SkippedRoute>,
@@ -1922,6 +2001,7 @@ pub(super) fn prepare_candidates(
     let credential_roots = credential_roots(registry, &home, &settings)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
+    let fabric_mcp = config.fabric_mcp_server();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -2319,6 +2399,7 @@ pub(super) fn prepare_candidates(
     let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
     let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
     let mut reprobed_accounts = std::collections::BTreeSet::new();
+    let mut refused_accounts = std::collections::BTreeSet::<(String, String)>::new();
     let mut candidate = 0usize;
     // A login resolved for one route serves every later route and the reader path.
     let mut gh_login: Option<std::ffi::OsString> = None;
@@ -2411,6 +2492,22 @@ pub(super) fn prepare_candidates(
                 provenant_records::diagnostic::BoundaryClass::Authority,
             );
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
+            continue;
+        }
+        if let Some(offered) = unoffered_model(&availability, &route, clock.unix_seconds()) {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
+            reasons.push(skip(
+                &label,
+                SkipKind::Refused,
+                format!(
+                    "model `{}` is not offered by this account; offered models: {}",
+                    route.model,
+                    offered.join(", ")
+                ),
+            ));
             continue;
         }
         let Some(registration) = provider_registry
@@ -2655,7 +2752,48 @@ pub(super) fn prepare_candidates(
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
         {
-            reasons.push(skip(&label, SkipKind::Unavailable, error));
+            // Admission refuses an account whose allowance is spent. Another
+            // account may still serve the same model, so move on to it once per
+            // account, never past a pinned one.
+            let spent = error.contains("allowance exhausted");
+            let refused_key = route
+                .account_key
+                .clone()
+                .filter(|_| spent && selected.is_none());
+            let Some(key) = refused_key else {
+                reasons.push(skip(&label, SkipKind::Unavailable, error));
+                continue;
+            };
+            let name = entries
+                .iter()
+                .find(|entry| entry.adapter == route.adapter && entry.key == key)
+                .map_or_else(
+                    || "unregistered account".to_owned(),
+                    |entry| entry.label.clone(),
+                );
+            let mut skipped = skip(
+                &label,
+                SkipKind::Account,
+                format!("account {name}: {error}"),
+            );
+            skipped.set_cause(provenant_records::RouteExclusionReason::Exhausted);
+            reasons.push(skipped);
+            previous_outcome = provenant_routing::FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::Exhausted,
+            );
+            refused_accounts.insert((route.adapter.clone(), key));
+            let remaining = without_refused_accounts(&availability, &refused_accounts);
+            if remaining
+                .iter()
+                .any(|record| record.adapter == route.adapter)
+            {
+                if let Ok(model) = provenant_routing::ModelId::parse(&label) {
+                    rejected.retain(|tried| *tried != model);
+                }
+                if let Ok(next) = resolve(&remaining, &rejected) {
+                    queue.extend(candidates(next));
+                }
+            }
             continue;
         }
         let entry = entries
@@ -2743,14 +2881,6 @@ pub(super) fn prepare_candidates(
                 &private_state,
             ) {
                 Ok(continuation) => Some(continuation),
-                Err(error)
-                    if task.extra.get("automatic_continuation")
-                        == Some(&serde_json::json!(true))
-                        && error.boundary_class()
-                            == provenant_records::diagnostic::BoundaryClass::None =>
-                {
-                    None
-                }
                 Err(error) => {
                     let class = error.boundary_class();
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -2845,7 +2975,6 @@ pub(super) fn prepare_candidates(
                     .providers
                     .get(adapter.id())
                     .and_then(|provider| provider.runtime_deadline_seconds),
-                continuations: model_policy.lane.max_continuations,
             },
         );
         let text = format!(
@@ -3048,6 +3177,7 @@ pub(super) fn prepare_candidates(
                     depth: paths.lane_depth,
                     attempt: paths.attempt_id,
                     assets,
+                    fabric_mcp,
                 },
             })
         };
@@ -3341,10 +3471,15 @@ pub(super) fn prepare_candidates(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
         );
-        provider.extra.insert(
-            "resume_continuations".into(),
-            serde_json::json!(model_policy.lane.resume_continuations.unwrap_or(false)),
-        );
+        if refreshed
+            .as_ref()
+            .is_some_and(|token| token.is_lane_token())
+        {
+            provider.extra.insert("lane_token".into(), true.into());
+            provider
+                .extra
+                .insert("registered_lane_token".into(), true.into());
+        }
         provider.extra.insert("project_paths".into(), project_paths);
         provider.extra.insert(
             "argv_prompt_limit".into(),
@@ -3463,7 +3598,8 @@ pub(super) fn prepare_candidates(
             provenant_routing::FallbackOutcome::UsageLimited => {
                 Some(provenant_records::run::PreparationFailure::UsageLimited)
             }
-            provenant_routing::FallbackOutcome::AdapterUnavailable => {
+            provenant_routing::FallbackOutcome::AdapterUnavailable
+            | provenant_routing::FallbackOutcome::ModelUnavailable => {
                 Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
             }
             provenant_routing::FallbackOutcome::Other => None,
@@ -3893,6 +4029,7 @@ mod user_skills_tests {
                             depth: 1,
                             attempt: AttemptId::from_bytes([7; 16]),
                             assets: &root,
+                            fabric_mcp: true,
                         },
                     };
                     let spec = provider.prepare(input)?;
@@ -4202,6 +4339,31 @@ mod candidate_walk_regressions {
         );
         assert!(queue.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn refused_accounts_leave_only_untried_accounts() {
+        let record = |key: &str| provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "claude".into(),
+            executable: "/fixture/claude".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: Some(key.into()),
+            observed_models: vec![],
+            observed_unix_seconds: 0,
+            expires_unix_seconds: 1,
+        };
+        let all = [record("spent"), record("ready")];
+        let mut refused = std::collections::BTreeSet::new();
+        refused.insert(("claude".to_owned(), "spent".to_owned()));
+        let left = without_refused_accounts(&all, &refused);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].account_key.as_deref(), Some("ready"));
+        refused.insert(("claude".to_owned(), "ready".to_owned()));
+        assert!(without_refused_accounts(&all, &refused).is_empty());
     }
 
     #[test]

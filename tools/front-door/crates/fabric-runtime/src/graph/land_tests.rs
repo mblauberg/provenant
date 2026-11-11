@@ -6,6 +6,10 @@ use std::convert::Infallible;
 
 const WRITE_HEAD: &str = "1111111111111111111111111111111111111111";
 const REPAIR_HEAD: &str = "2222222222222222222222222222222222222222";
+/// The commit the review read the writer's head against.
+const REVIEW_BASE: &str = "3333333333333333333333333333333333333333";
+/// The fetched land target, one commit past `REVIEW_BASE`.
+const TARGET: &str = "4444444444444444444444444444444444444444";
 
 #[derive(Default)]
 struct Journal(Option<GraphCheckpoint>);
@@ -43,6 +47,8 @@ struct Owner {
     policy: Option<LandChoice>,
     reply: Option<String>,
     asked: usize,
+    /// Every request filed, in order.
+    filed: Vec<AskRequest>,
     writer_branch: Option<String>,
     /// The newest commit a writer delivered, which CI reports as the head.
     head: Option<String>,
@@ -58,6 +64,8 @@ struct Owner {
     repair_prompts: Vec<String>,
     repair_families: std::collections::BTreeMap<String, String>,
     repair_alternative: bool,
+    /// The repository history that proves review carry-over against `TARGET`.
+    history: Option<provenant_core::review_cover::history::History>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -106,6 +114,27 @@ impl AttemptOwner for Owner {
     fn actor(&self) -> String {
         "fixture".into()
     }
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        let base = self.history.as_ref().map(|_| REVIEW_BASE.parse().unwrap());
+        (base, None)
+    }
+    fn review_coverage(
+        &mut self,
+        _branch: &str,
+        reviewed: provenant_core::review_cover::Reviewed<'_>,
+        head: &str,
+    ) -> Result<Option<provenant_core::review_cover::Coverage>, Self::Error> {
+        Ok(self.history.as_mut().map(|history| {
+            let Ok(coverage) =
+                provenant_core::review_cover::coverage(history, reviewed, head, TARGET);
+            coverage
+        }))
+    }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         if self.no_wall_clock {
             None
@@ -121,6 +150,16 @@ impl AttemptOwner for Owner {
     }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
+    }
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        if !self.filed.iter().any(|ask| ask.ask_id == filing.ask.ask_id) {
+            self.filed.push(filing.ask.clone());
+        }
+        Ok(AskFiled {
+            request: filing.ask.ask_id.clone(),
+            deadline: filing.ask.wake_at,
+            closed: false,
+        })
     }
     fn node_ask(&mut self, _: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked += 1;
@@ -264,6 +303,7 @@ impl AttemptOwner for Owner {
             result_path: None,
             branch,
             commit: commit.map(str::to_owned),
+            stop: None,
         })
     }
 }
@@ -392,7 +432,10 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
 fn bundled_deliver_repairs_findings_before_landing() {
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".to_owned(), vec!["f0-v0-s0".to_owned()]),
+        ("review-frame".to_owned(), vec!["false".to_owned()]),
+        ("review-verify".to_owned(), vec!["false".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["false".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         ("review-panel".to_owned(), vec!["correctness".to_owned()]),
         ("review-advice-correctness".to_owned(), vec![String::new()]),
     ]);
@@ -723,11 +766,13 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
         (ask.ask_id.as_str(), ask.kind, ask.session.as_str()),
         ("land.ask-1", AskKind::Land, "chair")
     );
-    let options: Vec<_> = ask.options.iter().map(|o| o.id.as_str()).collect();
+    let filed = &owner.filed[0];
+    let options: Vec<_> = filed.options.iter().map(|o| o.id.as_str()).collect();
     assert_eq!(options, ["hold"]);
-    assert!(ask.body.contains(REPAIR_HEAD) && ask.body.contains("crucial tier asks first"));
+    assert!(filed.body.contains(REPAIR_HEAD) && filed.body.contains("crucial tier asks first"));
     assert!(
-        ask.body
+        filed
+            .body
             .contains(&format!("provenant land N --head {REPAIR_HEAD}"))
     );
 
@@ -750,7 +795,7 @@ fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
             .excerpt
             .contains("the chair landed it by hand after land.ask-1")
     );
-    assert!(checkpoint.asks[0].resolved);
+    assert!(checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -829,7 +874,7 @@ fn a_configured_policy_overrides_the_default_and_records_its_source() {
         ),
         (LandPolicy::Ask, LandSource::Project, None)
     );
-    assert!(checkpoint.asks[0].body.contains("project config"));
+    assert!(owner.filed[0].body.contains("project config"));
     assert!(owner.lands.is_empty());
 }
 
@@ -1048,6 +1093,53 @@ fn ci_output_never_substitutes_for_review() {
         land.advance_error_code.as_deref(),
         Some("land_review_required")
     );
+}
+
+#[test]
+fn a_carried_over_head_lands_and_a_changed_delta_does_not() {
+    // write H1, review H1 against the bound REVIEW_BASE, PASS, then the continuation
+    // brings in the target (H2), CI, land H2.
+    let graph = json!([
+        {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+         "prompt":"write it", "route":{"alias":"senior"}},
+        {"id":"review", "access":"read_only", "prompt":"review", "depends_on":["write"],
+         "route":{"alias":"senior"}},
+        {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review"],
+         "inputs":[{"node":"review", "outputs":["verdict"]}],
+         "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+        {"id":"repair", "access":"worktree_write", "worktree":"/wt/feature", "continues":"write",
+         "prompt":"bring in main", "depends_on":["accepted"], "route":{"alias":"senior"}},
+        {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["repair"],
+         "condition":{"type":"ci", "target":"feature/x"}},
+        {"id":"land", "kind":"land", "access":"read_only", "depends_on":["ci"],
+         "land":{"node":"write", "tier":"routine"}}
+    ]);
+    let document: GraphDocument =
+        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":graph}))
+            .unwrap();
+    for (extra, lands) in [(&[][..], true), (&["one-more-line"][..], false)] {
+        let mut history = provenant_core::review_cover::history::History::default();
+        history.commit(REVIEW_BASE, &[], &["base"]);
+        history.commit(TARGET, &[REVIEW_BASE], &["main-change"]);
+        history.commit(WRITE_HEAD, &[REVIEW_BASE], &["feature"]);
+        history.commit(REPAIR_HEAD, &[WRITE_HEAD, TARGET], extra);
+        let mut owner = owner();
+        owner.history = Some(history);
+        let checkpoint = run(&document, &mut owner, &mut Journal::default());
+        let land = node(&checkpoint, "land");
+        if lands {
+            assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+            assert_eq!(owner.lands.len(), 1);
+            assert_eq!(owner.lands[0].1, REPAIR_HEAD);
+        } else {
+            assert!(owner.lands.is_empty(), "{:?}", owner.lands);
+            assert_eq!(land.state, NodeState::Failed);
+            assert_eq!(
+                land.advance_error_code.as_deref(),
+                Some("land_review_required")
+            );
+        }
+    }
 }
 
 #[test]
@@ -1319,4 +1411,16 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
         Some("land_review_required")
     );
     assert!(owner.lands.is_empty());
+}
+
+#[test]
+fn a_land_ask_id_carries_the_sequence_and_the_retry_generation() {
+    for (sequence, generation) in [(1, 0), (2, 0), (1, 3), (7, 12)] {
+        let id = land::ask_id("land", sequence, generation);
+        assert_eq!(land::parse(&id, "land"), Some((sequence, generation)));
+    }
+    assert_ne!(land::ask_id("land", 1, 0), land::ask_id("land", 1, 1));
+    assert_eq!(land::parse("land.ask-1.retry-0", "land"), None);
+    assert_eq!(land::parse("land.ask-0", "land"), None);
+    assert_eq!(land::parse("other.ask-1", "land"), None);
 }

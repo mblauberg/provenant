@@ -5,20 +5,21 @@ mod graph_status;
 mod interface;
 #[cfg(test)]
 mod lane_read_tests;
+mod refusal_detail;
 mod unified;
 pub(crate) use unified::{
     GraphCommand, append_graph_status, read_lane_graph, read_status_rows, target_text,
     unified_graph_command, unified_graph_output, unified_graph_steer, unified_graph_trace,
 };
 pub(crate) mod gc_cleanup;
+pub(crate) mod git_facts;
 mod graph_document;
-pub(crate) mod landing;
 pub(crate) mod owner;
 mod peer;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 
-pub use landing::*;
+pub(crate) use git_facts::*;
 pub(crate) use owner::*;
 pub(crate) use run_owner::*;
 pub(crate) use settlement::*;
@@ -29,6 +30,8 @@ pub(crate) use graph_document::publish_graph_document;
 use graph_human::graph_ci_waiting;
 #[cfg(test)]
 pub(crate) use graph_human::graph_human;
+#[cfg(test)]
+#[allow(unused_imports)]
 use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
 pub use peer::{hosts, peer};
@@ -67,6 +70,7 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
@@ -158,7 +162,7 @@ impl Factory {
             .ok_or(FacadeError::InvalidInput { detail: None })?;
         provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
             .map_err(|error| match error {
-                provenant_run::RunError::Writer(error) => landing::repository_fact_error(error),
+                provenant_run::RunError::Writer(error) => git_facts::repository_fact_error(error),
                 error => run_error(error),
             })?
             .parse()
@@ -952,6 +956,7 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
             delivery_stage,
             resource,
             input_failure,
+            cause,
         } => {
             let prefix = format!("{scope}: ");
             let operation = if operation.starts_with(&prefix) {
@@ -966,6 +971,7 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
                 delivery_stage,
                 resource,
                 input_failure,
+                cause,
             }
         }
         other => other,

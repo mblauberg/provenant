@@ -30,7 +30,7 @@ mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 mod presets;
 mod providers;
-pub use providers::{CodexCloudTransport, ProviderCloudSettings, ProviderSettings, ProviderUpdate};
+pub use providers::{ProviderSettings, ProviderUpdate};
 mod project_binding;
 mod release;
 mod retention;
@@ -119,12 +119,8 @@ pub enum ConfigError {
     StaleRevision { current: String },
     #[error("another config edit holds the lock")]
     Locked,
-    #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
+    #[error("unknown knob {name}{}", close_matches(.close))]
     UnknownKnob { name: String, close: Vec<String> },
-    #[error(
-        "unknown knob {name}; set {name} outside [knobs]; next: delete the line or run `provenant config migrate`"
-    )]
-    MisplacedDomainKnob { name: String, location: Location },
     #[error("invalid value for knob {name} ({rule})")]
     KnobValue { name: String, rule: &'static str },
     #[error("knob registry or config text is malformed")]
@@ -175,11 +171,33 @@ pub struct Location {
 }
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:?} {}:{}:{}",
-            self.origin, self.key_path, self.line, self.column
-        )
+        match &self.origin {
+            Origin::Compiled { profile } => {
+                write!(
+                    f,
+                    "the compiled {} profile ({})",
+                    profile.as_str(),
+                    self.key_path
+                )
+            }
+            Origin::User { path } => {
+                write!(
+                    f,
+                    "{}:{}:{} ({})",
+                    path.as_path_text().unwrap_or("config.toml"),
+                    self.line,
+                    self.column,
+                    self.key_path
+                )
+            }
+        }
+    }
+}
+fn close_matches(close: &[String]) -> String {
+    if close.is_empty() {
+        String::new()
+    } else {
+        format!("; did you mean {}?", close.join(", "))
     }
 }
 

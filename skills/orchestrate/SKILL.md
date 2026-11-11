@@ -1,57 +1,80 @@
 ---
 name: orchestrate
-description: "Use for template graphs, composites, parallel work, review panels and bounded repair loops. Not for single-owner work or coupled defects (diagnose). Session owns continuing goals and STOP missions."
+description: "Use to delegate or parallelise work: lanes, graphs, templates, review panels, waiting and landing."
 ---
 
 # Orchestrate
 
-Use `task` for one bounded assignment, `plan` when the shape is unsettled,
-`batch` for parallel implementation and `deliver` for implementation through
-landing. A composite is a template containing nodes; dotted names select
-flavours such as `review.security` and `implement.fix`. Slice larger work into
-lanes of about three acceptance items each, merged into one integration branch.
+Templates: `task` for one bounded assignment, `plan` to shape open work,
+`implement` for one writer slice, `batch` for disjoint slices into one
+integration branch, `deliver` through CI, review and landing, `explore` over
+areas, `research` for dated primary sources, `design` for options, `review`
+for a pinned head, `verify` to falsify claims and `synthesise` to reconcile
+returns. Dotted names select flavours (`review.security`, `implement.fix`).
+Layers are bundled, user, repository (`.provenant/templates/`) and inline;
+`provenant templates NAME --json` shows one.
 
+## Commands
+
+The one canonical set; other skills name templates and point here. Run with
+`--explain` first, check authority, write scope and gates, then submit without
+it.
 
 ```sh
-provenant run --route junior --file brief.md --explain
-provenant run --use plan --file brief.md --explain
-provenant run --use batch --file brief.md --set 'worktree="/absolute/project/.worktrees/slice"' --set 'write_scope=["src"]' --explain
+provenant run --route junior --file brief.md --branch NAME --base REF
+provenant run --use plan --file brief.md
+provenant run --use explore --route junior --over a,b --file questions.md
+provenant run --use review --file spec.md --set subject='"origin/BRANCH"' --set review_base='"origin/main"'
+provenant status --wait --target graph:ID --target pr:N --until all
+provenant output TARGET --trace
+provenant retry TARGET    # also stop, steer, edit
+provenant land N --head SHA --wait
+provenant cloud launch --file brief.md --provider codex --environment ENV
+provenant cloud collect KEY
+provenant ask --file question.json --session SESSION
 ```
 
-Use `explore` over areas, `research` for primary sources and `review` for
-a pinned head. Send broad code reading to a read-only lane and take back its
-findings with paths and line ranges; the chair's context is paid for again on
-every later turn, so it reads only what its own judgement needs. Nodes use `over`, `after` and `inputs` for copies, dependencies
-and evidence. Layers are bundled, user, repository and inline; project templates go under
-`.provenant/templates/`. Inspect them with `provenant templates NAME --json`.
+## Shape the work
 
-A single writer needs no registration: `run --branch NAME --base REF` creates its owned worktree. Register a worktree by hand with `provenant worktree create NAME --base BASE` only to share one among `batch` slices.
-The bundled `batch` composite gives every slice the same `worktree` and `write_scope` bindings, so its writers sharing that worktree run in sequence. For parallel writers, define a graph with a separate registered worktree and write scope for each node; review the integrated head. The [planner brief](references/planner.md)
-owns slicing and tier choices; [brief and collect](references/dispatch.md)
-owns the hand-off. Keep coupled writes with one owner.
+Slice into lanes of about three acceptance items with disjoint write scopes,
+merged into one integration branch. Settle shared contracts first; use waves
+only for real dependencies. Default slices to junior, contained design to
+senior and root constraints to principal; consult recorded cost per template.
+A long writer is for coupled work that cannot split. Review each slice
+lightly and the integrated head with the full panel.
 
-Orient with `provenant status`; collect with `provenant output TARGET`.
-Use `steer` for a message, `stop` for a subtree, `retry` for unfinished work,
-and `edit` for a graph patch. Use `--route junior` by default for implementation slices; raise the tier for design.
-The receipt records the resolved `adapter/model@effort`. Inside a worker, `run --use TEMPLATE` adds a child
-to the same graph, sharing budget, stopping and trace. From inside a lane,
-`status` reads that graph; `output CHILD` and `output CHILD --trace` collect a
-child's result, failure cause and timeline through the host relay. Use IDs from
-the launch receipt. The lane needs no journal or credential access. A child may
-select another project with `--project`; register writer worktrees in that
-project first. Credential and state roots remain refused. Attached live children are
-cancelled when their parent settles, including a successful exit. Use `--wait`
-to collect their completion before exiting, or explicitly detach a child that
-should outlive its parent. Any agent may return a patch; started attempts stay immutable.
+`run --branch NAME --base REF` creates a single writer's worktree. Register one
+by hand (`provenant worktree create`) only to share it: `batch` gives every
+slice the same worktree, so its writers run in sequence. Parallel writers need
+a graph with a worktree and write scope per node.
 
-To keep a long writer from paying for a very large context, set
-`lanes.context_handoff_tokens = 200000` under `[knobs]` in host configuration: the host stops it at that context
-and the graph restarts it fresh from its handoff on the same worktree. The
-setting is off by default until a trial settles it.
+Inside a lane, `run --use TEMPLATE` adds a child to the same graph, sharing
+budget, stopping and trace. Attached children are cancelled when their parent
+settles; `--wait` collects them first.
 
-Verify commits, paths, checks and routes against output. A synthesis cannot waive
-a gate. Bound repair and independently review its delta.
-HARNESS owns review floors and authority; the chair keeps user communication
-and acceptance. Load [routing](references/routing-and-tiers.md) for tier and
-independence decisions and [writer boundaries](references/lane-safety.md) for
-confinement. See [Herdr](references/herdr.md) for observation.
+`cloud launch` hands a brief to a provider's cloud session and prints its link
+and key; Provenant keeps no lifecycle for it. `cloud collect KEY` adds a
+worktree holding the branch it pushed, which then goes through review like any
+other.
+
+## Wait and recover
+
+Block on one `status --wait` call; never poll. Expiry leaves targets running.
+Reconcile the returned event before resuming. Recover an existing graph with
+`status`, `output` and `retry` before launching replacement work. An idle run
+or empty queue means no eligible work now, not done.
+
+## Collect
+
+Check commits, paths, acceptance evidence, review subject and the resolved
+`adapter/model@effort` against the output, not the requested tier. A failed
+child blocks dependent work, and a synthesis cannot waive a gate. Integrate
+disjoint heads in dependency order, run the affected checks and review the
+combined head.
+
+To restart a long writer fresh from its handoff, set
+`lanes.context_handoff_tokens` under `[knobs]` in host configuration; it is off
+by default.
+
+[Lanes and panels](references/lanes.md) covers briefs, confinement and review
+independence. [Herdr](references/herdr.md) covers watching panes and peers.

@@ -20,6 +20,10 @@ use thiserror::Error;
 
 use crate::harness::CLAUDE_CONFIG_LIMIT;
 
+/// The release asset every harness instruction link and the shared
+/// instructions file point to.
+pub(crate) const INSTRUCTION_ASSET: &str = "instructions/AGENTS.md";
+
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error(transparent)]
@@ -170,6 +174,9 @@ pub struct Targets {
     pub adopt_existing: bool,
     pub hooks: bool,
     pub remove_hooks: bool,
+    /// `fabric.mcp_server`: write the Fabric MCP entry. Off removes an
+    /// unchanged owned one.
+    pub fabric_mcp: bool,
     /// Rendered per-user LaunchAgent, supplied only by the process edge.
     pub peer_agent: Option<Vec<u8>>,
     /// Rendered host tick scheduler, supplied only by the process edge: the
@@ -251,6 +258,7 @@ impl Targets {
             adopt_existing: false,
             hooks: false,
             remove_hooks: false,
+            fabric_mcp: false,
             peer_agent: None,
             tick_agent: None,
             tick_service: None,
@@ -349,13 +357,6 @@ impl Targets {
             for path in std::iter::once(&h.mcp_file)
                 .chain(h.hook_file.iter())
                 .chain(h.instruction.iter())
-                .chain(
-                    h.instruction
-                        .iter()
-                        .map(|p| p.with_file_name("HARNESS.md"))
-                        .collect::<Vec<_>>()
-                        .iter(),
-                )
             {
                 if !file_paths.insert(path.clone()) {
                     return Err(InstallError::Conflict(path.clone()));
@@ -370,11 +371,11 @@ impl Targets {
                 normal_absolute(p)?;
             }
         }
-        for path in file_paths.iter().chain(skills_paths.iter()).chain([
-            &self.bin_dir.join("provenant"),
-            &self.shared_instruction,
-            &self.shared_instruction.with_file_name("HARNESS.md"),
-        ]) {
+        for path in file_paths
+            .iter()
+            .chain(skills_paths.iter())
+            .chain([&self.bin_dir.join("provenant"), &self.shared_instruction])
+        {
             if path.starts_with(self.roots.state.as_path())
                 || self
                     .protected_roots
@@ -740,37 +741,24 @@ fn desired(
                 "skill".into(),
             )?;
         }
-        if let Some(path) = &target.instruction {
-            for (destination, asset) in [
-                (path.clone(), "instructions/AGENTS.md"),
-                (path.with_file_name("HARNESS.md"), "instructions/HARNESS.md"),
-            ] {
-                if release.files.contains_key(Path::new(asset)) {
-                    insert(
-                        destination,
-                        Value::Link(root.join(asset)),
-                        Some(target.harness),
-                        "instruction".into(),
-                    )?;
-                }
-            }
-        }
-    }
-    for (destination, asset) in [
-        (targets.shared_instruction.clone(), "instructions/AGENTS.md"),
-        (
-            targets.shared_instruction.with_file_name("HARNESS.md"),
-            "instructions/HARNESS.md",
-        ),
-    ] {
-        if release.files.contains_key(Path::new(asset)) {
+        if let Some(path) = &target.instruction
+            && release.files.contains_key(Path::new(INSTRUCTION_ASSET))
+        {
             insert(
-                destination,
-                Value::Link(root.join(asset)),
-                None,
-                "shared-instruction".into(),
+                path.clone(),
+                Value::Link(root.join(INSTRUCTION_ASSET)),
+                Some(target.harness),
+                "instruction".into(),
             )?;
         }
+    }
+    if release.files.contains_key(Path::new(INSTRUCTION_ASSET)) {
+        insert(
+            targets.shared_instruction.clone(),
+            Value::Link(root.join(INSTRUCTION_ASSET)),
+            None,
+            "shared-instruction".into(),
+        )?;
     }
     let paths: Vec<_> = result.keys().collect();
     for pair in paths.windows(2) {
@@ -942,14 +930,7 @@ pub fn plan_install(
                             targets.adopt_existing
                                 || release
                                     .files
-                                    .get(match &want.value {
-                                        Value::Link(target)
-                                            if target.ends_with("instructions/HARNESS.md") =>
-                                        {
-                                            Path::new("instructions/HARNESS.md")
-                                        }
-                                        _ => Path::new("instructions/AGENTS.md"),
-                                    })
+                                    .get(Path::new(INSTRUCTION_ASSET))
                                     .is_some_and(|(wanted, _)| bytes == wanted)
                         }
                         _ => false,
@@ -2025,7 +2006,6 @@ fn distinct_target_paths<'a>(
                 .as_ref()
                 .map(AbsolutePath::to_path_buf)
                 .transpose()?,
-            instruction.as_ref().map(|p| p.with_file_name("HARNESS.md")),
             instruction,
         ];
         for path in paths.into_iter().flatten() {
@@ -2067,20 +2047,9 @@ fn permitted_entry(
     normal_absolute(&path)?;
     if entry.harness.is_none() {
         if entry.selector == "shared-instruction" {
-            let asset = if path == shared {
-                "instructions/AGENTS.md"
-            } else if path == shared.with_file_name("HARNESS.md") {
-                "instructions/HARNESS.md"
-            } else {
-                return Ok(false);
-            };
-            return Ok(matches!(
-                &entry.expected,
-                OwnedValue::Link { target, .. }
-                    if target.to_path_buf().is_ok_and(|link| {
-                        asset_target(&link, state_root, Path::new(asset))
-                    })
-            ));
+            return Ok(
+                path.parent() == shared.parent() && instruction_link(entry, &path, state_root)
+            );
         }
         if matches!(
             entry.selector.as_str(),
@@ -2166,29 +2135,26 @@ fn permitted_for(
         && let Some(instruction) = &target.instruction
     {
         let instruction = instruction.to_path_buf()?;
-        let agents = path == instruction;
-        let harness = path == instruction.with_file_name("HARNESS.md");
-        if (agents || harness)
-            && matches!(
-                &entry.expected,
-                OwnedValue::Link { target, .. }
-                    if target.to_path_buf().is_ok_and(|link| {
-                        asset_target(
-                            &link,
-                            state_root,
-                            Path::new(if agents {
-                                "instructions/AGENTS.md"
-                            } else {
-                                "instructions/HARNESS.md"
-                            }),
-                        )
-                    })
-            )
-        {
-            return Ok(true);
-        }
+        return Ok(if path == instruction {
+            links_to(entry, state_root, Path::new(INSTRUCTION_ASSET))
+        } else {
+            path.parent() == instruction.parent() && instruction_link(entry, &path, state_root)
+        });
     }
     Ok(false)
+}
+fn links_to(entry: &OwnedEntry, state_root: &Path, asset: &Path) -> bool {
+    matches!(
+        &entry.expected,
+        OwnedValue::Link { target, .. }
+            if target.to_path_buf().is_ok_and(|link| asset_target(&link, state_root, asset))
+    )
+}
+/// Whether `entry` links `path` to the release instructions asset of the same
+/// name. It admits an asset a later release retired, so an upgrade removes it.
+fn instruction_link(entry: &OwnedEntry, path: &Path, state_root: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| links_to(entry, state_root, &Path::new("instructions").join(name)))
 }
 /// Complete findings plus the bytes, metadata, links, absence and inventory
 /// actually inspected. No locks, repair, extra filesystem reads or state writes.
@@ -2320,7 +2286,7 @@ fn check_install_inspected(
     if let Some(release) = &release {
         findings.extend(shared_instruction_findings(release, targets, evidence)?);
     }
-    let asset = Path::new("instructions/AGENTS.md");
+    let asset = Path::new(INSTRUCTION_ASSET);
     let shared = release
         .as_ref()
         .filter(|release| release.files.contains_key(asset))
@@ -2399,8 +2365,7 @@ fn shared_instructions_link(target: &Path) -> bool {
     let Some(releases_directory) = digest_directory.parent() else {
         return false;
     };
-    (target.ends_with(Path::new("instructions/AGENTS.md"))
-        || target.ends_with(Path::new("instructions/HARNESS.md")))
+    target.ends_with(Path::new(INSTRUCTION_ASSET))
         && releases_directory.file_name() == Some(OsStr::new("releases"))
         && digest_directory
             .file_name()
@@ -2415,7 +2380,7 @@ fn shared_instruction_findings(
     targets: &Targets,
     evidence: &mut InspectionEvidence,
 ) -> Result<Vec<InstallFinding>, InstallError> {
-    let asset = Path::new("instructions/AGENTS.md");
+    let asset = Path::new(INSTRUCTION_ASSET);
     let Some((bytes, _)) = release.files.get(asset) else {
         return Ok(Vec::new());
     };

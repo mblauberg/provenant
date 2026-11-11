@@ -955,6 +955,69 @@ fn claude_fresh_token_does_not_create_refresh_lock() {
     assert!(!config.join("provenant-oauth-refresh.lock").exists());
 }
 
+/// A registered long-lived lane token wins over the rotating login: the host
+/// runs no refresh even when the login is about to expire, so no renewal can
+/// revoke a token a live lane holds.
+#[test]
+fn claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude-pro");
+    let now = 1_000_000_000_u64;
+    let expiring = format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"fixture-access","expiresAt":{}}}}}"#,
+        now + 1000
+    );
+    let script = FileCredentialScript::new(
+        &config,
+        KeychainScript {
+            items: std::sync::Mutex::new(vec![expiring.into_bytes()].into()),
+            statuses: std::sync::Mutex::new(
+                vec![br#"{"loggedIn":true,"email":"fixture@example.test"}"#.to_vec(); 2].into(),
+            ),
+            calls: Default::default(),
+        },
+    );
+    let token = config.join(claude::LANE_TOKEN_FILE);
+    std::fs::write(&token, "fixture-lane-token\n").unwrap();
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let login = claude::Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    let key = crate::identity::fingerprint("fixture@example.test").unwrap();
+    let account =
+        crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
+    let lane = claude::refresh_for_account(&script, &login, &account, &|| now, now + 60_000)
+        .expect("lane token");
+    assert_eq!(lane.access, "fixture-lane-token");
+    let calls = script.script.calls.lock().unwrap();
+    assert!(calls.iter().all(|(argv, _, _)| argv[1] == "auth"), "{calls:?}");
+}
+
+#[test]
+fn claude_lane_token_refuses_permissive_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude-pro");
+    std::fs::create_dir_all(&config).unwrap();
+    let token = config.join(claude::LANE_TOKEN_FILE);
+    std::fs::write(&token, "fixture-lane-token\n").unwrap();
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let login = claude::Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    let err = claude::lane_token(&login).unwrap_err();
+    assert!(matches!(err, ProviderError::CredentialReadFailed(_)));
+}
+
 #[test]
 fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
     use crate::claude::{

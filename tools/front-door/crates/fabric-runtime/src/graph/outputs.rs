@@ -180,7 +180,7 @@ pub(super) fn make_outputs_with_upstream(
         } else {
             capture
                 .verdict_invalid
-                .then(|| "verdict malformed, repeated or not final".to_owned())
+                .then(|| capture.verdict_cause.clone().unwrap_or_default())
         }
     });
     let assessed_risk = result

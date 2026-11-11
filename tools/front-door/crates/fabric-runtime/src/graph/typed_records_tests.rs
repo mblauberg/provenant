@@ -2,6 +2,44 @@
 use super::*;
 use serde_json::{Value, json};
 
+/// An owner that proves no carry-over, so only the reviewed head may land.
+struct NoCoverage;
+impl AttemptOwner for NoCoverage {
+    type Error = std::convert::Infallible;
+    fn actor(&self) -> String {
+        "fixture".into()
+    }
+    fn observe_or_start(
+        &mut self,
+        _: &AttemptKey,
+        _: NodeInput<'_>,
+        _: &GraphRoute,
+        _: AccessMode,
+        _: Option<&str>,
+        _: Replay<'_>,
+    ) -> Result<AttemptObservation, Self::Error> {
+        unreachable!("the landing check launches nothing")
+    }
+}
+
+fn acceptance(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+    head: &str,
+) -> Option<String> {
+    let Ok(error) = land::acceptance_error(
+        plan,
+        checkpoint,
+        positions,
+        &mut NoCoverage,
+        "land",
+        "write",
+        ("feature", head),
+    );
+    error
+}
+
 fn stored_with(node: Value, pause: Value) -> Value {
     let mut checkpoint: Value =
         serde_json::from_str::<Value>(include_str!("../fixtures/legacy-graph-checkpoint.json"))
@@ -185,7 +223,7 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
         .unwrap(),
     ];
 
-    let error = land::acceptance_error(&plan, &checkpoint, &positions, "land", "write", &head);
+    let error = acceptance(&plan, &checkpoint, &positions, &head);
     assert!(
         error.is_some(),
         "a decision without a reviewed base must fail closed at the landing check"
@@ -204,7 +242,7 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
         .unwrap(),
     ];
 
-    let ok = land::acceptance_error(&plan, &checkpoint, &positions, "land", "write", &head);
+    let ok = acceptance(&plan, &checkpoint, &positions, &head);
     assert!(
         ok.is_none(),
         "a decision with a matching reviewed base must allow landing"
@@ -223,7 +261,7 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
         .unwrap(),
     ];
 
-    let mismatch = land::acceptance_error(&plan, &checkpoint, &positions, "land", "write", &head);
+    let mismatch = acceptance(&plan, &checkpoint, &positions, &head);
     assert!(
         mismatch.is_some(),
         "a decision with a mismatched reviewed base must fail closed at the landing check"

@@ -403,3 +403,19 @@ fn admission_structural_limits_name_the_key() {
         assert!(refusal.contains(&format!("limits.{key}")), "{refusal}");
     }
 }
+
+#[test]
+fn cloud_placement_is_refused_at_admission_but_a_persisted_graph_still_replays() {
+    for field in ["cloud", "placement"] {
+        let graph = document(
+            2,
+            json!([{"id":"cloud","prompt":"p","access":"read_only","routes":[{"alias":"senior"}],
+                "attempt":{field: {"target":"t","provider":"claude"}}}]),
+        );
+        let limits = crate::config::GraphLimits::default();
+        assert!(matches!(graph.admit(&limits), Err(AdmissionError::Plan(_))));
+        // Replay must plan, so the node reaches launch and blocks with the
+        // typed refusal instead of failing every advance.
+        assert!(validate_replay_plan(&graph, &limits).is_ok(), "{field}");
+    }
+}

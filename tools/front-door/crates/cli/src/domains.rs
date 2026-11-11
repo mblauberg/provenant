@@ -36,6 +36,8 @@ pub struct LandSettings {
     pub integration: Integration,
     pub batch_size: u64,
     pub batch_wait_seconds: u64,
+    pub approval: ApprovalSource,
+    pub approval_tier: ApprovalTier,
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
     pub publish_settle_seconds: u64,
@@ -62,6 +64,10 @@ pub struct LandOverride {
     pub batch_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_wait_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_tier: Option<ApprovalTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_ref_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +174,15 @@ land_enum!(MergeMethod, Merge, Squash, Rebase);
 land_enum!(PrCiMode, Always, OptIn, Affected, None);
 land_enum!(LocalGateMode, Warn, Enforce, Off);
 land_enum!(GateKind, Checks, Commands);
+// What stands as a pull request's approval for batch landing: an approving
+// forge review at the head, or a Provenant review record that covers it.
+land_enum!(ApprovalSource, Forge, Receipt);
+// What approval a pull request needs. `auto` is `none` for a pull request that
+// touches only tests, docs or review-exempt paths and `carry` otherwise.
+// `none`: CI only. `carry`: a review that still covers the head, a change
+// after it that touches no production code, or a review of the delta since.
+// `delta`: as `carry`, but every change after the review needs its own review.
+land_enum!(ApprovalTier, Auto, None, Carry, Delta);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -264,6 +279,8 @@ impl Default for LandSettings {
             integration: Integration::Batch,
             batch_size: 8,
             batch_wait_seconds: 30,
+            approval: ApprovalSource::Forge,
+            approval_tier: ApprovalTier::Auto,
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
             publish_settle_seconds: 30,
@@ -404,12 +421,15 @@ impl DomainConfig for PrSettings {
         errors
     }
 }
+const TIERS: &[&str] = &["auto", "none", "carry", "delta"];
 const PR_SECTION: DomainSection = DomainSection::new::<PrSettings>("pr", |_| {
     r#"[land]
 poll_seconds = 30
 integration = "batch"
 batch_size = 8
 batch_wait_seconds = 30
+approval = "forge"
+approval_tier = "auto"
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
 publish_settle_seconds = 30
@@ -442,6 +462,8 @@ timeout_seconds = 60
     FieldMetadata::enumeration("land.integration", &["batch", "single", "forge_queue"]),
     FieldMetadata::int("land.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.batch_wait_seconds", "int"),
+    FieldMetadata::enumeration("land.approval", &["forge", "receipt"]),
+    FieldMetadata::enumeration("land.approval_tier", TIERS),
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
     FieldMetadata::new("land.publish_settle_seconds", "int"),
@@ -484,6 +506,10 @@ timeout_seconds = 60
     FieldMetadata::int("land.tiers.{tier}.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.projects.{project}.batch_wait_seconds", "int"),
     FieldMetadata::new("land.tiers.{tier}.batch_wait_seconds", "int"),
+    FieldMetadata::enumeration("land.projects.{project}.approval", &["forge", "receipt"]),
+    FieldMetadata::enumeration("land.tiers.{tier}.approval", &["forge", "receipt"]),
+    FieldMetadata::enumeration("land.projects.{project}.approval_tier", TIERS),
+    FieldMetadata::enumeration("land.tiers.{tier}.approval_tier", TIERS),
     FieldMetadata::new("land.projects.{project}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.tiers.{tier}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.projects.{project}.max_rebuilds", "int"),
@@ -589,35 +615,6 @@ pub struct LanesSettings {
     pub skill_stage_max_bytes: u64,
     #[serde(default)]
     pub projects: std::collections::BTreeMap<String, ProjectLanesConfig>,
-    /// Named provider environments available to projects.
-    #[serde(default)]
-    pub cloud_targets: std::collections::BTreeMap<String, CloudTarget>,
-}
-
-/// Configuration only; credentials belong to the provider's authentication mechanism.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CloudTarget {
-    pub provider: String,
-    pub environment: String,
-    pub model: String,
-    pub effort: Option<String>,
-    pub repository: String,
-    pub branch: String,
-    pub deadline_seconds: u64,
-}
-impl Default for CloudTarget {
-    fn default() -> Self {
-        Self {
-            provider: String::new(),
-            environment: String::new(),
-            model: String::new(),
-            effort: None,
-            repository: String::new(),
-            branch: "main".into(),
-            deadline_seconds: 3600,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -632,8 +629,6 @@ pub struct ProjectLanesConfig {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub exec_roots: Vec<PathBuf>,
-    #[serde(default)]
-    pub cloud_target: Option<String>,
 }
 
 impl Default for LanesSettings {
@@ -642,7 +637,6 @@ impl Default for LanesSettings {
             user_skills: UserSkillsMode::default(),
             skill_stage_max_bytes: 16 * 1024 * 1024,
             projects: Default::default(),
-            cloud_targets: Default::default(),
         }
     }
 }
@@ -673,14 +667,6 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("projects.{project}.shared_paths", "array"),
     FieldMetadata::new("projects.{project}.capabilities", "array"),
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
-    FieldMetadata::new("projects.{project}.cloud_target", "string"),
-    FieldMetadata::new("cloud_targets.{target}.provider", "string"),
-    FieldMetadata::new("cloud_targets.{target}.environment", "string"),
-    FieldMetadata::new("cloud_targets.{target}.model", "string"),
-    FieldMetadata::new("cloud_targets.{target}.effort", "string"),
-    FieldMetadata::new("cloud_targets.{target}.repository", "string"),
-    FieldMetadata::new("cloud_targets.{target}.branch", "string"),
-    FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
 ]);
 
 static ENTRIES: [DomainSection; 9] = [
@@ -729,48 +715,6 @@ mod tests {
         ] {
             assert!(edit(&roots, patch).is_err());
         }
-    }
-
-    #[test]
-    fn cloud_targets_round_trip_with_project_selection() {
-        let settings: LanesSettings = toml_edit::de::from_str(
-            r#"
-            [cloud_targets.build]
-            provider = "example"
-            environment = "env-1"
-            model = "small"
-            effort = "low"
-            repository = "owner/repo"
-            [projects.sample]
-            cloud_target = "build"
-        "#,
-        )
-        .unwrap();
-        assert_eq!(
-            settings.projects["sample"].cloud_target.as_deref(),
-            Some("build")
-        );
-        assert_eq!(settings.cloud_targets["build"].environment, "env-1");
-        let encoded = serde_json::to_string(&settings).unwrap();
-        assert_eq!(
-            serde_json::from_str::<LanesSettings>(&encoded).unwrap(),
-            settings
-        );
-        let temp = tempfile::tempdir().unwrap();
-        let roots = roots(&temp);
-        let edited = edit(
-            &roots,
-            json!({
-                "domains.lanes.cloud_targets.build.provider": "example",
-                "domains.lanes.cloud_targets.build.environment": "env-1",
-                "domains.lanes.cloud_targets.build.model": "small",
-                "domains.lanes.cloud_targets.build.effort": "low",
-                "domains.lanes.cloud_targets.build.repository": "owner/repo",
-                "domains.lanes.projects.sample.cloud_target": "build"
-            }),
-        )
-        .unwrap();
-        assert_eq!(edited.config.domains.lanes, settings);
     }
 
     struct Resolver;
@@ -1002,6 +946,34 @@ mod tests {
             edited.config.domains.quota.polling_intervals["claude"].timer_seconds,
             Some(17)
         );
+    }
+
+    #[test]
+    fn retired_cloud_keys_warn_and_do_not_refuse_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let text = "schema_version = 1\n[providers.codex.cloud]\ntransport = 'x'\ncommand = ['y']\n[domains.lanes.cloud_targets.main]\nid = 'z'\n[projects.demo]\ncloud_target = 'main'\n";
+        let config = provenant_config::load_with_domains(
+            &roots,
+            Some(std::io::Cursor::new(text.as_bytes())),
+            &SECTIONS,
+        )
+        .unwrap();
+        assert!(
+            config
+                .warnings
+                .iter()
+                .all(|warning| warning.rule == "unknown_key"),
+            "{:?}",
+            config.warnings
+        );
+        for line in [2, 5, 7] {
+            assert!(
+                config.warnings.iter().any(|warning| warning.line == line),
+                "no warning at line {line}: {:?}",
+                config.warnings
+            );
+        }
     }
 
     #[test]

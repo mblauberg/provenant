@@ -6,8 +6,8 @@
 //! returns its terminal rows immediately. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
 use super::{
-    Condition, ErrorKind, Fail, Status, cloud_observed_at, condition_met, lane_display_state,
-    lane_settled, silent_lane,
+    Condition, ErrorKind, Fail, Status, condition_met, lane_display_state, lane_settled,
+    silent_lane,
 };
 use provenant_core::retry::{RetryCause, is_transient};
 use provenant_core::{AttemptId, Clock, HostId, WallTime};
@@ -37,9 +37,6 @@ pub(super) struct Scope {
 }
 
 fn finished(lane: &run::AttemptRecord) -> Option<WallTime> {
-    if lane.cloud_observation.0.is_some() {
-        return cloud_observed_at(lane);
-    }
     match lane.state {
         run::AttemptState::Terminal { finished_at, .. } => Some(finished_at),
         _ => None,

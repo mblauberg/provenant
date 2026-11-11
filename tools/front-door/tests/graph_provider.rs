@@ -15,7 +15,7 @@ use support::{Result, TestRig, code};
 // confinement. No network, provider login, compiler or sleeps are involved.
 fn writer_shell_probe() -> Result<String> {
     let script = r#"set -eu
-for name in AGENTS.md CLAUDE.md HARNESS.md; do
+for name in AGENTS.md CLAUDE.md GLOBAL-AGENTS.md; do
     test -f "$name"
     printf 'edited by lane shell\n' > "$name"
 done
@@ -24,7 +24,7 @@ printf disposable > shell-scratch/build/file
 rm -rf shell-scratch/build
 test ! -e shell-scratch/build
 rmdir shell-scratch
-git add AGENTS.md CLAUDE.md HARNESS.md
+git add AGENTS.md CLAUDE.md GLOBAL-AGENTS.md
 git commit -qm 'test: edit root instructions'
 printf 'shell completed\n'
 printf 'ghp_abcdefghijklmnopqrstuvwxyz0123456789\n'
@@ -721,7 +721,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original instructions\n")?;
     }
     for args in [
@@ -781,7 +781,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         1,
         "direct launch must report policy once: {stderr}"
     );
-    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         assert_eq!(
             fs::read_to_string(tree.join(name))?,
             "edited by lane shell\n"
@@ -2404,7 +2404,6 @@ fn persisted_attempt_with(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
-                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -3324,29 +3323,17 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
-fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
+fn graph_writer_restarts_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for (resume, fresh, alternative, dirty) in [
-        (false, true, true, false),
-        (true, false, true, false),
-        (true, true, true, false),
-        (false, true, false, false),
-        (false, true, true, true),
-    ] {
+    for (alternative, dirty) in [(true, false), (false, false), (true, true)] {
         let rig = policy_codex_fixture()?;
         let cleanup = rig.process_cleanup();
         fs::write(
             rig.state.join("config.toml"),
             format!(
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries={}\n{}\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
-                if resume && fresh { 1 } else { 100000 },
-                if resume {
-                    "[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6-luna'\n[domains.routing.model_policy.rules.policy.lane]\nresume_continuations=true\n"
-                } else {
-                    ""
-                },
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.run]\ncontinuation_copy_entries=100000\n[domains.routing.pools]\nwriter-restart=[{{model='codex/gpt-6-luna',weight=1,effort='low'}}{}]\n",
                 if alternative {
                     ",{model='codex/gpt-6.1-terra',weight=0,effort='low'}"
                 } else {
@@ -3370,19 +3357,17 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
             None,
         )?;
         assert_eq!(code(&out), 0, "{out:?}");
-        let prompt = match (fresh, dirty) {
-            (true, true) => {
-                "fixture policy continuation fixture fresh continuation fixture dirty stop"
-            }
-            (true, false) => "fixture policy continuation fixture fresh continuation",
-            _ => "fixture policy continuation",
+        let prompt = if dirty {
+            "fixture policy continuation fixture fresh continuation fixture dirty stop"
+        } else {
+            "fixture policy continuation fixture fresh continuation"
         };
         let lane = run_graph_provider_with_wait(
             &rig,
             "auto-continuation",
             json!({
                 "id":"writer", "prompt":prompt, "access":"worktree_write", "worktree":tree,
-                "route": if resume { json!({"adapter":"codex","model":"gpt-6-luna","effort":"low"}) } else { json!({"alias":"writer-restart"}) }
+                "route": {"alias":"writer-restart"}
             }),
             "30s",
         )?;
@@ -3457,47 +3442,41 @@ fn graph_writer_automatically_continues_retained_or_fresh() -> Result {
                 "{out:?}"
             );
         }
-        if resume {
-            assert_eq!(attempts[0].run_id, attempts[1].run_id);
-            assert_eq!(attempts[0].superseded_by, Some(attempts[1].attempt_id));
-            assert_eq!(attempts[1].retry_of, Some(attempts[0].attempt_id));
-        } else {
-            assert_ne!(attempts[0].run_id, attempts[1].run_id);
-            assert_eq!(attempts[0].superseded_by, None);
-            assert_eq!(attempts[1].retry_of, None);
+        assert_ne!(attempts[0].run_id, attempts[1].run_id);
+        assert_eq!(attempts[0].superseded_by, None);
+        assert_eq!(attempts[1].retry_of, None);
+        assert_eq!(
+            attempts[1].profile.knobs.get("routing.graph_exclude"),
+            Some(&json!(["codex/gpt-6-luna"]))
+        );
+        if alternative {
             assert_eq!(
-                attempts[1].profile.knobs.get("routing.graph_exclude"),
-                Some(&json!(["codex/gpt-6-luna"]))
+                attempts[1]
+                    .applied_route
+                    .as_ref()
+                    .ok_or("successor route")?
+                    .model
+                    .as_deref(),
+                Some("codex/gpt-6.1-terra")
             );
-            if alternative {
-                assert_eq!(
-                    attempts[1]
-                        .applied_route
-                        .as_ref()
-                        .ok_or("successor route")?
-                        .model
-                        .as_deref(),
-                    Some("codex/gpt-6.1-terra")
-                );
-                assert!(matches!(
-                    attempts[1].state,
-                    provenant_records::run::AttemptState::Terminal {
-                        outcome: provenant_records::run::Outcome::Succeeded,
-                        ..
-                    }
-                ));
-            } else {
-                // A single-member user pool is exhausted by the predecessor
-                // exclusion. The successor is refused before provider launch.
-                assert_ne!(attempts[1].provider_launched, Some(true));
-                assert_eq!(
-                    attempts
-                        .iter()
-                        .filter(|attempt| attempt.provider_launched == Some(true))
-                        .count(),
-                    1
-                );
-            }
+            assert!(matches!(
+                attempts[1].state,
+                provenant_records::run::AttemptState::Terminal {
+                    outcome: provenant_records::run::Outcome::Succeeded,
+                    ..
+                }
+            ));
+        } else {
+            // A single-member user pool is exhausted by the predecessor
+            // exclusion. The successor is refused before provider launch.
+            assert_ne!(attempts[1].provider_launched, Some(true));
+            assert_eq!(
+                attempts
+                    .iter()
+                    .filter(|attempt| attempt.provider_launched == Some(true))
+                    .count(),
+                1
+            );
         }
         cleanup.disarm();
     }
@@ -3573,7 +3552,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
     let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     let git = provenant_os::git::git_executable().ok_or("git")?;
-    for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+    for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original\n")?;
     }
     let remote = rig.root.join("remote.git");
@@ -3850,12 +3829,18 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         };
         let cleanup = rig.process_cleanup();
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             fs::write(rig.project.join(name), "original instructions\n")?;
         }
         fs::write(rig.project.join(".gitignore"), "setup-assets/\n")?;
         for args in [
-            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md", ".gitignore"],
+            vec![
+                "add",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "GLOBAL-AGENTS.md",
+                ".gitignore",
+            ],
             vec!["commit", "-qm", "instructions"],
         ] {
             let out = rig.execute(&git, &args, None)?;
@@ -3899,7 +3884,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
             fs::read_to_string(tree.join("setup-assets/current"))?,
             "setup output\n"
         );
-        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert_eq!(
                 fs::read_to_string(tree.join(name))?,
                 "edited by lane shell\n"
@@ -3937,7 +3922,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
                 path.to_path_buf().map_err(Into::into)
             })
             .collect::<Result<Vec<std::path::PathBuf>>>()?;
-        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+        for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert!(paths.contains(&tree.join(name)), "{paths:?}");
         }
         let human = rig.command(&["output", id])?;
@@ -4511,10 +4496,7 @@ fn main() -> ExitCode {
                 "opencode_usage_limit_settlement_is_bounded",
                 opencode_usage_limit_settlement_is_bounded,
             ),
-            (
-                "graph_writer_automatically_continues_retained_or_fresh",
-                graph_writer_automatically_continues_retained_or_fresh,
-            ),
+            ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
             (
                 "host_native_preparation_uses_the_provider_contract",
                 host_native_preparation_uses_the_provider_contract,

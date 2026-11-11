@@ -12,8 +12,6 @@ pub const EXTENSIONS: &str = "limit_extensions";
 pub struct HostCaps {
     /// The provider's cap on the wall clock.
     pub runtime_seconds: Option<u64>,
-    /// Model policy's automatic continuations after a stop.
-    pub continuations: Option<u8>,
 }
 
 /// Resolve `task`'s limits for a lane on `provider`, once, at preparation.
@@ -65,17 +63,6 @@ pub fn lane_limits(
             .then(|| knob("lanes.context_handoff_tokens", LimitSource::Template))
             .flatten(),
         deadline_seconds,
-        continuations: writer
-            .then(|| {
-                caps.continuations.and_then(|n| {
-                    nonzero(Limit::new(
-                        n.into(),
-                        LimitSource::Host,
-                        LimitStrength::Default,
-                    ))
-                })
-            })
-            .flatten(),
         repair_cycles: knob("lanes.max_repair_cycles", LimitSource::Template),
     };
     // Raises the owner asked for with `retry --extend`; the command refused a
@@ -141,7 +128,6 @@ mod tests {
         task.provider_timeout_seconds = 3600;
         let caps = HostCaps {
             runtime_seconds: Some(600),
-            continuations: Some(2),
         };
         let limits = lane_limits(&task, state.path(), "p", "claude", caps);
         assert_eq!(
@@ -156,7 +142,6 @@ mod tests {
             found(&limits.deadline_seconds),
             Some((600, LimitSource::Host))
         );
-        assert_eq!(found(&limits.continuations), Some((2, LimitSource::Host)));
         let host_only = lane_limits(&task, state.path(), "other", "claude", HostCaps::default());
         assert_eq!(
             found(&host_only.token_budget),
@@ -203,7 +188,6 @@ mod tests {
         );
         let caps = HostCaps {
             runtime_seconds: Some(600),
-            ..HostCaps::default()
         };
         let limits = lane_limits(&task, state.path(), "p", "claude", caps);
         assert_eq!(

@@ -624,11 +624,11 @@ fn check_target_outside_a_checkout_is_invalid_input() -> Result {
 #[test]
 fn writing_checks_use_typed_findings_and_input_exits() -> Result {
     let rig = check_rig()?;
-    let owner = rig.project.join("skills/natural-writing");
+    let owner = rig.project.join("skills/writing");
     std::fs::create_dir_all(&owner)?;
     std::fs::write(
         owner.join("lint-rules.json"),
-        include_str!("../../../skills/natural-writing/lint-rules.json"),
+        include_str!("../../../skills/writing/lint-rules.json"),
     )?;
     std::fs::write(rig.project.join("clean.md"), "Plain prose.\n")?;
     let clean = rig.command(&["check", "writing", "clean.md", "--json"])?;

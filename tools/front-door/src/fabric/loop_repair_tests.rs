@@ -75,7 +75,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             parent_attempt: None,
             tasks: vec![provenant_run::DispatchTask {
                     source_head: None,
-                cloud: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
                     ..Default::default()
@@ -224,7 +223,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         return Ok(());
     }
     use provenant_fabric_runtime::{
-        graph::{AskScope, AttemptOwner, loop_ask},
+        graph::{AskFiling, AskLink, AskScope, AttemptOwner, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
     use provenant_records::inbox::{AnswerAction, InteractionChannel, RequestState};
@@ -256,7 +255,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let actor = original.inbox.actor.to_string();
     let ask = loop_ask("actor-loop", "revise", 2, "original-session");
-    let scope = AskScope {
+    let filing = AskFiling {
         graph_id: "actor-loop",
         instance_id: "instance-one",
         actor: &actor,
@@ -273,6 +272,18 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         prices: None,
         tick: false,
     };
+    let filed = owner.file_ask(filing)?;
+    let link = AskLink {
+        extra: Default::default(),
+        ask_id: ask.ask_id.clone(),
+        kind: ask.kind,
+        node: ask.node.clone(),
+        rounds: ask.rounds,
+        session: ask.session.clone(),
+        wake_at: ask.wake_at,
+        request: filed.request,
+    };
+    let scope = AskScope { actor: &actor, ask: &link };
     assert_eq!(owner.node_ask(scope)?, None);
     let service = InboxService::open(
         &fixture.roots.state,
@@ -325,7 +336,8 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     else {
         return Err("request".into());
     };
-    assert_eq!(item.request.state, RequestState::Superseded);
+    // Closing leaves an answered request answered.
+    assert_eq!(item.request.state, RequestState::Answered);
     Ok(())
 }
 

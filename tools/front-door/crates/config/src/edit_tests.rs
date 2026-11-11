@@ -190,3 +190,43 @@ fn history_records_changes_and_redacts_nothing_secret_looking() {
     let future = "2999-01-01T00:00:00Z".parse().unwrap();
     assert!(history(&roots, Some(future), 10).unwrap().is_empty());
 }
+
+#[test]
+fn apply_refuses_unknown_names_and_bad_values_before_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = roots(temp.path());
+    for value in [
+        json!({"lanes.max_concurency": 4}),
+        json!({"lanes.max_concurrency": 9999}),
+        json!({"lanes.publish": "perhaps"}),
+    ] {
+        let error = patch(&roots, value, &EditOptions::new("test"))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Refused(_) | ConfigError::KnobValue { .. }
+            ),
+            "{error:?}"
+        );
+    }
+    assert_eq!(text(temp.path()), None);
+}
+
+#[test]
+fn unset_removes_a_misspelt_entry_the_file_already_holds() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = roots(temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "schema_version = 1\n[knobs]\n\"lanes.max_concurency\" = 4\n",
+    )
+    .unwrap();
+    crate::tests::knob_edit(&roots, crate::KnobEdit::Unset("lanes.max_concurency")).unwrap();
+    assert!(!text(temp.path()).unwrap().contains("max_concurency"));
+    assert!(matches!(
+        crate::tests::knob_edit(&roots, crate::KnobEdit::Unset("lanes.max_concurency")),
+        Err(ConfigError::UnknownKnob { .. })
+    ));
+}

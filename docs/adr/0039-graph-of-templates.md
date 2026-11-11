@@ -98,7 +98,7 @@ times node count. Prompts are scanned for secrets before they persist.
 
 Bundled templates are owned by
 [`assets/templates/`](../../tools/front-door/crates/fabric-runtime/assets/templates/).
-The [template runbook](../runbooks/presets.md) owns composition and use; template
+The [template runbook](../runbooks/routing-and-templates.md#templates) owns composition and use; template
 names, tiers and briefs are not a separate architectural catalogue.
 
 ## Trace and recovery
@@ -116,7 +116,7 @@ advances pending graphs without a second scheduler in the CLI or MCP façade
 
 ## Interface
 
-The [generated command reference](../reference/cli.md) owns commands and flags.
+`provenant help` owns commands and flags.
 CLI and MCP call the same graph service. Inside a lane, submission adds child
 work through the host relay; it does not create a private child store.
 
@@ -166,3 +166,22 @@ continuation budget after the table, and can only send a step to the chair. A
 change to a default is an edit to that table and its spec row, reviewed as a
 policy change. `blocked` is a stop cause carrying the writer's handoff note,
 not a plain failure (#3154). Part of #3078 (wave 2, slice W2-A).
+
+## Amendment: a node can carry a condition
+
+A node, or an entry of a template's `exports`, may carry `when = { name = value }`.
+Each name is a parameter of the enclosing template or a launch resolver holding
+one value, and is resolved when the document is submitted into terms that record
+what was expected and what was bound. An unknown name, a value that is not a
+scalar or a `when` on a loop or `repeat` is refused with a typed parameter fault
+(`kind = "when"`) that names the field. A node whose terms do not all hold starts
+as a skipped row carrying its condition, and every other node drops it from its
+edges, inputs and exports, taking over its parents so ordering holds; a node that
+needs its output is refused. This replaced the eight `review-shape-f?-v?-s?`
+composites, which existed only to switch the framing, verification and synthesis
+stages on and off, with one `review-shape` and the launch values `review-frame`,
+`review-verify` and `review-synthesis`. The old composite names and the
+`review-topology` launch value are gone, without aliases. Review coverage rules
+are unchanged, with one exception: a lens boundary now reduces verdicts in every
+shape, so a blocked lens no longer blocks a shape that has synthesis while enough
+lenses succeed (#3172).

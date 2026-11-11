@@ -20,12 +20,12 @@ use provenant_routing::{
 };
 #[cfg(feature = "fixture")]
 pub use resolution::fixture_resolve_dispatch;
-pub use resolution::resolve_review_family;
 use resolution::*;
 pub(crate) use resolution::{
     DispatchError, check_dispatch_candidate, recorded_model_readiness,
     resolve_dispatch_rejecting_family,
 };
+pub use resolution::{depletion_facts, resolve_review_family};
 use serde::Serialize;
 use std::{collections::BTreeSet, io, str::FromStr};
 

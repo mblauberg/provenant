@@ -29,13 +29,13 @@ ineligible. Price and free status do not enter that check.
 
 Review independence uses the resolved pool tier and model family, recorded per
 attempt, so a review leg is judged by what actually ran
-([review ladder](../../HARNESS.md#review-ladder)).
+(the review planner's path floors).
 
 ## Consequences
 
 Retuning capacity or adding a model is a data change. Bundled pool contents
 are pinned by catalogue tests and the policy golden, so a data change updates
 those in the same commit. The [routing spec](../specs/routing.md) owns
-the rules and the [routing runbook](../runbooks/model-routing.md) owns use.
+the rules and the [routing runbook](../runbooks/routing-and-templates.md) owns use.
 Changing the confidentiality rule, or treating free models differently from
 paid ones in eligibility, amends this ADR.

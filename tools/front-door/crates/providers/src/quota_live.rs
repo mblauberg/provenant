@@ -589,12 +589,14 @@ impl LiveQuota {
         let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
         let actual = agy_signed_in_account(signed_in, read(&log).ok())?;
         let key = format!("agy-{actual}");
+        let models = crate::quota::extract_agy_models(Some(&payload), None);
         crate::agy::remember_identity(
             &self.state,
             &account.identity_dir,
             &key,
             self.now(),
             stamp_before,
+            &models,
         );
         if key != account.scope.account_key {
             if let Some(roots) = &self.roots {

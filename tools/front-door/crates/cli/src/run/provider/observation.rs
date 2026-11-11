@@ -357,6 +357,13 @@ pub(super) fn observe_account(
             unavailable()
         )));
     }
+    // An adapter flagged `offered_models` reads the offer list its usage probe cached.
+    let observed_models =
+        if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.offered_models) {
+            provenant_providers::agy::cached_models(executor.root(), &directory)
+        } else {
+            Vec::new()
+        };
     Ok(provenant_providers::AvailabilityRecord {
         schema_version: 1,
         adapter: entry.adapter.clone(),
@@ -368,7 +375,7 @@ pub(super) fn observe_account(
         fixture_ref: format!("installed/{}/version", entry.adapter),
         catalogue_revision: catalogue_revision.into(),
         account_key: Some(entry.key.clone()),
-        observed_models: Vec::new(),
+        observed_models,
         observed_unix_seconds: timestamp,
         expires_unix_seconds: timestamp.saturating_add(300),
     })

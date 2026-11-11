@@ -40,10 +40,15 @@ pub(crate) struct Spec {
     #[serde(default)]
     pub(crate) values: Vec<String>,
     pub(crate) default: Value,
-    /// Grants or bounds capability or authority, so an invalid value refuses
-    /// the whole configuration rather than recovering to the default.
+    /// Grants or bounds capability or authority, so an invalid value takes
+    /// `safe`, never a permissive reading of the entry.
     #[serde(default)]
     strict: bool,
+    /// The restrictive value a strict knob takes when its entry is invalid.
+    /// A strict knob with none has no safe reading, so an invalid entry
+    /// refuses the file.
+    #[serde(default)]
+    safe: Option<Value>,
     #[serde(default)]
     host_only: bool,
 }
@@ -83,6 +88,14 @@ impl<D> crate::ResolvedConfig<D> {
             .get(name)
             .and_then(|knob| knob.value.as_bool())
             .ok_or_else(|| invalid(name, "type"))
+    }
+
+    /// Whether `fabric.mcp_server` opts the Fabric MCP server in. Off when unreadable.
+    pub fn fabric_mcp_server(&self) -> bool {
+        self.knobs
+            .get("fabric.mcp_server")
+            .and_then(|knob| knob.value.as_bool())
+            .unwrap_or(false)
     }
 
     /// Host-owned process exceptions. Never read from a task/profile stamp.
@@ -171,13 +184,29 @@ fn spec<'a>(registry: &'a Registry, name: &str) -> Result<&'a Spec, ConfigError>
         .ok_or_else(|| unknown(registry, name))
 }
 fn unknown(registry: &Registry, name: &str) -> ConfigError {
-    let near = |known: &&String| {
-        known.contains(name) || name.contains(known.as_str()) || distance(known, name) <= 3
-    };
     ConfigError::UnknownKnob {
         name: name.into(),
-        close: registry.knobs.keys().filter(near).cloned().collect(),
+        close: nearest(name, registry.knobs.keys().map(String::as_str)),
     }
+}
+/// The names closest to `name` by edit distance (or containment), nearest first.
+pub(crate) fn nearest<'a>(name: &str, known: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut near: Vec<(usize, &str)> = known
+        .filter(|known| known.contains(name) || name.contains(known) || distance(known, name) <= 3)
+        .map(|known| (distance(known, name), known))
+        .collect();
+    near.sort();
+    near.into_iter()
+        .take(3)
+        .map(|(_, known)| known.to_owned())
+        .collect()
+}
+/// Registry knob names closest to `name`.
+pub(crate) fn nearest_knobs(name: &str) -> Vec<String> {
+    registry().map_or_else(
+        |_| Vec::new(),
+        |registry| nearest(name, registry.knobs.keys().map(String::as_str)),
+    )
 }
 fn distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -274,53 +303,129 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     Ok(Value::from(text))
 }
 
-/// Whether an invalid value of the knob must refuse the configuration.
-pub(crate) fn strict(name: &str) -> bool {
-    registry().is_ok_and(|registry| registry.knobs.get(name).is_some_and(|spec| spec.strict))
+/// The restrictive value an invalid entry for the strict knob `name` takes.
+pub(crate) fn safe_value(name: &str) -> Option<Value> {
+    let spec = registry().ok()?.knobs.get(name)?;
+    spec.strict.then(|| spec.safe.clone()).flatten()
+}
+/// Whether an invalid entry for `name` refuses the file: a strict knob with
+/// no restrictive value, where any fallback could drop what the user set.
+pub(crate) fn refuses_when_invalid(name: &str) -> bool {
+    registry().is_ok_and(|registry| {
+        registry
+            .knobs
+            .get(name)
+            .is_some_and(|spec| spec.strict && spec.safe.is_none())
+    })
+}
+/// Whether some strict knob has no restrictive value, so a malformed `[knobs]`
+/// table cannot be ignored safely.
+pub(crate) fn any_refuses_when_invalid() -> bool {
+    registry().is_ok_and(|registry| {
+        registry
+            .knobs
+            .values()
+            .any(|spec| spec.strict && spec.safe.is_none())
+    })
+}
+/// Every leaf under `[knobs]` by dotted name, so an unquoted `lanes.publish =
+/// false`, which TOML reads as a nested table, is the knob `lanes.publish`.
+fn flatten<'a>(table: &'a dyn TableLike, prefix: &str, out: &mut Vec<(String, &'a Item)>) {
+    for (key, item) in table.iter() {
+        let name = if prefix.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match item.as_table_like() {
+            Some(nested) => flatten(nested, &name, out),
+            None => out.push((name, item)),
+        }
+    }
+}
+
+/// One `[knobs]` entry the resolver ignored; the knob keeps a default.
+pub(crate) struct KnobProblem {
+    pub(crate) name: String,
+    /// `unknown_key` for a name outside the registry, else the value rule.
+    pub(crate) rule: &'static str,
 }
 
 /// Registry default, then the profile preset, then the user's `[knobs]`.
-/// An error names the offending knob key and rule.
+/// An unknown name or an invalid value is ignored and reported; it never
+/// refuses. A strict knob takes its restrictive value instead of the default,
+/// and every strict knob does when the whole table is malformed.
 pub(crate) fn resolve(
     profile: Profile,
     overrides: Option<&dyn TableLike>,
-) -> Result<BTreeMap<String, KnobValue>, (String, &'static str)> {
-    let registry = registry().map_err(|_| (String::new(), "registry"))?;
+    malformed_table: bool,
+) -> Result<(BTreeMap<String, KnobValue>, Vec<KnobProblem>), ConfigError> {
+    let registry = registry()?;
     let preset = registry.presets.get(profile_name(profile));
     let mut knobs = BTreeMap::new();
     for (name, spec) in &registry.knobs {
         let from_preset = preset.and_then(|p| p.knobs.get(name));
-        knobs.insert(
-            name.clone(),
-            match from_preset {
-                Some(value) => KnobValue {
-                    value: value.clone(),
-                    source: KnobSource::Profile,
-                },
-                None => KnobValue {
-                    value: spec.default.clone(),
-                    source: KnobSource::Default,
-                },
+        let value = match (from_preset, safe_value(name)) {
+            (_, Some(safe)) if malformed_table => KnobValue {
+                value: safe,
+                source: KnobSource::Default,
             },
-        );
-    }
-    for (name, item) in overrides.into_iter().flat_map(|table| table.iter()) {
-        let key = format!("knobs.{name}");
-        let spec = registry
-            .knobs
-            .get(name)
-            .ok_or((key.clone(), "unknown_key"))?;
-        let value = from_toml(item).ok_or((key.clone(), "type"))?;
-        check(spec, &value).map_err(|rule| (key, rule))?;
-        knobs.insert(
-            name.into(),
-            KnobValue {
-                value,
-                source: KnobSource::Override,
+            (Some(value), _) => KnobValue {
+                value: value.clone(),
+                source: KnobSource::Profile,
             },
-        );
+            (None, _) => KnobValue {
+                value: spec.default.clone(),
+                source: KnobSource::Default,
+            },
+        };
+        knobs.insert(name.clone(), value);
     }
-    Ok(knobs)
+    let mut problems = Vec::new();
+    let mut entries = Vec::new();
+    if let Some(table) = overrides {
+        flatten(table, "", &mut entries);
+    }
+    for (name, item) in entries {
+        let name = name.as_str();
+        let Some(spec) = registry.knobs.get(name) else {
+            problems.push(KnobProblem {
+                name: name.into(),
+                rule: "unknown_key",
+            });
+            continue;
+        };
+        let checked = from_toml(item)
+            .ok_or("type")
+            .and_then(|value| check(spec, &value).map(|()| value));
+        match checked {
+            Ok(value) => {
+                knobs.insert(
+                    name.into(),
+                    KnobValue {
+                        value,
+                        source: KnobSource::Override,
+                    },
+                );
+            }
+            Err(rule) => {
+                if let Some(safe) = safe_value(name) {
+                    knobs.insert(
+                        name.into(),
+                        KnobValue {
+                            value: safe,
+                            source: KnobSource::Default,
+                        },
+                    );
+                }
+                problems.push(KnobProblem {
+                    name: name.into(),
+                    rule,
+                });
+            }
+        }
+    }
+    Ok((knobs, problems))
 }
 
 impl KnobEdit<'_> {
@@ -391,11 +496,20 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
             }
         }
         KnobEdit::Unset(name) => {
-            spec(registry, name)?;
-            if let Some(item) = doc.get_mut("knobs") {
-                let knobs = item
-                    .as_table_like_mut()
-                    .ok_or_else(|| invalid("knobs", "type"))?;
+            let table = match doc.get_mut("knobs") {
+                Some(item) => Some(
+                    item.as_table_like_mut()
+                        .ok_or_else(|| invalid("knobs", "type"))?,
+                ),
+                None => None,
+            };
+            // A misspelt entry already in the file can be removed by name,
+            // which is how a warning about it is repaired.
+            let present = table.as_ref().is_some_and(|knobs| knobs.contains_key(name));
+            if !present {
+                spec(registry, name)?;
+            }
+            if let Some(knobs) = table {
                 knobs.remove(name);
             }
         }

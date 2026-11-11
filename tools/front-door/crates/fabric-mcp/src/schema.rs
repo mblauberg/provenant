@@ -146,12 +146,10 @@ pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
     }
 }
 
-fn proof(landing: bool) -> Value {
-    let mut fields = json!({"id": reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")});
-    if landing {
-        fields["reference"] = text(MAX_REFERENCE_BYTES);
-    }
-    object(fields)
+fn proof() -> Value {
+    object(
+        json!({"id": reference("Id"), "generation":integer(0,u64::MAX),"token":pattern("^[0-9a-f]{32}$")}),
+    )
 }
 fn definitions() -> Value {
     let message_ref = tagged(
@@ -166,7 +164,7 @@ fn definitions() -> Value {
         "OperationId":pattern("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"),
         "GitOid":pattern("^(?:[0-9a-f]{40}|[0-9a-f]{64})$"),
         "AttemptTarget":object(json!({"attempt":reference("Id"),"host?":nullable(reference("Id"))})),
-        "ClaimProof":proof(false),"LandingProof":proof(true),
+        "ClaimProof":proof(),
         "MessageRef":message_ref,
         "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(MAX_ARTIFACT_PATH_BYTES)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
         "ContextLabel":nullable(text(256)),
@@ -221,13 +219,10 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Manage advisory work claims and landing leases.",
+            "Manage advisory work claims.",
             json!({
-                "claim_acquire":{"scope":reference("Scope"),"lease_seconds":lease.clone()},"claim_renew":{"proof":reference("ClaimProof"),"lease_seconds":lease.clone()},
-                "claim_verify":{"proof":reference("ClaimProof")},"claim_release":{"proof":reference("ClaimProof")},"claim_list":{"after?":nullable(reference("Id")),"limit":page.clone()},
-                "landing_acquire":{"reference":text(MAX_REFERENCE_BYTES),"expected":reference("GitOid"),"candidate":reference("GitOid"),"lease_seconds":lease.clone()},
-                "landing_renew":{"proof":reference("LandingProof"),"lease_seconds":lease},"landing_verify":{"proof":reference("LandingProof")},"landing_release":{"proof":reference("LandingProof")},
-                "landing_wait":{"reference":text(MAX_REFERENCE_BYTES),"generation":count.clone(),"wait_seconds":wait.clone()}
+                "claim_acquire":{"scope":reference("Scope"),"lease_seconds":lease.clone()},"claim_renew":{"proof":reference("ClaimProof"),"lease_seconds":lease},
+                "claim_verify":{"proof":reference("ClaimProof")},"claim_release":{"proof":reference("ClaimProof")},"claim_list":{"after?":nullable(reference("Id")),"limit":page.clone()}
             }),
         ),
         (
@@ -318,7 +313,7 @@ fn build_strict() -> Vec<Value> {
                         (*kind, operation),
                         (ToolKind::Mail, Some("send" | "mark_read"))
                             | (ToolKind::Events, Some("note"))
-                            | (ToolKind::Claim, Some("claim_acquire" | "claim_renew" | "claim_release" | "landing_acquire" | "landing_renew" | "landing_release"))
+                            | (ToolKind::Claim, Some("claim_acquire" | "claim_renew" | "claim_release"))
                     );
                     if is_mutation {
                         variant["properties"]["operation_id"] = reference("OperationId");

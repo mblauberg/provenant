@@ -304,13 +304,35 @@ pub(crate) fn fallback_candidate(
     launched: bool,
 ) -> bool {
     (!launched || access == AccessMode::ReadOnly)
-        && matches!(
-            outcome,
-            AttemptOutcome::AuthRequired
-                | AttemptOutcome::UsageLimited
-                | AttemptOutcome::AdapterUnavailable
-                | AttemptOutcome::PreparationRefused(_)
-        )
+        && fallback_cause(outcome)
+            .is_some_and(|cause| cause.default_next() == provenant_records::NextStep::NewRoute)
+}
+
+/// The stop class that decides a route fallback. A host refusal before launch
+/// is a route that cannot serve the node, whatever refused it.
+fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCause> {
+    use provenant_records::StopCause;
+    match outcome {
+        AttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
+        AttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
+            Some(StopCause::AdapterUnavailable)
+        }
+        _ => None,
+    }
+}
+
+/// The step a node's `on_stop` names for a fallback outcome, when it moves the
+/// stop somewhere other than the next route.
+fn on_stop_holds(
+    node: &PlannedNode,
+    outcome: AttemptOutcome,
+) -> Option<provenant_records::StopCause> {
+    fallback_cause(outcome).filter(|cause| {
+        node.on_stop
+            .get(*cause)
+            .is_some_and(|step| step != provenant_records::NextStep::NewRoute)
+    })
 }
 
 /// A settled review task can be independently re-attempted without changing
@@ -534,6 +556,20 @@ pub(super) fn next_attempt_transition(
             return NextAttemptDecision::Ready(NextAttempt::Fail {
                 code: None,
                 message: None,
+            });
+        }
+        Some(last)
+            if let Some(cause) = last.outcome.and_then(|outcome| {
+                fallback_candidate(outcome, node.access, last.launched)
+                    .then(|| on_stop_holds(node, outcome))
+                    .flatten()
+            }) =>
+        {
+            return NextAttemptDecision::Ready(NextAttempt::Fail {
+                code: Some("on_stop_held"),
+                message: Some(format!(
+                    "on_stop keeps a {cause} stop off the next route; return to the chair"
+                )),
             });
         }
         Some(last)
@@ -1194,6 +1230,7 @@ mod tests {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
+                cause: None,
                 operation: "read file".into(),
                 path: None,
             },

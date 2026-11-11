@@ -105,7 +105,7 @@ hand-written graph; `--explain` inspects it before launch.
 | **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
 | **Telemetry** | Local cost and token reports, CLI and MCP usage counts, and timeline export for Perfetto, with no collector. |
-| **Skills** | 20 workflow skills (scope, implement, code review, diagnose, orchestrate and more) plus 8 library skills for specific tools and stacks, installed into each harness. |
+| **Skills** | 15 workflow skills (scope, deliver, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
 
 ## Requirements
 
@@ -210,7 +210,7 @@ flowchart LR
    verifies the final commit and pushes it with its own Git authority.
    `provenant lane deliver ATTEMPT --deliver pr` opens a pull request.
    `provenant pr status` watches CI, and `provenant land` checks CI and merges
-   the verified head. The [review ladder](HARNESS.md) sets review coverage.
+   the verified head. `provenant run --use review` plans review coverage from configurable path floors.
 
 Fabric runs alongside this path. Sessions on one machine, or on peer hosts,
 exchange messages, share tasks and claim work, so two harnesses can split a job
@@ -249,7 +249,9 @@ involved. Usage counters never log arguments, prompts or results.
 
 | Command | Shows |
 | --- | --- |
-| `provenant telemetry stats` | Tokens and cost by run and attempt, priced from [`config/telemetry-prices.toml`](config/telemetry-prices.toml) |
+| `provenant telemetry stats` | Tokens by run and attempt |
+| `provenant telemetry cost [TARGET]` | API-equivalent cost from the usage ledger, priced from [`config/telemetry-prices.toml`](config/telemetry-prices.toml) |
+| `provenant telemetry value` | Each account's usage against its plan price and quota readings, and cost per accepted outcome |
 | `provenant telemetry stats --usage` | How often each CLI verb and MCP tool is used, including installed ones never called |
 | `provenant telemetry trace` | A timeline of attempts across hosts, for [Perfetto](https://ui.perfetto.dev) |
 | `provenant status` | Active and recent lanes; `--all` and `--json` show full records |
@@ -259,7 +261,7 @@ involved. Usage counters never log arguments, prompts or results.
 
 Use these to tune your setup with evidence: shift route weights towards models
 whose lanes succeed, spot commands and MCP tools nobody calls, and see where
-quota actually goes. The `retrospect` and `evaluate` skills help turn what you
+quota actually goes. The `improve` skill helps turn what you
 find into process changes and repeatable evaluations.
 
 ## Documentation
@@ -267,21 +269,20 @@ find into process changes and repeatable evaluations.
 | Document | Covers |
 | --- | --- |
 | [Architecture](docs/ARCHITECTURE.md) | Components, crate map, state root and lifecycle |
-| [`HARNESS.md`](HARNESS.md) | The runtime rules agents follow, including the review ladder |
+| [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) | The standing rules every harness loads |
 | [Specifications](docs/specs/README.md) | Contracts for each subsystem |
 | [Install](docs/runbooks/install.md) | Build, package, install, uninstall and Fabric MCP |
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |
-| [Model routing](docs/runbooks/model-routing.md) | Pools, weights and pacing |
+| [Routing and templates](docs/runbooks/routing-and-templates.md) | Pools, pacing, model policy, review panels and templates |
 | [Providers](docs/runbooks/providers.md) | Launch notes for each provider |
+| [Cloud launch](docs/runbooks/cloud-launch.md) | Hand a brief to a provider cloud session and collect its branch |
 | [Fabric hosts](docs/runbooks/fabric-hosts.md) | Peer hosts and remote dispatch |
 | [Worktrees](docs/worktrees.md) | Worktree policy and writer dispatch |
 | [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |
 | [Human inbox](docs/runbooks/human-inbox.md) | Inbox use and message delivery to sessions |
 | [Claude hooks](docs/runbooks/claude-hooks.md) | Managed Claude Code session and worktree hooks |
-| [Disk](docs/runbooks/disk.md) | Inspecting Provenant storage |
-| [Garbage collection](docs/runbooks/gc.md) | Collecting caches and expired provider state |
+| [Disk and garbage collection](docs/runbooks/gc.md) | Inspecting storage; collecting caches and expired provider state |
 | [CI](docs/runbooks/ci.md) | Checks, test inventory and reproducing failures |
-| [PR reconciler](docs/runbooks/pr-reconciler.md) | Pull request work records |
 | [Replay bench](docs/runbooks/bench.md) | Mining, verifying and running replay tasks |
 | [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |

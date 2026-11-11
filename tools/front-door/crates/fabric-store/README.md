@@ -121,11 +121,11 @@ choice avoids inventing a filesystem resolution policy for nonexistent paths.
 Claims remain advisory and never replace run's writer lock. Expired claims cannot
 renew or verify, but the unchanged holder may explicitly release them. Lists omit
 tokens, include retained released/expired observations and use a bounded ID cursor.
-Acquire prunes at most 100 released claim payloads and their paths in its project,
-only when no push operation references them. Migration 4 retains compact scope
+Acquire prunes at most 100 released claim payloads and their paths in its project.
+Migration 4 retains compact scope
 identity/generation counters, including counters for pruned records, so reacquiring
 never revives an older fence or reuses its generation. Expired unreleased claims
-and every operation-referenced claim remain available. Prefix overlap uses the
+remain available. Prefix overlap uses the
 project/path index for exact ancestors and binary descendant ranges.
 
 On case-insensitive filesystems, overlap detection relies on canonicalisation
@@ -134,43 +134,8 @@ If the filesystem preserves different spellings through canonicalisation, both
 advisory claims can succeed. No case folding is applied: filesystem case and
 Unicode rules vary by volume. Run's writer lock remains the writing authority.
 
-`lock_landing` returns a non-cloneable `LandingGuard` backed by OS crate's safe
-exclusive OS lock in `fabric/locks/`. It binds database directory identity,
-project and fully-qualified branch ref. Validation checks the lock directory's
-identity, not the identity of the locked file; the caller must re-verify that binding.
-Hold it across the entire push or reconciliation operation, including Git, and
-pass it to every landing mutation.
-Lock acquisition is bounded by the request budget and never holds a transaction.
-A lock holder can read/mutate through another connection to the same database.
-
-Landing acquire freezes checked expected/candidate `GitOid` values and retains a
-per-ref generation counter. `prepare_push` atomically freezes the request, its
-canonical digest and the operation ID with the landing record. A different
-request under the same operation ID conflicts. One generation has one operation;
-preparation replay returns its existing phase without another event. Operations
-and fences never expose tokens in observations or diagnostics.
-
-| Current push phase | Action | Next phase |
-|---|---|---|
-| Prepared or Retryable | Explicit Begin, live fence | Pushing |
-| Pushing | Confirmed Git success | Committed |
-| Pushing | Uncertain | Unknown |
-| Pushing or Unknown | Reconcile remote equals candidate | Committed |
-| Pushing or Unknown | Reconcile remote equals expected | Retryable |
-| Pushing or Unknown | Reconcile other OID | Conflict |
-| Pushing or Unknown | Reconcile without proof | Unknown |
-
-All other transitions return a typed error. Pushing and Unknown pin ownership
-regardless of TTL and prevent release or takeover. Renewal requires a live fence;
-an unchanged expired holder may release only after any unresolved push is closed.
-Retryable
-requires explicit Begin and a live fence, never an automatic transport retry.
-Conflict records divergent remote proof and permits explicit release; no Git is
-performed by this crate.
-
 Identical live acquire retries by the same actor/token return the existing fence
-without renewing it or appending an event. Landing retries also match frozen OIDs;
-a changed expected or candidate OID conflicts, including during an unresolved push.
+without renewing it or appending an event.
 
 Migration 7 removes the retired legacy import table and fields. Stores carrying
 legacy markers can migrate; the migration removes those retired fields.

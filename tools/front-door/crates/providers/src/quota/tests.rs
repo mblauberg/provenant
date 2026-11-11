@@ -221,6 +221,16 @@ fn agy_keeps_independent_model_pools_and_reports_available_if_any_pool_has_headr
     );
     let details = snapshot.details.expect("provider details retained");
     assert_eq!(details.fingerprint.as_deref(), Some("google-abcdef123456"));
+    assert_eq!(
+        details.models,
+        vec![
+            "Gemini Flash",
+            "Gemini Pro",
+            "Claude Opus",
+            "Claude Sonnet",
+            "GPT-OSS"
+        ]
+    );
 }
 
 #[test]

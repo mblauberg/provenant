@@ -366,6 +366,7 @@ fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
         })
         .unwrap();
         assert_eq!(wire["code"], "io");
@@ -423,6 +424,7 @@ fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
         delivery_stage: None,
         resource: None,
         input_failure: None,
+        cause: None,
         delivery_limit: None,
     };
     let mut owner = ErrorLauncher {
@@ -588,6 +590,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         },
         route: route("first"),
         state: AttemptState::Starting,
+        stop: None,
         attempt_ref: None,
         outcome: None,
         launched: true,
@@ -733,6 +736,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
             delivery_stage: None,
             resource: None,
             input_failure: None,
+            cause: None,
             operation: "read file".into(),
             path: None,
         },
