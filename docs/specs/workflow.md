@@ -24,8 +24,8 @@ highest author tier, from an independent reviewer; authors, decision makers
 (the chair included) and repeats never count. `inconclusive` never counts and
 never blocks. Cross-family legs count only on observed family evidence, never
 attestation; a waived leg needs a blocker with source references. A diff that
-touches tests always gets the `tests` lens. [HARNESS.md](../../HARNESS.md#review-ladder)
-owns the ladder; the checker's counts may sit below it.
+touches tests always gets the `tests` lens. The `code-review` skill
+owns the lens choice; the checker's counts may sit below it.
 - Why: self-review, a stale subject or an attested family proves nothing.
 - Test: `crates/workflow/src/coverage.rs::authors_decision_makers_repeats_and_low_tiers_do_not_count`;
   `::a_review_of_another_subject_never_counts`;

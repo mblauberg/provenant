@@ -16,7 +16,7 @@ body:
       description: >-
         The documented behaviour, the behaviour you saw, and the gap between
         them. Quote the contract you are measuring against (a SKILL.md line,
-        HARNESS.md, a script's help text) where you can.
+        GLOBAL-AGENTS.md, a script's help text) where you can.
     validations:
       required: true
 

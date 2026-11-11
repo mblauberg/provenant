@@ -16,6 +16,8 @@ Templates `docs/TASK/example.md`, `$ROOT/no.md`, `/runtime/no.md`,
 `https://example.com/no.md` and protocol `tools/list` are not repository paths.
 
 ```sh
-# Examples are never executed, and fenced content is not inline references.
-`provenant missing`
+# Examples are never executed; fenced lines that do not start with provenant are not checked.
+echo `provenant missing`
+provenant route list --pool example
+provenant gc --apply  # comments are ignored --vanished
 ```

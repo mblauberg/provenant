@@ -18,7 +18,7 @@ status=0
 # Specs, runtime-path runbooks and fixtures describe these paths on purpose.
 hits=$(git grep -n -I -E "$patterns" -- '*.md' .github/ISSUE_TEMPLATE \
   ':(exclude)docs/specs' \
-  ':(exclude)docs/runbooks/disk.md' ':(exclude)docs/runbooks/configuration.md' \
+  ':(exclude)docs/runbooks/gc.md' ':(exclude)docs/runbooks/configuration.md' \
   ':(exclude)**/tests/**' \
   ':(exclude)**/fixtures/**' ':(exclude)**/evals/**') || status=$?
 case "$status" in

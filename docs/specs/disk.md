@@ -6,7 +6,7 @@ Owner: `crates/os/src/disk.rs` (measurement), `crates/confinement/src/disk.rs`
 Anchor: `crates/os/src/disk.rs`, `crates/run/src/disk.rs`
 
 `provenant disk report` inventories lane caches, worktrees and the host state
-root; `DiskReport` documents the fields and the [disk runbook](../runbooks/disk.md)
+root; `DiskReport` documents the fields and the [disk and GC runbook](../runbooks/gc.md)
 the procedure. Paths are relative to `tools/front-door/`.
 
 ## Strictly read-only

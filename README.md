@@ -273,15 +273,14 @@ find into process changes and repeatable evaluations.
 | [Specifications](docs/specs/README.md) | Contracts for each subsystem |
 | [Install](docs/runbooks/install.md) | Build, package, install, uninstall and Fabric MCP |
 | [Configuration](docs/runbooks/configuration.md) | Profiles, knobs, quota display and account switching |
-| [Model routing](docs/runbooks/model-routing.md) | Pools, weights and pacing |
+| [Routing and templates](docs/runbooks/routing-and-templates.md) | Pools, pacing, model policy, review panels and templates |
 | [Providers](docs/runbooks/providers.md) | Launch notes for each provider |
 | [Fabric hosts](docs/runbooks/fabric-hosts.md) | Peer hosts and remote dispatch |
 | [Worktrees](docs/worktrees.md) | Worktree policy and writer dispatch |
 | [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |
 | [Human inbox](docs/runbooks/human-inbox.md) | Inbox use and message delivery to sessions |
 | [Claude hooks](docs/runbooks/claude-hooks.md) | Managed Claude Code session and worktree hooks |
-| [Disk](docs/runbooks/disk.md) | Inspecting Provenant storage |
-| [Garbage collection](docs/runbooks/gc.md) | Collecting caches and expired provider state |
+| [Disk and garbage collection](docs/runbooks/gc.md) | Inspecting storage; collecting caches and expired provider state |
 | [CI](docs/runbooks/ci.md) | Checks, test inventory and reproducing failures |
 | [PR reconciler](docs/runbooks/pr-reconciler.md) | Pull request work records |
 | [Replay bench](docs/runbooks/bench.md) | Mining, verifying and running replay tasks |
