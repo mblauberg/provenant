@@ -64,10 +64,23 @@ fn ingest_is_idempotent_and_attributes_by_directory() -> Result {
     assert_eq!(second["data"]["added"], 0);
     assert_eq!(second["data"]["already_present"], 3);
 
-    let store = fs::read_to_string(rig.state.join("ingest.jsonl"))?;
+    let store = stored(&rig)?;
     assert!(!store.contains("PRIVATE PROMPT"));
     assert!(store.contains("\"source\":\"lane\""));
     Ok(())
+}
+
+/// Every stored row, one JSON line each, across the dated segments.
+fn stored(rig: &TestRig) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let mut names: Vec<_> = fs::read_dir(rig.state.join("ingest"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<_, _>>()?;
+    names.sort();
+    let mut text = String::new();
+    for name in names {
+        text.push_str(&fs::read_to_string(name)?);
+    }
+    Ok(text)
 }
 
 #[test]
@@ -92,7 +105,7 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
         Some(&input),
     )?;
     assert_eq!(code(&output), 0);
-    let store = fs::read_to_string(rig.state.join("ingest.jsonl"))?;
+    let store = stored(&rig)?;
     let rows: Vec<Value> = store
         .lines()
         .map(serde_json::from_str)
@@ -140,7 +153,7 @@ fn chair_stop_ingests_new_usage() -> Result {
     fs::create_dir_all(&subagents)?;
     fs::write(subagents.join("agent-a.jsonl"), message("m3", 20))?;
     assert_eq!(code(&invoke()?), 0);
-    let rows: Vec<Value> = fs::read_to_string(rig.state.join("ingest.jsonl"))?
+    let rows: Vec<Value> = stored(&rig)?
         .lines()
         .map(serde_json::from_str)
         .collect::<std::result::Result<_, _>>()?;
@@ -323,7 +336,7 @@ fn telemetry_stats_reports_context_coverage_reasoning_and_acceptance_denominator
             .is_some_and(|text| text.contains("recorded accepted workflow receipt"))
     );
     assert!(data["cli_ergonomics"]["counts"].is_object());
-    let store = fs::read_to_string(rig.state.join("ingest.jsonl"))?;
+    let store = stored(&rig)?;
     assert!(!store.contains("PRIVATE PROMPT"));
     Ok(())
 }
@@ -379,7 +392,7 @@ fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
     assert_eq!(row["kind"], "attempt");
     assert_eq!(row["attempt_id"], "tool-1");
     assert_eq!(row["state"], "settled");
-    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    let stats = rig.command(&["telemetry", "stats", "--json", "--detail"])?;
     assert_eq!(code(&stats), 0, "{stats:?}");
     let stats: Value = serde_json::from_slice(&stats.stdout.bytes)?;
     assert_eq!(
@@ -399,5 +412,43 @@ fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
         30
     );
     assert!(!fs::read_to_string(rig.state.join("native-attempts.json"))?.contains("PRIVATE"));
+    Ok(())
+}
+
+#[test]
+fn stats_json_is_bounded_by_default_and_an_oversized_detail_leaves_no_artefact() -> Result {
+    let rig = rig()?;
+    // A run holds at most 64 tasks.
+    // Long labels make each per-attempt row heavy, so few attempts overflow.
+    let attempts = 650usize;
+    let work = |index: usize| {
+        json!({"graph_id": format!("graph-{}", "g".repeat(100)),
+            "node_id": format!("node-{index}-{}", "n".repeat(100))})
+    };
+    for run in 0..attempts.div_ceil(50) {
+        let contexts: Vec<Value> = (run * 50..(run * 50 + 50).min(attempts))
+            .map(work)
+            .collect();
+        terminal_run::seed(&rig, &format!("bounded-stats-{run}"), &contexts)?;
+    }
+    // The default is the summary the human view shows: counts, not rows.
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["attempt_context"]["attempts_omitted"],
+        attempts
+    );
+    assert!(value["data"]["attempt_context"].get("attempts").is_none());
+    // Per-attempt rows past the limit are refused with a typed code, and the
+    // command publishes nothing.
+    let output = rig.command(&["telemetry", "stats", "--json", "--detail"])?;
+    assert_eq!(code(&output), 3, "{}", output.stdout.bytes.len());
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
+    assert!(value["data"].get("artifact").is_none_or(Value::is_null));
+    let results = rig.state.join("tmp/results");
+    let left = fs::read_dir(&results).map_or(0, Iterator::count);
+    assert_eq!(left, 0);
     Ok(())
 }

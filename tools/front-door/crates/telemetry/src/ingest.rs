@@ -1,10 +1,13 @@
 //! Native session ingest: per-message token rows from Claude Code transcripts,
 //! attributed to an account by the config directory they were found under.
 //!
-//! The store is `ingest.jsonl` in the state root, one row per assistant
-//! message, keyed by session and message ID so a re-run adds nothing. A row
-//! holds counts and identifiers only: never a prompt, a reply or a path.
-use crate::claude::Raw;
+//! The store is the `ingest` directory in the state root: one dated segment per
+//! UTC day of message time (`2026-10-01.jsonl`), one row per assistant message,
+//! keyed by session and message ID so a re-run adds nothing. A row holds counts
+//! and identifiers only: never a prompt, a reply or a path. Ingest rewrites
+//! only the segments it touches and readers stream the days they ask for, so
+//! no operation meets a whole-store size.
+use crate::{claude::Raw, segments};
 use provenant_core::Roots;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -21,13 +24,21 @@ use thiserror::Error;
 pub const ROW_SCHEMA_VERSION: u64 = 1;
 /// The only provider whose sessions leave a native transcript.
 pub const PROVIDER: &str = "claude";
-const STORE: &str = "ingest.jsonl";
+const DIRECTORY: &str = "ingest";
+/// The single-file store earlier releases wrote; see [`migrate_legacy`].
+const LEGACY_STORE: &str = "ingest.jsonl";
 const LOCK: &str = "ingest.lock";
 const CURSORS: &str = "ingest-cursors.json";
 const CURSOR_CAP: u64 = 32 << 20;
-/// Largest store read or grown. At about 250 bytes a row this is roughly
-/// half a million messages; ingest stops adding rows and says so.
-const STORE_CAP: u64 = 128 << 20;
+/// Largest day ingest rewrites. At about 250 bytes a row this is roughly a
+/// quarter of a million messages in one day; past it ingest stops adding rows
+/// to that day and says so. Readers stream and have no such limit.
+const SEGMENT_CAP: u64 = 64 << 20;
+/// A longer stored line is not a row.
+const MAX_ROW_LINE: usize = 1 << 20;
+/// Days before the newest segments that ingest always reloads, so a chair
+/// recorded or an attempt settled after its rows were ingested still updates them.
+const RECENT_SEGMENTS: usize = 2;
 const MAX_FILE_BYTES: u64 = 1 << 30;
 /// A longer line is a tool result or attachment, never a usage record.
 const MAX_LINE_BYTES: usize = 8 << 20;
@@ -44,8 +55,17 @@ pub enum IngestError {
     Io(#[from] std::io::Error),
     #[error("another ingest is running")]
     Busy,
-    #[error("the ingest store exceeds its size cap")]
-    StoreTooLarge,
+}
+
+impl IngestError {
+    /// Stable machine-readable code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Filesystem(_) => "filesystem",
+            Self::Io(_) => "io",
+            Self::Busy => "busy",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -207,7 +227,7 @@ pub struct Report {
     pub unreadable_files: u64,
     /// Native attempt metadata could not be read, so linking was skipped.
     pub attempts_unreadable: bool,
-    /// The store hit its cap, so some new messages were not recorded.
+    /// A day's segment hit its cap, so some new messages were not recorded.
     pub store_full: bool,
     /// The request's deadline passed, so some transcripts were not read.
     pub deadline_reached: bool,
@@ -418,7 +438,7 @@ struct CursorStore {
     files: BTreeMap<String, Cursor>,
 }
 
-fn read_cursors(directory: &Directory, store: &[u8]) -> BTreeMap<String, Cursor> {
+fn read_cursors(directory: &Directory, store: &str) -> BTreeMap<String, Cursor> {
     let Ok(file) = directory.open_read(OsStr::new(CURSORS)) else {
         return BTreeMap::new();
     };
@@ -433,7 +453,7 @@ fn read_cursors(directory: &Directory, store: &[u8]) -> BTreeMap<String, Cursor>
         .ok()
         // Version 1 did not retain pending structural events. Replay those
         // transcripts rather than treating discarded observations as zero.
-        .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == digest(store))
+        .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == store)
         .map(|cursor| cursor.files)
         .unwrap_or_default()
 }
@@ -662,22 +682,7 @@ fn row(session: String, message: String, pending: Pending) -> Row {
     }
 }
 
-fn read_store(directory: &Directory) -> Result<Vec<u8>, IngestError> {
-    match directory.open_read(OsStr::new(STORE)) {
-        Ok(file) => {
-            if file.metadata()?.size > STORE_CAP {
-                return Err(IngestError::StoreTooLarge);
-            }
-            let mut bytes = Vec::new();
-            file.take(STORE_CAP).read_to_end(&mut bytes)?;
-            Ok(bytes)
-        }
-        Err(error) if error.is_not_found() => Ok(Vec::new()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Parses the store. A current-version row is read. Any other line, such as a
+/// Parses a segment. A current-version row is read. Any other line, such as a
 /// row another schema version wrote or a torn line, is returned as its bytes so
 /// a rewrite keeps it unchanged rather than erasing it.
 fn split(bytes: &[u8]) -> (Vec<Row>, Vec<&[u8]>) {
@@ -707,9 +712,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             FsError::LockTimeout { .. } => IngestError::Busy,
             other => other.into(),
         })?;
-    let existing = read_store(&directory)?;
+    migrate_legacy(&directory)?;
+    let store = open_segments(&directory, true)?;
     let mut cursors = if request.incremental {
-        read_cursors(&directory, &existing)
+        read_cursors(&directory, &fingerprint(&store)?)
     } else {
         BTreeMap::new()
     };
@@ -766,22 +772,39 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     report.messages = messages.len() as u64;
 
-    let (current, kept) = split(&existing);
-    let mut known: BTreeMap<(String, String), Row> = current
-        .into_iter()
-        .map(|row| ((row.session.clone(), row.message.clone()), row))
+    // Load the days new messages fall on and the newest few, so later chair
+    // and attempt records still reach recent rows. Older days stay on disk.
+    let mut names: BTreeSet<String> = messages
+        .values()
+        .map(|pending| segments::name(pending.timestamp))
         .collect();
-    let mut fresh: Vec<Row> = Vec::new();
-    let mut changed = false;
-    for row in known.values_mut() {
-        if row.source == Source::Lane && request.chair_sessions.contains(&row.session) {
-            row.source = Source::Chair;
-            changed = true;
+    let existing = segments::list(&store)?;
+    names.extend(existing.iter().rev().take(RECENT_SEGMENTS).cloned());
+    let mut days = BTreeMap::new();
+    for name in names {
+        let segment = Segment::load(&store, &name)?;
+        days.insert(name, segment);
+    }
+    for segment in days.values_mut() {
+        for row in segment.rows.values_mut() {
+            if row.source == Source::Lane && request.chair_sessions.contains(&row.session) {
+                row.source = Source::Chair;
+                segment.changed = true;
+            }
         }
     }
+    let mut fresh: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     for ((session, message), pending) in messages {
         let account = report.accounts.entry(pending.account.clone()).or_default();
-        if let Some(previous) = known.get_mut(&(session.clone(), message.clone())) {
+        let day = segments::name(pending.timestamp);
+        let segment = days
+            .get_mut(&day)
+            .ok_or_else(|| std::io::Error::other("segment not loaded"))?;
+        if segment.full {
+            report.store_full = true;
+            continue;
+        }
+        if let Some(previous) = segment.rows.get_mut(&(session.clone(), message.clone())) {
             account.present += 1;
             report.already_present += 1;
             let current = row(session, message, pending);
@@ -811,9 +834,12 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             if previous.source == Source::Lane && current.source == Source::Chair {
                 previous.source = Source::Chair;
             }
-            changed |= *previous != before;
+            segment.changed |= *previous != before;
         } else {
-            fresh.push(row(session, message, pending));
+            fresh
+                .entry(day)
+                .or_default()
+                .push(row(session, message, pending));
         }
     }
     let attempts = match crate::native_attempts::read(roots) {
@@ -836,60 +862,51 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             ))
         })
         .collect();
-    for row in known.values_mut().chain(fresh.iter_mut()) {
-        if row.source != Source::Subagent {
+    for row in fresh.values_mut().flatten() {
+        link(row, &links);
+    }
+    for segment in days.values_mut() {
+        for row in segment.rows.values_mut() {
+            segment.changed |= link(row, &links);
+        }
+    }
+    for (day, segment) in &mut days {
+        let mut added = fresh.remove(day).unwrap_or_default();
+        added.sort_by(|a, b| {
+            (&a.timestamp, &a.session, &a.message).cmp(&(&b.timestamp, &b.session, &b.message))
+        });
+        if segment.full {
             continue;
         }
-        let link = row
-            .native_config
-            .as_deref()
-            .zip(row.agent_id.as_deref())
-            .and_then(|(config, agent)| links.get(&(config, row.session.as_str(), agent)))
-            .map(|id| (*id).to_owned());
-        if link.is_some() && row.native_attempt != link {
-            row.native_attempt = link;
-            changed = true;
+        let mut out = segment.encode()?;
+        let mut size = out.len() as u64;
+        for row in added {
+            let mut line = serde_json::to_vec(&row).map_err(std::io::Error::other)?;
+            line.push(b'\n');
+            if size + line.len() as u64 > SEGMENT_CAP {
+                report.store_full = true;
+                break;
+            }
+            size += line.len() as u64;
+            report
+                .accounts
+                .entry(row.account.clone())
+                .or_default()
+                .added += 1;
+            report.added += 1;
+            segment.changed = true;
+            out.extend_from_slice(&line);
         }
-    }
-    fresh.sort_by(|a, b| {
-        (&a.timestamp, &a.session, &a.message).cmp(&(&b.timestamp, &b.session, &b.message))
-    });
-    let mut out = Vec::new();
-    for line in &kept {
-        out.extend_from_slice(line);
-        out.push(b'\n');
-    }
-    for row in known.values() {
-        serde_json::to_writer(&mut out, row).map_err(std::io::Error::other)?;
-        out.push(b'\n');
-    }
-    let mut size = out.len() as u64;
-    for row in fresh {
-        let mut line = serde_json::to_vec(&row).map_err(std::io::Error::other)?;
-        line.push(b'\n');
-        if size + line.len() as u64 > STORE_CAP {
-            report.store_full = true;
-            break;
+        if segment.changed {
+            store
+                .atomic_write(OsStr::new(day), ".ingest-", &out, PublishMode::Replace)?
+                .require_durable()?;
         }
-        size += line.len() as u64;
-        report
-            .accounts
-            .entry(row.account.clone())
-            .or_default()
-            .added += 1;
-        report.added += 1;
-        changed = true;
-        out.extend_from_slice(&line);
-    }
-    if changed {
-        directory
-            .atomic_write(OsStr::new(STORE), ".ingest-", &out, PublishMode::Replace)?
-            .require_durable()?;
     }
     if request.incremental && !report.store_full {
         let bytes = serde_json::to_vec(&CursorStore {
             schema_version: 2,
-            store_digest: digest(if changed { &out } else { &existing }),
+            store_digest: fingerprint(&store)?,
             files: cursors,
         })
         .map_err(std::io::Error::other)?;
@@ -907,6 +924,184 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     Ok(report)
 }
 
+/// Point a native sub-agent row at its attempt. True when the row changed.
+fn link(row: &mut Row, links: &BTreeMap<(&str, &str, &str), &str>) -> bool {
+    if row.source != Source::Subagent {
+        return false;
+    }
+    let found = row
+        .native_config
+        .as_deref()
+        .zip(row.agent_id.as_deref())
+        .and_then(|(config, agent)| links.get(&(config, row.session.as_str(), agent)))
+        .map(|id| (*id).to_owned());
+    if found.is_some() && row.native_attempt != found {
+        row.native_attempt = found;
+        return true;
+    }
+    false
+}
+
+/// One day of rows. Lines this build cannot read are kept as they are.
+#[derive(Default)]
+struct Segment {
+    rows: BTreeMap<(String, String), Row>,
+    kept: Vec<Vec<u8>>,
+    /// Over [`SEGMENT_CAP`]: not loaded and not rewritten.
+    full: bool,
+    changed: bool,
+}
+
+impl Segment {
+    fn load(directory: &Directory, name: &str) -> Result<Self, IngestError> {
+        let file = match directory.open_read(OsStr::new(name)) {
+            Ok(file) => file,
+            Err(error) if error.is_not_found() => return Ok(Self::default()),
+            Err(error) => return Err(error.into()),
+        };
+        if file.metadata()?.size > SEGMENT_CAP {
+            return Ok(Self {
+                full: true,
+                ..Self::default()
+            });
+        }
+        let mut bytes = Vec::new();
+        file.take(SEGMENT_CAP).read_to_end(&mut bytes)?;
+        let (rows, kept) = split(&bytes);
+        Ok(Self {
+            rows: rows
+                .into_iter()
+                .map(|row| ((row.session.clone(), row.message.clone()), row))
+                .collect(),
+            kept: kept.into_iter().map(<[u8]>::to_vec).collect(),
+            full: false,
+            changed: false,
+        })
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, IngestError> {
+        let mut out = Vec::new();
+        for line in &self.kept {
+            out.extend_from_slice(line);
+            out.push(b'\n');
+        }
+        for row in self.rows.values() {
+            serde_json::to_writer(&mut out, row).map_err(std::io::Error::other)?;
+            out.push(b'\n');
+        }
+        Ok(out)
+    }
+}
+
+/// The segments directory, created on request.
+fn open_segments(root: &Directory, create: bool) -> Result<Directory, IngestError> {
+    if create {
+        match root.mkdir(OsStr::new(DIRECTORY), 0o700) {
+            Ok(()) => root.sync()?,
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(root.open_directory(OsStr::new(DIRECTORY))?)
+}
+
+/// Identifies the store's current contents for the cursors: the segments and
+/// their sizes. A cursor made against other contents is not trusted.
+fn fingerprint(directory: &Directory) -> Result<String, IngestError> {
+    let mut listing = String::new();
+    for name in segments::list(directory)? {
+        let size = directory.open_read(OsStr::new(&name))?.metadata()?.size;
+        listing.push_str(&format!("{name}:{size}\n"));
+    }
+    Ok(digest(listing.as_bytes()))
+}
+
+/// Calls `each` with every line, without its newline. A line longer than
+/// [`MAX_ROW_LINE`] is not a row and is dropped.
+fn each_line(reader: impl Read, mut each: impl FnMut(&[u8])) -> std::io::Result<()> {
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = (&mut reader)
+            .take(MAX_ROW_LINE as u64 + 1)
+            .read_until(b'\n', &mut line)?;
+        if read == 0 {
+            return Ok(());
+        }
+        if line.len() > MAX_ROW_LINE && line.last() != Some(&b'\n') {
+            let mut rest = Vec::new();
+            loop {
+                rest.clear();
+                let drained = (&mut reader).take(1 << 20).read_until(b'\n', &mut rest)?;
+                if drained == 0 || rest.last() == Some(&b'\n') {
+                    break;
+                }
+            }
+            continue;
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        each(&line);
+    }
+}
+
+/// One-off: earlier releases kept every row in one `ingest.jsonl`, which grew
+/// past its cap and stopped every reader. Split it into dated segments, then
+/// remove it. Rows go to the day of their timestamp; a line with none (a torn
+/// write, another schema's row) stays beside the line before it. Safe to repeat
+/// after an interruption: lines already in a segment are not added twice.
+/// Delete this function once no release writes the single file.
+/// The ingest lock must be held.
+fn migrate_legacy(root: &Directory) -> Result<(), IngestError> {
+    let file = match root.open_read(OsStr::new(LEGACY_STORE)) {
+        Ok(file) => file,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut days: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+    let mut last = segments::name(jiff::Timestamp::UNIX_EPOCH);
+    each_line(file, |line| {
+        if line.is_empty() {
+            return;
+        }
+        let day = serde_json::from_slice::<serde_json::Value>(line)
+            .ok()
+            .and_then(|value| value.get("timestamp")?.as_str()?.parse().ok())
+            .map_or_else(|| last.clone(), segments::name);
+        days.entry(day.clone()).or_default().push(line.to_vec());
+        last = day;
+    })?;
+    let store = open_segments(root, true)?;
+    for (day, lines) in days {
+        let mut out = match store.read_bounded(OsStr::new(&day), SEGMENT_CAP) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if out.last().is_some_and(|last| *last != b'\n') {
+            out.push(b'\n');
+        }
+        let mut held: BTreeSet<Vec<u8>> = out
+            .split(|byte| *byte == b'\n')
+            .map(<[u8]>::to_vec)
+            .collect();
+        for line in lines {
+            if held.insert(line.clone()) {
+                out.extend_from_slice(&line);
+                out.push(b'\n');
+            }
+        }
+        store
+            .atomic_write(OsStr::new(&day), ".ingest-", &out, PublishMode::Replace)?
+            .require_durable()?;
+    }
+    root.unlink(OsStr::new(LEGACY_STORE))?;
+    root.sync()?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RowFilter {
     pub account: Option<String>,
@@ -915,24 +1110,60 @@ pub struct RowFilter {
     pub until: Option<i64>,
 }
 
-/// Rows matching the filter, oldest first. A missing store is empty.
+/// Rows matching the filter, oldest first. Only the days the filter's window
+/// reaches are read, each streamed. A missing store is empty.
 pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestError> {
-    let directory = match Directory::open_anchor(roots.state.as_path()) {
+    let root = match Directory::open_anchor(roots.state.as_path()) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let bytes = read_store(&directory)?;
-    let mut rows: Vec<(i64, Row)> = split(&bytes)
-        .0
-        .into_iter()
-        .filter(|row| filter.account.as_ref().is_none_or(|a| *a == row.account))
-        .filter(|row| filter.model.as_ref().is_none_or(|m| *m == row.model))
-        .filter_map(|row| Some((row.unix_seconds()?, row)))
-        .filter(|(at, _)| {
-            filter.since.is_none_or(|s| *at >= s) && filter.until.is_none_or(|u| *at <= u)
-        })
-        .collect();
+    // One-off: a reader meeting the single-file store splits it first.
+    if root.metadata_at(OsStr::new(LEGACY_STORE), false).is_ok() {
+        let _lock = root
+            .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => IngestError::Busy,
+                other => other.into(),
+            })?;
+        migrate_legacy(&root)?;
+    }
+    let directory = match open_segments(&root, false) {
+        Ok(directory) => directory,
+        Err(IngestError::Filesystem(error)) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let day = |seconds: i64| {
+        jiff::Timestamp::from_second(seconds)
+            .ok()
+            .map(segments::name)
+    };
+    let (first, last) = (filter.since.and_then(day), filter.until.and_then(day));
+    let mut rows: Vec<(i64, Row)> = Vec::new();
+    for name in segments::list(&directory)? {
+        if first.as_ref().is_some_and(|first| name < *first)
+            || last.as_ref().is_some_and(|last| name > *last)
+        {
+            continue;
+        }
+        each_line(directory.open_read(OsStr::new(&name))?, |line| {
+            let Ok(row) = serde_json::from_slice::<Row>(line) else {
+                return;
+            };
+            if row.schema_version != ROW_SCHEMA_VERSION
+                || filter.account.as_ref().is_some_and(|a| *a != row.account)
+                || filter.model.as_ref().is_some_and(|m| *m != row.model)
+            {
+                return;
+            }
+            if let Some(at) = row.unix_seconds()
+                && filter.since.is_none_or(|s| at >= s)
+                && filter.until.is_none_or(|u| at <= u)
+            {
+                rows.push((at, row));
+            }
+        })?;
+    }
     rows.sort_by_key(|(at, _)| *at);
     Ok(rows.into_iter().map(|(_, row)| row).collect())
 }

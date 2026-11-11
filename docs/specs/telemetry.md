@@ -194,13 +194,16 @@ non-secret file identity and digest evidence. Replacements, truncation or store
 changes invalidate a cursor. Incomplete lines are retried. Publish usage before
 its cursor, so interruption can cause a reread but never skip committed input.
 
-Reads and stores are bounded and never follow links. Missing message timestamps
-are counted as skipped. Reaching the store cap stops additions visibly instead
-of manufacturing complete coverage. The [CLI reference](../reference/cli-all.md)
+The store is one segment per UTC day. Ingest rewrites only the days new messages
+fall on and the newest few; readers stream the days their window reaches. Reads
+are bounded and never follow links. Missing message timestamps are counted as
+skipped. A day that reaches its segment cap stops additions to that day visibly
+instead of manufacturing complete coverage. The [CLI reference](../reference/cli-all.md)
 owns invocation; `crates/telemetry/src/ingest.rs` owns limits and record layout.
 - Why (default): most Claude spend is the interactive chair and its native sub-agents,
   which no supervised attempt record sees.
 - Test: `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
+  `crates/telemetry/src/ingest/tests.rs::a_single_file_store_over_the_old_cap_is_split_on_first_open`;
   `crates/telemetry/src/ingest/tests.rs::lines_this_build_cannot_read_survive_a_rewrite`;
   `crates/telemetry/src/ingest/tests.rs::incremental_ingest_resumes_complete_lines_and_recovers_replacements`;
   `crates/telemetry/src/ingest/tests.rs::native_attempt_links_only_its_matching_subagent_and_updates_after_settlement`
@@ -470,9 +473,14 @@ to `most_constrained` with a warning and leaves config unchanged.
   `tests/quota.rs::show_warns_when_display_icon_account_is_not_registered`
 - Owner: `crates/cli/src/quota.rs`
 
-`telemetry stats --detail --json` includes the recorded route decision and pool
-selection receipt for each selected terminal attempt. Older attempts can omit
-these fields.
+`telemetry stats --json` is bounded by default: it carries the figures the human
+view shows, and the arrays that grow with each attempt (`attempt_context.attempts`,
+`task_context.rows` and `graph_outcomes`, `cache_read_share.lanes`,
+`native_subagents.attempts`) are replaced by their counts under `<name>_omitted`.
+`telemetry stats --detail --json` includes those rows and the recorded route
+decision and pool selection receipt for each selected terminal attempt. Older
+attempts can omit these fields. A result over 1 MiB is refused with
+`RESULT_TOO_LARGE` and publishes no artefact.
 
 ## Not provided
 

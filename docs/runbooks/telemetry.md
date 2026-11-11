@@ -6,9 +6,14 @@ Anchor: [`telemetry tests`](../../tools/front-door/crates/telemetry/src/tests.rs
 from `config/telemetry-prices.toml`. Optional `--since`, `--until DATE`,
 `--run-id ID` and `--detail` bound or extend the report. `--since` takes a
 number of seconds ago, a date or an RFC3339 timestamp. Use `--json` for
-structured output. The contract is in the [telemetry spec](../specs/telemetry.md).
+structured output. `--json` returns the same summary rows the human view shows;
+the per-attempt arrays (`attempt_context.attempts`, `task_context.rows`,
+`cache_read_share.lanes` and `native_subagents.attempts`) need `--detail`, and
+a result over 1 MiB is refused with `RESULT_TOO_LARGE` and no artefact, so
+narrow it with `--since` and `--until`. The contract is in the
+[telemetry spec](../specs/telemetry.md).
 
-For behaviour comparisons, inspect `attempt_context` and `task_context` for
+For behaviour comparisons, inspect `attempt_context` and `task_context` (with `--detail`) for
 source, effective time and known/unknown coverage, then `reply_context` for
 thinking per inferred trigger, `context_bands` for spend by the context each
 reply sent, and `cli_ergonomics` for help, retry, wait and poll counts. Native replies and CLI counts cover the host window; attempt
@@ -61,13 +66,17 @@ hook runs the last day of ingest automatically, within a three-second budget
 that stops the read and keeps the rows already read, so an interactive session
 is captured without a manual command.
 
-The store is `ingest.jsonl` under the state root. It holds counts, model,
+The store is the `ingest` directory under the state root, one `YYYY-MM-DD.jsonl`
+segment per UTC day of message time, so readers meet only the days they ask
+for and the store has no whole-size limit. It holds counts, model,
 effort, account, timestamp, session and message IDs and a `source` of `chair`,
 `subagent` or `lane`; it never holds prompt, reply, tool or path text. A row
 whose message streamed repeatedly keeps the largest count of each bucket. A
 row first seen as a `lane` becomes a `chair` once the hook records its session.
 A line this build cannot read, such as another schema version or a torn write,
-is kept as it was when the store is rewritten. Reads never follow links, and a
+is kept as it was when the day's segment is rewritten. A single `ingest.jsonl`
+from an earlier release is split into segments the first time ingest or a
+report opens it. Reads never follow links, and a
 message without a timestamp is counted as skipped rather than guessed.
 
 ## Mileage
