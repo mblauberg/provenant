@@ -98,7 +98,7 @@ times node count. Prompts are scanned for secrets before they persist.
 
 Bundled templates are owned by
 [`assets/templates/`](../../tools/front-door/crates/fabric-runtime/assets/templates/).
-The [template runbook](../runbooks/presets.md) owns composition and use; template
+The [template runbook](../runbooks/routing-and-templates.md#templates) owns composition and use; template
 names, tiers and briefs are not a separate architectural catalogue.
 
 ## Trace and recovery
