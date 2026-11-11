@@ -56,11 +56,11 @@
       "relation": "negative",
       "prompt": "Profile render churn in a React view that uses TanStack Query; the cache is correct.",
       "tags": [
-        "adjacent",
+        "no-skill",
         "near-miss"
       ],
       "expected": {
-        "primary_skill": "react-performance",
+        "primary_skill": null,
         "companion_skills": []
       }
     },
@@ -100,20 +100,6 @@
       ],
       "expected": {
         "primary_skill": "code-review",
-        "companion_skills": [
-          "tanstack"
-        ]
-      }
-    },
-    {
-      "id": "q261",
-      "relation": "boundary",
-      "prompt": "Remove the React request waterfall while preserving TanStack Query freshness and cancellation semantics.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "react-performance",
         "companion_skills": [
           "tanstack"
         ]

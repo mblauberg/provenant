@@ -110,7 +110,3 @@ Opus 5, Sonnet 5, GPT-5.6 Sol and Luna, GLM-5.3) are counted separately in
   readable. Its qualitative finding, that more effort can add cost with no gain
   and that harness shifts cost per success 5 to 30 times, matches the rule above
   but is not recorded as data.
-
-Qualitative judgement about each model stays in
-[`docs/model-dossier.md`](../../model-dossier.md); this registry holds only
-numbers with their sources.
