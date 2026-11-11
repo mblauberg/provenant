@@ -61,7 +61,8 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert_eq!(ask.ask_id, "choose.ask-1");
     assert_eq!(ask.kind, AskKind::Decide);
     assert_eq!(ask.session, "chair-session");
-    assert!(ask.body.contains("Ship the change?"));
+    assert_eq!(ask.request, "choose.ask-1");
+    assert!(owner.filed[0].body.contains("Ship the change?"));
     assert!(ask.wake_at.is_none() && waiting.checkpoint.wake_at.is_none());
     assert!(owner.calls.is_empty());
     assert_eq!(
@@ -94,11 +95,10 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
             .unwrap()
             .contains("answered by chair")
     );
-    let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
-    assert_eq!(answer.source, AnswerSource::Answered);
-    assert_eq!(answer.actor.as_deref(), Some("chair"));
-    assert!(run.checkpoint.asks[0].resolved && run.checkpoint.asks[0].closed);
-    assert_eq!(owner.closed_asks, ["choose.ask-1"]);
+    // The inbox keeps the answer; the checkpoint keeps no link once it is applied.
+    assert!(run.checkpoint.asks.is_empty());
+    assert!(owner.closed_asks.is_empty());
+    assert_eq!(owner.filed.len(), 1);
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(replay.checkpoint, run.checkpoint);
     assert_eq!(owner.calls.len(), 1);
@@ -127,7 +127,7 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     );
     assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
 
-    // A rejected answer keeps the node open and the next advance asks again.
+    // A rejected answer keeps the node open and replaces the request at once.
     let mut owner = FakeOwner {
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
@@ -139,23 +139,20 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     let rejected = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(rejected.status, GraphStatus::Pending);
     assert_eq!(state(&rejected, "choose"), NodeState::Running);
-    let first = &rejected.checkpoint.asks[0];
-    assert_eq!(
-        first.answer.as_ref().unwrap().rejection_code.as_deref(),
-        Some("invalid_decide_option")
-    );
-    assert!(first.resolved && first.closed);
     assert!(owner.calls.is_empty());
-
-    let again = advance(&document, &mut owner, &mut journal).unwrap();
-    let second = &again.checkpoint.asks[0];
+    let [second] = &rejected.checkpoint.asks[..] else {
+        panic!("one link per node");
+    };
     assert_eq!(second.ask_id, "choose.ask-2");
-    assert!(!second.resolved);
+    assert_eq!(owner.filed.len(), 2);
     assert!(
-        second
+        owner.filed[1]
             .body
             .ends_with("The previous answer was not applied: answer must choose one of ship, hold")
     );
+    let again = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(again.checkpoint, rejected.checkpoint);
+    assert_eq!(owner.filed.len(), 2);
     owner
         .answers
         .insert("choose.ask-2".into(), reply(Some("ship"), None));
@@ -184,6 +181,14 @@ fn decide_ids_stay_unique_across_repeated_cancel_and_resume() {
         .collect();
     assert_eq!(ids, ["choose.ask-3"]);
     assert_eq!(owner.closed_asks, ["choose.ask-1", "choose.ask-2"]);
+    assert_eq!(
+        owner
+            .filed
+            .iter()
+            .map(|ask| ask.ask_id.as_str())
+            .collect::<Vec<_>>(),
+        ["choose.ask-1", "choose.ask-2", "choose.ask-3"]
+    );
 }
 
 #[test]
@@ -293,7 +298,7 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(owner.asked, ["pause-1"]);
-    assert!(!paused.checkpoint.asks[0].resolved);
+    assert_eq!(paused.checkpoint.asks.len(), 1);
 
     owner.observations = [
         terminal(AttemptOutcome::Succeeded),
@@ -311,12 +316,7 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.pause.is_none());
     assert!(run.checkpoint.pause.is_none());
-    assert!(
-        run.checkpoint
-            .asks
-            .iter()
-            .all(|ask| ask.resolved && ask.closed)
-    );
+    assert!(run.checkpoint.asks.is_empty());
     assert_eq!(owner.closed_asks, ["pause-1"]);
 }
 
@@ -332,7 +332,8 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(waiting.checkpoint.asks[0].wake_at, Some(at(60)));
     assert_eq!(waiting.checkpoint.wake_at, Some(at(60)));
-    assert_eq!(waiting.checkpoint.asks[0].default.as_deref(), Some("hold"));
+    assert_eq!(owner.filed[0].default.as_deref(), Some("hold"));
+    assert_eq!(owner.filed[0].wake_at, Some(at(60)));
     assert_eq!(journal.0.as_ref().unwrap().wake_at, Some(at(60)));
     owner.now = Some(at(59));
     assert_eq!(
@@ -347,13 +348,7 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
     assert_eq!(state(&run, "ship-work"), NodeState::Skipped);
-    let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
-    assert_eq!(answer.source, AnswerSource::Default);
-    assert_eq!(
-        (answer.option.as_deref(), answer.actor.as_deref()),
-        (Some("hold"), None)
-    );
-    assert_eq!(answer.at, Some(at(61)));
+    assert!(run.checkpoint.asks.is_empty());
     assert!(run.checkpoint.wake_at.is_none());
     let choose = run
         .checkpoint
@@ -399,7 +394,7 @@ fn several_decide_asks_are_open_at_once_and_resolve_independently() {
     assert_eq!(state(&partial, "second"), NodeState::Succeeded);
     assert_eq!(state(&partial, "first"), NodeState::Running);
     assert_eq!(partial.checkpoint.wake_at, Some(at(120)));
-    assert_eq!(owner.closed_asks, ["second.ask-1"]);
+    assert!(owner.closed_asks.is_empty());
 
     owner
         .answers
@@ -432,16 +427,12 @@ fn decide_nodes_run_inside_loop_bodies_once_per_round() {
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    let ids: Vec<_> = run
-        .checkpoint
-        .asks
-        .iter()
-        .map(|ask| ask.ask_id.as_str())
-        .collect();
+    let ids: Vec<_> = owner.filed.iter().map(|ask| ask.ask_id.as_str()).collect();
     assert_eq!(
         ids,
         ["revise--r1--choose.ask-1", "revise--r2--choose.ask-1"]
     );
+    assert!(run.checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -545,7 +536,8 @@ fn a_budget_pause_raises_one_ask_and_an_extend_answer_resumes() {
     let ask = &paused.checkpoint.asks[0];
     assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
     assert!(
-        ask.body
+        owner.filed[0]
+            .body
             .contains(paused.checkpoint.pause_reason().unwrap())
     );
     assert_eq!(
@@ -566,16 +558,8 @@ fn a_budget_pause_raises_one_ask_and_an_extend_answer_resumes() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(run.checkpoint.extensions, ["budget.per_graph.tokens=30"]);
     assert_eq!(owner.calls.len(), 2);
-    assert_eq!(
-        run.checkpoint.asks[0]
-            .answer
-            .as_ref()
-            .unwrap()
-            .actor
-            .as_deref(),
-        Some("chair")
-    );
-    assert_eq!(owner.closed_asks, ["pause-1"]);
+    assert!(run.checkpoint.asks.is_empty());
+    assert!(owner.closed_asks.is_empty());
 }
 
 #[test]
@@ -594,19 +578,16 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
     let rejected =
         advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(rejected.status, GraphStatus::Paused);
-    let first = &rejected.checkpoint.asks[0];
-    assert_eq!(
-        first.answer.as_ref().unwrap().rejection_code.as_deref(),
-        Some("invalid_pause_answer")
+    // The rejected answer is replaced by a request that says why.
+    assert_eq!(rejected.checkpoint.asks.len(), 1);
+    assert_eq!(rejected.checkpoint.asks[0].ask_id, "pause-2");
+    assert!(
+        owner.filed[1]
+            .body
+            .contains("The previous answer was not applied")
     );
     let again = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
-    let second = again
-        .checkpoint
-        .asks
-        .iter()
-        .find(|ask| ask.ask_id == "pause-2")
-        .unwrap();
-    assert!(second.body.contains("The previous answer was not applied"));
+    assert_eq!(again.checkpoint, rejected.checkpoint);
 
     owner
         .answers
@@ -615,7 +596,7 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
         advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
     assert_eq!(owner.calls.len(), 1);
-    assert!(cancelled.checkpoint.asks.iter().all(|ask| ask.closed));
+    assert!(cancelled.checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -728,7 +709,7 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
                 checkpoint:approved_journal.0.as_mut().unwrap() }, "scope", None, &context).unwrap();
             let retried = advance(&document, &mut approved_owner, &mut approved_journal).unwrap();
             assert_eq!(state(&retried, "scope"), NodeState::Running);
-            assert!(retried.checkpoint.asks.iter().any(|ask| ask.ask_id == "scope.ask-2.retry-1" && !ask.resolved));
+            assert!(retried.checkpoint.asks.iter().any(|ask| ask.ask_id == "scope.ask-1.retry-1"));
             assert_eq!(approved_owner.owner_notifications, ["scope.owner-notification.retry-1"]);
             owner.answers.insert("scope.ask-1".into(), reply(Some("hold"), None));
             let held = advance(&document, &mut owner, &mut journal).unwrap();
@@ -771,6 +752,6 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
     assert_eq!(retried.status, GraphStatus::Pending);
     assert_eq!(state(&retried, "redesign--scope"), NodeState::Running);
     assert_eq!(retried.checkpoint.asks[0].ask_id, "redesign--scope.ask-1.retry-1");
-    assert!(retried.checkpoint.asks[0].body.contains("Revised principal slice"));
+    assert!(owner.filed.last().unwrap().body.contains("Revised principal slice"));
     assert_eq!(owner.owner_notifications, ["redesign--scope.owner-notification", "redesign--scope.owner-notification.retry-1"]);
 }

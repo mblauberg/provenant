@@ -167,6 +167,74 @@ fn inbox_cli_posts_lists_and_resolves_all_kinds_without_apps() -> Result {
 }
 
 #[test]
+fn console_overview_and_the_cli_list_the_same_open_asks() -> Result {
+    let rig = TestRig::new()?;
+    let file = draft(&rig, "decision")?;
+    let mut ids = Vec::new();
+    for number in 0..3 {
+        let operation = format!("ask-{number}");
+        let created = call(
+            &rig,
+            &[
+                "ask",
+                "--file",
+                &file,
+                "--session",
+                "chair-a",
+                "--operation-id",
+                &operation,
+            ],
+            None,
+            0,
+        )?;
+        ids.push(
+            created["data"]["request_id"]
+                .as_str()
+                .ok_or("request ID")?
+                .to_owned(),
+        );
+    }
+    // Answering by chat closes one of them for both views.
+    let answered = call(
+        &rig,
+        &[
+            "answer",
+            &ids[1],
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "chat",
+            "--operation-id",
+            "chat-answer",
+        ],
+        None,
+        0,
+    )?;
+    assert_eq!(answered["data"]["revision"], 2);
+    let ids_of = |value: &Value, items: &str| -> Result<Vec<String>> {
+        let mut ids = value["data"][items]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .map(|item| item["id"].as_str().map(str::to_owned).ok_or("item ID"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.sort();
+        Ok(ids)
+    };
+    let cli = ids_of(&call(&rig, &["inbox"], None, 0)?, "items")?;
+    let console = ids_of(&call(&rig, &["console", "overview"], None, 0)?, "needs_you")?;
+    let mut expected = vec![ids[0].clone(), ids[2].clone()];
+    expected.sort();
+    assert_eq!(cli, expected);
+    assert_eq!(console, expected);
+    Ok(())
+}
+
+#[test]
 fn inbox_cli_refuses_forged_ownership_and_closes_without_approval() -> Result {
     let rig = TestRig::new()?;
     let file = draft(&rig, "decision")?;

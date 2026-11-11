@@ -533,8 +533,13 @@ pub(super) fn session<'a>(spec: &'a LandSpec, plan: &'a PlannedGraph) -> Option<
     spec.session.as_deref().or(plan.decision_session.as_deref())
 }
 
-pub(super) fn sequence(ask: &NodeAsk, node_id: &str) -> Option<u64> {
-    ask.ask_id
+/// The ID of a land node's one ask.
+pub(super) fn ask_id(node_id: &str) -> String {
+    format!("{node_id}.ask-1")
+}
+
+pub(super) fn sequence(ask_id: &str, node_id: &str) -> Option<u64> {
+    ask_id
         .strip_prefix(node_id)?
         .strip_prefix(".ask-")?
         .parse()
@@ -564,9 +569,9 @@ pub(super) fn land_ask(
     node: &PlannedNode,
     record: &LandRecord,
     session: &str,
-) -> NodeAsk {
+) -> AskRequest {
     let mut ask = asks::ask(
-        format!("{}.ask-1", node.id),
+        ask_id(&node.id),
         AskKind::Land,
         session,
         format!(
@@ -832,7 +837,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     journal: &mut J,
 ) -> Result<Option<String>, GraphError<R::Error, J::Error>> {
-    let mine = |ask: &NodeAsk| ask.node.as_deref() == Some(node.id.as_str());
+    let mine = |ask: &AskLink| ask.node.as_deref() == Some(node.id.as_str());
     let position = match checkpoint.asks.iter().rposition(mine) {
         Some(position) => position,
         None => {
@@ -852,25 +857,16 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
                 )?;
                 return Ok(None);
             };
-            asks::identity::<R, J::Error>(checkpoint, owner)?;
-            checkpoint
-                .asks
-                .push(land_ask(&plan.graph_id, node, record, &session));
+            let request = land_ask(&plan.graph_id, node, record, &session);
+            let (link, _) = asks::file(checkpoint, owner, journal, &request)?;
+            checkpoint.asks.push(link);
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             checkpoint.asks.len() - 1
         }
     };
     let ask_id = checkpoint.asks[position].ask_id.clone();
-    if checkpoint.asks[position].resolved {
-        return Ok(None);
-    }
-    let before = checkpoint.asks[position].inbox_error.clone();
-    let reply = asks::poll(checkpoint, position, owner);
-    let Ok(Some(reply)) = reply else {
-        if checkpoint.asks[position].inbox_error != before {
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
-        }
+    let Ok(Some(reply)) = asks::poll(checkpoint, position, owner) else {
         return Ok(Some(ask_id));
     };
     let answer = asks::answered(reply);
@@ -896,9 +892,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     if let Some(land) = progress.land.as_mut() {
         land.wake_at = None;
     }
-    let ask = &mut checkpoint.asks[position];
-    ask.answer = Some(answer);
-    ask.resolved = true;
+    checkpoint.asks.remove(position);
     asks::refresh_wake(checkpoint);
     journal.save(checkpoint).map_err(GraphError::Journal)?;
     Ok(None)
@@ -906,7 +900,7 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
 
 pub(super) fn validate_progress(
     progress: &NodeProgress,
-    checkpoint: &GraphCheckpoint,
+    _checkpoint: &GraphCheckpoint,
 ) -> Result<(), ()> {
     let authority = progress
         .land
@@ -918,12 +912,9 @@ pub(super) fn validate_progress(
                 .land
                 .as_ref()
                 .is_some_and(|record| record.policy == LandPolicy::Ask)
-                && checkpoint.asks.iter().any(|ask| {
-                    &ask.ask_id == ask_id
-                        && ask.kind == AskKind::Land
-                        && ask.node.as_deref() == Some(progress.id.as_str())
-                        && ask.answer.is_none()
-                })
+                // The ask itself is the inbox's; the chair landed by hand on its
+                // authority, so the node names the one ask it raises.
+                && *ask_id == self::ask_id(&progress.id)
         }
         Some(LandAuthority::Policy) => progress
             .land

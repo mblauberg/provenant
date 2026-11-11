@@ -138,7 +138,7 @@ mod file_tests;
 #[path = "graph/graph_tests.rs"]
 mod tests;
 pub use asks::{
-    AnswerSource, AskAnswer, AskKind, AskOption, AskReply, AskScope, DecideSpec, NodeAsk,
+    AskFiled, AskFiling, AskKind, AskLink, AskOption, AskReply, AskRequest, AskScope, DecideSpec,
     close_resolved_asks, loop_ask,
 };
 pub use composites::CompositeSpec;
@@ -428,17 +428,29 @@ pub trait AttemptOwner {
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
 
-    /// Raise the ask if it is new, idempotently by its ask ID, and return its
-    /// answer once there is one. A host without an inbox never answers.
+    /// File the ask as an open inbox request, idempotently by the graph
+    /// instance and ask ID: a repeat returns the request it filed first, with
+    /// the deadline that request carries. A host without an inbox names the ask
+    /// itself and never has an answer.
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        Ok(AskFiled {
+            request: filing.ask.ask_id.clone(),
+            deadline: filing.ask.wake_at,
+            closed: false,
+        })
+    }
+    /// Read the answer to a filed ask, once there is one. A host without an
+    /// inbox never answers.
     fn node_ask(&mut self, _scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         Ok(None)
     }
     /// Send a durable non-blocking owner notification, idempotent by ask ID.
     /// False means the host has no notification transport yet.
-    fn notify_owner(&mut self, _scope: AskScope<'_>) -> Result<bool, Self::Error> {
+    fn notify_owner(&mut self, _filing: AskFiling<'_>) -> Result<bool, Self::Error> {
         Ok(false)
     }
-    /// Withdraw a resolved ask's inbox request. Closing never creates one.
+    /// Withdraw an unanswered ask's inbox request. Closing never creates one,
+    /// and an answered request stays answered.
     fn close_node_ask(&mut self, _scope: AskScope<'_>) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -1749,7 +1761,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &extension,
                             limits,
                         ) {
-                            transitions::reject_loop_decision(&mut checkpoint, &node.id, &reason);
                             loops::pause_invalid_decision(
                                 &mut checkpoint,
                                 &node.id,

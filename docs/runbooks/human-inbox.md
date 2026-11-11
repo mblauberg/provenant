@@ -56,6 +56,11 @@ provenant inbox acknowledge REQUEST_ID --answer ANSWER_ID \
   refuses answers; `inbox --state all` still shows it. Expiry is a projection at
   read time and implies no approval. `inbox close` with a reason and revision
   withdraws, supersedes or expires an item without discarding its answer.
+- A graph node ask is an ordinary open request in the same list, filed by the
+  graph under the chair's session; `provenant inbox` and `console overview` show
+  it beside the others. Answer it as any other request, including
+  `--channel chat`; the graph reads the answer on its next advance, acknowledges
+  it and resumes the node. Cancelling the graph closes its unanswered requests.
 - `work` links a request to a run; only `verified` `work_coverage` may be treated
   as navigable work.
 - Peers and projects: `--all-projects` finds a request's project by ID and lists

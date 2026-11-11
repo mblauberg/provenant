@@ -1168,13 +1168,15 @@ fn detached_node_asks_survive_whole_graph_cancellation() {
     relay::fence_detached_cancellation(&document, &mut checkpoint).unwrap();
     for (id, node) in [("attached-ask", "a"), ("detached-ask", "a--keep")] {
         checkpoint.asks.push(serde_json::from_value(json!({
-            "ask_id":id, "kind":"decide", "node":node, "session":"chair",
-            "title":"Choose", "body":"Choose", "options":[], "resolved":false, "closed":false
+            "ask_id":id, "kind":"decide", "node":node, "session":"chair", "request":id
         })).unwrap());
     }
-    close_resolved_asks(&mut checkpoint, &mut FakeOwner::default(), &mut MemoryJournal::default()).unwrap();
-    assert!(checkpoint.asks[0].resolved);
-    assert!(!checkpoint.asks[1].resolved);
+    checkpoint.ask_actor = Some("chair".into());
+    let mut owner = FakeOwner::default();
+    close_resolved_asks(&mut checkpoint, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.closed_asks, ["attached-ask"]);
+    let kept: Vec<_> = checkpoint.asks.iter().map(|ask| ask.ask_id.as_str()).collect();
+    assert_eq!(kept, ["detached-ask"]);
 }
 
 #[test]

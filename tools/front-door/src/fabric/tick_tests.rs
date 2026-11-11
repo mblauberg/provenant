@@ -61,7 +61,9 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
     assert_eq!(report.advanced, 2);
     let due = graph::FileJournal::read_checkpoint(&roots.state, project, "b-due")?.ok_or("missing due graph")?;
     assert_eq!(due.nodes[0].state, graph::NodeState::Succeeded);
-    assert_eq!(due.asks[0].answer.as_ref().ok_or("missing default")?.source, graph::AnswerSource::Default);
+    // The deadline took the default; the checkpoint keeps the verdict, not the link.
+    assert!(due.asks.is_empty());
+    assert_eq!(due.nodes[0].outputs.as_ref().and_then(|outputs| outputs.verdict.as_deref()), Some("hold"));
     assert!(due.wake_at.is_none());
     let cancelled = graph::FileJournal::read_checkpoint(&roots.state, project, "d-cancelled")?.ok_or("missing cancelled graph")?;
     assert_eq!(cancelled.nodes[0].state, graph::NodeState::Skipped);

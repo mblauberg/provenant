@@ -698,21 +698,18 @@ impl Factory {
                             first_error.get_or_insert(error);
                         }
                     }
-                    if let (Some(instance_id), Some(actor)) =
-                        (&checkpoint.instance_id, &checkpoint.ask_actor)
-                    {
-                        for ask in checkpoint.asks.iter().filter(|ask| !ask.closed) {
-                            let scope = provenant_fabric_runtime::graph::AskScope {
-                                graph_id: &checkpoint.graph_id,
-                                instance_id,
-                                actor,
-                                ask,
-                            };
-                            if let Err(error) = graph_ask_edge(self, cancel, scope, true) {
+                    if let Some(actor) = &checkpoint.ask_actor {
+                        for ask in &checkpoint.asks {
+                            let scope = provenant_fabric_runtime::graph::AskScope { actor, ask };
+                            if let Err(error) =
+                                graph_ask_with(self, cancel, actor, &ask.ask_id, |service| {
+                                    graph_ask_close(service, &scope, cancel)
+                                })
+                            {
                                 first_error.get_or_insert(error);
                             }
                         }
-                    } else if checkpoint.asks.iter().any(|ask| !ask.closed) {
+                    } else if !checkpoint.asks.is_empty() {
                         first_error.get_or_insert(FacadeError::StateCorrupt);
                     }
                     if let Some(error) = first_error {

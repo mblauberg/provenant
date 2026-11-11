@@ -143,26 +143,24 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
     outputs
 }
 
-/// An ask holding the longest deadline, answer and inbox error it can store.
-fn filled_ask(mut ask: NodeAsk) -> NodeAsk {
-    ask.wake_at = Some(envelope::latest());
-    ask.answer = Some(AskAnswer {
+/// The link an ask leaves in the checkpoint, holding the longest deadline and
+/// request ID it can store.
+fn filled_ask(ask: AskRequest) -> AskLink {
+    AskLink {
         extra: Default::default(),
-        source: AnswerSource::Answered,
-        option: Some(worst(asks::OPTION_BYTES)),
-        text: Some(worst(asks::ANSWER_BYTES)),
-        actor: Some(worst(HOST_ID_BYTES)),
-        at: Some(envelope::latest()),
-        rejected: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
-        rejection_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
-    });
-    ask.inbox_error = Some(worst(MAX_ADVANCE_ERROR_BYTES));
-    ask
+        ask_id: ask.ask_id,
+        kind: ask.kind,
+        node: ask.node,
+        rounds: ask.rounds,
+        session: ask.session,
+        wake_at: Some(envelope::latest()),
+        request: "f".repeat(asks::REQUEST_ID_BYTES),
+    }
 }
 
-/// Every ask the plan can hold at once: each loop round, each decide node and
-/// the pause history with one open and one awaiting its close.
-fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
+/// Every link the plan can hold at once: each loop round, each decide node and
+/// the one open pause.
+fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
     let mut asks = Vec::new();
     for node in &plan.nodes {
         if let Some(session) = node
@@ -210,20 +208,21 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 None,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
             );
-            if scope { ask.body = worst(provenant_records::inbox::REQUEST_BODY_BYTES); }
+            if scope {
+                // A repair gate raised again after a retry carries the generation.
+                ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
+            }
             asks.push(filled_ask(ask));
         }
     }
     if let Some(session) = &plan.decision_session {
-        asks.extend((0..asks::MAX_PAUSE_ASKS as u64 + 2).map(|index| {
-            filled_ask(asks::pause_ask(
-                &plan.graph_id,
-                u64::MAX - index,
-                session,
-                &worst(PAUSE_REASON_BYTES),
-                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
-            ))
-        }));
+        asks.push(filled_ask(asks::pause_ask(
+            &plan.graph_id,
+            u64::MAX,
+            session,
+            &worst(PAUSE_REASON_BYTES),
+            Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+        )));
     }
     asks
 }

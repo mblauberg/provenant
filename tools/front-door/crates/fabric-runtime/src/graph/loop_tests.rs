@@ -900,6 +900,20 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
     assert_eq!(owner.stored_refs[0], Some(format!("host/{attempt}")));
 }
 
+/// The link a filed ask leaves in the checkpoint.
+fn link_of(ask: AskRequest) -> AskLink {
+    AskLink {
+        extra: Default::default(),
+        request: ask.ask_id.clone(),
+        ask_id: ask.ask_id,
+        kind: ask.kind,
+        node: ask.node,
+        rounds: ask.rounds,
+        session: ask.session,
+        wake_at: ask.wake_at,
+    }
+}
+
 struct DecisionOwner {
     inner: FakeOwner,
     response: Result<Option<LoopDecision>, NoObservation>,
@@ -909,6 +923,18 @@ impl AttemptOwner for DecisionOwner {
     type Error = NoObservation;
     fn actor(&self) -> String {
         self.inner.actor()
+    }
+    fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
+        // A request closed with no answer keeps its ID, as the inbox does.
+        let key = (
+            filing.ask.node.clone().unwrap_or_default(),
+            filing.ask.rounds.unwrap_or_default(),
+        );
+        Ok(AskFiled {
+            request: filing.ask.ask_id.clone(),
+            deadline: filing.ask.wake_at,
+            closed: self.closed.contains(&key),
+        })
     }
     fn node_ask(&mut self, _: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         match &self.response {
@@ -996,7 +1022,7 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
 }
 
 #[test]
-fn loop_inbox_extension_respects_host_ceiling_and_closes_rejected_ask() {
+fn loop_inbox_extension_respects_host_ceiling_and_keeps_the_rejected_ask_until_resume() {
     let mut document = fixture("exhaust");
     document.nodes[0]
         .loop_body
@@ -1021,7 +1047,10 @@ fn loop_inbox_extension_respects_host_ceiling_and_closes_rejected_ask() {
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::InvalidLoopDecision));
     assert!(paused.checkpoint.extensions.is_empty());
-    assert_eq!(owner.closed, [("revise".into(), 2)]);
+    // The rejected answer stays inspectable through its link until a resume
+    // settles the loop.
+    assert_eq!(paused.checkpoint.asks.len(), 1);
+    assert!(owner.closed.is_empty());
     let stopped = resume_with_budget(
         &document,
         &mut owner,
@@ -1032,6 +1061,8 @@ fn loop_inbox_extension_respects_host_ceiling_and_closes_rejected_ask() {
     )
     .unwrap();
     assert_eq!(stopped.status, GraphStatus::Complete);
+    assert!(stopped.checkpoint.asks.is_empty());
+    assert_eq!(owner.closed, [("revise".into(), 2)]);
 }
 
 #[test]
@@ -1617,12 +1648,8 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
         )
         .unwrap();
         assert_eq!(run.status, GraphStatus::Cancelled);
-        assert!(
-            run.checkpoint
-                .asks
-                .iter()
-                .any(|ask| ask.inbox_error.is_some())
-        );
+        // The link stays until its request is closed.
+        assert!(!run.checkpoint.asks.is_empty());
     }
     assert!(
         FileJournal::pending_execution(&root, project, &document.graph_id)
@@ -1687,13 +1714,6 @@ fn loop_inbox_recovery_clears_stale_unavailable_pause_durably() {
     )
     .unwrap();
     assert_eq!(recovered.checkpoint.pause_cause(), Some(PauseCause::LoopPaused));
-    assert!(
-        recovered
-            .checkpoint
-            .asks
-            .iter()
-            .all(|ask| ask.inbox_error.is_none())
-    );
     assert_eq!(journal.0.as_ref().unwrap(), &recovered.checkpoint);
 }
 
@@ -1810,18 +1830,16 @@ fn loop_close_success_does_not_hide_another_pending_close_failure() {
     )
     .unwrap()
     .checkpoint;
-    let mut first = asks::loop_ask(&checkpoint.graph_id, "revise", 1, "chair-session");
-    first.resolved = true;
+    let first = link_of(asks::loop_ask(&checkpoint.graph_id, "revise", 1, "chair-session"));
     checkpoint.asks.insert(0, first);
     checkpoint.cancelled = true;
     close_resolved_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
-    assert!(!checkpoint.asks[0].closed);
-    assert!(checkpoint.asks[0].inbox_error.is_some());
-    assert!(checkpoint.asks[1].closed);
+    // The failed close keeps its link; the other one closed and went.
+    assert_eq!(checkpoint.asks.len(), 1);
+    assert_eq!(checkpoint.asks[0].rounds, Some(1));
     owner.fail_first = false;
     close_resolved_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
-    assert!(checkpoint.asks.iter().all(|ask| ask.closed));
-    assert!(checkpoint.asks.iter().all(|ask| ask.inbox_error.is_none()));
+    assert!(checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -1848,10 +1866,10 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
     )
     .unwrap()
     .checkpoint;
-    let mut first = asks::loop_ask(&checkpoint.graph_id, "revise", 1, "chair-session");
-    first.resolved = true;
+    let first = link_of(asks::loop_ask(&checkpoint.graph_id, "revise", 1, "chair-session"));
     checkpoint.asks.insert(0, first);
     close_resolved_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
+    assert!(checkpoint.asks.iter().all(|ask| ask.rounds != Some(1)));
     owner.response = Ok(None);
     let run = advance_with_budget(
         &document,

@@ -51,27 +51,20 @@ pub(super) fn latest() -> provenant_core::WallTime {
         .unwrap_or_else(|_| unreachable!("the epoch is a valid wall time"))
 }
 
-/// Worst-case ask: its rendered text, deadline, answer and inbox error.
-fn ask_bound(mut ask: NodeAsk, variable: usize) -> usize {
-    ask.wake_at = Some(latest());
-    ask.answer = Some(AskAnswer {
+/// Worst-case link: the IDs, session and deadline of one ask. The question and
+/// its answer live in the inbox, so no text is counted.
+fn ask_bound(ask: &AskRequest) -> usize {
+    let link = AskLink {
         extra: Default::default(),
-        source: AnswerSource::Answered,
-        option: Some(String::new()),
-        text: Some(String::new()),
-        actor: Some(String::new()),
-        at: Some(latest()),
-        rejected: Some(String::new()),
-        rejection_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
-    });
-    ask.inbox_error = Some(String::new());
-    canonical_len(&ask)
-        + variable
-        + asks::OPTION_BYTES
-        + asks::ANSWER_BYTES
-        + HOST_ID_BYTES
-        + 2 * MAX_ADVANCE_ERROR_BYTES
-        + 1
+        ask_id: ask.ask_id.clone(),
+        kind: ask.kind,
+        node: ask.node.clone(),
+        rounds: ask.rounds,
+        session: ask.session.clone(),
+        wake_at: Some(latest()),
+        request: "f".repeat(asks::REQUEST_ID_BYTES),
+    };
+    canonical_len(&link) + 1
 }
 
 pub(super) fn checkpoint_bound(
@@ -149,13 +142,15 @@ pub(super) fn checkpoint_bound(
             + 6 * MAX_CANCEL_REASON_BYTES,
         MAX_UNKNOWN_USAGE * (UNKNOWN_USAGE_TEXT_BYTES + longest_id + 1),
         MAX_USAGE_EVENTS * (canonical_len(&event) + 64 + NOTE_BYTES + 1),
-        // Pause asks: the kept history, one open and one awaiting its close.
+        // The pause ask: one open at a time.
         plan.decision_session.as_deref().map_or(0, |session| {
-            (asks::MAX_PAUSE_ASKS + 2)
-                * ask_bound(
-                    asks::pause_ask(&plan.graph_id, u64::MAX, session, "", Some("")),
-                    PAUSE_REASON_BYTES + MAX_ADVANCE_ERROR_BYTES,
-                )
+            ask_bound(&asks::pause_ask(
+                &plan.graph_id,
+                u64::MAX,
+                session,
+                "",
+                None,
+            ))
         }),
     ];
     let mut loop_rounds = std::collections::BTreeMap::<&str, usize>::new();
@@ -426,11 +421,11 @@ fn node_bound(
         bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
             let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
-            bytes += loop_rounds * ask_bound(ask, 0);
+            bytes += loop_rounds * ask_bound(&ask);
         }
     }
     if let Some(spec) = &node.decide {
-        // One ask per decide node: a withdrawn ask is replaced, not kept.
+        // One ask per decide node: a rejected answer's request replaces it.
         let repair_scope =
             node.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true));
         let session = asks::decide_session(spec, plan.decision_session.as_deref())
@@ -444,25 +439,17 @@ fn node_bound(
             None,
             Some(""),
         );
-        bytes += ask_bound(
-            ask,
-            if repair_scope {
-                // The scope decision includes a principal report; `bounded`
-                // limits the whole dynamic body in canonical bytes.
-                provenant_records::inbox::REQUEST_BODY_BYTES + 27 // .retry- plus a u64 generation
-            } else {
-                MAX_ADVANCE_ERROR_BYTES
-            },
-        );
+        bytes += ask_bound(&ask)
+            // The repair scope ask ID adds `.retry-` and a u64 generation.
+            + if repair_scope { 27 } else { 0 };
     }
     if let Some(spec) = &node.land {
-        // branch, head, ask ID, actor and note; one ask, whose body names the
-        // branch and head twice.
+        // branch, head, ask ID, actor and note; and one ask link.
         bytes +=
             2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
         let ask = land::land_ask(&plan.graph_id, node, &land_skeleton(spec.tier), session);
-        bytes += ask_bound(ask, 4 * OUTPUT_FIELD_BYTES + MAX_ADVANCE_ERROR_BYTES);
+        bytes += ask_bound(&ask);
     }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason

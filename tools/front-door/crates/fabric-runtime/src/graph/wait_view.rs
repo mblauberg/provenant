@@ -41,9 +41,10 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
             let quota = node.state == NodeState::Failed
                 && attempt.and_then(|attempt| attempt.outcome)
                     == Some(AttemptOutcome::UsageLimited);
-            let approval = checkpoint.asks.iter().find(|ask| {
-                ask.node.as_deref() == Some(node.id.as_str()) && !ask.closed && !ask.resolved
-            });
+            let approval = checkpoint
+                .asks
+                .iter()
+                .find(|ask| ask.node.as_deref() == Some(node.id.as_str()));
             let retry = node
                 .launch_retry
                 .as_ref()
@@ -215,7 +216,7 @@ mod tests {
     fn wait_view_uses_only_recorded_facts_without_changing_checkpoint() {
         let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
-            "asks":[{"ask_id":"ask","kind":"decide","node":"approval","session":"chair","title":"t","body":"b","options":[],"resolved":false,"closed":false}],
+            "asks":[{"ask_id":"ask","kind":"decide","node":"approval","session":"chair","request":"hrq-ask"}],
             "nodes":[
                 {"id":"approval","state":"running","worktree":null,"attempts":[]},
                 {"id":"ci","state":"running","worktree":null,"attempts":[],"ci":{"state":"pending","summary":"waiting"}},

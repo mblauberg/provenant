@@ -206,7 +206,7 @@ fn manual_resume_publishes_marker_before_reopened_checkpoint() {
 }
 
 #[test]
-fn answered_ask_publishes_marker_before_pending_checkpoint() {
+fn an_ask_link_publishes_marker_before_pending_checkpoint() {
     use super::journal::{CRASH_POINT, CrashPoint};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let temp = crate::test_support::tempdir().unwrap();
@@ -222,13 +222,6 @@ fn answered_ask_publishes_marker_before_pending_checkpoint() {
     let mut fixture: StoredCheckpoint =
         serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
     fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
-    fixture.checkpoint.asks.push(
-        serde_json::from_value(serde_json::json!({
-            "ask_id":"open","kind":"pause","session":"chair","title":"question","body":"waiting",
-            "options":[],"resolved":false,"closed":false
-        }))
-        .unwrap(),
-    );
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
@@ -237,10 +230,11 @@ fn answered_ask_publishes_marker_before_pending_checkpoint() {
             .unwrap()
             .is_empty()
     );
-    fixture.checkpoint.asks[0].resolved = true;
-    fixture.checkpoint.asks[0].answer = Some(
+    // A link to an open request makes the graph pending, so the tick reads the
+    // inbox for its answer.
+    fixture.checkpoint.asks.push(
         serde_json::from_value(serde_json::json!({
-            "source":"answered","actor":"chair","text":"continue"
+            "ask_id":"open","kind":"pause","session":"chair","request":"hrq-open"
         }))
         .unwrap(),
     );
@@ -251,11 +245,11 @@ fn answered_ask_publishes_marker_before_pending_checkpoint() {
         ["g-test"]
     );
     assert!(
-        !FileJournal::read_checkpoint(&root, project, "g-test")
+        FileJournal::read_checkpoint(&root, project, "g-test")
             .unwrap()
             .unwrap()
-            .asks[0]
-            .resolved
+            .asks
+            .is_empty()
     );
     journal.save(&fixture.checkpoint).unwrap();
     assert_eq!(
@@ -266,6 +260,14 @@ fn answered_ask_publishes_marker_before_pending_checkpoint() {
         FileJournal::pending_execution(&root, project, "g-test")
             .unwrap()
             .is_some()
+    );
+    // Applying the answer drops the link, and the graph is no longer pending.
+    fixture.checkpoint.asks.clear();
+    journal.save(&fixture.checkpoint).unwrap();
+    assert!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -410,8 +412,7 @@ fn checkpoint_collection_keeps_pending_and_recent_graphs() {
     );
     fixture.checkpoint.asks.push(
         serde_json::from_value(serde_json::json!({
-            "ask_id":"open", "kind":"pause", "session":"chair", "title":"question",
-            "body":"waiting", "options":[], "resolved":false, "closed":false
+            "ask_id":"open", "kind":"pause", "session":"chair", "request":"hrq-open"
         }))
         .unwrap(),
     );
