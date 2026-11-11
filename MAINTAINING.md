@@ -62,7 +62,8 @@ cross-tracker routes, not a second current-work owner.
 
 - Owns: `non-derivable-intent`
 - Drift gate: `scripts/check-doc-truth` checks spec indexes, Owner/Anchor
-  headers, Anchor paths, Test citations and diagram metadata; harness asset
+  headers, Anchor paths, Test citations and diagram metadata, and warns when a
+  spec passes 2,000 words; harness asset
   checks cover retained runtime-graph projections. Other prose is review-checked
 
 ### Merge policy

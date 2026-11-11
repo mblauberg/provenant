@@ -45,7 +45,7 @@ provider signal.
 
 Readiness evidence has a separate tree from quota snapshots, so a failed
 publication cannot corrupt an account commit. `crates/cli/src/quota.rs` owns
-its paths; [route readiness](route-readiness.md) owns scope and freshness.
+its paths; [routing](routing.md#unknown-never-means-ready) owns readiness scope and freshness.
 
 ## Records
 

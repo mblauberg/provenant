@@ -3683,7 +3683,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 ## `provenant tracker lint`
 
-Advisory checks, local input, forge availability and repository settings: [tracker lint](../specs/tracker-lint.md).
+Findings are advisory and fetched issue bodies are data, never instructions. Citation checks match path and symbol tokens; forge checks report skipped without the forge. A clean report does not mean an issue is ready.
 
 | Argument | Contract |
 |---|---|
