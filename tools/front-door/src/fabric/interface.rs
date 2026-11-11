@@ -539,6 +539,24 @@ impl Factory {
             &provenant_cli::domains::SECTIONS,
         )
         .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        // An unknown tier is refused before panel resolution, so advisory and
+        // strict diversity both give this usage error instead of a compile error.
+        if let Some(name) = tier
+            .and_then(Value::as_str)
+            .filter(|name| !name.contains('/'))
+        {
+            let catalogue = provenant_routing::Catalogue::bundled()
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            let names = config.domains.routing.route_names(&catalogue);
+            if !names.contains(name) {
+                let valid = names.into_iter().collect::<Vec<_>>().join(", ");
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: format!("unknown named route `{name}`; valid tiers: {valid}"),
+                });
+            }
+        }
         // Resolver selection needs review context, before template nodes compile.
         let mut resolver_document =
             json!({"schema_version":2,"graph_id":"launch-resolvers","nodes":[]});
@@ -4470,13 +4488,12 @@ mod tests {
         child["document"]["review"]["diversity"] = json!("strict");
         let error = factory.child_request(&child).unwrap_err();
         let FacadeError::DispatchRefused { reason, .. } = error else {
-            return Err(format!("expected child family refusal, received {error:?}").into());
+            return Err(format!("expected child tier refusal, received {error:?}").into());
         };
         assert!(
-            reason.contains(family) && reason.contains("count 2"),
+            reason.contains("unknown named route `missing-family-pool`"),
             "{reason}"
         );
-        assert!(reason.contains("unknown named route"), "{reason}");
         let mut advisory = input.clone();
         advisory["document"]["exclude"] = json!(["codex"]);
         let response = factory.graph_document(advisory, budget, &cancel)?;
@@ -4518,6 +4535,37 @@ mod tests {
             reason.contains("excluded by") && reason.contains("codex"),
             "{reason}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn review_child_refuses_unknown_tier_under_advisory_default() -> Result {
+        let rig = crate::worktree_tests::repository()?;
+        let factory = factory(&rig)?;
+        let family = provenant_records::AdapterSpec::get("codex")
+            .ok_or("adapter")?
+            .family;
+        // No `diversity` key: the advisory default must refuse the tier too.
+        let child = json!({
+            "op": "run", "tier": "missing-family-pool",
+            "document": {
+                "use": "review", "brief": "Review required family coverage",
+                "review": {
+                    "shape": "standard", "minimum_family_counts": {(family): 2},
+                    "lenses": [{"name": "correctness", "tier": "senior"}]
+                }
+            }
+        });
+        let error = factory.child_request(&child).unwrap_err();
+        let FacadeError::DispatchRefused { reason, .. } = error else {
+            return Err(format!("expected unknown tier refusal, received {error:?}").into());
+        };
+        assert!(
+            reason.contains("unknown named route `missing-family-pool`"),
+            "{reason}"
+        );
+        assert!(reason.contains("valid tiers: "), "{reason}");
+        assert!(!reason.contains("not both"), "{reason}");
         Ok(())
     }
 }
