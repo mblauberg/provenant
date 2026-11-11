@@ -112,7 +112,7 @@ launches, reuses finished outputs and resumes only unfinished work.
 
 Landing accepts independent review evidence bound to the exact subject it merges. Run settlement
 advances pending graphs without a second scheduler in the CLI or MCP façade
-([ADR 0022](0022-thin-fabric-mcp-execution-facade.md)).
+([ADR 0021](0021-configured-workspace-dispatch-boundaries.md)).
 
 ## Interface
 
