@@ -57,7 +57,13 @@ pub use validation::minimum_schema_version;
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
+mod ask_link_tests;
+#[cfg(test)]
+mod next_step_tests;
+#[cfg(test)]
 mod typed_records_tests;
+#[cfg(test)]
+mod when_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
