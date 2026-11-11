@@ -1,10 +1,10 @@
 # Glossary
 
-Terms used by `HARNESS.md`. Risk-tier criteria are listed there and compiled
-into `provenant-records`.
+Terms used by `GLOBAL-AGENTS.md` and the skills. Risk-tier criteria are
+compiled into `provenant-records`.
 
-- **Acceptance:** the delivery criterion owned by the [constitution](../HARNESS.md#lifecycle-and-user-gates); it grants no external-action authority.
-- **User gate:** a decision reserved to the user by the [constitution](../HARNESS.md#lifecycle-and-user-gates).
+- **Acceptance:** checks and the review the risk requires have passed, so the chair accepts the work ([global rules](../GLOBAL-AGENTS.md)); it grants no external-action authority.
+- **User gate:** a one-way door reserved to the user by the [global rules](../GLOBAL-AGENTS.md).
 - **Chair:** the harness the user started. It owns authority, user communication, run state, gates and final synthesis.
 - **Lane:** a worker assignment with its own authority and output.
 - **Graph node:** a scheduled unit of graph work, which may be an agent, action or composite.

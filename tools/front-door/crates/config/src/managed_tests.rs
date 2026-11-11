@@ -351,9 +351,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
         .unwrap();
     f.targets.peer_agent = Some(b"old home plist\n".to_vec());
     fs::create_dir_all(f.source.join("instructions")).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        fs::write(f.source.join("instructions").join(name), b"instructions\n").unwrap();
-    }
+    fs::write(f.source.join("instructions/AGENTS.md"), b"instructions\n").unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -379,8 +377,9 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .iter()
             .filter(|finding| finding.rule == "relocated_stale_entry")
             .count(),
-        // Five managed target entries plus the shared AGENTS.md and HARNESS.md links.
-        8
+        // The binary, skill, configuration, instruction and peer-agent
+        // entries plus the shared instructions link.
+        6
     );
     struct StopReporter(usize);
     impl InstallReporter for StopReporter {
@@ -426,7 +425,6 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     for path in [
         moved_home.join(".codex/skills/example"),
         moved_home.join(".codex/AGENTS.md"),
-        moved_home.join(".codex/HARNESS.md"),
         targets.bin_dir.join("provenant"),
     ] {
         let snapshots = Snapshots::capture(&release, &targets).unwrap();
@@ -2094,11 +2092,9 @@ fn regular_user_instructions_are_preserved_with_manual_include_advice() {
     let f = Fixture::new();
     let assets = f.source.join("instructions");
     fs::create_dir_all(&assets).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        let p = assets.join(name);
-        fs::write(&p, b"release instructions").unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    let asset = assets.join("AGENTS.md");
+    fs::write(&asset, b"release instructions").unwrap();
+    fs::set_permissions(asset, fs::Permissions::from_mode(0o600)).unwrap();
     let instruction = f.home.join(".codex/AGENTS.md");
     fs::create_dir_all(instruction.parent().unwrap()).unwrap();
     fs::write(&instruction, b"my instructions").unwrap();
@@ -2134,11 +2130,9 @@ fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenc
     let f = Fixture::new();
     let assets = f.source.join("instructions");
     fs::create_dir_all(&assets).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        let p = assets.join(name);
-        fs::write(&p, b"release instructions").unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    let asset = assets.join("AGENTS.md");
+    fs::write(&asset, b"release instructions").unwrap();
+    fs::set_permissions(asset, fs::Permissions::from_mode(0o600)).unwrap();
     let instruction = f.home.join(".codex/AGENTS.md");
     fs::create_dir_all(instruction.parent().unwrap()).unwrap();
     let text = b"See ~/.agents/AGENTS.md for shared instructions";
@@ -2179,7 +2173,6 @@ fn shared_release(base: &Path, name: &str, instructions: &[u8]) -> Release {
     .unwrap();
     fs::create_dir_all(source.join("instructions")).unwrap();
     fs::write(source.join("instructions/AGENTS.md"), instructions).unwrap();
-    fs::write(source.join("instructions/HARNESS.md"), b"harness guide").unwrap();
     let digest = source_digest(&[SourceInput {
         name: "src/lib.rs",
         bytes: name.as_bytes(),
@@ -2208,10 +2201,6 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
     let old_target =
         release_root(&state, old.manifest.source_digest).join("instructions/AGENTS.md");
     assert_eq!(fs::read_link(&shared).unwrap(), old_target);
-    assert_eq!(
-        fs::read_link(shared.with_file_name("HARNESS.md")).unwrap(),
-        release_root(&state, old.manifest.source_digest).join("instructions/HARNESS.md")
-    );
     let receipt = read_receipt(&f.targets).unwrap().unwrap();
     assert!(
         receipt
@@ -2239,10 +2228,6 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
     let new_target =
         release_root(&state, new.manifest.source_digest).join("instructions/AGENTS.md");
     assert_eq!(fs::read_link(&shared).unwrap(), new_target);
-    assert_eq!(
-        fs::read_link(shared.with_file_name("HARNESS.md")).unwrap(),
-        release_root(&state, new.manifest.source_digest).join("instructions/HARNESS.md")
-    );
     assert!(f.plan_for(new.clone()).actions().is_empty());
 
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
@@ -2253,6 +2238,76 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
             .entries
             .iter()
             .any(|entry| entry.selector == "shared-instruction")
+    );
+}
+
+/// An earlier installer linked a second instructions asset beside the shared
+/// file and each harness instruction file. An upgrade to a release without
+/// that asset removes both links and their receipt entries.
+#[test]
+fn an_upgrade_removes_links_to_a_retired_instructions_asset() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    let state = f.targets.roots.state.as_path().to_path_buf();
+    let old = shared_release(&f.base, "retired-old", b"old instructions");
+    install(
+        &f.plan_for(old.clone()),
+        &ctx,
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let retired = release_root(&state, old.manifest.source_digest).join("instructions/RETIRED.md");
+    let links = [
+        (
+            f.home.join(".agents/RETIRED.md"),
+            None,
+            "shared-instruction",
+        ),
+        (
+            f.home.join(".codex/RETIRED.md"),
+            Some(Harness::Codex),
+            "instruction",
+        ),
+    ];
+    let mut receipt: InstallReceipt = read_receipt(&f.targets).unwrap().unwrap();
+    for (path, harness, selector) in &links {
+        symlink(&retired, path).unwrap();
+        receipt.entries.push(OwnedEntry {
+            extra: Default::default(),
+            path: AbsolutePath::new(path).unwrap(),
+            harness: *harness,
+            selector: (*selector).into(),
+            expected: owned(&Value::Link(retired.clone())).unwrap(),
+        });
+    }
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let new = shared_release(&f.base, "retired-new", b"new instructions");
+    install(
+        &f.plan_for(new.clone()),
+        &ctx,
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    for (path, _, _) in &links {
+        assert!(fs::symlink_metadata(path).is_err(), "{path:?} remains");
+        assert!(
+            !receipt
+                .entries
+                .iter()
+                .any(|entry| entry.path.to_path_buf().unwrap() == *path)
+        );
+    }
+    assert_eq!(
+        fs::read_link(f.home.join(".agents/AGENTS.md")).unwrap(),
+        release_root(&state, new.manifest.source_digest).join("instructions/AGENTS.md")
     );
 }
 
@@ -2703,15 +2758,9 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         instruction: Some(claude_instruction.clone()),
     });
     fs::create_dir_all(f.source.join("instructions")).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        let path = f.source.join("instructions").join(name);
-        fs::write(path, b"release instruction").unwrap();
-        fs::set_permissions(
-            f.source.join("instructions").join(name),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-    }
+    let asset = f.source.join("instructions/AGENTS.md");
+    fs::write(&asset, b"release instruction").unwrap();
+    fs::set_permissions(asset, fs::Permissions::from_mode(0o600)).unwrap();
 
     let release = f.release();
     let plan = f.plan_for(release);
@@ -3198,11 +3247,9 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
         .unwrap();
     }
     fs::create_dir_all(f.source.join("instructions")).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        let p = f.source.join("instructions").join(name);
-        fs::write(&p, b"PROVENANT_AGENT_LABEL instructions\n").unwrap();
-        fs::set_permissions(p, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    let asset = f.source.join("instructions/AGENTS.md");
+    fs::write(&asset, b"PROVENANT_AGENT_LABEL instructions\n").unwrap();
+    fs::set_permissions(asset, fs::Permissions::from_mode(0o600)).unwrap();
     let hook = f.home.join(".claude/settings.json");
     let herdr = r#"{"type":"command", "command":"herdr capture", "timeout":2}"#;
     let before = format!(
@@ -3372,11 +3419,9 @@ fn claude_config_dir_moves_its_mcp_registration() {
 fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     let mut f = Fixture::new();
     fs::create_dir_all(f.source.join("instructions")).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        let path = f.source.join("instructions").join(name);
-        fs::write(&path, b"release instruction").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    let asset = f.source.join("instructions/AGENTS.md");
+    fs::write(&asset, b"release instruction").unwrap();
+    fs::set_permissions(asset, fs::Permissions::from_mode(0o600)).unwrap();
     let (roots, home) = (f.targets.roots.clone(), f.home.clone());
     let claude = |dir: Option<&Path>| {
         let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
@@ -3391,7 +3436,6 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     let installed = |dir: &Path, mcp: &Path| {
         dir.join("skills/example").is_symlink()
             && dir.join("CLAUDE.md").is_symlink()
-            && dir.join("HARNESS.md").is_symlink()
             && fs::read_to_string(mcp).is_ok_and(|text| text.contains("\"fabric\""))
             && fs::read_to_string(dir.join("settings.json"))
                 .is_ok_and(|text| text.contains("pre-tool-use"))
@@ -3783,9 +3827,7 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
     fs::create_dir_all(f.source.join("instructions")).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        fs::write(f.source.join("instructions").join(name), b"instructions").unwrap();
-    }
+    fs::write(f.source.join("instructions/AGENTS.md"), b"instructions").unwrap();
     let config = f.targets.harnesses[0].mcp_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let a = f.release();
@@ -3809,13 +3851,11 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     .unwrap();
     let b = f.release_variant("opencode-b", &["example"]);
     fs::create_dir_all(b.source().join("instructions")).unwrap();
-    for name in ["AGENTS.md", "HARNESS.md"] {
-        fs::write(
-            b.source().join("instructions").join(name),
-            b"new instructions",
-        )
-        .unwrap();
-    }
+    fs::write(
+        b.source().join("instructions/AGENTS.md"),
+        b"new instructions",
+    )
+    .unwrap();
     fs::remove_file(b.source().join("release.json")).unwrap();
     let b = package_fixture_release(b.source(), b.manifest.source_digest);
     let new = release_root(f.targets.roots.state.as_path(), b.manifest.source_digest)
@@ -4322,11 +4362,6 @@ fn shared_instruction_adopts_foreign_link_and_resolves_parent() {
         fs::read_link(&shared)
             .unwrap()
             .ends_with("instructions/AGENTS.md")
-    );
-    assert!(
-        fs::read_link(external.join("HARNESS.md"))
-            .unwrap()
-            .ends_with("instructions/HARNESS.md")
     );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(

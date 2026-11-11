@@ -51,7 +51,7 @@ setting is off by default until a trial settles it.
 
 Verify commits, paths, checks and routes against output. A synthesis cannot waive
 a gate. Bound repair and independently review its delta.
-HARNESS owns review floors and authority; the chair keeps user communication
+Path floors set review minimums and the global rules set authority; the chair keeps user communication
 and acceptance. Load [routing](references/routing-and-tiers.md) for tier and
 independence decisions and [writer boundaries](references/lane-safety.md) for
 confinement. See [Herdr](references/herdr.md) for observation.

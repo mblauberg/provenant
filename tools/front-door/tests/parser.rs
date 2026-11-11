@@ -248,7 +248,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
     let fake = rig.project.join("fake");
     fs::create_dir_all(fake.join("scripts"))?;
     fs::write(fake.join(".git"), "not a Git worktree file")?;
-    fs::write(fake.join("HARNESS.md"), "# fixture")?;
+    fs::write(fake.join("GLOBAL-AGENTS.md"), "# fixture")?;
     let invalid_project = rig.execute_os(
         std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
         &[

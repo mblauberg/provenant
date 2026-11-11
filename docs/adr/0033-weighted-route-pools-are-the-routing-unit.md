@@ -29,7 +29,7 @@ ineligible. Price and free status do not enter that check.
 
 Review independence uses the resolved pool tier and model family, recorded per
 attempt, so a review leg is judged by what actually ran
-([review ladder](../../HARNESS.md#review-ladder)).
+(the review planner's path floors).
 
 ## Consequences
 

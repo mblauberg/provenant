@@ -20,7 +20,7 @@ Supply the subject and base on the command line (a ref is enough for the base; t
 a dotted flavour such as `review.security` selects a specific lens. A composite
 runs `review` over a panel resolved at launch, then `review.verify` and `review.synthesis`
 where needed. The planner chooses lenses and tiers from risk, changed paths
-and author tier; the chair checks HARNESS floors and adds missing coverage.
+and author tier; the chair checks the path floors and adds missing coverage.
 Review each slice lightly and the integrated head with the full required panel.
 Lens breadth comes before family spread. `deliver` includes review before landing.
 
@@ -36,8 +36,7 @@ design is wrong before another repair, as `implement` describes.
   `git diff`, never the working tree, and uses no Git write verbs.
 - The command pins the subject and base; the brief carries the spec. Never send the
   author's hypothesis, expected verdict or scratchpad.
-- Prefer a model family distinct from every author and repairer; the
-  HARNESS.md review ladder asks for it from `substantial` upward when one is
+- Prefer a model family distinct from every author and repairer when one is
   available. When none is available, require an independent same-family reviewer through a
   different lens, without reducing the review count, and record that the
   family separation was unavailable; do not claim it.

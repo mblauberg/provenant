@@ -124,7 +124,7 @@ cross-issue dependencies. Use a table for tabular data.
 ## Mechanics
 
 This runbook is Provenant-local process. The worktree authority it relies on,
-the standing envelope in `HARNESS.md` and the helper contract in
+the Git rule in `GLOBAL-AGENTS.md` and the helper contract in
 [`docs/worktrees.md`](../worktrees.md), is harness doctrine. The examples use
 issue `148`.
 
@@ -133,7 +133,7 @@ issue `148`.
 Name the branch `<type>/<area>-<slug>`, at most 48 characters, where `<type>` is
 `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `ci` or `build`.
 Use no issue number and no run vocabulary such as batch, wave, lane or model
-name. The standing `HARNESS.md` envelope covers branch and worktree creation.
+name. The `GLOBAL-AGENTS.md` Git rule covers branch and worktree creation.
 
 ```sh
 provenant worktree create fix/repo-runbook-mechanics --base main
@@ -234,8 +234,7 @@ Status option IDs: `Backlog` `c764d63a`, `Ready` `a5ebd55b`, `In progress`
 
 Merge authority is repository-based. By user directive, auto-merge is enabled
 and agents merge directly: once a pull request has its tier's planned
-independent review under the
-[`HARNESS.md` review ladder](../../HARNESS.md#review-ladder) and `ci-status` is
+independent review from `provenant run --use review` and `ci-status` is
 green on the exact head (or on the candidate, for batch landing), an agent
 merges without waiting for the user. Forge-required checks stay mandatory.
 Before merging a substantial software change, confirm its delivery receipt
@@ -261,8 +260,8 @@ The user review or merge gate applies only when an agent is stuck: split
 verdicts it cannot settle with primary evidence, or a decision outside its
 authority. Standing user gates are credential or connector setup, rewrites of
 or pushes to shared branches outside authorised merges. A chair may lower risk
-outside protected boundaries with a recorded reason; boundary floors remain
-binding even with owner approval.
+outside protected boundaries with a recorded reason; boundary floors change
+only with the owner's explicit authority.
 
 ### Land
 
