@@ -867,8 +867,7 @@ fn fixture_git_commands_use_the_scrubbed_helper() -> Result<(), Box<dyn Error>> 
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("test-") || name == "test-check-adr-index" {
-            // This one only reads the checkout containing the test itself.
+        if !name.starts_with("test-") {
             continue;
         }
         let source = fs::read_to_string(entry.path())?;

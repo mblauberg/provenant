@@ -9,7 +9,7 @@ Fabric is the daemonless coordination layer for one user's agents and hosts.
 It grants no authority to install, land or run a provider, and keeps no second
 run status ([run](run.md)). ADRs
 [0020](../adr/0020-retire-the-daemon-fabric.md),
-[0022](../adr/0022-thin-fabric-mcp-execution-facade.md),
+[0021](../adr/0021-configured-workspace-dispatch-boundaries.md),
 [0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) and
 [0039](../adr/0039-graph-of-templates.md) record the decisions; the
 [peer host runbook](../runbooks/fabric-hosts.md) and `provenant help --all`

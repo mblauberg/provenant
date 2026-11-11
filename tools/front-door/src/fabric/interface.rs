@@ -1503,7 +1503,7 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let scratch = self
-            .prepare_scratch(cancel, budget)
+            .prepare_scratch(cancel)
             .map_err(scratch_prepare_error)?;
         let path = publish_graph_document(&scratch, &encode(&document)?)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
