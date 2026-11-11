@@ -533,19 +533,33 @@ pub(super) fn session<'a>(spec: &'a LandSpec, plan: &'a PlannedGraph) -> Option<
     spec.session.as_deref().or(plan.decision_session.as_deref())
 }
 
-/// The ID of a land node's one ask.
-pub(super) fn ask_id(node_id: &str) -> String {
-    format!("{node_id}.ask-1")
+/// The ID of a land node's ask: the sequence number, which moves past a request
+/// a cancel closed, and the node's retry generation, which keeps a retried node
+/// from finding the request an earlier run left answered.
+pub(super) fn ask_id(node_id: &str, sequence: u64, generation: u64) -> String {
+    let base = format!("{node_id}.ask-{sequence}");
+    match generation {
+        0 => base,
+        generation => format!("{base}.retry-{generation}"),
+    }
 }
 
-pub(super) fn sequence(ask_id: &str, node_id: &str) -> Option<u64> {
-    ask_id
-        .strip_prefix(node_id)?
-        .strip_prefix(".ask-")?
-        .parse()
-        .ok()
-        .filter(|sequence| *sequence > 0)
+/// The sequence and retry generation an ask ID names.
+pub(super) fn parse(ask_id: &str, node_id: &str) -> Option<(u64, u64)> {
+    let identity = ask_id.strip_prefix(node_id)?.strip_prefix(".ask-")?;
+    let (sequence, generation) = match identity.split_once(".retry-") {
+        Some((sequence, generation)) => {
+            (sequence, generation.parse::<u64>().ok().filter(|g| *g > 0)?)
+        }
+        None => (identity, 0),
+    };
+    let sequence = sequence.parse::<u64>().ok().filter(|s| *s > 0)?;
+    Some((sequence, generation))
 }
+
+/// The most closed requests one land node may leave behind before a new raise
+/// is refused.
+const MAX_LAND_SEQUENCE: u64 = 1_000;
 
 fn source_name(source: LandSource) -> &'static str {
     match source {
@@ -569,9 +583,11 @@ pub(super) fn land_ask(
     node: &PlannedNode,
     record: &LandRecord,
     session: &str,
+    sequence: u64,
+    generation: u64,
 ) -> AskRequest {
     let mut ask = asks::ask(
-        ask_id(&node.id),
+        ask_id(&node.id, sequence, generation),
         AskKind::Land,
         session,
         format!(
@@ -857,8 +873,25 @@ fn ask_chair<R: AttemptOwner, J: GraphJournal>(
                 )?;
                 return Ok(None);
             };
-            let request = land_ask(&plan.graph_id, node, record, &session);
-            let (link, _) = asks::file(checkpoint, owner, journal, &request)?;
+            let generation = asks::retry_generation(&checkpoint.nodes[index]);
+            let mut filed = None;
+            for sequence in 1..=MAX_LAND_SEQUENCE {
+                let request =
+                    land_ask(&plan.graph_id, node, record, &session, sequence, generation);
+                let (link, closed) = asks::file(checkpoint, owner, journal, &request)?;
+                // A request an earlier cancel closed keeps its ask ID, so a
+                // raise after a resume files under the next one.
+                if !closed {
+                    filed = Some(link);
+                    break;
+                }
+            }
+            let Some(link) = filed else {
+                return Err(GraphError::Refused(format!(
+                    "node {}: {MAX_LAND_SEQUENCE} land requests are already closed; retry the node",
+                    node.id
+                )));
+            };
             checkpoint.asks.push(link);
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
@@ -914,7 +947,8 @@ pub(super) fn validate_progress(
                 .is_some_and(|record| record.policy == LandPolicy::Ask)
                 // The ask itself is the inbox's; the chair landed by hand on its
                 // authority, so the node names the one ask it raises.
-                && *ask_id == self::ask_id(&progress.id)
+                && parse(ask_id, &progress.id)
+                    .is_some_and(|(_, generation)| generation == asks::retry_generation(progress))
         }
         Some(LandAuthority::Policy) => progress
             .land

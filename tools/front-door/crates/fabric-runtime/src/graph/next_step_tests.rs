@@ -379,17 +379,27 @@ fn ladder_facts() -> DepletionFacts {
     }
 }
 
+/// The restart record a settled stop saved, with the routes it launched on.
+fn ladder_choices(checkpoint: &GraphCheckpoint) -> Vec<patch::LadderChoice> {
+    checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref()?.restart.as_ref()?.ladder.clone())
+        .collect()
+}
+
+fn limited(reference: &str) -> AttemptObservation {
+    terminal(
+        reference,
+        AttemptOutcome::OtherFailure,
+        Some(StopCause::UsageLimited),
+        None,
+    )
+}
+
 #[test]
-fn a_usage_limited_writer_restarts_on_the_ladder_route_then_reaches_the_chair() {
+fn a_usage_limited_writer_restarts_on_the_ladder_route_then_on_its_declared_route() {
     let document = document("worktree_write", serde_json::Value::Null);
-    let limited = |reference| {
-        terminal(
-            reference,
-            AttemptOutcome::OtherFailure,
-            Some(StopCause::UsageLimited),
-            None,
-        )
-    };
     let mut owner = Owner {
         observations: [limited("a/1"), limited("a/2"), done("b/1")].into(),
         facts: Some(ladder_facts()),
@@ -400,16 +410,76 @@ fn a_usage_limited_writer_restarts_on_the_ladder_route_then_reaches_the_chair() 
         ..journal(&document)
     };
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    // The ladder, not the declared route list, chose the restart: the same
-    // model on the spare account, in the same worktree.
-    assert_eq!(adapters(&owner), ["first", "first"]);
+    // The ladder, not the declared route list, chose the first restart: the
+    // same model on the spare account, in the same worktree. It leaves the
+    // declared route behind it.
+    assert_eq!(adapters(&owner)[..2], ["first", "first"]);
     assert_eq!(owner.routes[1].account.as_deref(), Some("spare"));
     assert_eq!(owner.worktrees[0], owner.worktrees[1]);
+    let choices = ladder_choices(&run.checkpoint);
+    assert_eq!(choices.len(), 1);
+    assert_eq!(
+        choices[0].rung,
+        provenant_routing::Rung::SameModelOtherAccount
+    );
+    assert!(choices[0].target.contains("first/model") && choices[0].target.contains("spare"));
+    // The ladder has nothing left, but the node declares an untried route, so
+    // the chair is not asked while a route remains.
+    assert_eq!(adapters(&owner), ["first", "first", "second"]);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(
         restarts(&run.checkpoint),
-        [(StopCause::UsageLimited, NextStep::NewRoute)]
+        [
+            (StopCause::UsageLimited, NextStep::NewRoute),
+            (StopCause::UsageLimited, NextStep::NewRoute)
+        ]
     );
-    // Every ladder route has run, so the second stop goes to the chair even
-    // though the node declares an untried route.
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+}
+
+#[test]
+fn a_ladder_that_sees_no_ready_route_still_tries_the_declared_untried_route() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut facts = ladder_facts();
+    facts.readiness.clear();
+    let mut owner = Owner {
+        observations: [limited("a/1"), done("b/1")].into(),
+        facts: Some(facts.clone()),
+        ..Default::default()
+    };
+    let mut journal = Settled {
+        facts: Some(facts),
+        ..journal(&document)
+    };
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(adapters(&owner), ["first", "second"]);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert!(ladder_choices(&run.checkpoint).is_empty());
+}
+
+#[test]
+fn a_host_native_hand_off_keeps_a_launchable_route_after_it() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut facts = ladder_facts();
+    facts.readiness.clear();
+    facts.host_native = vec![provenant_routing::HostNativeRoute {
+        name: "claude-agent".into(),
+        model: None,
+    }];
+    let mut owner = Owner {
+        observations: [limited("a/1"), done("b/1")].into(),
+        facts: Some(facts.clone()),
+        ..Default::default()
+    };
+    let mut journal = Settled {
+        facts: Some(facts),
+        ..journal(&document)
+    };
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(adapters(&owner), ["first", "host-native"]);
+    assert!(run.checkpoint.pause.is_none(), "{:?}", run.checkpoint.pause);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    let choices = ladder_choices(&run.checkpoint);
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].rung, provenant_routing::Rung::HostNative);
+    assert_eq!(choices[0].target, "host-native/claude-agent");
 }

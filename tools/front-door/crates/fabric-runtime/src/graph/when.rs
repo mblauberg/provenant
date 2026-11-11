@@ -81,6 +81,19 @@ pub fn skipped_rows(
 /// that the order it had is kept. A reference that needs the skipped node's
 /// output, such as a source or a writer to continue, is refused.
 pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, AdmissionError> {
+    // A loop's round nodes are cloned from its body and do not carry its
+    // condition, so a skipped loop would still run its rounds. Whatever the
+    // value, the condition is refused rather than half applied.
+    if let Some(node) = document
+        .nodes
+        .iter()
+        .find(|node| !node.when.is_empty() && node.loop_body.is_some())
+    {
+        return Err(AdmissionError::Plan(format!(
+            "node {}: when is not supported on a loop",
+            node.id
+        )));
+    }
     let skipped: BTreeSet<&str> = skipped(&document.nodes)
         .into_iter()
         .map(|(id, _)| id)
@@ -119,9 +132,6 @@ pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, A
     for node in &mut pruned.nodes {
         if skipped.contains(node.id.as_str()) {
             continue;
-        }
-        if !node.when.is_empty() && node.loop_body.is_some() {
-            return Err(refuse(node, "when is not supported on a loop".into()));
         }
         let mentions = |name: &str| skipped.contains(name);
         let outputs_of = node

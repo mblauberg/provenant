@@ -238,6 +238,25 @@ fn decide_body(graph_id: &str, node_id: &str, spec: &DecideSpec, previous: Optio
     body
 }
 
+/// The part of an ask ID that names the node's retry generation, empty for a
+/// node that was never retried. A retry resets the node, so its first ask would
+/// otherwise repeat an ID the inbox already holds, answered, and the old answer
+/// would be consumed again.
+pub(super) fn retry_suffix(progress: &NodeProgress) -> String {
+    match retry_generation(progress) {
+        0 => String::new(),
+        generation => format!(".retry-{generation}"),
+    }
+}
+
+pub(super) fn retry_generation(progress: &NodeProgress) -> u64 {
+    progress
+        .extra
+        .get("retry_generation")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
 /// The ID sequence of a decide ask, so a replacement never reuses an ID.
 fn decide_sequence(ask_id: &str, node_id: &str) -> Option<u64> {
     let identity = ask_id.strip_prefix(node_id)?.strip_prefix(".ask-")?;
@@ -559,15 +578,7 @@ fn decide_request(
         wake_at,
         previous,
     );
-    if repair_scope_gate(node.extra.get("repair_scope_gate"))
-        && let Some(generation) = checkpoint.nodes[index]
-            .extra
-            .get("retry_generation")
-            .and_then(serde_json::Value::as_u64)
-            .filter(|generation| *generation > 0)
-    {
-        ask.ask_id.push_str(&format!(".retry-{generation}"));
-    }
+    ask.ask_id.push_str(&retry_suffix(&checkpoint.nodes[index]));
     if repair_scope_gate(node.extra.get("repair_scope_gate"))
         && let Some(report) = node.depends_on.iter().find_map(|id| {
             checkpoint
@@ -1034,7 +1045,7 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                 }
                 (AskKind::Pause, None) => plan.decision_session.as_deref() == session,
                 (AskKind::Land, Some(node)) => {
-                    land::sequence(&ask.ask_id, &node.id).is_some()
+                    land::parse(&ask.ask_id, &node.id).is_some()
                         && node
                             .land
                             .as_ref()

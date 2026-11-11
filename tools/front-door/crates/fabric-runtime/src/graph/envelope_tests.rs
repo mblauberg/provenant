@@ -180,12 +180,14 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 .max()
                 .unwrap_or(0);
             asks.extend((1..=rounds).map(|round| {
-                filled_ask(asks::loop_ask(
+                let mut ask = asks::loop_ask(
                     &plan.graph_id,
                     &node.id,
                     usize::MAX - round,
                     session,
-                ))
+                );
+                ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
+                filled_ask(ask)
             }));
         }
         if let Some(spec) = &node.land {
@@ -194,10 +196,11 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 node,
                 &filled_land(spec.tier),
                 land::session(spec, plan).unwrap(),
+                1,
+                u64::MAX,
             )));
         }
         if let Some(spec) = &node.decide {
-            let scope = node.extra.get("repair_scope_gate") == Some(&json!(true));
             let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id);
             let mut ask = asks::decide_ask(
                 &plan.graph_id,
@@ -208,10 +211,8 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
                 None,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
             );
-            if scope {
-                // A repair gate raised again after a retry carries the generation.
-                ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
-            }
+            // A node raised again after a retry carries the generation.
+            ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
             asks.push(filled_ask(ask));
         }
     }

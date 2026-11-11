@@ -1719,7 +1719,7 @@ else returns to the chair.
 | `host_native_unconfigured` | `chair` | no | 0 |
 | `spawn_failure` | `new_route` | no | 1 |
 | `settlement_failed` | `chair` | no | 0 |
-| `lost` | `chair` | no | 1 |
+| `lost` | `chair` | no | 0 |
 | `unsettled` | `chair` | no | 0 |
 | `quarantined` | `chair` | no | 0 |
 

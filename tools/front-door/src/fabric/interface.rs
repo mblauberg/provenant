@@ -4177,6 +4177,8 @@ mod tests {
                 .nodes
                 .iter()
                 .filter(|node| node.id.starts_with("review--") && node.composite.is_none())
+                // A stage whose `when` does not hold stays as a skipped row and never launches.
+                .filter(|node| node.when.iter().all(graph::WhenTerm::holds))
                 .map(|node| node.id.clone())
                 .collect();
             for stage in ["frame", "verify", "synthesis"] {

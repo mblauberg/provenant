@@ -891,7 +891,11 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             return Ok(None);
         };
-        let ask_id = format!("{}.rounds-{rounds}", node.id);
+        let ask_id = format!(
+            "{}.rounds-{rounds}{}",
+            node.id,
+            asks::retry_suffix(&checkpoint.nodes[index])
+        );
         let paused = format!(
             "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
             node.id
@@ -902,7 +906,8 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         let position = match checkpoint.asks.iter().position(|ask| ask.ask_id == ask_id) {
             Some(position) => position,
             None => {
-                let request = asks::loop_ask(&checkpoint.graph_id, &node.id, rounds, session);
+                let mut request = asks::loop_ask(&checkpoint.graph_id, &node.id, rounds, session);
+                request.ask_id = ask_id.clone();
                 match asks::file(checkpoint, owner, journal, &request) {
                     Ok((_, true)) => {
                         // The request was closed with no answer. Another

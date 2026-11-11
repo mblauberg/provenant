@@ -169,6 +169,19 @@ pub struct Restart {
     pub cause: provenant_records::StopCause,
     #[serde(flatten)]
     pub step: provenant_records::NextStep,
+    /// The routing ladder's choice, when a depleted stop was handed off by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<LadderChoice>,
+}
+
+/// The rung, target and tier the depletion ladder chose for a restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LadderChoice {
+    pub rung: provenant_routing::Rung,
+    /// `adapter/model` with its account, or `host-native/name`.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// The node field naming the parent node whose patch added a node.
@@ -311,11 +324,13 @@ fn admit_patch_for_retry(
             };
         }
         if revision(graph.checkpoint) != 0
-            || graph
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.state != NodeState::Pending || !node.attempts.is_empty())
+            || graph.checkpoint.nodes.iter().any(|node| {
+                // A row a `when` condition skipped at submission has not started.
+                let skipped_at_submission =
+                    node.state == NodeState::Skipped && node.skip_reason.is_some();
+                (node.state != NodeState::Pending && !skipped_at_submission)
+                    || !node.attempts.is_empty()
+            })
         {
             return Err(PatchError::new(
                 "started",
