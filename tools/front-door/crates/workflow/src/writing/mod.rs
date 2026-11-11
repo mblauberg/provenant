@@ -47,7 +47,7 @@ impl RuleSet {
     fn asset(self) -> &'static str {
         match self {
             Self::Legal => "skills/legal-writing/lint-rules.json",
-            _ => "skills/natural-writing/lint-rules.json",
+            _ => "skills/writing/lint-rules.json",
         }
     }
 }
