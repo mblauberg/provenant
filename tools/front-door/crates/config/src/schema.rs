@@ -354,9 +354,15 @@ pub fn apply_patch<T: Serialize>(
     let registry = registry()?;
     for (path, value) in patch {
         if !editable_path(path) {
-            return Err(ConfigError::Refused(format!(
-                "{path} is not an editable field"
-            )));
+            let near = crate::knobs::nearest(path, known.keys().copied());
+            return Err(ConfigError::Refused(if near.is_empty() {
+                format!("{path} is not an editable field")
+            } else {
+                format!(
+                    "{path} is not an editable field; did you mean {}?",
+                    near.join(", ")
+                )
+            }));
         }
         if path == "profile" || registry.knobs.contains_key(path) {
             let text = match value {

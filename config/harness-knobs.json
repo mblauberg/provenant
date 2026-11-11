@@ -600,12 +600,14 @@
     },
     "lanes.max_depth": {
       "strict": true,
+      "safe": 1,
       "type": "int", "min": 1, "default": 2, "status": "wired",
       "effect": "Maximum nested lane depth, including the first dispatched lane.",
       "trade_off": "Lower limits delegation chains; higher permits deeper nested work."
     },
     "lanes.publish": {
       "strict": true,
+      "safe": false,
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
       "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests.",

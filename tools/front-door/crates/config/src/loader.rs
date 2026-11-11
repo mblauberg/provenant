@@ -257,7 +257,6 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
             | ConfigError::MissingVersion { .. }
             | ConfigError::UnsupportedVersion { .. }
             | ConfigError::Schema { .. }
-            | ConfigError::MisplacedDomainKnob { .. }
             | ConfigError::CollectionLimit { .. }
             | ConfigError::Domain { .. }),
         ) => {
@@ -388,6 +387,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
 
     let knobs_item = user.remove("knobs");
+    let knobs_item_was_present = knobs_item.is_some();
     let version = user.get("schema_version");
     if text.is_some() {
         let location = site(&user_sites, "schema_version", &user_origin, false);
@@ -415,8 +415,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .and_then(Item::as_str)
         .and_then(Profile::from_name)
         .unwrap_or_default();
-    let mut valid_knobs = knobs_item.clone().and_then(|item| item.into_table().ok());
-    let mut knob_boundary = user
+    let knob_boundary = user
         .get("profile")
         .and_then(Item::as_str)
         .filter(|name| Profile::from_name(name).is_none())
@@ -424,53 +423,43 @@ fn inspect<T: DeserializeOwned + Serialize>(
             location: site(&user_sites, "profile", &user_origin, false),
             rule: "range",
         });
-    // The knobs table holds capability and authority knobs, so a malformed
-    // container refuses like a malformed strict knob.
-    if knobs_item.is_some() && valid_knobs.is_none() {
-        knob_boundary = Some(ConfigError::Schema {
-            location: site(&user_sites, "knobs", &user_origin, false),
-            rule: "type",
+    // A malformed container is ignored with a warning. It holds capability
+    // and authority knobs, so every strict knob then takes its restrictive
+    // value rather than a default that could grant what the user withheld.
+    let valid_knobs = knobs_item.and_then(|item| match item.into_table() {
+        Ok(table) => Some(table),
+        Err(_) => {
+            issues.push(Issue {
+                location: site(&user_sites, "knobs", &user_origin, false),
+                rule: "type",
+                source: None,
+                rejected: String::new(),
+            });
+            None
+        }
+    });
+    let malformed_knobs = knobs_item_was_present && valid_knobs.is_none();
+    let (knobs, knob_problems) = crate::knobs::resolve(
+        profile,
+        valid_knobs
+            .as_ref()
+            .map(|table| table as &dyn toml_edit::TableLike),
+        malformed_knobs,
+    )?;
+    for problem in knob_problems {
+        let key = format!("knobs.{}", problem.name);
+        issues.push(Issue {
+            location: site(
+                &user_sites,
+                &key,
+                &user_origin,
+                problem.rule == "unknown_key",
+            ),
+            rule: problem.rule,
+            source: None,
+            rejected: String::new(),
         });
     }
-    let knobs = loop {
-        match crate::knobs::resolve(
-            profile,
-            valid_knobs
-                .as_ref()
-                .map(|table| table as &dyn toml_edit::TableLike),
-        ) {
-            Ok(knobs) => break knobs,
-            Err((key, rule)) if key.starts_with("knobs.") => {
-                let location = site(&user_sites, &key, &user_origin, rule == "unknown_key");
-                // An invalid capability or authority knob never recovers to
-                // its default, which could grant what the user withheld.
-                if rule == "unknown_key"
-                    && crate::migrate::RETIRED_DOMAIN_KNOBS
-                        .contains(&key.trim_start_matches("knobs."))
-                {
-                    knob_boundary.get_or_insert(ConfigError::MisplacedDomainKnob {
-                        name: key.trim_start_matches("knobs.").to_owned(),
-                        location,
-                    });
-                } else if rule == "unknown_key"
-                    || crate::knobs::strict(key.trim_start_matches("knobs."))
-                {
-                    knob_boundary.get_or_insert(ConfigError::Schema { location, rule });
-                } else {
-                    issues.push(Issue {
-                        location,
-                        rule,
-                        source: None,
-                        rejected: String::new(),
-                    });
-                }
-                if let Some(table) = &mut valid_knobs {
-                    table.remove(key.trim_start_matches("knobs."));
-                }
-            }
-            Err(_) => return Err(ConfigError::KnobRegistry),
-        }
-    };
     let compiled = Origin::Compiled { profile };
     let header = format!(
         "schema_version={}\nprofile='{}'",
@@ -1288,9 +1277,35 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
                 "{key}: ignored invalid configuration ({}: {})",
                 issue.rule, source.code
             ),
+            None if key.starts_with("knobs.") => knob_message(&key, issue.rule),
             None => format!("{key}: ignored invalid configuration ({})", issue.rule),
         },
     })
+}
+/// Plain-text warning for a `[knobs]` entry the resolver ignored.
+fn knob_message(key: &str, rule: &str) -> String {
+    let name = key.trim_start_matches("knobs.");
+    if rule != "unknown_key" {
+        let fallback = match crate::knobs::safe_value(name) {
+            Some(value) => format!("using the restrictive value {value}"),
+            None => "using the default".to_owned(),
+        };
+        return format!("{key}: invalid value ({rule}); {fallback}");
+    }
+    if crate::migrate::RETIRED_DOMAIN_KNOBS.contains(&name) {
+        return format!(
+            "{key}: ignored; this setting is not a knob and belongs outside [knobs]; run `provenant config migrate` or delete the line"
+        );
+    }
+    match crate::knobs::nearest_knobs(name).as_slice() {
+        [] => format!(
+            "{key}: unknown knob, ignored; run `provenant config schema` for the valid names"
+        ),
+        near => format!(
+            "{key}: unknown knob, ignored; did you mean {}?",
+            near.join(", ")
+        ),
+    }
 }
 fn qualify(name: &str, field: &str) -> String {
     if field.is_empty() {

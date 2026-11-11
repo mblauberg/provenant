@@ -378,7 +378,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
 }
 
 #[test]
-fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_refuses_authority_input_without_writes()
+fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authority_input_without_writes()
 -> Result {
     let rig = TestRig::new()?.without_state()?;
     let defaults = rig.command(&["config", "show", "--json"])?;
@@ -419,19 +419,57 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_refuses_authority_
     for stream in [&unknown.stdout.bytes, &unknown.stderr.bytes] {
         assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
     }
-    // A malformed authority knob refuses rather than recovering to its default.
-    std::fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'lanes.publish'='private-marker'\n",
-    )?;
+    // A malformed authority knob warns and takes its restrictive value, so one
+    // typo never stops the command or widens authority.
+    let malformed = "schema_version=1\n[knobs]\n'lanes.publish'='private-marker'\n";
+    std::fs::write(rig.state.join("config.toml"), malformed)?;
     let invalid = rig.command(&["config", "show", "--json"])?;
-    assert_eq!(code(&invalid), 2);
-    assert!(String::from_utf8_lossy(&invalid.stdout.bytes).contains("lanes.publish"));
-    assert!(!String::from_utf8_lossy(&invalid.stdout.bytes).contains("private-marker"));
+    assert_eq!(
+        code(&invalid),
+        0,
+        "{}",
+        String::from_utf8_lossy(&invalid.stdout.bytes)
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&invalid.stdout.bytes)?;
+    assert_eq!(shown["data"]["knobs"]["lanes.publish"]["value"], false);
+    let stderr = String::from_utf8_lossy(&invalid.stderr.bytes);
+    assert!(stderr.contains("lanes.publish"), "{stderr}");
+    for stream in [&invalid.stdout.bytes, &invalid.stderr.bytes] {
+        assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
+    }
     assert_eq!(
         std::fs::read_to_string(rig.state.join("config.toml"))?,
-        "schema_version=1\n[knobs]\n'lanes.publish'='private-marker'\n"
+        malformed
     );
+    // A misspelt knob name warns once, naming the nearest knob, and neither
+    // `config show` nor `status` refuses.
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n\n[knobs]\n\"lanes.max_concurency\" = 4\n",
+    )?;
+    // Fabric requires a private state directory; that is unrelated to the typo.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut stderr = String::new();
+    for args in [&["config", "show", "--json"][..], &["status", "--json"][..]] {
+        let output = rig.command(args)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{args:?} {}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        stderr.push_str(&String::from_utf8_lossy(&output.stderr.bytes));
+    }
+    assert_eq!(
+        stderr.matches("lanes.max_concurency").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("lanes.max_concurrency"), "{stderr}");
+    assert!(!stderr.contains("PathWire"), "{stderr}");
     rig.assert_legacy_unchanged()
 }
 

@@ -58,7 +58,7 @@ fn census_exclude_ancestors_defaults_true_and_can_be_disabled() {
 }
 
 #[test]
-fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_malformed_authority() {
+fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_recovers_malformed_authority() {
     let name = "confinement.census_ignore_unreadable";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert!(defaults.census_ignore_unreadable().unwrap().is_empty());
@@ -96,9 +96,11 @@ fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_malformed_author
         "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'='all'",
         "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'=[{path='/a',team_id=''}]",
     ] {
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_eq!(config.warnings.len(), 1);
         assert!(
-            load(&roots(), Some(text.as_bytes())).is_err(),
-            "strict authority must not recover"
+            config.census_ignore_unreadable().unwrap().is_empty(),
+            "an invalid exception list must never grant an exception"
         );
     }
     KnobEdit::Unset(name).apply(&mut doc).unwrap();
@@ -598,7 +600,6 @@ fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoin
     ] {
         let loaded = load(&roots(), Some(text.as_bytes()));
         if (text.contains("profile='") && refusal == "range")
-            || (text.contains("[knobs]") && refusal == "unknown_key")
             || matches!(refusal, "missing" | "version" | "syntax")
             || (text.starts_with("schema_version=")
                 && !text.starts_with("schema_version=1\n")
@@ -1502,7 +1503,7 @@ pub(crate) fn state_roots(dir: &Path) -> Roots {
     inputs.state_dir = Some(dir.into());
     inputs.resolve(&Resolver).unwrap()
 }
-fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigError> {
+pub(crate) fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigError> {
     edit_config(
         roots,
         &crate::domains::NO_DOMAINS,
@@ -1805,8 +1806,10 @@ fn migrate_preserves_unrecognised_knobs() {
     let original =
         "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n'domains.routing.future' = 1\n";
     std::fs::write(&path, original).unwrap();
-    assert!(crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).is_err());
-    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(!text.contains("review.polish"));
+    assert!(text.contains("domains.routing.future"));
 }
 #[test]
 fn set_creates_a_missing_private_state_directory() {
@@ -2040,32 +2043,25 @@ fn registered_knobs_have_production_readers() {
 }
 
 #[test]
-fn misplaced_domain_knob_points_to_its_domain_key() {
-    let error = load(
+fn misplaced_domain_knob_warns_with_the_migrate_repair() {
+    let config = load(
         &roots(),
         Some(&b"schema_version=1\n[knobs]\n'domains.routing.capacity_cooldown_seconds'=30"[..]),
     )
-    .unwrap_err();
-    let message = error.to_string();
-    assert!(message.contains("domains.routing.capacity_cooldown_seconds"));
-    assert!(message.contains("outside [knobs]"));
+    .unwrap();
+    assert_warning(&config, "unknown_key");
+    assert!(config.warnings[0].message.contains("config migrate"));
 }
 
 #[test]
-fn unknown_domain_knob_is_an_unknown_key_not_misplaced() {
-    let error = load(
+fn unknown_domain_knob_warns_without_the_migrate_repair() {
+    let config = load(
         &roots(),
         Some(&b"schema_version=1\n[knobs]\n'domains.routing.future'=1"[..]),
     )
-    .unwrap_err();
-    assert!(matches!(
-        &error,
-        ConfigError::Schema {
-            rule: "unknown_key",
-            ..
-        }
-    ));
-    assert!(!error.to_string().contains("outside [knobs]"));
+    .unwrap();
+    assert_warning(&config, "unknown_key");
+    assert!(!config.warnings[0].message.contains("config migrate"));
 }
 
 #[test]
