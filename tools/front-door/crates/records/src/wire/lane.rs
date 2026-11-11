@@ -592,12 +592,7 @@ mod terminal_cause_tests {
             assert_eq!(label.as_deref(), Some(cause.reason()));
             let label = label.unwrap();
             assert!(label.len() <= 60, "{cause:?}: {label}");
-            // A removed placement names its replacement command instead.
-            let next = match cause {
-                TerminalCause::CloudPlacementRemoved => "provenant cloud launch",
-                _ => "provenant output ID",
-            };
-            assert!(label.contains(next), "{label}");
+            assert!(label.contains("provenant output ID"), "{label}");
             assert!(!label.contains("fixture scoped note"), "{label}");
             assert!(!label.contains("secret"));
         }
