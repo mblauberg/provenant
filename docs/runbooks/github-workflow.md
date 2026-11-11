@@ -403,6 +403,4 @@ A major bump, a new dependency or any other change takes at least one
    gate.
 
 CI behaviour, local reproduction of CI failures and advisory test signals are
-in the [CI runbook](ci.md). The [PR reconciler](pr-reconciler.md) and
-[event intake](event-intake-configuration.md) workers observe pull request
-and CI events outside a session.
+in the [CI runbook](ci.md).

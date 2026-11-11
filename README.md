@@ -283,7 +283,6 @@ find into process changes and repeatable evaluations.
 | [Disk](docs/runbooks/disk.md) | Inspecting Provenant storage |
 | [Garbage collection](docs/runbooks/gc.md) | Collecting caches and expired provider state |
 | [CI](docs/runbooks/ci.md) | Checks, test inventory and reproducing failures |
-| [PR reconciler](docs/runbooks/pr-reconciler.md) | Pull request work records |
 | [Replay bench](docs/runbooks/bench.md) | Mining, verifying and running replay tasks |
 | [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |

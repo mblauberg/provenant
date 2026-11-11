@@ -87,8 +87,8 @@ Documentation claims sit in three tiers, and the third is deliberate:
 1. **Code-checked.** Runtime schema and migration structure is owned by code
    and tests. Relative Markdown links in `docs/` and each `SKILL.md` are
    machine-checked. `scripts/check-doc-truth` requires every runbook and spec
-   `Anchor:` to resolve to a source file and compares the event-intake and
-   delivery tables with the code they project. `scripts/check-harness` rejects
+   `Anchor:` to resolve to a source file and compares the delivery
+   table with the code it projects. `scripts/check-harness` rejects
    a skill `references/` path named outside its skill.
 2. **Review-checked.** The README skill count and architecture risk factors are
    maintained from current files and code; no harness check binds those regions

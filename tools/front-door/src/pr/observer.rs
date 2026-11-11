@@ -12,7 +12,7 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use crate::event_intake::gh::{Forge, Gh, Response, rate_limit_reset};
+use super::gh::{Forge, Gh, Response, rate_limit_reset};
 use provenant_core::{CancelToken, Clock as _, DurationMicros, WaitBudget};
 use provenant_os::{
     clock::SystemClock,

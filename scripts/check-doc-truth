@@ -368,19 +368,6 @@ def table_rows(text, heading):
 def check_projections(root):
     """Compare hand-kept runbook tables with the source they project."""
     errors = []
-    intake = root / "docs/runbooks/event-intake-configuration.md"
-    source = root / "tools/front-door/src/bin/event-intake.rs"
-    if intake.exists() and source.exists():
-        code = source.read_text()
-        documented = {row[0].strip("`"): row for row in table_rows(intake.read_text(), "## Configure")}
-        read = set(re.findall(r'"(PROVENANT_INTAKE_[A-Z_]+)"', code))
-        for name in sorted(read ^ set(documented)):
-            where = "is read by event-intake but not documented" if name in read else "is documented but not read"
-            errors.append(f"{intake.relative_to(root)}: error: {name} {where}")
-        default = re.search(r'"PROVENANT_INTAKE_SWEEP_SECONDS"\)\s*\.unwrap_or_else\(\|_\| "(\d+)"', code)
-        row = documented.get("PROVENANT_INTAKE_SWEEP_SECONDS")
-        if default and row and f"`{default[1]}`" not in row[1]:
-            errors.append(f"{intake.relative_to(root)}: error: sweep default is {default[1]}")
     inbox = root / "docs/runbooks/human-inbox.md"
     specs = root / "tools/front-door/crates/records/src/adapters.rs"
     hooks = root / "tools/front-door/crates/cli/src/hooks.rs"
