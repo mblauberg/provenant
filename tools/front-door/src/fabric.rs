@@ -64,13 +64,28 @@ use std::{
     time::Instant,
 };
 
-pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeError {
+pub(crate) fn scratch_prepare_error(
+    error: provenant_confinement::worktrees::WorktreeError,
+) -> FacadeError {
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_os::fs::FsError;
+    // Fixed text only: the lower error names paths. A lock that stayed held is
+    // the contention signal, so say so instead of leaving a bare `io`.
+    let cause = match &error {
+        WorktreeError::Filesystem(FsError::LockTimeout { .. }) => {
+            Some("the repository exclude lock stayed held past its wait budget")
+        }
+        WorktreeError::Filesystem(FsError::Cancelled { .. }) => {
+            Some("waiting for the repository exclude lock was cancelled")
+        }
+        _ => None,
+    };
     FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
         resource: None,
         input_failure: None,
-        cause: None,
+        cause,
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
