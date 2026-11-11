@@ -484,13 +484,35 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
 }
 
 #[test]
+fn gate_verdict_accepts_one_line_wherever_it_sits_outside_fences() {
+    for text in [
+        "VERDICT: PASS\nmore explanation",
+        "Reviewed.\nVERDICT: PASS\nmore explanation",
+        "```text\nVERDICT: FAIL\n```\nVERDICT: PASS\nmore",
+    ] {
+        let (document, mut owner) =
+            verdict_fixture(VerdictThreshold::All, &[Some("PASS"), Some("PASS")]);
+        owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, text);
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded, "{text:?}");
+        assert_eq!(
+            run.checkpoint.nodes[0]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some("VERDICT: PASS")
+        );
+    }
+}
+
+#[test]
 fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
     for text in [
         "VERDICT: FAIL\nVERDICT: PASS".to_owned(),
         "VERDICT: PASS\nVERDICT: PASS".to_owned(),
-        "VERDICT: PASS\nmore explanation".to_owned(),
         "VERDICT: PASS x".to_owned(),
-        "verdict: pass".to_owned(),
         format!("VERDICT: PASS{}", " ".repeat(1024)),
         format!(
             "{}\nVERDICT: FAIL\n{}\nVERDICT: PASS",
@@ -515,6 +537,23 @@ fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
             );
         }
     }
+}
+
+#[test]
+fn gate_verdict_ignores_prose_that_only_resembles_a_verdict_line() {
+    // Not a declaration, so the reviewer reports no verdict: it cannot pass an
+    // all-reviewers gate, while a quorum may still settle on the others.
+    let (document, mut owner) = verdict_fixture(
+        VerdictThreshold::All,
+        &[Some("PASS"), Some("PASS"), Some("PASS")],
+    );
+    owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, "verdict: pass");
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.nodes[3].state, NodeState::Failed);
+    assert_eq!(
+        run.checkpoint.nodes[0].outputs.as_ref().unwrap().verdict,
+        None
+    );
 }
 
 #[test]

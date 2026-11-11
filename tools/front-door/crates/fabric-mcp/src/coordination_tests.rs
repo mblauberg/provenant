@@ -698,14 +698,15 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
             .code(),
         "invalid_input"
     );
-    let claim = crate::lane::Request {
-        tool: "fabric_lease".into(),
-        arguments: json!({"op":"claim_acquire","scope":{"kind":"issue","key":"lane"},"lease_seconds":1}),
+    // The relay carries coordination only; other tools stay refused in a lane.
+    let run = crate::lane::Request {
+        tool: "fabric_run".into(),
+        arguments: json!({"op":"wait","targets":[{"attempt":"11111111111111111111111111111111"}],"condition":"all","wait_seconds":1}),
     };
     assert_eq!(
-        relay_call(&claim.tool, claim.arguments)
+        relay_call(&run.tool, run.arguments)
             .err()
-            .ok_or("lane claim accepted")?
+            .ok_or("lane run tool accepted")?
             .code(),
         "lane_coordination_refused"
     );

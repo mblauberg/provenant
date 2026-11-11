@@ -416,21 +416,19 @@ fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
 }
 
 #[test]
-fn stats_json_is_bounded_by_default_and_an_oversized_detail_leaves_no_artefact() -> Result {
+fn stats_json_is_bounded_by_default_and_detail_carries_the_rows() -> Result {
     let rig = rig()?;
-    // A run holds at most 64 tasks.
-    // Long labels make each per-attempt row heavy, so few attempts overflow.
-    let attempts = 650usize;
-    let work = |index: usize| {
-        json!({"graph_id": format!("graph-{}", "g".repeat(100)),
-            "node_id": format!("node-{index}-{}", "n".repeat(100))})
-    };
-    for run in 0..attempts.div_ceil(50) {
-        let contexts: Vec<Value> = (run * 50..(run * 50 + 50).min(attempts))
-            .map(work)
-            .collect();
-        terminal_run::seed(&rig, &format!("bounded-stats-{run}"), &contexts)?;
-    }
+    // The size limit itself is tested at the renderer with a low injected bound
+    // (`unpublished_result_tests` in src/lib.rs); settling attempts is slow, so
+    // this keeps a few.
+    let attempts = 6usize;
+    let contexts: Vec<Value> = (0..attempts)
+        .map(|index| {
+            json!({"graph_id": format!("graph-{}", "g".repeat(100)),
+                "node_id": format!("node-{index}-{}", "n".repeat(100))})
+        })
+        .collect();
+    terminal_run::seed(&rig, "bounded-stats", &contexts)?;
     // The default is the summary the human view shows: counts, not rows.
     let output = rig.command(&["telemetry", "stats", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
@@ -440,15 +438,18 @@ fn stats_json_is_bounded_by_default_and_an_oversized_detail_leaves_no_artefact()
         attempts
     );
     assert!(value["data"]["attempt_context"].get("attempts").is_none());
-    // Per-attempt rows past the limit are refused with a typed code, and the
-    // command publishes nothing.
+    // --detail carries the per-attempt rows and publishes nothing.
     let output = rig.command(&["telemetry", "stats", "--json", "--detail"])?;
-    assert_eq!(code(&output), 3, "{}", output.stdout.bytes.len());
+    assert_eq!(code(&output), 0, "{output:?}");
     let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
+    assert_eq!(
+        value["data"]["attempt_context"]["attempts"]
+            .as_array()
+            .map(Vec::len),
+        Some(attempts)
+    );
     assert!(value["data"].get("artifact").is_none_or(Value::is_null));
-    let results = rig.state.join("tmp/results");
-    let left = fs::read_dir(&results).map_or(0, Iterator::count);
+    let left = fs::read_dir(rig.state.join("tmp/results")).map_or(0, Iterator::count);
     assert_eq!(left, 0);
     Ok(())
 }

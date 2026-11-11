@@ -174,19 +174,16 @@ fn emit_unpublished<T: Serialize>(
     read_only: bool,
     summary: Option<&provenant_cli::Summary>,
 ) -> u8 {
-    let mode = globals.render_mode(human, read_only, summary);
-    // The size bounds the result, not its presentation: a compact view of an
-    // oversized result is still an oversized result.
-    let oversized = !globals.json
-        && serde_json::to_vec(result)
-            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
-    let rendered = if oversized {
-        Err(RenderError::TooLarge)
-    } else if !globals.json && result.error.is_some() {
-        provenant_cli::render(result, mode, &mut io::stderr().lock())
-    } else {
-        provenant_cli::render(result, mode, &mut io::stdout().lock())
-    };
+    let rendered = render_unpublished(
+        result,
+        globals,
+        human,
+        read_only,
+        summary,
+        provenant_cli::MAX_RESULT_BYTES,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    );
     match rendered {
         Ok(()) => provenant_cli::exit_status(&result.status),
         Err(RenderError::TooLarge) => fail_with_repair(
@@ -201,6 +198,31 @@ fn emit_unpublished<T: Serialize>(
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
             3
         }
+    }
+}
+/// Render a result no larger than `limit`, writing nothing when it is larger.
+#[allow(clippy::too_many_arguments)]
+fn render_unpublished<T: Serialize>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    human: &str,
+    read_only: bool,
+    summary: Option<&provenant_cli::Summary>,
+    limit: usize,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<(), RenderError> {
+    let mode = globals.render_mode(human, read_only, summary);
+    // The size bounds the result, not its presentation: a compact view of an
+    // oversized result is still an oversized result.
+    let oversized =
+        !globals.json && serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() > limit);
+    if oversized {
+        Err(RenderError::TooLarge)
+    } else if !globals.json && result.error.is_some() {
+        provenant_cli::render_within(result, mode, stderr, limit)
+    } else {
+        provenant_cli::render_within(result, mode, stdout, limit)
     }
 }
 /// Accounts by adapter, then the registered rows; none needs action.
@@ -1781,4 +1803,58 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         );
     }
     status
+}
+
+#[cfg(test)]
+mod unpublished_result_tests {
+    #[test]
+    fn an_oversized_result_is_refused_and_writes_nothing() {
+        let result = provenant_records::CommandResult::new(
+            "telemetry stats",
+            provenant_records::Outcome::Ok,
+            "x".repeat(4096),
+        );
+        for json in [true, false] {
+            let globals = provenant_cli::Globals {
+                json,
+                full: true,
+                ..Default::default()
+            };
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let rendered = super::render_unpublished(
+                &result, &globals, "", false, None, 1024, &mut out, &mut err,
+            );
+            assert!(
+                matches!(rendered, Err(provenant_cli::RenderError::TooLarge)),
+                "json={json}"
+            );
+            assert!(out.is_empty() && err.is_empty(), "json={json}");
+        }
+    }
+
+    #[test]
+    fn a_result_within_the_bound_is_rendered() {
+        let result = provenant_records::CommandResult::new(
+            "telemetry stats",
+            provenant_records::Outcome::Ok,
+            "x".repeat(64),
+        );
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        super::render_unpublished(
+            &result,
+            &globals,
+            "",
+            false,
+            None,
+            1024,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .expect("within the bound");
+        assert!(!out.is_empty());
+    }
 }

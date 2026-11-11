@@ -453,12 +453,12 @@ fn execute(
                 let mut observation = input.clone();
                 let seconds =
                     (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55);
-                match &mut observation {
-                    Mutation::Events(EventsInput::Read {
-                        wait_seconds: Some(wait_seconds),
-                        ..
-                    }) => *wait_seconds = seconds,
-                    _ => {}
+                if let Mutation::Events(EventsInput::Read {
+                    wait_seconds: Some(wait_seconds),
+                    ..
+                }) = &mut observation
+                {
+                    *wait_seconds = seconds;
                 }
                 let call = match observation {
                     Mutation::Mail(input) => ToolCall::Mail(input, None),

@@ -2833,18 +2833,21 @@ mod host_clock_tests {
 
     #[test]
     fn only_a_reportable_verdict_counts_as_a_lane_reporting() {
-        assert!(reports_verdict("Reviewed the change.\n\nVERDICT: APPROVE"));
+        assert!(reports_verdict("Reviewed the change.\n\nVERDICT: PASS"));
         assert!(reports_verdict(
-            "Reviewed the change.\nVERDICT: APPROVE\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
+            "Reviewed the change.\nVERDICT: FAIL\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
         ));
-        // A verdict that is not the first or last thing said is ambiguous: the
-        // reader refuses it, and so does settlement.
-        assert!(!reports_verdict(
-            "Reviewed the change.\nVERDICT: APPROVE\nOne more note."
+        // Exactly one verdict line outside fenced blocks counts, wherever it sits.
+        assert!(reports_verdict(
+            "Reviewed the change.\nVERDICT: PASS\nOne more note."
         ));
-        assert!(!reports_verdict(
-            "VERDICT: APPROVE\nVERDICT: REQUEST_CHANGES"
+        assert!(reports_verdict(
+            "```text\nVERDICT: FAIL\n```\nVERDICT: INCONCLUSIVE"
         ));
+        // Several verdict lines, a malformed token or none do not.
+        assert!(!reports_verdict("VERDICT: PASS\nVERDICT: FAIL"));
+        assert!(!reports_verdict("Reviewed.\nVERDICT: MAYBE soon"));
+        assert!(!reports_verdict("Reviewed.\nVERDICT: maybe"));
         assert!(!reports_verdict("Reviewed the change with no verdict."));
     }
 

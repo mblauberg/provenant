@@ -240,30 +240,28 @@ fn expired_claim_refuses_renewal_but_allows_release() {
 // RESERVED lock. Successful writes after the fault prove the connection recovers.
 #[derive(Debug, Clone, Copy)]
 enum Mutation {
-    WorkAcquire,
-    WorkRenew,
-    WorkRelease,
+    Acquire,
+    Renew,
+    Release,
 }
 fn exercise_fault(stage: Mutation, full: bool) {
     let f = Fixture::new();
     let store = f.open();
-    let work_fence = if matches!(stage, Mutation::WorkAcquire) {
+    let work_fence = if matches!(stage, Mutation::Acquire) {
         None
     } else {
         Some(store.acquire_claim(&work(&f, 3), &f.request()).unwrap())
     };
     let action = |req: &Request<'_>| -> Result<()> {
         match stage {
-            Mutation::WorkAcquire => store.acquire_claim(&work(&f, 3), req).map(|_| ()),
-            Mutation::WorkRenew => store.renew_claim(
+            Mutation::Acquire => store.acquire_claim(&work(&f, 3), req).map(|_| ()),
+            Mutation::Renew => store.renew_claim(
                 project(),
                 work_fence.as_ref().unwrap(),
                 DurationMicros::from_seconds(2).unwrap(),
                 req,
             ),
-            Mutation::WorkRelease => {
-                store.release_claim(project(), work_fence.as_ref().unwrap(), req)
-            }
+            Mutation::Release => store.release_claim(project(), work_fence.as_ref().unwrap(), req),
         }
     };
     let before = database_records(&store);
@@ -339,11 +337,7 @@ fn database_records(store: &Store) -> Vec<Vec<u8>> {
 #[test]
 fn full_and_busy_roll_back_every_new_mutation_and_its_event() {
     for full in [false, true] {
-        for stage in [
-            Mutation::WorkAcquire,
-            Mutation::WorkRenew,
-            Mutation::WorkRelease,
-        ] {
+        for stage in [Mutation::Acquire, Mutation::Renew, Mutation::Release] {
             exercise_fault(stage, full);
         }
     }
