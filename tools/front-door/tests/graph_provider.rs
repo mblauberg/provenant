@@ -3854,7 +3854,13 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         }
         fs::write(rig.project.join(".gitignore"), "setup-assets/\n")?;
         for args in [
-            vec!["add", "AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md", ".gitignore"],
+            vec![
+                "add",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "GLOBAL-AGENTS.md",
+                ".gitignore",
+            ],
             vec!["commit", "-qm", "instructions"],
         ] {
             let out = rig.execute(&git, &args, None)?;
