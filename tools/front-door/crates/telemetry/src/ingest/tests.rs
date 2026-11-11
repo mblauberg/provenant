@@ -187,6 +187,66 @@ fn a_single_file_store_over_the_old_cap_is_split_on_first_open() -> Result {
 }
 
 #[test]
+fn a_message_seen_on_both_sides_of_midnight_is_counted_once() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T23:59:59Z", 5, 0, 0, 1),
+    )?;
+    f.run(&DIRS, &[], None)?;
+    // A later run reads only the stream's tail, which is stamped the next day.
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-02T00:00:01Z", 5, 0, 0, 9),
+    )?;
+    let report = f.run(&DIRS, &[], None)?;
+    assert_eq!((report.added, report.already_present), (0, 1));
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].output, 9);
+    assert_eq!(segment_files(&f)?, ["2026-10-01.jsonl"]);
+    Ok(())
+}
+
+#[test]
+fn legacy_lines_too_long_to_migrate_keep_the_old_file() -> Result {
+    let f = Fixture::new()?;
+    let legacy = f.base.join("state/ingest.jsonl");
+    let kept = serde_json::json!({"timestamp": "2026-10-01T00:00:00Z", "message": "m1"});
+    let huge = "x".repeat(MAX_ROW_LINE + 10);
+    std::fs::write(&legacy, format!("{kept}\n{huge}\n"))?;
+    read_rows(&f.roots, &RowFilter::default())?;
+    let aside = f.base.join("state/ingest.jsonl.unmigrated");
+    assert!(!legacy.exists());
+    assert!(std::fs::read_to_string(&aside)?.contains(&huge));
+    assert!(stored(&f)?.contains("\"m1\""));
+    // A later open does not migrate again.
+    read_rows(&f.roots, &RowFilter::default())?;
+    assert!(aside.exists());
+    Ok(())
+}
+
+#[test]
+fn ingest_removes_staging_files_a_crash_left_in_the_store() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T00:00:00Z", 1, 0, 0, 1),
+    )?;
+    f.run(&DIRS, &[], None)?;
+    let stale = f
+        .base
+        .join("state/ingest/.ingest-.provenant-staging.abc.tmp");
+    std::fs::write(&stale, b"partial")?;
+    f.run(&DIRS, &[], None)?;
+    assert!(!stale.exists());
+    Ok(())
+}
+
+#[test]
 fn effort_is_kept_only_when_it_is_a_short_identifier() -> Result {
     let f = Fixture::new()?;
     f.write(

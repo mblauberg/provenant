@@ -28,7 +28,10 @@ keyed by session and message, so reruns add nothing. The chair's SessionStart
 hook ingests the last day automatically within a three-second budget. The store
 (the `ingest` directory in the state root, one `YYYY-MM-DD.jsonl` segment per
 UTC day, with no whole-size limit) holds counts, model, account, timestamps and
-IDs only, never prompt, reply, tool or path text.
+IDs only, never prompt, reply, tool or path text. A message that straddles
+UTC midnight stays under the day it was first stored. If an old single-file
+store had lines over 1 MiB, they are not migrated: the file is kept as
+`ingest.jsonl.unmigrated` and one line says how many.
 
 To attribute chair sessions, launch with the registered account's directory:
 `CLAUDE_CONFIG_DIR=~/.claude-work claude`. `provenant quota usage` lists chair

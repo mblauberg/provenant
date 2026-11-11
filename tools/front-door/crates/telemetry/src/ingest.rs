@@ -27,6 +27,8 @@ pub const PROVIDER: &str = "claude";
 const DIRECTORY: &str = "ingest";
 /// The single-file store earlier releases wrote; see [`migrate_legacy`].
 const LEGACY_STORE: &str = "ingest.jsonl";
+/// Where the old file is kept when some of its lines could not be carried over.
+const UNMIGRATED_STORE: &str = "ingest.jsonl.unmigrated";
 const LOCK: &str = "ingest.lock";
 const CURSORS: &str = "ingest-cursors.json";
 const CURSOR_CAP: u64 = 32 << 20;
@@ -714,6 +716,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         })?;
     migrate_legacy(&directory)?;
     let store = open_segments(&directory, true)?;
+    sweep_staging(&store)?;
     let mut cursors = if request.incremental {
         read_cursors(&directory, &fingerprint(&store)?)
     } else {
@@ -774,10 +777,19 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
 
     // Load the days new messages fall on and the newest few, so later chair
     // and attempt records still reach recent rows. Older days stay on disk.
-    let mut names: BTreeSet<String> = messages
-        .values()
-        .map(|pending| segments::name(pending.timestamp))
-        .collect();
+    // A message that straddles UTC midnight can be stored under one day by an
+    // earlier run and arrive under the next now, so each day's neighbours load
+    // too and a row is looked up across all of them.
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for pending in messages.values() {
+        let day = pending.timestamp.to_zoned(jiff::tz::TimeZone::UTC).date();
+        for date in [day.yesterday().ok(), Some(day), day.tomorrow().ok()]
+            .into_iter()
+            .flatten()
+        {
+            names.insert(format!("{date}{}", segments::SUFFIX));
+        }
+    }
     let existing = segments::list(&store)?;
     names.extend(existing.iter().rev().take(RECENT_SEGMENTS).cloned());
     let mut days = BTreeMap::new();
@@ -797,14 +809,19 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     for ((session, message), pending) in messages {
         let account = report.accounts.entry(pending.account.clone()).or_default();
         let day = segments::name(pending.timestamp);
+        let key = (session.clone(), message.clone());
+        let holder = days
+            .iter()
+            .find(|(_, segment)| segment.rows.contains_key(&key))
+            .map_or_else(|| day.clone(), |(name, _)| name.clone());
         let segment = days
-            .get_mut(&day)
+            .get_mut(&holder)
             .ok_or_else(|| std::io::Error::other("segment not loaded"))?;
         if segment.full {
             report.store_full = true;
             continue;
         }
-        if let Some(previous) = segment.rows.get_mut(&(session.clone(), message.clone())) {
+        if let Some(previous) = segment.rows.get_mut(&key) {
             account.present += 1;
             report.already_present += 1;
             let current = row(session, message, pending);
@@ -1005,6 +1022,31 @@ fn open_segments(root: &Directory, create: bool) -> Result<Directory, IngestErro
     Ok(root.open_directory(OsStr::new(DIRECTORY))?)
 }
 
+/// Removes `.ingest-*` files a crashed write left in the segments directory.
+/// The ingest lock is held, so no write of ours is in flight and every one is
+/// stale. (`staging_gc` only scans the state root, where the cursor file's
+/// staging files go.)
+fn sweep_staging(store: &Directory) -> Result<(), IngestError> {
+    let mut stale = Vec::new();
+    for entry in store.entries()? {
+        let entry = entry?;
+        if entry
+            .to_str()
+            .is_some_and(|name| name.starts_with(".ingest-"))
+        {
+            stale.push(entry);
+        }
+    }
+    for name in stale {
+        match store.unlink(&name) {
+            Ok(()) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 /// Identifies the store's current contents for the cursors: the segments and
 /// their sizes. A cursor made against other contents is not trusted.
 fn fingerprint(directory: &Directory) -> Result<String, IngestError> {
@@ -1017,19 +1059,21 @@ fn fingerprint(directory: &Directory) -> Result<String, IngestError> {
 }
 
 /// Calls `each` with every line, without its newline. A line longer than
-/// [`MAX_ROW_LINE`] is not a row and is dropped.
-fn each_line(reader: impl Read, mut each: impl FnMut(&[u8])) -> std::io::Result<()> {
+/// [`MAX_ROW_LINE`] is not a row and is dropped; the count of those is returned.
+fn each_line(reader: impl Read, mut each: impl FnMut(&[u8])) -> std::io::Result<u64> {
     let mut reader = BufReader::new(reader);
     let mut line = Vec::new();
+    let mut dropped = 0;
     loop {
         line.clear();
         let read = (&mut reader)
             .take(MAX_ROW_LINE as u64 + 1)
             .read_until(b'\n', &mut line)?;
         if read == 0 {
-            return Ok(());
+            return Ok(dropped);
         }
         if line.len() > MAX_ROW_LINE && line.last() != Some(&b'\n') {
+            dropped += 1;
             let mut rest = Vec::new();
             loop {
                 rest.clear();
@@ -1054,6 +1098,7 @@ fn each_line(reader: impl Read, mut each: impl FnMut(&[u8])) -> std::io::Result<
 /// after an interruption: lines already in a segment are not added twice.
 /// Delete this function once no release writes the single file.
 /// The ingest lock must be held.
+#[allow(clippy::print_stderr)] // The one report of rows left behind; the rename keeps it to once.
 fn migrate_legacy(root: &Directory) -> Result<(), IngestError> {
     let file = match root.open_read(OsStr::new(LEGACY_STORE)) {
         Ok(file) => file,
@@ -1062,7 +1107,7 @@ fn migrate_legacy(root: &Directory) -> Result<(), IngestError> {
     };
     let mut days: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
     let mut last = segments::name(jiff::Timestamp::UNIX_EPOCH);
-    each_line(file, |line| {
+    let dropped = each_line(file, |line| {
         if line.is_empty() {
             return;
         }
@@ -1097,7 +1142,17 @@ fn migrate_legacy(root: &Directory) -> Result<(), IngestError> {
             .atomic_write(OsStr::new(&day), ".ingest-", &out, PublishMode::Replace)?
             .require_durable()?;
     }
-    root.unlink(OsStr::new(LEGACY_STORE))?;
+    if dropped == 0 {
+        root.unlink(OsStr::new(LEGACY_STORE))?;
+    } else {
+        // Keep what could not be carried over, once: the rename also stops the
+        // next open from migrating again.
+        root.replace(OsStr::new(LEGACY_STORE), root, OsStr::new(UNMIGRATED_STORE))?;
+        eprintln!(
+            "provenant: {dropped} line(s) of the old {LEGACY_STORE} were too long to migrate; \
+             the file is kept as {UNMIGRATED_STORE}"
+        );
+    }
     root.sync()?;
     Ok(())
 }
