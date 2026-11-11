@@ -105,7 +105,7 @@ hand-written graph; `--explain` inspects it before launch.
 | **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
 | **Telemetry** | Local cost and token reports, CLI and MCP usage counts, and timeline export for Perfetto, with no collector. |
-| **Skills** | 20 workflow skills (scope, implement, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
+| **Skills** | 15 workflow skills (scope, deliver, code review, diagnose, orchestrate and more) plus 3 library skills for specific tools and stacks, installed into each harness. |
 
 ## Requirements
 
@@ -261,7 +261,7 @@ involved. Usage counters never log arguments, prompts or results.
 
 Use these to tune your setup with evidence: shift route weights towards models
 whose lanes succeed, spot commands and MCP tools nobody calls, and see where
-quota actually goes. The `retrospect` and `evaluate` skills help turn what you
+quota actually goes. The `improve` skill helps turn what you
 find into process changes and repeatable evaluations.
 
 ## Documentation

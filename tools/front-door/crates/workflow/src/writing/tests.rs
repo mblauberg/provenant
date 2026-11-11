@@ -9,7 +9,7 @@ fn matcher(set: RuleSet) -> Matcher {
         .as_slice(),
         _ => include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../../skills/natural-writing/lint-rules.json"
+            "/../../../../skills/writing/lint-rules.json"
         ))
         .as_slice(),
     };

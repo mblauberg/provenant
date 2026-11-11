@@ -1,66 +1,56 @@
 ---
 name: setup-repo
-description: "Use when asked to set up or scaffold a repository's process: tracker, issue forms, labels, branch ruleset, templates, routes, autonomy level, docs layout or work-item runbook. Not for a repo's day-to-day GitHub mechanics; use its runbook."
+description: "Use to set up a repository's tracker, issue forms, labels, ruleset and runbook."
 ---
 
 # Setup
 
-Scaffold the process a repository needs so agents can run it with the human near or
-out of the loop. Setup is the one place that sets how much autonomy a repo grants.
+Scaffold the process a repository needs so agents can run it with the human
+near or out of the loop. Setup is the one place that sets how much autonomy a
+repository grants.
 
-## Gate and classify
+## Classify
 
-Name the target; never infer it from the working directory. Read the target's
-`Repository process` declaration, `MAINTAINING.md`, `.github/**`, `.provenant/**` and
-its runbook before proposing anything. Ask only what the repo has not already settled.
-
-Show one diff and get one approval. Mark each action **keep** (exact match),
-**create** (absent), **adapt** (compatible, propose the merge) or **conflict**
-(semantic mismatch: stop and ask). Never overwrite. A re-run on a set-up repo must
-produce no diff. Confirm the remote host before any `gh` command.
+"This repo" in a checkout means that checkout; otherwise name the target. Read
+its `Repository process` declaration, `MAINTAINING.md`, `.github/**`,
+`.provenant/**` and runbook first, and ask only what it has not settled. Show
+one diff naming the target and get one approval. Mark each action **keep**
+(exact match), **create** (absent), **adapt** (compatible, propose the merge)
+or **conflict** (semantic mismatch: ask). Never overwrite; a re-run on a set-up
+repository produces no diff. Confirm the remote host before any `gh` command.
 
 ## Declare the process
 
 Amend the `Repository process` block in `MAINTAINING.md` from
-[`templates/repo-declarations.md`](templates/repo-declarations.md): tracker, scope home
-(`issue-tracker` or `project-docs`), workflow-state owner, docs layout, merge policy
-and runbook pointers. Pointers only; never copy policy. With tracker `none`, both
-homes are `project-docs` and the GitHub steps are skipped. Ask where specs, runbooks
-and ADRs live, and apply engineering-docs' default homes.
+[`templates/repo-declarations.md`](templates/repo-declarations.md): tracker,
+scope home (`issue-tracker` or `project-docs`), workflow-state owner, docs
+layout, merge policy and runbook pointers. Pointers only; never copy policy.
+With tracker `none`, both homes are `project-docs` and the GitHub steps are
+skipped. Specs, runbooks and ADRs take `engineering-docs`' default homes unless
+the owner says otherwise.
 
-## Autonomy
-
-Record the chosen autonomy and landing gates in the repository runbook.
-Put project templates under `.provenant/templates/`; a leaf holds a brief,
-tier, access and outputs, while a composite holds nodes. Use `plan` for open
-shape, `batch` for disjoint slices and `deliver` through landing. Keep write
-scopes and decision authority explicit; a template grants no new authority.
-
-Inspect with `provenant templates NAME` and
-`provenant run --use NAME --file BRIEF --explain`; run `provenant config check`.
+Record the chosen autonomy and landing gates in the runbook. Project templates
+go under `.provenant/templates/`; a template grants no new authority. Run
+`provenant config check`.
 
 ## GitHub steps
 
-Only with tracker GitHub issues and a confirmed host:
-
 1. **Labels:** copy [`labels.yml`](templates/labels.yml) and
-   [`workflows-labels.yml`](templates/workflows-labels.yml). The sync prunes any
-   undeclared label, so warn before the first run. Labels signal handling only, never
-   type or status.
-2. **Issue forms:** copy [`ISSUE_TEMPLATE/`](templates/ISSUE_TEMPLATE/config.yml): Epic,
-   Feature, Task and Bug. The spec fields sit on Feature and Task. Confirm private
-   vulnerability reporting works, then copy [`SECURITY.md`](templates/SECURITY.md).
-3. **Ruleset:** add the [`ci-status` aggregate](templates/ci-status-aggregate.yml), then
-   create a ruleset requiring that one exact-head check, per
-   [ruleset guidance](references/ruleset-and-ci.md). Ask which jobs it should `needs:`.
-4. **PR template:** copy [`pull_request_template.md`](templates/pull_request_template.md)
-   and adapt the evidence rows.
-5. **Runbook:** seed the declared work-item runbook from
-   [the runbook seed](references/runbook-seed.md) and add the project's mechanics.
+   [`workflows-labels.yml`](templates/workflows-labels.yml). The sync prunes
+   undeclared labels, so warn before the first run.
+2. **Issue forms:** copy [`ISSUE_TEMPLATE/`](templates/ISSUE_TEMPLATE/config.yml)
+   (Epic, Feature, Task, Bug). Confirm private vulnerability reporting works,
+   then copy [`SECURITY.md`](templates/SECURITY.md).
+3. **Ruleset:** add the [`ci-status` aggregate](templates/ci-status-aggregate.yml)
+   and a ruleset requiring that one exact-head check, per
+   [ruleset guidance](references/ruleset-and-ci.md). Ask which jobs it
+   `needs:`.
+4. **PR template:** copy
+   [`pull_request_template.md`](templates/pull_request_template.md) and adapt
+   the evidence rows.
+5. **Runbook:** seed the work-item runbook from
+   [the runbook seed](references/runbook-seed.md).
 6. **Dependabot and CODEOWNERS:** adapt [`dependabot.yml`](templates/dependabot.yml).
 
-## Stop
-
-Stop for an unnamed target, unconfirmed write permission or host, replacement of an
-existing ruleset or labels file, a semantic conflict, or ambiguous `ci-status`
-dependencies.
+Stop and ask before replacing an existing ruleset or labels file, on a
+semantic conflict, or when write permission or the host is unconfirmed.

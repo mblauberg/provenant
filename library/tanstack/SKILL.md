@@ -1,6 +1,6 @@
 ---
 name: tanstack
-description: "Use for TanStack Query, Router (file routes), Table, Virtual, Form, Store, Pacer, Hotkeys, Charts, Devtools and DB: keys, queryOptions, loaders, useTable, useForm, selectors. Not for ordinary component state (TanStack Store work stays here), render speed or backend caches."
+description: "Use for TanStack Query, Router, Table, Virtual, Form, Store, Pacer, Hotkeys, Charts and DB."
 ---
 
 # TanStack ecosystem: judgement layer
@@ -13,7 +13,7 @@ installed versions, so confirm them first. Project conventions win over this fil
 Read the lockfile and installed declarations before using an API. Consult the
 [version notes](references/releases-2026.md) and
 [version-matched documentation](references/version-matched.md). Flag unrelated
-migration sites for implement or refactor.
+migration sites for `deliver`.
 
 ## Where agents slip
 

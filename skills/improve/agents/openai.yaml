@@ -1,0 +1,4 @@
+interface:
+  display_name: "Improve"
+  short_description: "Turn run evidence into tested process changes"
+  default_prompt: "Use $improve to review this cycle's evidence, evaluate what changed, and propose the smallest gated process or skill changes."

@@ -59,7 +59,6 @@ def main():
             fail(path, f"invalid YAML: {error}")
             return {}
 
-    skills = {p.parent.name for p in paths if p.name == "SKILL.md"}
     versions = {}
     package = root / "package.json"
     if package.exists():
@@ -243,33 +242,6 @@ def main():
                         fail(path, "options need unique, nonempty labels")
             if not inputs:
                 fail(path, "at least one input is required")
-        elif path.parent.name == "evals" and path.name in ("trigger_cases.json", "regression_cases.json"):
-            try:
-                data = json.loads((root / path).read_text())
-                target = path.parent.parent.name
-                cases = data["cases"]
-                if data["schema_version"] != 1 or data["target_skill"] != target or not isinstance(cases, list) or not cases:
-                    raise ValueError("invalid version, target or cases")
-                seen = set()
-                for case in cases:
-                    ident, relation, prompt, tags, expected = (case[k] for k in ("id", "relation", "prompt", "tags", "expected"))
-                    primary, companions = expected["primary_skill"], expected["companion_skills"]
-                    prefix = "r" if path.name.startswith("regression") else "q"
-                    if not isinstance(ident, str) or not re.fullmatch(prefix + r"\d+", ident) or ident in seen or not nonempty(prompt):
-                        raise ValueError("invalid case identity or prompt")
-                    seen.add(ident)
-                    if not isinstance(tags, list) or not tags or not all(nonempty(t) for t in tags) or len(set(tags)) != len(tags):
-                        raise ValueError("invalid tags")
-                    if not isinstance(companions, list) or len(set(companions)) != len(companions) or any(c not in skills or c == primary for c in companions) or (primary is not None and primary not in skills):
-                        raise ValueError("invalid skill reference")
-                    if primary is None and (companions or "no-skill" not in tags):
-                        raise ValueError("invalid no-skill route")
-                    if relation == "positive" and primary != target or relation == "negative" and (primary == target or target in companions) or relation == "boundary" and not ({"adjacent", "composition"} & set(tags)) or relation not in ("positive", "negative", "boundary"):
-                        raise ValueError("invalid route relation")
-                    if prefix == "r" and (not nonempty(case.get("note")) or relation == "boundary" and primary != target and target not in companions) or prefix == "q" and "note" in case:
-                        raise ValueError("invalid regression note or route")
-            except (OSError, ValueError, KeyError, TypeError) as error:
-                fail(path, f"invalid route fixture: {error}")
 
     ambient_path = re.compile(r"(?<![\w./~-])(?:\.\.?/)*(?:docs|config|scripts)/[\w./-]*|(?<![\w-])MAINTAINING\.md\b")
     ambient = Path("GLOBAL-AGENTS.md")

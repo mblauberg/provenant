@@ -7,7 +7,7 @@ calls and the next unresolved branch. For each question give the evidence alread
 known, two or three options when useful, and a recommended answer with its
 trade-off. If the user is unsure why, give the trade-offs in prose first and offer
 options only once they can decide. Do not run a second interview on the same
-request. The interview is not approval; return the register to the spec gate.
+request. The interview ends in the spec digest, not a separate approval.
 
 ## Spike
 
@@ -20,7 +20,7 @@ variable under test. Do not touch credentials, user data or external systems
 without separate authority.
 
 Harvest into the spec, then retire the code. A spike never graduates to production;
-rebuild the smallest production version through implement.
+rebuild the smallest production version through `deliver`.
 
 ```markdown
 **Spike:** <question> (date, timebox)
