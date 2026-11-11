@@ -324,11 +324,7 @@ fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
         .collect()
 }
 fn raw_pool<'a>(context: &'a RoutingContext<'_>, name: &str) -> Option<&'a Vec<RoutePoolMember>> {
-    context
-        .config
-        .pools
-        .get(name)
-        .or_else(|| context.catalogue.pools.get(name))
+    crate::ladder::pool(context.catalogue, context.config, name)
 }
 fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
     let members = raw_pool(context, name)?;
@@ -2762,4 +2758,90 @@ fn stable_roll(operation_id: &str, task_index: u64, pool: &str, total: u64) -> u
     hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
     hash ^= hash >> 33;
     hash % total
+}
+
+/// Readiness of every pool model, and of `also`, on each registered account of
+/// its provider, for [`next_after_depletion`]. Each pair is judged by the same
+/// checks as a dispatch, with that one account as the only choice, so exhausted,
+/// unauthenticated, stale or unobserved accounts are not ready. A pair the
+/// dispatch checks would refuse outright, such as an unsupported launch, has no
+/// fact and so is unknown.
+pub fn depletion_facts(
+    context: &RoutingContext<'_>,
+    intent: RouteIntent,
+    also: &[ModelId],
+) -> Result<Vec<ReadinessFact>, RoutingError> {
+    let context = ValidatedContext::new(context)?;
+    let mut models: Vec<ModelId> = effective_pool_names(&context)
+        .iter()
+        .filter_map(|name| raw_pool(&context, name))
+        .flatten()
+        .map(|member| member.model.clone())
+        .chain(also.iter().cloned())
+        .collect();
+    models.sort();
+    models.dedup();
+    let now = context.now_seconds();
+    let mut facts = Vec::new();
+    for model in &models {
+        for record in context
+            .availability
+            .iter()
+            .filter(|record| record.adapter == model.adapter())
+        {
+            let one = std::slice::from_ref(record);
+            let scoped = ValidatedContext(RoutingContext {
+                availability: one,
+                ..context.0
+            });
+            let Ok(route) = candidate(model, None, &scoped, false, intent) else {
+                continue;
+            };
+            let state = match route.readiness {
+                RouteReadiness::Ready { .. } => Readiness::Ready,
+                RouteReadiness::Unavailable { .. } => {
+                    match latest_reading(model, record, &scoped, true)
+                        .filter(|reading| reading_exhausted(&reading.snapshot, model, &scoped))
+                    {
+                        Some(reading) => Readiness::Depleted {
+                            resets_unix_seconds: spent_windows_reset(
+                                &reading.snapshot,
+                                catalogue_pool(&scoped, model),
+                                now,
+                            ),
+                        },
+                        None => Readiness::Unavailable,
+                    }
+                }
+            };
+            facts.push(ReadinessFact {
+                model: model.clone(),
+                account: record.account_key.clone(),
+                state,
+            });
+        }
+    }
+    Ok(facts)
+}
+fn catalogue_pool<'a>(context: &'a RoutingContext<'_>, model: &ModelId) -> Option<&'a str> {
+    context.catalogue.quota_pool(model)
+}
+/// When every full window serving the model has reset; `None` if any has no
+/// reset time or none is full.
+fn spent_windows_reset(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    model_pool: Option<&str>,
+    now: i64,
+) -> Option<i64> {
+    let mut latest = None;
+    for window in snapshot
+        .windows
+        .iter()
+        .filter(|w| window_serves(&snapshot.account.adapter, &w.pool, model_pool))
+        .filter(|w| w.used_basis_points >= 10_000)
+    {
+        let reset = window.resets_unix_seconds.filter(|reset| *reset > now)?;
+        latest = latest.max(Some(reset));
+    }
+    latest
 }

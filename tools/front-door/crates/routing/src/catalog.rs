@@ -296,6 +296,8 @@ pub struct RoutingConfig {
     pub capacity_retry_max_seconds: u64,
     /// Ceiling on any settlement retry's sealed wait, whatever its cause.
     pub retry_delay_ceiling_seconds: u64,
+    /// Where work goes when its account or model is depleted.
+    pub depletion: crate::DepletionPolicy,
     pub review: crate::ReviewConfig,
     pub routes: BTreeMap<String, NamedRoute>,
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
@@ -346,6 +348,7 @@ struct BundledRoutingDefaults {
     capacity_retry_seconds: u64,
     capacity_retry_max_seconds: u64,
     retry_delay_ceiling_seconds: u64,
+    depletion: crate::DepletionPolicy,
     review: crate::ReviewConfig,
     routes: BTreeMap<String, NamedRoute>,
     pools: BTreeMap<String, Vec<RoutePoolMember>>,
@@ -377,6 +380,7 @@ impl Default for RoutingConfig {
                     capacity_retry_seconds: asset.capacity_retry_seconds,
                     capacity_retry_max_seconds: asset.capacity_retry_max_seconds,
                     retry_delay_ceiling_seconds: asset.retry_delay_ceiling_seconds,
+                    depletion: asset.depletion,
                     review: asset.review,
                     routes: asset.routes,
                     pools: asset.pools,
@@ -693,6 +697,7 @@ impl DomainConfig for RoutingConfig {
                 });
             }
         }
+        self.depletion.validate(&mut errors);
         if self.routes.len() > 128 {
             errors.push(SectionError {
                 detail: None,

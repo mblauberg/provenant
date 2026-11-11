@@ -3611,7 +3611,8 @@ pub(super) fn prepare_candidates(
             provenant_routing::FallbackOutcome::UsageLimited => {
                 Some(provenant_records::run::PreparationFailure::UsageLimited)
             }
-            provenant_routing::FallbackOutcome::AdapterUnavailable => {
+            provenant_routing::FallbackOutcome::AdapterUnavailable
+            | provenant_routing::FallbackOutcome::ModelUnavailable => {
                 Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
             }
             provenant_routing::FallbackOutcome::Other => None,
