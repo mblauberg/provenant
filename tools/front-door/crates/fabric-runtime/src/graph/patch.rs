@@ -515,9 +515,7 @@ fn retry_node_scope(
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
     let container = node.composite.is_some() || node.loop_body.is_some();
     if container && brief.is_some() {
-        return Err(PatchError::invalid(
-            "container retry requires per-leaf brief edits",
-        ));
+        return Err(container_brief_refusal(graph.checkpoint, id, context));
     }
     // Enclosing joins depend on their members, but redoing one member must
     // only recompute those joins, rather than retiring the selected member.
@@ -590,7 +588,7 @@ fn retry_node_scope(
         ));
     }
     if let Some(brief) = brief {
-        node.prompt = brief.to_owned();
+        replace_brief(&mut node, brief);
     }
     let mut candidate = graph.checkpoint.clone();
     if candidate.cancelled {
@@ -682,7 +680,7 @@ fn retry_node_scope(
         .find(|node| node.id == id)
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
         if let Some(brief) = brief {
-            node.prompt = brief.to_owned();
+            replace_brief(&mut node, brief);
         }
     }
     if let Some(routes) = replacement_routes {
@@ -737,6 +735,46 @@ fn retry_node_scope(
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
+}
+
+/// Replace a leaf's brief. A template derives its single acceptance check
+/// from the brief, so a check still equal to the old brief follows it.
+fn replace_brief(node: &mut GraphNode, brief: &str) {
+    if node.acceptance_checks.len() == 1 && node.acceptance_checks[0] == node.prompt {
+        node.acceptance_checks = vec![brief.to_owned()];
+    }
+    node.prompt = brief.to_owned();
+}
+
+/// A container's brief lives in its member nodes. When the template it was
+/// built from declares no `brief` parameter, the refusal names that field and
+/// template as the same typed fault a bad `with` produces.
+fn container_brief_refusal(
+    checkpoint: &GraphCheckpoint,
+    id: &str,
+    context: &PatchContext<'_>,
+) -> PatchError {
+    let mut error = PatchError::invalid("container retry requires per-leaf brief edits");
+    let used = checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.uses)
+        .find(|used| used.id == id);
+    if let Some(used) = used
+        && let Ok(template) = context.library.resolve(&used.name)
+        && !template.parameters.contains_key("brief")
+    {
+        error.parameter = Some(Box::new(ParameterRefusal {
+            node: Some(id.to_owned()),
+            template: used.name.clone(),
+            fault: template::ParameterFault::Unknown {
+                key: Some("brief".into()),
+                accepted: template.parameters.keys().cloned().collect(),
+                suggestion: None,
+            },
+        }));
+    }
+    error
 }
 
 // An explicit host-proven refusal leaves a Starting row but no process to
