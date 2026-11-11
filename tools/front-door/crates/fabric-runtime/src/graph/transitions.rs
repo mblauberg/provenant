@@ -684,9 +684,13 @@ pub(super) fn initial_checkpoint(
                 id: node.id.clone(),
                 title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                 worktree: node.worktree.clone(),
-                state: NodeState::Pending,
+                state: if when::holds(&node.when) {
+                    NodeState::Pending
+                } else {
+                    NodeState::Skipped
+                },
                 cancelled_from: None,
-                skip_reason: None,
+                skip_reason: when::skip_reason(&node.when),
                 advance_error: None,
                 advance_error_code: None,
                 advance_owner_code: None,

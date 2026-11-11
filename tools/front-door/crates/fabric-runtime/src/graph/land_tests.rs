@@ -419,7 +419,10 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
 fn bundled_deliver_repairs_findings_before_landing() {
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".to_owned(), vec!["f0-v0-s0".to_owned()]),
+        ("review-frame".to_owned(), vec!["false".to_owned()]),
+        ("review-verify".to_owned(), vec!["false".to_owned()]),
+        ("review-synthesis".to_owned(), vec!["false".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         ("review-panel".to_owned(), vec!["correctness".to_owned()]),
         ("review-advice-correctness".to_owned(), vec![String::new()]),
     ]);

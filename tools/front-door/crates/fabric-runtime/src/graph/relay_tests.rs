@@ -782,7 +782,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
     let (document, mut checkpoint) = live(None);
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".into(), vec!["f1-v1-s1".into()]),
+        ("review-frame".into(), vec!["true".into()]), ("review-verify".into(), vec!["true".into()]), ("review-synthesis".into(), vec!["true".into()]),
         ("review-verifiers".into(), vec!["1".into()]),
         ("review-panel".into(), vec!["correctness".into(), "tests".into()]),
         ("review-advice-correctness".into(), vec![String::new()]),

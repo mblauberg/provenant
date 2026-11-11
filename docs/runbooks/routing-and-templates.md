@@ -110,6 +110,13 @@ advisory unless `review.diversity = "strict"`.
 provenant run --use review --file brief.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain
 ```
 
+The bundled panel is one `review-shape` composite. The host binds the launch
+values `review-frame`, `review-verify` and `review-synthesis` (`true` or
+`false`) from the selected shape, and the framing, verification and synthesis
+stages carry `when` on them. A stage that is off shows as skipped in `--explain`
+and `status`; there is one template to override for a custom panel, not one per
+combination.
+
 Submit without `--explain` and bind each attempt's resolved route to the review
 evidence. A changed head needs delta review.
 
@@ -141,6 +148,15 @@ returns `writer_lock_busy`.
   user, repository, inline. A leaf template has a brief, tier, access and
   outputs; a composite has `nodes` (`use`, `after`, `over`, `min_ok`, `brief`,
   `tier`). Dotted names such as `review.security` are flavours.
+- `when = { name = value }` on a node, or on an entry of a template's
+  `exports`, runs it only if every named value matches. A name is a parameter of
+  the enclosing template or a launch value the host binds as a single value; the
+  match is decided at submission, so a mistyped name is refused with the name
+  and the nearest valid ones. A node that does not match stays in the graph as a
+  skipped row that names its condition (`status`, and `skipped` in `--explain`).
+  Nodes that depended on it run as if it were absent, and a node that needs its
+  output (`source`, `continues`, `land`, `on_fail`) is refused. `when` is not
+  supported on a loop or a `repeat`.
 - Identity: `identity = "fresh"` (`task`) starts a new graph every time;
   `"content"` (`review`, `deliver`) reuses an equal submission at the same Git
   HEAD, so a new commit starts a new review. Use a new `operation_id` for new

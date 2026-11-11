@@ -30,7 +30,6 @@ fn panel(topology: &str) -> GraphDocument {
 fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".into(), vec![topology.to_owned()]),
         (
             "review-panel".into(),
             lenses.iter().map(|lens| (*lens).to_owned()).collect(),
@@ -43,6 +42,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
         ("review-advice-tests".into(), vec![String::new()]),
     ]);
     let mut resolvers = resolvers;
+    resolvers.extend(super::when_tests::stages(topology));
     for lens in lenses {
         resolvers.insert(format!("review-advice-{lens}"), vec![String::new()]);
     }
