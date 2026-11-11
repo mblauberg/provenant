@@ -10,8 +10,7 @@ prompt, route and result of each, so completion and cancellation survive a
 disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
 stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
-itself. Grammar and bounds are in the generated [CLI
-reference](../reference/cli-all.md). Paths are relative to `tools/front-door/`.
+itself. Grammar and bounds are in `provenant help --all`. Paths are relative to `tools/front-door/`.
 
 Templates bind route and access controls before admission. The receipt reports
 the applied effort and effective network access.
@@ -359,8 +358,7 @@ Admission and operation insertion commit together; the immutable request is
 published before acknowledgement. Transactions contain no launches, probes,
 waits or supervisor calls. Optional total and writer-specific host/project caps
 are independent. Build slots gate compiling Cargo commands rather than idle
-writers. Configuration and bounds belong to the generated
-[configuration reference](../reference/config-keys-all.md).
+writers. Configuration and bounds belong to `provenant config schema --all`.
 
 Known kernel memory pressure may defer either class. Low available memory alone
 is advisory. The disk floor holds lanes with write authority, including prepared

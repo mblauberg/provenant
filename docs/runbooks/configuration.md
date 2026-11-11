@@ -3,8 +3,7 @@ Owner: provenant-config
 Anchor: [`config/harness-knobs.json`](../../config/harness-knobs.json); [`LaneBuildSettings`](../../tools/front-door/crates/config/src/gc.rs)
 
 Settings live in the selected state root's `config.toml`. The
-[configuration keys](../reference/config-keys.md) and the
-[advanced reference](../reference/config-keys-all.md) are generated from the
+`provenant config schema` and `provenant config schema --all` are generated from the
 registry and list every key with its table, default, effect and bounds. This
 runbook covers what the reference cannot: precedence, safety rules and the
 operator decisions behind each setting.
@@ -336,8 +335,7 @@ keep = ["web/target"]
 foreign_worktrees = "keep" # opt in with "merged-clean"
 ```
 
-The [advanced reference](../reference/config-keys-all.md#host-gc-settings)
-lists every key with its default and bounds. [GC](gc.md) owns what each
+`provenant config schema --all` lists every host GC key with its default and bounds. [GC](gc.md) owns what each
 collection removes, keeps and reports; [disk inspection](disk.md) covers
 measuring what is using space. Completion cleanup is independent of the daily
 schedule: settlement publishes durable intent without waiting for collection or

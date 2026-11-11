@@ -436,5 +436,4 @@ compiled graph without starting work.
 
 Template composition and planner constraints are specified in
 [ADR 0039](../adr/0039-graph-of-templates.md). Review panels resolve at launch;
-`provenant run --use review` starts that template. The generated
-[CLI reference](../reference/cli-all.md) owns current flags.
+`provenant run --use review` starts that template. `provenant help --all` owns current flags.

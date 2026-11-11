@@ -27,7 +27,7 @@ provenant worktree list
 provenant worktree remove fix-repo-example
 ```
 
-The [generated command reference](reference/cli-all.md) owns flags and result
+`provenant help --all` owns flags and result
 fields. New branch names must avoid case, Unicode-normalisation and branch-path
 prefix collisions. Remote bases are pinned to the advertised commit, not a
 possibly stale tracking ref. Unreachable or ambiguous remote bases refuse

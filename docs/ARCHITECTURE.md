@@ -93,7 +93,7 @@ decisions. `provenant-run` owns dispatch and records the resolved route and
 provider result. `provenant-providers` owns the adapter registry and native wire forms.
 
 The [routing spec](specs/routing.md) owns selection and fallback intent; the
-[generated command reference](reference/cli-all.md) owns operator interfaces.
+`provenant help --all` owns operator interfaces.
 
 Run records retain requested and resolved model identity, effort, and any
 fallback substitution.

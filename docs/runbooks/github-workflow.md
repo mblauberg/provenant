@@ -281,7 +281,7 @@ its guarantees. `--wait`, `--head` or `integration = "single"` select the
 single-PR path. `--explain --json` reports the effective policy and its
 sources. Settings live under `[domains.pr.land]`, with `projects.<project>` and
 `tiers.<tier>` overrides; the
-[generated reference](../reference/config-keys-all.md#host-land-settings) lists
+`provenant config schema --all` lists
 each key. The bundled CI trigger covers `land/**`, so changing
 `candidate_ref_prefix` needs a matching CI trigger. `forge_queue` is rejected
 at runtime. A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and

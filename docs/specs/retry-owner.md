@@ -12,7 +12,7 @@ Recovery preserves terminal receipts and predecessor links. Node, template and
 host allowances resolve once with their origin; graph and run must not multiply
 or renew that allowance. Observation replay and proven pre-launch preparation
 fallbacks spend no settlement retries. Scoped account refusals remain scoped.
-The [configuration reference](../reference/config-keys.md) owns defaults.
+`provenant config schema` owns defaults.
 - Why (default): retries must remain bounded and explainable across restart.
 - Test: `crates/routing/src/retry.rs::tests::allowance_precedence_and_origin`;
   `crates/fabric-runtime/src/graph/graph_composite_and_allowance_tests.rs::cumulative_allowance_counts_graph_attempts_and_survives_observation_replay`;

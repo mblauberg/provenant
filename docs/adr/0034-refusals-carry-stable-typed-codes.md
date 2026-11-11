@@ -15,8 +15,7 @@ hid which remedy applied.
 Every refusal carries its own stable `error.code` that names the cause, over
 and above the category that drives status and exit code. Each owner declares
 its codes once, with meaning, in a typed enum (for run, `ErrorKind`); the CLI
-lists them in `help --all --json`, and the generated reference renders that
-list. Typed causes survive across crate, graph checkpoint and MCP boundaries
+lists them in `help --all --json`. Typed causes survive across crate, graph checkpoint and MCP boundaries
 instead of being flattened to prose. Tests assert the code and stable
 identifiers, never message text.
 
