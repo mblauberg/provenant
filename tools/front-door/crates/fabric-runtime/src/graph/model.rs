@@ -253,9 +253,16 @@ pub struct AttemptSpec {
     /// and a narrowed network always sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
-    /// Set by the graph owner when a relay ancestor of this node ran
-    /// sandboxed. It only narrows: the lane is then sandboxed whatever
-    /// `sandbox` says.
+    /// The node whose lane or plan added or replaced this one, set by patch
+    /// admission. When that lane was sandboxed by distrust (its route, its
+    /// parent or the knob), the graph owner sandboxes this node too. Admission
+    /// overwrites any value an author supplies, and a value can only add a
+    /// sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_by: Option<String>,
+    /// Set by the graph owner from `admitted_by` before launch, and carried to
+    /// a peer. It only narrows: the lane is then sandboxed whatever `sandbox`
+    /// says.
     #[serde(default, skip_serializing_if = "is_false")]
     pub parent_sandboxed: bool,
 }
@@ -347,6 +354,7 @@ impl AttemptSpec {
             && self.supervision.is_none()
             && self.receipts.is_none()
             && self.sandbox.is_none()
+            && self.admitted_by.is_none()
             && !self.parent_sandboxed
     }
 }

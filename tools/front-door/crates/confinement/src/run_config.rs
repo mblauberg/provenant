@@ -131,7 +131,8 @@ fn default_sandboxed_routes() -> Vec<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxSource {
-    /// The lane was submitted by a sandboxed lane.
+    /// The lane was started, or added or replaced in a graph, by a lane
+    /// sandboxed by its route, its own parent or the knob.
     Parent,
     /// The route matches `domains.run.sandboxed_routes`.
     Route,

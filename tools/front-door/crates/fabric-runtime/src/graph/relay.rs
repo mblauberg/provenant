@@ -160,14 +160,6 @@ pub fn depth(id: &str) -> usize {
     id.matches(SEPARATOR).count()
 }
 
-/// The nodes that admitted `node` through the relay, nearest last: `a` and
-/// `a--b` for `a--b--c`. A node a lane adds is named `parent--child`.
-pub fn relay_ancestors(node: &str) -> impl Iterator<Item = &str> {
-    node.match_indices(SEPARATOR)
-        .map(move |(index, _)| &node[..index])
-        .filter(|ancestor| !ancestor.is_empty())
-}
-
 /// The running node whose live attempt is `attempt`. The relay passes the
 /// attempt it was started for, so a lane cannot act as another node.
 pub fn parent_of_attempt<'a>(checkpoint: &'a GraphCheckpoint, attempt: &str) -> Option<&'a str> {

@@ -1373,6 +1373,11 @@ fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composi
         .nodes
         .into_iter()
         .filter(|node| node.id.starts_with("plan--impl"))
+        .map(|mut node| {
+            // The planner admitted the fragment.
+            patch::stamp_admitter(&mut node, "plan");
+            node
+        })
         .collect();
     assert_eq!(by_id(expansion.nodes.clone()), by_id(expected));
 }
@@ -2080,6 +2085,14 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
             (record.revision, record.parent.as_deref()),
             (index as u64 + 1, Some(parent))
         );
+        // Each fragment names its planner as the admitter.
+        for node in &mut expansion.nodes {
+            let spec = node.attempt.as_mut().unwrap();
+            assert_eq!(spec.admitted_by.take().as_deref(), Some(parent));
+            if spec.is_empty() {
+                node.attempt = None;
+            }
+        }
         assert!(record.digest.starts_with("sha256:"));
     }
     assert_eq!(comparable, recursive);
@@ -3184,6 +3197,45 @@ fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
         let mut planner = checkpoint.clone();
         admit_with(&planned, &mut planner, Some("a"), edit, &|_| Ok(())).unwrap();
     }
+}
+
+#[test]
+fn admitted_nodes_name_their_admitter_for_the_sandbox_floor() {
+    let admitted_by = |node: &GraphNode| node.attempt.as_ref().and_then(|spec| spec.admitted_by.clone());
+    // A planner's replace of a node outside its subtree, carrying a forged
+    // admitter, is named after the planner; so is a node it adds.
+    let (document, checkpoint) = running_graph();
+    let library = TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let mut planned = document.clone();
+    planned.nodes[0] = Compiler { library: &library, resolvers: &resolvers }
+        .compile(&json!({"id":"a", "use":"plan"}))
+        .unwrap();
+    let mut planner = checkpoint.clone();
+    admit_with(&planned, &mut planner, Some("a"), json!({"schema_version":1,
+        "nodes":[{"id":"child", "use":"task", "brief":"Child"}],
+        "replace":[{"id":"b", "use":"task", "brief":"Replacement", "attempt":{"admitted_by":"elsewhere"}}]}),
+        &|_| Ok(())).unwrap();
+    let expansion = planner.expansions.last().unwrap();
+    assert_eq!(admitted_by(&expansion.nodes[0]).as_deref(), Some("a"));
+    assert_eq!(admitted_by(&expansion.patch.as_ref().unwrap().replaced[0]).as_deref(), Some("a"));
+    // The host admits on its own authority and names no admitter.
+    let mut owner = checkpoint.clone();
+    admit(&document, &mut owner, json!({"schema_version":1,
+        "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]})).unwrap();
+    assert_eq!(admitted_by(&owner.expansions.last().unwrap().patch.as_ref().unwrap().replaced[0]), None);
+    // Nested members, loop bodies and fallback stages expand later and carry it too.
+    let mut nested: GraphNode = serde_json::from_value(json!({
+        "id":"c", "access":"read_only", "kind":"composite",
+        "composite":{"nodes":[{"id":"m", "access":"read_only", "prompt":"M",
+            "loop":{"body":[{"id":"r", "access":"read_only", "prompt":"R"}], "until":"done", "max_rounds":2}}],
+            "exports":[]}
+    })).unwrap();
+    patch::stamp_admitter(&mut nested, "lane");
+    let member = &nested.composite.as_ref().unwrap().nodes[0];
+    assert_eq!(admitted_by(&nested).as_deref(), Some("lane"));
+    assert_eq!(admitted_by(member).as_deref(), Some("lane"));
+    assert_eq!(admitted_by(&member.loop_body.as_ref().unwrap().body[0]).as_deref(), Some("lane"));
 }
 
 #[test]

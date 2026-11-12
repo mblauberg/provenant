@@ -80,14 +80,18 @@ path from it. A narrowed network always sandboxes the lane.
 
 Each macOS attempt resolves whether it runs under Seatbelt. In order:
 
-1. **Floors** that no override removes: a lane submitted by a sandboxed lane,
-   directly or as a graph child it added through the relay (`parent`; an
-   unreadable parent record, or a parent on another host, counts as
-   sandboxed), a route id
+1. **Floors** that no override removes: a lane started by a lane that was
+   itself sandboxed by its route, its parent or the knob (`parent`), a route id
    (`adapter/model`, or `command/NAME`) starting with an entry of
    `[domains.run] sandboxed_routes` (`route`; default `["opencode/opencode/"]`,
    the OpenCode Zen tier, so `opencode/opencode-go/` is not listed), and an
-   effective network of `provider` or `local` (`network`).
+   effective network of `provider` or `local` (`network`). "Started by"
+   covers `run` from inside a lane and every graph node a lane or planner
+   adds or replaces: admission names the admitting node in
+   `attempt.admitted_by`, overwriting any value the author wrote. A sandbox
+   that only enforces read-only access or a narrowed network does not pass
+   on, so a read-only planner's writers stay unsandboxed. An unreadable
+   record, or an admitting attempt on another host, counts as sandboxed.
 2. **The `lanes.sandbox` knob** (`auto|on|off`): `run --sandbox` /
    `--no-sandbox`, graph and template `attempt.sandbox`, or host `[knobs]`.
    `on` and `off` decide (`knob`).

@@ -128,7 +128,8 @@ state. Configured-host native checks cover actual enforcement. A lane returning
 Writers on trusted routes run without Seatbelt, like the same CLI started by
 hand, so they can share host build caches and services. A lane stays sandboxed
 when its route is listed in `domains.run.sandboxed_routes` (the OpenCode Zen
-tier, whose models may train on prompts), when a sandboxed lane submitted it,
+tier, whose models may train on prompts), when a lane sandboxed by its route,
+its parent or the knob started it or admitted it into a graph,
 when its network is narrowed, or, under the default `auto`, when it is
 read-only, because only the sandbox enforces those. The `lanes.sandbox` knob
 sets the rest. The

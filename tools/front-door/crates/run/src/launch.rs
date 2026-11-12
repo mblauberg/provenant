@@ -587,9 +587,9 @@ impl RunStore {
         }
         task
     }
-    /// A lane submitted by a sandboxed lane is sandboxed: authority only
-    /// narrows. The host reads the parent's record. The flag can only add a
-    /// sandbox, so a value already on the task is kept.
+    /// A lane submitted by a lane sandboxed by distrust is sandboxed:
+    /// authority only narrows. The host reads the parent's record. The flag
+    /// can only add a sandbox, so a value already on the task is kept.
     pub(crate) fn seal_parent_sandbox(
         &self,
         request: &CanonicalRequest,
@@ -597,7 +597,7 @@ impl RunStore {
         call: &Request<'_>,
     ) {
         if let Some(parent) = request.parent_attempt
-            && self.attempt_sandboxed(parent, call)
+            && self.attempt_floors_children(parent, call)
         {
             task.extra.insert(
                 provenant_records::run::PARENT_SANDBOXED_FIELD.into(),

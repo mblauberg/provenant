@@ -1482,14 +1482,31 @@ impl AttemptRecord {
         self.applied_route.as_ref()?.extra.get(SANDBOX_ROUTE_FIELD)
     }
 
-    /// Whether this attempt ran sandboxed. A record that does not say, such
-    /// as one written before lanes could run unsandboxed, counts as
-    /// sandboxed, so a child it submits stays sandboxed too.
-    pub fn sandboxed(&self) -> bool {
-        self.sandbox()
-            .and_then(|sandbox| sandbox.get("sandboxed"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true)
+    /// Whether a lane this attempt submits or admits must be sandboxed. It
+    /// must when this attempt was sandboxed by distrust: its route, its own
+    /// parent, the `lanes.sandbox` knob or the platform. A sandbox that only
+    /// enforces read-only access or a narrowed network does not pass on, so a
+    /// read-only planner's writers stay unsandboxed. A record that does not
+    /// say, such as one written before lanes could run unsandboxed, floors.
+    pub fn floors_children(&self) -> bool {
+        sandbox_floors_children(self.sandbox())
+    }
+}
+/// [`AttemptRecord::floors_children`] for a recorded sandbox mode.
+fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
+    let Some(sandbox) = sandbox else {
+        return true;
+    };
+    match sandbox
+        .get("sandboxed")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(false) => false,
+        Some(true) => !matches!(
+            sandbox.get("source").and_then(serde_json::Value::as_str),
+            Some("read_only" | "network" | "default")
+        ),
+        None => true,
     }
 }
 /// The applied-route field that records an attempt's sandbox mode.
@@ -1623,6 +1640,29 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_sandbox_forced_by_distrust_floors_children() {
+        let floors = |value: serde_json::Value| sandbox_floors_children(Some(&value));
+        for source in ["route", "parent", "knob", "platform", "unknown"] {
+            assert!(
+                floors(serde_json::json!({"sandboxed":true,"source":source})),
+                "{source}"
+            );
+        }
+        for source in ["read_only", "network"] {
+            assert!(
+                !floors(serde_json::json!({"sandboxed":true,"source":source})),
+                "{source}"
+            );
+        }
+        assert!(!floors(
+            serde_json::json!({"sandboxed":false,"source":"default"})
+        ));
+        assert!(floors(serde_json::json!({"sandboxed":true})));
+        assert!(floors(serde_json::json!({})));
+        assert!(sandbox_floors_children(None));
+    }
 
     #[test]
     fn preparation_plan_diagnostics_use_closed_facts_after_round_trip()

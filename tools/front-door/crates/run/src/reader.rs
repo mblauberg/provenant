@@ -589,9 +589,10 @@ impl RunStore {
             AttemptState::Terminal { .. }
         ))
     }
-    /// Whether the attempt `id`, from any project, ran sandboxed. A record
-    /// that cannot be read counts as sandboxed.
-    pub fn attempt_sandboxed(&self, id: AttemptId, call: &Request<'_>) -> bool {
+    /// Whether lanes the attempt `id`, from any project, submits or admits
+    /// must be sandboxed ([`AttemptRecord::floors_children`]). A record that
+    /// cannot be read floors.
+    pub fn attempt_floors_children(&self, id: AttemptId, call: &Request<'_>) -> bool {
         let read = || -> Result<bool> {
             call.check()?;
             let project: String = self
@@ -606,7 +607,9 @@ impl RunStore {
             let mut context = self.context.clone();
             context.project_id = provenant_core::ProjectId::parse(&project)
                 .map_err(|_| RunError::Validation("attempt index project"))?;
-            Ok(Self::open(&context, call)?.record(id, call)?.sandboxed())
+            Ok(Self::open(&context, call)?
+                .record(id, call)?
+                .floors_children())
         };
         read().unwrap_or(true)
     }
