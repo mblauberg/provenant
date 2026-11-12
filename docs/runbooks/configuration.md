@@ -80,8 +80,10 @@ path from it. A narrowed network always sandboxes the lane.
 
 Each macOS attempt resolves whether it runs under Seatbelt. In order:
 
-1. **Floors** that no override removes: a lane submitted by a sandboxed lane
-   (`parent`; an unreadable parent record counts as sandboxed), a route id
+1. **Floors** that no override removes: a lane submitted by a sandboxed lane,
+   directly or as a graph child it added through the relay (`parent`; an
+   unreadable parent record, or a parent on another host, counts as
+   sandboxed), a route id
    (`adapter/model`, or `command/NAME`) starting with an entry of
    `[domains.run] sandboxed_routes` (`route`; default `["opencode/opencode/"]`,
    the OpenCode Zen tier, so `opencode/opencode-go/` is not listed), and an
@@ -94,7 +96,9 @@ Each macOS attempt resolves whether it runs under Seatbelt. In order:
    `[knobs] "lanes.sandbox" = "off"` to run read-only lanes unsandboxed too.
 
 The lane sees `PROVENANT_SANDBOX=on|off`; the receipt's
-`applied_route.sandbox` and `status` record the mode and its source.
+`applied_route.sandbox` and `status` record the mode and its source. Off
+macOS every lane resolves as sandboxed (`platform`), so Linux keeps refusing
+lane launch.
 
 `[domains.run] sandbox_cache_reads` (absolute directories, replaced per project
 by `[domains.run.projects."ID"] sandbox_cache_reads`) gives sandboxed lanes
@@ -110,13 +114,21 @@ What holds in each mode:
   kept for publishing) are stripped. An unsandboxed lane can read on-disk
   credential stores such as `~/.aws` and `~/.ssh`: route trust replaces the
   file denial.
-- **Git.** One writer per worktree, the lane's private Git directory and
-  host-owned delivery with object and expected-ref checks hold in both modes.
-  Only a sandboxed lane is kernel-denied writes to the shared Git directory;
-  an unsandboxed writer is trusted not to bypass its Git shim.
+- **Git.** Writer custody (one registered writer per worktree), the lane's
+  private Git directory and host-owned delivery with object and expected-ref
+  checks hold in both modes. Only a sandboxed lane is kernel-denied writes to
+  the shared Git directory, other worktrees and the primary checkout; an
+  unsandboxed writer is trusted not to bypass its Git shim or write there.
+- **Host state.** An unsandboxed lane can also write the state directory,
+  including `config.toml` (`sandboxed_routes`, `[knobs]`) and run records, so
+  every floor above holds only as far as the unsandboxed routes are trusted.
 - **Process tree.** Sandboxed lanes are walked by their sandbox mark,
-  unsandboxed lanes by ancestry, so heavy-lock accounting covers both. Cleanup
-  of escapees that left the process tree relies on the sandbox mark.
+  unsandboxed lanes by ancestry, so heavy-lock accounting covers both.
+  Cleanup of escapees that left the process tree relies on the sandbox mark:
+  a daemon an unsandboxed lane detaches (for example `setsid`, `pg_ctl` or a
+  compiler-cache server) is not killed, and while it holds the lane's
+  inherited descriptors the attempt cannot settle. Start shared daemons from
+  the host, or close inherited descriptors when a lane starts one.
 
 ## Unreadable process census exceptions
 

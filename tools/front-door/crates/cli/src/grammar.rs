@@ -620,8 +620,8 @@ pub struct GraphRunArgs {
     #[arg(long, conflicts_with = "no_sandbox")]
     pub sandbox: bool,
     /// Run the lane unsandboxed (attempt.sandbox = "off"); a route in
-    /// domains.run.sandboxed_routes, or a lane started by a sandboxed lane,
-    /// stays sandboxed
+    /// domains.run.sandboxed_routes, a lane started by a sandboxed lane and a
+    /// lane with a narrowed network stay sandboxed
     #[arg(long)]
     pub no_sandbox: bool,
     /// Explain the compiled graph without starting work

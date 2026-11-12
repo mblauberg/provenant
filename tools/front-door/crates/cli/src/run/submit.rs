@@ -769,6 +769,12 @@ fn submit_with_launcher(
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
             let attempt = task.attempt;
             if attempt.confidential { task_profile.extra.insert("confidential".into(), serde_json::json!(true)); }
+            if attempt.parent_sandboxed {
+                task_profile.extra.insert(
+                    provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
+                    serde_json::json!(true),
+                );
+            }
             if attempt.new_worktree.is_some()
                 || !attempt.capabilities.is_empty()
                 || !attempt.write_roots.is_empty()

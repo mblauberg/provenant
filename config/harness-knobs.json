@@ -9,7 +9,6 @@
       "lanes.slot_wait_seconds",
       "lanes.context_handoff_tokens",
       "lanes.publish",
-      "lanes.sandbox",
       "lanes.local_cargo",
       "lanes.isolation",
       "lanes.supervision",
@@ -617,8 +616,8 @@
       "values": ["auto", "on", "off"],
       "default": "auto",
       "status": "wired",
-      "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs",
-      "effect": "Whether a macOS lane runs under the Seatbelt sandbox. Three floors always sandbox and no value removes them: a route listed in domains.run.sandboxed_routes (the OpenCode Zen tier by default), a lane submitted by a sandboxed lane, and a lane whose network is provider or local, because only the sandbox enforces those. Otherwise on sandboxes and off does not; auto (default) sandboxes read-only lanes, because only the sandbox keeps them read-only, and runs writers unsandboxed. Set per run with --sandbox or --no-sandbox, per graph node or template with attempt.sandbox, or as the host default in [knobs]. The lane sees PROVENANT_SANDBOX=on or off, and status and the receipt show the mode and its source (parent, route, network, knob, read_only or default).",
+      "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
+      "effect": "Whether a macOS lane runs under the Seatbelt sandbox. Three floors always sandbox and no value removes them: a route listed in domains.run.sandboxed_routes (the OpenCode Zen tier by default), a lane submitted by a sandboxed lane (directly or as a graph child it added), and a lane whose network is provider or local, because only the sandbox enforces those. Off macOS every lane resolves as sandboxed, so Linux keeps refusing lanes. Otherwise on sandboxes and off does not; auto (default) sandboxes read-only lanes, because only the sandbox keeps them read-only, and runs writers unsandboxed. Set per run with --sandbox or --no-sandbox, per graph node or template with attempt.sandbox, or as the host default in [knobs]. The lane sees PROVENANT_SANDBOX=on or off, and status and the receipt show the mode and its source (parent, route, network, platform, knob, read_only or default).",
       "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. The environment is still rebuilt from an allowlist with hosted-cloud keys stripped, Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
     }
   },

@@ -536,8 +536,10 @@ pub(crate) fn strip_hosted_credentials(environment: &mut Vec<(OsString, OsString
 }
 
 fn hosted_credential(name: &std::ffi::OsStr) -> bool {
-    const PREFIXES: [&str; 8] = [
+    const PREFIXES: [&str; 10] = [
         "AWS_",
+        "CLOUDSDK_",
+        "TF_VAR_",
         "NEON_",
         "CLOUDFLARE_",
         "CF_API_",
@@ -546,15 +548,18 @@ fn hosted_credential(name: &std::ffi::OsStr) -> bool {
         "DIGITALOCEAN_",
         "HCLOUD_",
     ];
-    const NAMES: [&str; 5] = [
+    const NAMES: [&str; 7] = [
+        "GITHUB_TOKEN",
+        "HF_TOKEN",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_OAUTH_ACCESS_TOKEN",
         "VAULT_TOKEN",
         "NPM_TOKEN",
         "PGPASSWORD",
     ];
-    const SUFFIXES: [&str; 7] = [
+    const SUFFIXES: [&str; 8] = [
         "_API_KEY",
+        "_PASSWORD",
         "_API_TOKEN",
         "_ACCESS_KEY",
         "_ACCESS_TOKEN",
@@ -587,6 +592,11 @@ mod tests {
             "STRIPE_SECRET_KEY",
             "GOOGLE_APPLICATION_CREDENTIALS",
             "PGPASSWORD",
+            "REDIS_PASSWORD",
+            "GITHUB_TOKEN",
+            "HF_TOKEN",
+            "TF_VAR_db_password",
+            "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
             "aws_secret_access_key",
             "GH_TOKEN",
             "HOME",

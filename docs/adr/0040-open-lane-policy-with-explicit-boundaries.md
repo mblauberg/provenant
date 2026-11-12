@@ -139,6 +139,8 @@ For an unsandboxed lane, ADR 0035's lane Git and credentials boundaries rest
 on the private Git directory, host-owned delivery, writer custody and the
 stripped environment, not on kernel denials: route trust replaces the file
 and shared-Git write denials, and `host_policy` path denials do not apply.
+Such a lane can also write the host state that records the floors, and
+detached daemons it starts escape cleanup.
 Overturn when a trusted route is traced to writing shared Git state or using
 an on-disk credential it was not given.
 

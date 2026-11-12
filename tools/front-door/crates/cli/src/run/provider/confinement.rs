@@ -348,28 +348,36 @@ pub(super) fn confinement_request(
 }
 
 /// Resolve the lane's sandbox from its route id (`adapter/model`), the
-/// sealed `lanes.sandbox` knob, the host-set parent flag and the access the
-/// plan grants. A knob value that is not a string sandboxes.
+/// sealed `lanes.sandbox` knob, the parent flag and the access the plan
+/// grants. The parent flag only narrows, so the host may set it on either the
+/// task or its profile. A knob value that is not a string sandboxes.
 pub(super) fn sandbox_mode(
     host: &provenant_confinement::run_config::RunConfig,
     route: &str,
     task: &run::TaskRequest,
     plan: &ConfinedPlan,
 ) -> provenant_confinement::run_config::SandboxMode {
-    use provenant_confinement::run_config::{SANDBOX_KNOB, SandboxInputs};
+    use provenant_confinement::run_config::{SandboxInputs, SandboxMode, SandboxSource};
+    if !cfg!(target_os = "macos") {
+        return SandboxMode {
+            sandboxed: true,
+            source: SandboxSource::Platform,
+        };
+    }
     let permissions = plan.permissions();
     host.sandbox_for(SandboxInputs {
         route,
         knob: task
             .profile
             .knobs
-            .get(SANDBOX_KNOB)
+            .get("lanes.sandbox")
             .map(|value| value.as_str().unwrap_or("on")),
-        parent_sandboxed: task
-            .extra
-            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        parent_sandboxed: [&task.extra, &task.profile.extra].into_iter().any(|extra| {
+            extra
+                .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        }),
         network_narrowed: permissions.network != NetworkAccess::Open,
         read_only: matches!(permissions.mode, AccessMode::ReadOnly),
     })

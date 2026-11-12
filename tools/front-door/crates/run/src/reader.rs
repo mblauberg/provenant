@@ -591,7 +591,7 @@ impl RunStore {
     }
     /// Whether the attempt `id`, from any project, ran sandboxed. A record
     /// that cannot be read counts as sandboxed.
-    pub(crate) fn attempt_sandboxed(&self, id: AttemptId, call: &Request<'_>) -> bool {
+    pub fn attempt_sandboxed(&self, id: AttemptId, call: &Request<'_>) -> bool {
         let read = || -> Result<bool> {
             call.check()?;
             let project: String = self

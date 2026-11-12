@@ -247,11 +247,17 @@ pub struct AttemptSpec {
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
-    /// `on` sandboxes this node's lane; `off` or `auto` leaves the route's
-    /// default. Sets the `lanes.sandbox` knob for this node alone. A route in
-    /// `domains.run.sandboxed_routes` and a sandboxed parent always sandbox.
+    /// `on` sandboxes this node's lane, `off` does not, and `auto` sandboxes
+    /// it only when read-only. Sets the `lanes.sandbox` knob for this node
+    /// alone. A route in `domains.run.sandboxed_routes`, a sandboxed parent
+    /// and a narrowed network always sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
+    /// Set by the graph owner when a relay ancestor of this node ran
+    /// sandboxed. It only narrows: the lane is then sandboxed whatever
+    /// `sandbox` says.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parent_sandboxed: bool,
 }
 
 /// The `light` preset: no private source view, minimal supervision and no
@@ -341,6 +347,7 @@ impl AttemptSpec {
             && self.supervision.is_none()
             && self.receipts.is_none()
             && self.sandbox.is_none()
+            && !self.parent_sandboxed
     }
 }
 

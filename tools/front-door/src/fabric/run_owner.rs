@@ -510,6 +510,46 @@ impl BinaryRunOwner<'_> {
         Ok(self.session_with_facts(cancel, facts)?.store)
     }
 
+    /// Whether a relay ancestor of any task's node ran sandboxed; see
+    /// [`relay_ancestor_sandboxed`].
+    fn tasks_have_sandboxed_ancestor(
+        &self,
+        tasks: &[provenant_fabric_runtime::coordination::facade::SubmittedTask],
+        cancel: &CancelToken,
+    ) -> bool {
+        let ctx = &self.factory.context;
+        let local = ctx.identity.host.to_string();
+        let mut store = None;
+        tasks.iter().any(|task| {
+            let Some((graph, node)) = task.context.as_ref().and_then(|context| {
+                Some((context.graph_id.as_deref()?, context.node_id.as_deref()?))
+            }) else {
+                return false;
+            };
+            relay_ancestor_sandboxed(
+                node,
+                || {
+                    provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                        &ctx.roots.state,
+                        ctx.identity.project,
+                        graph,
+                    )
+                    .ok()
+                    .flatten()
+                },
+                &local,
+                &mut |id| {
+                    store
+                        .get_or_insert_with(|| self.read_session(cancel).ok())
+                        .as_ref()
+                        .is_none_or(|session| {
+                            session.store.attempt_sandboxed(id, &self.call(cancel))
+                        })
+                },
+            )
+        })
+    }
+
     pub(crate) fn read_session(
         &self,
         cancel: &CancelToken,
@@ -997,6 +1037,7 @@ impl BinaryRunOwner<'_> {
             // An accepted pre-cutover operation may have no context. The sealed
             // request digest below still rejects any change to its launch inputs.
         }
+        let ancestor_sandboxed = self.tasks_have_sandboxed_ancestor(&tasks, cancel);
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
             if !self.allow_remote
                 || tasks.iter().any(|task| {
@@ -1021,6 +1062,7 @@ impl BinaryRunOwner<'_> {
             self.guard_graph_admission(&operation_id, Some(host), budget, cancel)?;
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
+            attempt.parent_sandboxed |= ancestor_sandboxed;
             let mut extra = provenant_records::ExtraFields::default();
             extra.insert(
                 "graph_launch_actor".into(),
@@ -1095,13 +1137,17 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
-                attempt: attempt.clone().unwrap_or_else(|| {
-                    provenant_fabric_runtime::graph::AttemptSpec {
-                        account: task.account,
-                        build_heavy: task.build_heavy,
-                        ..Default::default()
-                    }
-                }),
+                attempt: {
+                    let mut spec = attempt.clone().unwrap_or_else(|| {
+                        provenant_fabric_runtime::graph::AttemptSpec {
+                            account: task.account,
+                            build_heavy: task.build_heavy,
+                            ..Default::default()
+                        }
+                    });
+                    spec.parent_sandboxed |= ancestor_sandboxed;
+                    spec
+                },
                 require_skill_location: task.require_skill_location,
                 settlement_retry_limit,
                 context: task.context,
@@ -1759,6 +1805,45 @@ fn require_graph_context(
     }
 }
 
+/// Whether a relay ancestor of `node` ran sandboxed. A lane adds a child as
+/// `parent--child`, and a child of a sandboxed lane is sandboxed. The graph is
+/// read only when the node has an ancestor. An unreadable graph, an ancestor
+/// attempt on another host and an attempt `sandboxed` cannot read all count
+/// as sandboxed; an ancestor without attempts (a composite) cannot have
+/// admitted the child and is skipped.
+pub(crate) fn relay_ancestor_sandboxed(
+    node: &str,
+    checkpoint: impl FnOnce() -> Option<provenant_fabric_runtime::graph::GraphCheckpoint>,
+    local_host: &str,
+    sandboxed: &mut dyn FnMut(provenant_core::AttemptId) -> bool,
+) -> bool {
+    use provenant_fabric_runtime::graph::relay::relay_ancestors;
+    if relay_ancestors(node).next().is_none() {
+        return false;
+    }
+    let Some(checkpoint) = checkpoint() else {
+        return true;
+    };
+    relay_ancestors(node).any(|ancestor| {
+        checkpoint
+            .nodes
+            .iter()
+            .filter(|row| row.id == ancestor)
+            .flat_map(|row| row.recorded_attempts())
+            .filter_map(|row| row.attempt_ref.as_deref())
+            .any(|reference| {
+                match reference
+                    .split_once('/')
+                    .filter(|(host, _)| *host == local_host)
+                    .and_then(|(_, id)| id.parse::<provenant_core::AttemptId>().ok())
+                {
+                    Some(id) => sandboxed(id),
+                    None => true,
+                }
+            })
+    })
+}
+
 #[cfg(test)]
 #[allow(
     unused_imports,
@@ -1766,6 +1851,76 @@ fn require_graph_context(
 )]
 mod graph_control_tests {
     use super::*;
+    #[test]
+    fn relay_children_of_sandboxed_lanes_are_sandboxed() {
+        use provenant_fabric_runtime::graph::relay::relay_ancestors;
+        assert_eq!(
+            relay_ancestors("a--b--c").collect::<Vec<_>>(),
+            ["a", "a--b"]
+        );
+        assert_eq!(relay_ancestors("root").count(), 0);
+        let open = provenant_core::AttemptId::from_bytes([1; 16]);
+        let closed = provenant_core::AttemptId::from_bytes([2; 16]);
+        let checkpoint = |parent: String| {
+            let attempt = |node: &str, reference: &str| {
+                serde_json::json!({"id":node,"state":"running","attempts":[{
+                    "key":{"graph_id":"g","node_id":node,"route_index":0},
+                    "launched":true,"route":{"alias":"junior"},"state":"running",
+                    "attempt_ref":reference,"launch_actor":"fixture"}]})
+            };
+            move || {
+                serde_json::from_value(serde_json::json!({
+                    "schema_version":1,"graph_id":"g","plan_digest":"fixture",
+                    "nodes":[
+                        {"id":"composite","state":"running","attempts":[]},
+                        attempt("parent", &parent),
+                    ]
+                }))
+                .ok()
+            }
+        };
+        let mut lookup = |id| id == closed;
+        let local = |id: provenant_core::AttemptId| format!("host/{id}");
+        // A root node never reads the graph.
+        assert!(!relay_ancestor_sandboxed(
+            "parent",
+            || panic!("read"),
+            "host",
+            &mut lookup
+        ));
+        assert!(!relay_ancestor_sandboxed(
+            "parent--child",
+            checkpoint(local(open)),
+            "host",
+            &mut lookup
+        ));
+        assert!(relay_ancestor_sandboxed(
+            "parent--child--leaf",
+            checkpoint(local(closed)),
+            "host",
+            &mut lookup
+        ));
+        // Another host's attempt and an unreadable graph fail closed.
+        assert!(relay_ancestor_sandboxed(
+            "parent--child",
+            checkpoint(format!("peer/{open}")),
+            "host",
+            &mut lookup
+        ));
+        assert!(relay_ancestor_sandboxed(
+            "parent--child",
+            || None,
+            "host",
+            &mut lookup
+        ));
+        // A composite has no attempts and cannot have admitted the child.
+        assert!(!relay_ancestor_sandboxed(
+            "composite--inner",
+            checkpoint(local(open)),
+            "host",
+            &mut lookup
+        ));
+    }
     #[test]
     fn blocked_launches_refuse_without_echoing_untrusted_text() {
         let attempt = provenant_core::AttemptId::from_bytes([7; 16]);

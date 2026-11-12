@@ -115,8 +115,6 @@ pub struct RunConfig {
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
-/// The knob that selects a lane's sandbox: `auto`, `on` or `off`.
-pub const SANDBOX_KNOB: &str = "lanes.sandbox";
 /// Set in every lane's environment to `on` or `off`, so a lane's own tools
 /// can choose, for example, a private cache when they cannot write a shared one.
 pub const SANDBOX_ENV: &str = "PROVENANT_SANDBOX";
@@ -139,6 +137,8 @@ pub enum SandboxSource {
     Route,
     /// The lane's network is narrower than open; only the sandbox holds it.
     Network,
+    /// The platform has no unsandboxed launch: Linux keeps refusing lanes.
+    Platform,
     /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
     Knob,
     /// A read-only lane under `auto`: only the sandbox keeps it read-only.
