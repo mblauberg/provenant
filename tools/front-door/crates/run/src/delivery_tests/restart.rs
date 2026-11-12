@@ -770,6 +770,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 home: self.home.clone(),
                 cargo_registry_seed: false,
                 state_root: self.state.clone(),
+                sandboxed: true,
             });
             Ok(prepared)
         }

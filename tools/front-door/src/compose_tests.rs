@@ -242,10 +242,11 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     }
     let rig = fixture()?;
     // The cargo seed is on by default; this test is about the lane cache and
-    // provider state, so it pins the seed off.
+    // provider state, so it pins the seed off. The fixture asserts that
+    // writes outside its grants fail, so the writer runs sandboxed.
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+        "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
     )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);

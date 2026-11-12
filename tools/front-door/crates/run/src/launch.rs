@@ -587,6 +587,24 @@ impl RunStore {
         }
         task
     }
+    /// A lane submitted by a lane sandboxed by distrust is sandboxed:
+    /// authority only narrows. The host reads the parent's record. The flag
+    /// can only add a sandbox, so a value already on the task is kept.
+    pub(crate) fn seal_parent_sandbox(
+        &self,
+        request: &CanonicalRequest,
+        task: &mut TaskRequest,
+        call: &Request<'_>,
+    ) {
+        if let Some(parent) = request.parent_attempt
+            && self.attempt_floors_children(parent, call)
+        {
+            task.extra.insert(
+                provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
+                true.into(),
+            );
+        }
+    }
     pub(crate) fn prepare_fresh_start(
         &self,
         input: &PreparedRun,
@@ -596,7 +614,8 @@ impl RunStore {
         let [task] = input.request.tasks.as_slice() else {
             return Err(RunError::Validation("continuation task count"));
         };
-        let effective = self.effective_launch_task(&input.request, task);
+        let mut effective = self.effective_launch_task(&input.request, task);
+        self.seal_parent_sandbox(&input.request, &mut effective, call);
         let task = &effective;
         let [attempt] = input.attempts.as_slice() else {
             return Err(RunError::Validation("continuation attempt count"));
@@ -1168,6 +1187,7 @@ impl RunStore {
                 continue;
             }
             let mut effective_task = self.effective_launch_task(&request, task);
+            self.seal_parent_sandbox(&request, &mut effective_task, call);
             if record.continuation.as_deref() == Some("automatic") {
                 effective_task
                     .extra
@@ -1790,6 +1810,7 @@ mod policy_reporting_tests {
                 home: "/fixture/home".into(),
                 cargo_registry_seed: false,
                 state_root: "/fixture/state".into(),
+                sandboxed: true,
             }),
         };
         let grants = applied_write_grants(&prepared, WriteGrantLimit::default())?;

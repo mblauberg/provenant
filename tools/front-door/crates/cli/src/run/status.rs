@@ -1264,6 +1264,17 @@ pub(super) fn render_lanes_with_view(
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
+            // Unsandboxed is the default; name only a sandboxed lane and why.
+            let sandbox_field = lane
+                .sandbox()
+                .filter(|sandbox| sandbox["sandboxed"] == true)
+                .map(|sandbox| {
+                    format!(
+                        " sandboxed({})",
+                        plain_text(sandbox["source"].as_str().unwrap_or("unknown"), 16)
+                    )
+                })
+                .unwrap_or_default();
             let full = state_and_reason(&lane.state).1;
             let label = provenant_records::wire::LaneRow::state_and_label(&lane.state).1;
             let reason = if projected.git_import_failure.is_some() {
@@ -1297,7 +1308,7 @@ pub(super) fn render_lanes_with_view(
             });
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
+                "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{sandbox_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
             if !lane.partial_signals.is_empty() {

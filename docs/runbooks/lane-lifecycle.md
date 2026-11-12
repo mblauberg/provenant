@@ -32,8 +32,10 @@ priorities) is in the [run spec](../specs/run.md) and
   or second checkout to bypass it. A host-authorised merge of `origin/main` is
   the alternative.
 - Linux has no enforcing backend and refuses lane launch rather than run
-  unconfined. On macOS, lanes cannot create hard links or bind Unix sockets
-  outside granted paths; `cargo nextest run --profile lane` excludes fixtures
+  unconfined. Each macOS lane resolves a
+  [sandbox mode](configuration.md#lane-sandbox-mode); `status` shows
+  `sandboxed(<source>)` on sandboxed lanes. Sandboxed lanes cannot create hard
+  links or bind Unix sockets outside granted paths; `cargo nextest run --profile lane` excludes fixtures
   needing them and CI's `ci` profile keeps them.
 
 ## Delivery

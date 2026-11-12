@@ -861,6 +861,7 @@ impl provenant_run::Providers for WriterProvider {
                 home: self.home.clone(),
                 cargo_registry_seed: false,
                 state_root: self.state.clone(),
+                sandboxed: true,
             }),
             observed_head: None,
             repository: None,

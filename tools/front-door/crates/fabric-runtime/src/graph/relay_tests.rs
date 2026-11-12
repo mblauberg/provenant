@@ -200,6 +200,8 @@ fn rich_child_attempt_controls_define_replay_identity_and_reach_the_launch() {
     ).unwrap();
     let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
     let child = plan.nodes.iter().find(|node| node.id == receipt.node).unwrap();
+    // Admission names the lane that added the child.
+    let spec = AttemptSpec { admitted_by: Some("a".into()), ..spec };
     assert_eq!(child.attempt.as_ref(), Some(&spec));
     let mut owner = FakeOwner {
         observations: [

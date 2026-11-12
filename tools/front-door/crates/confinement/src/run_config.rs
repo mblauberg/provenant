@@ -33,6 +33,8 @@ continuation_copy_depth = 32
 source_view_seconds = 300
 source_view_entries = 100000
 source_view_bytes = 536870912
+sandboxed_routes = ["opencode/opencode/"]
+sandbox_cache_reads = []
 
 [projects]
 "#;
@@ -100,8 +102,77 @@ pub struct RunConfig {
     /// Maximum total file bytes in one pinned source view.
     #[serde(default = "default_source_view_bytes")]
     pub source_view_bytes: u64,
+    /// Route prefixes (`adapter/model`) whose lanes always run sandboxed. The
+    /// default is the OpenCode Zen tier (`opencode/opencode/`), whose free
+    /// models may train on or retain prompts; OpenCode Go
+    /// (`opencode/opencode-go/`) is not on it.
+    #[serde(default = "default_sandboxed_routes")]
+    pub sandboxed_routes: Vec<String>,
+    /// Host cache directories a sandboxed lane may read but never write, such
+    /// as a compiler cache. An unsandboxed lane has ordinary access to them.
+    #[serde(default)]
+    pub sandbox_cache_reads: Vec<PathBuf>,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
+}
+/// Set in every lane's environment to `on` or `off`, so a lane's own tools
+/// can choose, for example, a private cache when they cannot write a shared one.
+pub const SANDBOX_ENV: &str = "PROVENANT_SANDBOX";
+/// The OpenCode Zen tier: model IDs served by the `zen` account.
+pub const DEFAULT_SANDBOXED_ROUTES: [&str; 1] = ["opencode/opencode/"];
+const MAX_SANDBOXED_ROUTES: usize = 64;
+fn default_sandboxed_routes() -> Vec<String> {
+    DEFAULT_SANDBOXED_ROUTES
+        .iter()
+        .map(|route| (*route).to_owned())
+        .collect()
+}
+/// Why a lane runs with or without the sandbox, strongest reason first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxSource {
+    /// The lane was started, or added or replaced in a graph, by a lane
+    /// sandboxed by its route, its own parent or the knob.
+    Parent,
+    /// The route matches `domains.run.sandboxed_routes`.
+    Route,
+    /// The lane's network is narrower than open; only the sandbox holds it.
+    Network,
+    /// The platform has no unsandboxed launch: Linux keeps refusing lanes.
+    Platform,
+    /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
+    Knob,
+    /// A read-only lane under `auto`: only the sandbox keeps it read-only.
+    ReadOnly,
+    /// A writer under `auto` on a trusted route: it runs like the CLI started
+    /// by hand.
+    Default,
+}
+/// What decides one attempt's sandbox.
+#[derive(Clone, Copy, Debug)]
+pub struct SandboxInputs<'a> {
+    /// The route id, `adapter/model` (`command/NAME` for a configured command).
+    pub route: &'a str,
+    /// The sealed `lanes.sandbox` value, if any.
+    pub knob: Option<&'a str>,
+    /// The host found the submitting lane sandboxed (or could not tell).
+    pub parent_sandboxed: bool,
+    /// The lane's effective network is `provider` or `local`.
+    pub network_narrowed: bool,
+    /// The lane cannot write its checkout.
+    pub read_only: bool,
+}
+/// The resolved sandbox mode for one attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxMode {
+    pub sandboxed: bool,
+    pub source: SandboxSource,
+}
+impl SandboxMode {
+    /// The `PROVENANT_SANDBOX` value.
+    pub fn env_value(self) -> &'static str {
+        if self.sandboxed { "on" } else { "off" }
+    }
 }
 /// Default writer token budget.
 pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 500_000;
@@ -152,6 +223,9 @@ pub struct ProjectRunConfig {
     /// Replaces the host writer token budget for this project.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
+    /// Replaces the host `sandbox_cache_reads` for this project.
+    #[serde(default)]
+    pub sandbox_cache_reads: Option<Vec<PathBuf>>,
 }
 fn default_review_exempt() -> Vec<String> {
     DEFAULT_REVIEW_EXEMPT
@@ -178,6 +252,8 @@ impl Default for RunConfig {
             source_view_seconds: default_source_view_seconds(),
             source_view_entries: default_source_view_entries(),
             source_view_bytes: default_source_view_bytes(),
+            sandboxed_routes: default_sandboxed_routes(),
+            sandbox_cache_reads: Vec::new(),
             projects: BTreeMap::new(),
         }
     }
@@ -198,6 +274,44 @@ impl RunConfig {
             .unwrap_or(&self.writer_writes)
             .iter()
             .map(PathBuf::as_path)
+    }
+
+    /// The cache directories a sandboxed lane in `project` may read; the
+    /// project list replaces the host list when present.
+    pub fn sandbox_cache_reads_for(&self, project: &str) -> impl Iterator<Item = &Path> {
+        self.projects
+            .get(project)
+            .and_then(|s| s.sandbox_cache_reads.as_ref())
+            .unwrap_or(&self.sandbox_cache_reads)
+            .iter()
+            .map(PathBuf::as_path)
+    }
+
+    /// Resolve one attempt's sandbox. A sandboxed parent, a listed route and
+    /// a narrowed network always sandbox: `off` cannot remove them. Otherwise
+    /// `on` and `off` decide; under `auto` (or no value) a read-only lane is
+    /// sandboxed, because only the sandbox keeps it read-only, and a writer is
+    /// not. A value the registry does not know sandboxes.
+    pub fn sandbox_for(&self, inputs: SandboxInputs<'_>) -> SandboxMode {
+        let listed = self
+            .sandboxed_routes
+            .iter()
+            .any(|prefix| !prefix.is_empty() && inputs.route.starts_with(prefix.as_str()));
+        let (sandboxed, source) = if inputs.parent_sandboxed {
+            (true, SandboxSource::Parent)
+        } else if listed {
+            (true, SandboxSource::Route)
+        } else if inputs.network_narrowed {
+            (true, SandboxSource::Network)
+        } else {
+            match inputs.knob {
+                None | Some("auto") if inputs.read_only => (true, SandboxSource::ReadOnly),
+                None | Some("auto") => (false, SandboxSource::Default),
+                Some("off") => (false, SandboxSource::Knob),
+                Some(_) => (true, SandboxSource::Knob),
+            }
+        };
+        SandboxMode { sandboxed, source }
     }
 
     /// Read `[domains.run]` from the state root's `config.toml`.
@@ -408,6 +522,30 @@ impl DomainConfig for RunConfig {
         }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
+        valid_writer_writes(
+            "sandbox_cache_reads",
+            &self.sandbox_cache_reads,
+            &mut errors,
+        );
+        if self.sandboxed_routes.len() > MAX_SANDBOXED_ROUTES {
+            errors.push(SectionError {
+                detail: None,
+                field: "sandboxed_routes".into(),
+                code: "range",
+            });
+        }
+        for (index, route) in self.sandboxed_routes.iter().enumerate() {
+            if route.is_empty()
+                || route.len() > 256
+                || !route.bytes().all(|byte| byte.is_ascii_graphic())
+            {
+                errors.push(SectionError {
+                    detail: None,
+                    field: format!("sandboxed_routes.{index}"),
+                    code: "value",
+                });
+            }
+        }
         for (project, settings) in &self.projects {
             if !project_key(project) {
                 errors.push(SectionError {
@@ -426,6 +564,13 @@ impl DomainConfig for RunConfig {
             if let Some(paths) = &settings.writer_writes {
                 valid_writer_writes(
                     &format!("projects.{project}.writer_writes"),
+                    paths,
+                    &mut errors,
+                );
+            }
+            if let Some(paths) = &settings.sandbox_cache_reads {
+                valid_writer_writes(
+                    &format!("projects.{project}.sandbox_cache_reads"),
                     paths,
                     &mut errors,
                 );
@@ -475,6 +620,9 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("projects.{project}.writer_writes", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
     FieldMetadata::new("projects.{project}.admission_seconds", "integer"),
+    FieldMetadata::new("sandboxed_routes", "array"),
+    FieldMetadata::new("sandbox_cache_reads", "array"),
+    FieldMetadata::new("projects.{project}.sandbox_cache_reads", "array"),
 ];
 pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DEFAULTS)
     .with_boundary_checks()
@@ -560,6 +708,138 @@ mod tests {
                 .validate()
                 .iter()
                 .any(|error| error.field == "grant_limit")
+        );
+        Ok(())
+    }
+    fn writer(route: &str) -> SandboxInputs<'_> {
+        SandboxInputs {
+            route,
+            knob: None,
+            parent_sandboxed: false,
+            network_narrowed: false,
+            read_only: false,
+        }
+    }
+    fn mode(sandboxed: bool, source: SandboxSource) -> SandboxMode {
+        SandboxMode { sandboxed, source }
+    }
+    #[test]
+    fn trusted_writers_run_unsandboxed_and_every_floor_sandboxes() {
+        let config = RunConfig::default();
+        for route in [
+            "claude/claude-opus-5-5",
+            "codex/gpt-5.5",
+            "agy/gemini-3.5-pro",
+            "cursor/grok-4.7",
+            "opencode/opencode-go/glm-5.3-flash",
+            "command/check",
+        ] {
+            let lane = writer(route);
+            assert_eq!(
+                config.sandbox_for(lane),
+                mode(false, SandboxSource::Default),
+                "{route}"
+            );
+            let knob = |value| SandboxInputs {
+                knob: Some(value),
+                ..lane
+            };
+            assert_eq!(
+                config.sandbox_for(knob("auto")),
+                mode(false, SandboxSource::Default)
+            );
+            assert_eq!(
+                config.sandbox_for(knob("on")),
+                mode(true, SandboxSource::Knob)
+            );
+            assert_eq!(
+                config.sandbox_for(knob("off")),
+                mode(false, SandboxSource::Knob)
+            );
+            // A value the registry does not know sandboxes rather than opens.
+            assert_eq!(
+                config.sandbox_for(knob("maybe")),
+                mode(true, SandboxSource::Knob)
+            );
+            // Read-only lanes are sandboxed under auto; `off` opens them.
+            let read_only = SandboxInputs {
+                read_only: true,
+                ..lane
+            };
+            assert_eq!(
+                config.sandbox_for(read_only),
+                mode(true, SandboxSource::ReadOnly)
+            );
+            assert_eq!(
+                config.sandbox_for(SandboxInputs {
+                    knob: Some("off"),
+                    ..read_only
+                }),
+                mode(false, SandboxSource::Knob)
+            );
+        }
+        // Floors: no knob value removes them, strongest reason first.
+        for knob in [None, Some("auto"), Some("off"), Some("on")] {
+            let zen = SandboxInputs {
+                knob,
+                network_narrowed: true,
+                ..writer("opencode/opencode/glm-5.3-flash-free")
+            };
+            assert_eq!(config.sandbox_for(zen), mode(true, SandboxSource::Route));
+            let narrowed = SandboxInputs {
+                knob,
+                network_narrowed: true,
+                ..writer("claude/claude-opus-5-5")
+            };
+            assert_eq!(
+                config.sandbox_for(narrowed),
+                mode(true, SandboxSource::Network)
+            );
+            let child = SandboxInputs {
+                parent_sandboxed: true,
+                ..zen
+            };
+            assert_eq!(config.sandbox_for(child), mode(true, SandboxSource::Parent));
+        }
+        assert_eq!(mode(true, SandboxSource::Knob).env_value(), "on");
+        assert_eq!(mode(false, SandboxSource::Default).env_value(), "off");
+    }
+    #[test]
+    fn sandboxed_routes_and_cache_reads_are_configurable_and_validated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let open: RunConfig = toml_edit::de::from_str("sandboxed_routes = []")?;
+        assert!(open.validate().is_empty());
+        assert!(
+            !open
+                .sandbox_for(writer("opencode/opencode/glm-5.3-flash-free"))
+                .sandboxed
+        );
+        let wider: RunConfig =
+            toml_edit::de::from_str("sandboxed_routes = [\"opencode/\", \"cursor/\"]")?;
+        assert!(
+            wider
+                .sandbox_for(writer("opencode/opencode-go/x"))
+                .sandboxed
+        );
+        assert!(wider.sandbox_for(writer("cursor/grok-4.7")).sandboxed);
+        let bad: RunConfig = toml_edit::de::from_str("sandboxed_routes = [\"\", \"has space/\"]")?;
+        let fields: Vec<_> = bad.validate().into_iter().map(|e| e.field).collect();
+        assert_eq!(fields, ["sandboxed_routes.0", "sandboxed_routes.1"]);
+        let caches: RunConfig = toml_edit::de::from_str(
+            "sandbox_cache_reads = [\"/var/cache/sccache\"]\n[projects.p]\nsandbox_cache_reads = []\n",
+        )?;
+        assert!(caches.validate().is_empty());
+        assert_eq!(
+            caches.sandbox_cache_reads_for("other").collect::<Vec<_>>(),
+            [Path::new("/var/cache/sccache")]
+        );
+        assert_eq!(caches.sandbox_cache_reads_for("p").count(), 0);
+        let relative: RunConfig = toml_edit::de::from_str("sandbox_cache_reads = [\"cache\"]")?;
+        assert!(
+            relative
+                .validate()
+                .iter()
+                .any(|error| error.field.starts_with("sandbox_cache_reads"))
         );
         Ok(())
     }

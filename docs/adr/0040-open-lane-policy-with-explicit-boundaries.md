@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-11-08.
+Changed: 2026-11-08; 2026-11-12 (sandbox mode, #3246).
 
 ## Context
 
@@ -122,6 +122,28 @@ refusal; it must never fall back to unconfined execution. Fixture checks cover
 policy resolution, mandatory roots, exception boundaries and provider private
 state. Configured-host native checks cover actual enforcement. A lane returning
 `ProbeFailed`/skip supplies no native enforcement evidence.
+
+## Sandbox mode
+
+Writers on trusted routes run without Seatbelt, like the same CLI started by
+hand, so they can share host build caches and services. A lane stays sandboxed
+when its route is listed in `domains.run.sandboxed_routes` (the OpenCode Zen
+tier, whose models may train on prompts), when a lane sandboxed by its route,
+its parent or the knob started it or admitted it into a graph,
+when its network is narrowed, or, under the default `auto`, when it is
+read-only, because only the sandbox enforces those. The `lanes.sandbox` knob
+sets the rest. The
+[configuration runbook](../runbooks/configuration.md#lane-sandbox-mode) owns
+the rules and what holds in each mode.
+
+For an unsandboxed lane, ADR 0035's lane Git and credentials boundaries rest
+on the private Git directory, host-owned delivery, writer custody and the
+stripped environment, not on kernel denials: route trust replaces the file
+and shared-Git write denials, and `host_policy` path denials do not apply.
+Such a lane can also write the host state that records the floors, and
+detached daemons it starts escape cleanup.
+Overturn when a trusted route is traced to writing shared Git state or using
+an on-disk credential it was not given.
 
 ## Known limits
 
