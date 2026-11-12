@@ -247,6 +247,11 @@ pub struct AttemptSpec {
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
+    /// `on` sandboxes this node's lane; `off` or `auto` leaves the route's
+    /// default. Sets the `lanes.sandbox` knob for this node alone. A route in
+    /// `domains.run.sandboxed_routes` and a sandboxed parent always sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
 }
 
 /// The `light` preset: no private source view, minimal supervision and no
@@ -306,6 +311,9 @@ impl AttemptSpec {
         if self.effective_receipts() != "delivery" {
             knobs.push(format!("lanes.receipts={}", self.effective_receipts()));
         }
+        if let Some(sandbox) = &self.sandbox {
+            knobs.push(format!("lanes.sandbox={sandbox}"));
+        }
         knobs
     }
 
@@ -332,6 +340,7 @@ impl AttemptSpec {
             && self.isolation.is_none()
             && self.supervision.is_none()
             && self.receipts.is_none()
+            && self.sandbox.is_none()
     }
 }
 

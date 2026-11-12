@@ -1014,6 +1014,8 @@ impl Driver<'_> {
                     &self.attempt,
                     root,
                     self.reservation.scope.attempt,
+                    // Without a profile the lane has no sandbox mark to test.
+                    self.profile_file.is_some(),
                 )
             });
         if write_record(

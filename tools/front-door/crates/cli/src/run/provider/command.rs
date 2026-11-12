@@ -299,6 +299,27 @@ pub(super) fn prepare_command(
             .map(|tool| tool.receipt())
             .collect(),
     );
+    let sandbox = sandbox_mode(
+        &config.domains.run,
+        &format!("{provider}/{name}"),
+        task,
+        &plan,
+    );
+    let mut route = RouteRecord {
+        provider: Some(provider.into()),
+        source: Some(format!("domains.fabric.commands.{name}")),
+        extra: [
+            ("name".into(), serde_json::Value::String(name.into())),
+            ("applied_access".into(), applied_access),
+            ("tool_closure".into(), tool_closure),
+            ("discovery_warnings".into(), serde_json::json!(warnings)),
+            ("project_paths".into(), project_paths),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    apply_sandbox_mode(sandbox, &mut spec.env, &mut route);
     Ok(run::PreparedLaunch {
         skipped_routes: Vec::new(),
         argv: spec.argv,
@@ -306,20 +327,7 @@ pub(super) fn prepare_command(
         stdin: Vec::new(),
         secret_input: None,
         cwd: spec.cwd,
-        route: RouteRecord {
-            provider: Some(provider.into()),
-            source: Some(format!("domains.fabric.commands.{name}")),
-            extra: [
-                ("name".into(), serde_json::Value::String(name.into())),
-                ("applied_access".into(), applied_access),
-                ("tool_closure".into(), tool_closure),
-                ("discovery_warnings".into(), serde_json::json!(warnings)),
-                ("project_paths".into(), project_paths),
-            ]
-            .into_iter()
-            .collect(),
-            ..Default::default()
-        },
+        route,
         observed_head,
         repository,
         confinement: Some(run::LaunchConfinement {
@@ -329,6 +337,7 @@ pub(super) fn prepare_command(
             home,
             cargo_registry_seed: false,
             state_root: roots.state.as_path().to_owned(),
+            sandboxed: sandbox.sandboxed,
         }),
     })
 }

@@ -1476,7 +1476,26 @@ impl AttemptRecord {
     pub fn user_skills(&self) -> Option<&serde_json::Value> {
         self.applied_route.as_ref()?.extra.get("user_skills")
     }
+
+    /// The recorded sandbox of a launched attempt: `{"sandboxed", "source"}`.
+    pub fn sandbox(&self) -> Option<&serde_json::Value> {
+        self.applied_route.as_ref()?.extra.get(SANDBOX_ROUTE_FIELD)
+    }
+
+    /// Whether this attempt ran sandboxed. A record that does not say, such
+    /// as one written before lanes could run unsandboxed, counts as
+    /// sandboxed, so a child it submits stays sandboxed too.
+    pub fn sandboxed(&self) -> bool {
+        self.sandbox()
+            .and_then(|sandbox| sandbox.get("sandboxed"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    }
 }
+/// The applied-route field that records an attempt's sandbox mode.
+pub const SANDBOX_ROUTE_FIELD: &str = "sandbox";
+/// The task field the host sets when the submitting lane was sandboxed.
+pub const PARENT_SANDBOXED_FIELD: &str = "parent_sandboxed";
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
 /// record compare differently.

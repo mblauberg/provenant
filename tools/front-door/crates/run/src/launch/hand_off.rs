@@ -369,16 +369,24 @@ impl RunStore {
             {
                 local_or_withdraw!(Err::<(), _>(typed_local("lane Git objects", &error)));
             }
-            match confinement.command(&plan.argv, &id, call.cancel) {
-                Ok(command) => {
-                    plan.argv = command.argv;
-                    profile_file = Some(command.profile);
+            if confinement.sandboxed {
+                match confinement.command(&plan.argv, &id, call.cancel) {
+                    Ok(command) => {
+                        plan.argv = command.argv;
+                        profile_file = Some(command.profile);
+                    }
+                    Err(error) => {
+                        local_or_withdraw!(Err::<(), _>(typed_local(
+                            "confinement command",
+                            &error
+                        )));
+                    }
                 }
-                Err(error) => {
-                    local_or_withdraw!(Err::<(), _>(typed_local("confinement command", &error)));
-                }
+            } else if let Err(error) = confinement.prepare_writer_directories() {
+                local_or_withdraw!(Err::<(), _>(typed_local("writer directories", &error)));
             }
         }
+        strip_hosted_credentials(&mut plan.environment);
         // Route records name models as `adapter/model`; prefix only a
         // provider-native one (which may itself contain `/`).
         let provider = plan.route.provider.as_deref().unwrap_or_default();
@@ -519,8 +527,97 @@ impl Drop for CancelWatch {
     }
 }
 
+/// Hosted-cloud and third-party credentials never reach a lane, sandboxed
+/// or not. Adapters already rebuild the environment from an allowlist; this
+/// holds the boundary if an allowlist ever grows. `GH_TOKEN` is the one
+/// credential the host hands a publishing lane on purpose.
+pub(crate) fn strip_hosted_credentials(environment: &mut Vec<(OsString, OsString)>) {
+    environment.retain(|(name, _)| !hosted_credential(name));
+}
+
+fn hosted_credential(name: &std::ffi::OsStr) -> bool {
+    const PREFIXES: [&str; 8] = [
+        "AWS_",
+        "NEON_",
+        "CLOUDFLARE_",
+        "CF_API_",
+        "AZURE_",
+        "ARM_CLIENT_",
+        "DIGITALOCEAN_",
+        "HCLOUD_",
+    ];
+    const NAMES: [&str; 5] = [
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_OAUTH_ACCESS_TOKEN",
+        "VAULT_TOKEN",
+        "NPM_TOKEN",
+        "PGPASSWORD",
+    ];
+    const SUFFIXES: [&str; 7] = [
+        "_API_KEY",
+        "_API_TOKEN",
+        "_ACCESS_KEY",
+        "_ACCESS_TOKEN",
+        "_AUTH_TOKEN",
+        "_SECRET",
+        "_SECRET_KEY",
+    ];
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let upper = name.to_ascii_uppercase();
+    upper != "GH_TOKEN"
+        && (PREFIXES.iter().any(|prefix| upper.starts_with(prefix))
+            || NAMES.contains(&upper.as_str())
+            || SUFFIXES.iter().any(|suffix| upper.ends_with(suffix)))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosted_credentials_are_stripped_and_the_lane_keeps_its_own_environment() {
+        let mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_PROFILE",
+            "NEON_API_KEY",
+            "CLOUDFLARE_API_TOKEN",
+            "CF_API_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "STRIPE_SECRET_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "PGPASSWORD",
+            "aws_secret_access_key",
+            "GH_TOKEN",
+            "HOME",
+            "PATH",
+            "TMPDIR",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            "PROVENANT_SANDBOX",
+            "SCCACHE_DIR",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), "value".into()))
+        .collect();
+        super::strip_hosted_credentials(&mut environment);
+        let kept: Vec<_> = environment
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "GH_TOKEN",
+                "HOME",
+                "PATH",
+                "TMPDIR",
+                "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+                "PROVENANT_SANDBOX",
+                "SCCACHE_DIR",
+            ]
+        );
+    }
+
     use super::*;
     use crate::tests::{call, clock, context, input, route};
     use provenant_core::CancelToken;

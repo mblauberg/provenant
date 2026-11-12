@@ -969,8 +969,8 @@ Git's documented global options, with their separate values, to find the
 subcommand; an option it does not recognise means it does not bind. Git
 children inherit the bound selectors, so a hook that changes directory and
 calls Git by absolute path stays bound to the lane. The threat model is
-accidental fixture commits; the sandbox is the boundary, and a lane can only
-affect its own branch. A fixture that
+accidental fixture commits; for a sandboxed lane the sandbox is the boundary,
+and a lane can only affect its own branch. A fixture that
 runs `git init` and commits in a temporary directory, even one under the
 checkout, therefore acts on that directory with its own `-c user.name` and
 cannot read or write the lane's index or branch. That private object
@@ -983,8 +983,10 @@ garbage collection cannot discard a base that a private rebase no longer names.
 The original worktree gitfile stays unchanged so the host retains its verified
 repository identity. Seatbelt denies writes throughout both the shared Git
 directory and the linked admin directory, including refs, config, hooks, info
-and the original index. Inside the checkout the shim's selectors intentionally
-select the lane repository. The sandbox, not the shim, is the hard boundary:
+and the original index; an unsandboxed lane has no such denial and is trusted
+not to bypass its shim. Inside the checkout the shim's selectors intentionally
+select the lane repository. For a sandboxed lane the sandbox, not the shim, is
+the hard boundary:
 Git run by absolute path inside the checkout bypasses the shim, finds the
 original gitfile and can only read the shared metadata, never write it, so it
 cannot reach other lanes or change the host repository. Outside the checkout

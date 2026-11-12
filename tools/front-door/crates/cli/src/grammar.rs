@@ -616,6 +616,14 @@ pub struct GraphRunArgs {
     /// Let this child outlive parent and graph cancellation (inside a lane only)
     #[arg(long)]
     pub detached: bool,
+    /// Run the lane under the macOS sandbox (sets attempt.sandbox = "on")
+    #[arg(long, conflicts_with = "no_sandbox")]
+    pub sandbox: bool,
+    /// Run the lane unsandboxed (attempt.sandbox = "off"); a route in
+    /// domains.run.sandboxed_routes, or a lane started by a sandboxed lane,
+    /// stays sandboxed
+    #[arg(long)]
+    pub no_sandbox: bool,
     /// Explain the compiled graph without starting work
     #[arg(long)]
     pub explain: bool,
@@ -630,6 +638,17 @@ pub struct GraphRunArgs {
 }
 
 impl GraphRunArgs {
+    /// The `attempt.sandbox` value `--sandbox` or `--no-sandbox` selects.
+    pub fn sandbox_override(&self) -> Option<&'static str> {
+        if self.sandbox {
+            Some("on")
+        } else if self.no_sandbox {
+            Some("off")
+        } else {
+            None
+        }
+    }
+
     /// A duration consumed as the positional brief after a bare `--wait`.
     pub fn ambiguous_wait_brief(&self) -> Option<&str> {
         self.bare_wait_value.as_deref()

@@ -589,6 +589,27 @@ impl RunStore {
             AttemptState::Terminal { .. }
         ))
     }
+    /// Whether the attempt `id`, from any project, ran sandboxed. A record
+    /// that cannot be read counts as sandboxed.
+    pub(crate) fn attempt_sandboxed(&self, id: AttemptId, call: &Request<'_>) -> bool {
+        let read = || -> Result<bool> {
+            call.check()?;
+            let project: String = self
+                .db
+                .query_row(
+                    "SELECT project FROM attempts WHERE id=?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let mut context = self.context.clone();
+            context.project_id = provenant_core::ProjectId::parse(&project)
+                .map_err(|_| RunError::Validation("attempt index project"))?;
+            Ok(Self::open(&context, call)?.record(id, call)?.sandboxed())
+        };
+        read().unwrap_or(true)
+    }
     /// The record read for view paths. It reports the published checkpoint
     /// without syncing it, so status, lane listings and output paging do not
     /// pay a durable flush per history row.

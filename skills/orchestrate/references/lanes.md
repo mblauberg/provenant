@@ -14,6 +14,11 @@ process has exited before adopting its worktree.
 The runtime enforces confinement, writer exclusion, source pins and gates; the
 chair still picks the boundary and checks returned work against it.
 
+- Writers on trusted routes run unsandboxed; read-only lanes, narrowed-network
+  lanes and the OpenCode Zen tier run sandboxed. Pass `--sandbox` (graphs:
+  `attempt.sandbox = "on"`) for a writer that must not touch the host outside
+  its worktree.
+
 - Partition by stable interfaces; serialise overlapping or dependent writes.
 - Keep credentials, authentication stores and unrelated paths out of briefs,
   read roots, outputs and disclosure.

@@ -470,6 +470,7 @@ fn run_input(
     request: GraphRunArgs,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
+        let sandbox = request.sandbox_override();
         let model = request.model.map(model_selector).transpose()?;
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [
@@ -548,6 +549,9 @@ fn run_input(
             validate_set_value_path(key, &parsed["value"])?;
             parameters[key] = parsed["value"].clone();
         }
+        if let Some(sandbox) = sandbox {
+            parameters["attempt.sandbox"] = json!(sandbox);
+        }
         input["set"] = parameters;
         if let Some(brief) = request.brief {
             input["brief"] = json!(brief);
@@ -591,7 +595,7 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         )),
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
-        | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" => Ok(()),
+        | "local_cargo" | "preset" | "isolation" | "supervision" | "receipts" | "sandbox" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
         }
@@ -690,6 +694,8 @@ mod tests {
             set: Vec::new(),
             file: None,
             detached: false,
+            sandbox: false,
+            no_sandbox: false,
             explain: false,
             wait: None,
             bare_wait_value: None,
@@ -779,6 +785,35 @@ mod tests {
         assert_eq!(input["set"]["attempt.confidential"], true);
         assert_eq!(input["set"]["attempt.provider_timeout"], 42);
         assert_eq!(input["set"]["attempt.host"], "other");
+    }
+
+    #[test]
+    fn sandbox_flags_set_the_attempt_sandbox_and_conflict() {
+        let parse = |flags: &[&str]| {
+            provenant_cli::parse(
+                ["run", "Inspect"]
+                    .iter()
+                    .chain(flags)
+                    .map(std::ffi::OsString::from),
+            )
+        };
+        for (flag, value) in [("--sandbox", "on"), ("--no-sandbox", "off")] {
+            let provenant_cli::ParseOutcome::Invocation(invocation) = parse(&[flag]) else {
+                panic!("{flag} should parse");
+            };
+            let provenant_cli::Command::Run(request) = invocation.command else {
+                panic!("run command");
+            };
+            let input = run_input(*request).unwrap();
+            assert_eq!(input["set"]["attempt.sandbox"], value);
+        }
+        assert!(!matches!(
+            parse(&["--sandbox", "--no-sandbox"]),
+            provenant_cli::ParseOutcome::Invocation(_)
+        ));
+        let mut request = run_request();
+        request.set.push("attempt.sandbox='on'".into());
+        assert_eq!(run_input(request).unwrap()["set"]["attempt.sandbox"], "on");
     }
 
     #[test]

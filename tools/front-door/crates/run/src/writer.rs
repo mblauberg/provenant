@@ -791,6 +791,10 @@ pub struct LaunchConfinement {
     pub cargo_registry_seed: bool,
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
+    /// Whether the lane runs under the compiled sandbox profile. Without it
+    /// the plan still prepares writer directories and records access, but the
+    /// provider starts directly, like the same CLI started by hand.
+    pub sandboxed: bool,
 }
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
@@ -983,6 +987,18 @@ impl LaunchConfinement {
             );
         }
     }
+    /// Run holds writer custody here: create the derived ref parents and the
+    /// private lane cache, before they are anchored or used unsandboxed.
+    pub(crate) fn prepare_writer_directories(&self) -> Result<()> {
+        if let (Some(writer), AccessMode::WorktreeWrite(authority)) =
+            (&self.writer, &self.plan.permissions().mode)
+        {
+            prepare_writer_directories(&writer.worktree, &writer.branch, authority, &self.home)
+                .map_err(RunError::Confinement)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn command(
         &self,
         argv: &[OsString],
@@ -1003,14 +1019,7 @@ impl LaunchConfinement {
         )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        // Run holds writer custody here: create the derived ref parents and the
-        // private lane cache before they are anchored.
-        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
-            (writer, &self.plan.permissions().mode)
-        {
-            prepare_writer_directories(worktree, branch, authority, &self.home)
-                .map_err(RunError::Confinement)?;
-        }
+        self.prepare_writer_directories()?;
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
             .map(AnchoredDirectory::open_canonical)

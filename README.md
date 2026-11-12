@@ -31,9 +31,10 @@
 Provenant lets the coding agent you are already talking to hand work to other
 agents safely. From a Claude Code, Codex or other supported session, you ask for
 a task to be delegated; Provenant picks a model, checks that one of your
-accounts has quota left, runs the agent in a sandbox that can write only to its
-own Git worktree (or nowhere, for read-only work), records everything it did and
-can push the result to a branch for review.
+accounts has quota left, runs the agent in its own Git worktree (writers on
+trusted routes run like the CLI started by hand; read-only work and untrusted
+routes run in a sandbox), records everything it did and can push the result to
+a branch for review.
 
 It is for developers who run several coding agents at once on their own
 subscriptions and want that to stay organised: no two agents writing in the same
@@ -47,7 +48,7 @@ flowchart TB
     end
     subgraph P["Provenant"]
         direction LR
-        RT["Pick a model<br/>by route"] --> QA["Check quota<br/>pick an account"] --> CF["Launch in<br/>a sandbox"] --> RC["Record<br/>the run"]
+        RT["Pick a model<br/>by route"] --> QA["Check quota<br/>pick an account"] --> CF["Launch<br/>the lane"] --> RC["Record<br/>the run"]
     end
     subgraph A["Your signed-in accounts"]
         direction LR
@@ -100,7 +101,7 @@ hand-written graph; `--explain` inspects it before launch.
 | **Usage meter** | `provenant quota` and an optional macOS menu bar app show every account's windows, reset times, credits and staleness in one place. |
 | **Your harnesses** | One install wires Fabric MCP, skills and instructions into Claude Code, Codex, Cursor, Agy and OpenCode. Claude Code also gets managed hooks and automatic account switching. |
 | **Routing** | Named pools (`utility`, `junior`, `senior`, `principal`, `writing`, `design`) choose among models by weight, scaled by each provider's pacing. |
-| **Confined lanes** | Each lane runs `read-only` or `worktree-write` under a macOS sandbox profile. Writers get one registered worktree; network-open profiles can read the existing gh login. |
+| **Lane modes** | Each lane runs `read-only` or `worktree-write`. Writers on trusted routes run unsandboxed and share host caches; read-only lanes, narrowed-network lanes and listed routes (the OpenCode Zen tier) run under a macOS sandbox profile. `--sandbox` and `--no-sandbox` override per run. Writers get one registered worktree. |
 | **Host-side delivery** | The host verifies a writer's final commit, pushes it to the branch you name and can open a pull request. |
 | **Fabric** | Messages, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
@@ -109,7 +110,7 @@ hand-written graph; `--explain` inspects it before launch.
 
 ## Requirements
 
-- **macOS** for dispatch. Lanes are confined with the macOS sandbox, and Linux
+- **macOS** for dispatch. Sandboxed lanes use the macOS sandbox, and Linux
   has no confinement backend, so it refuses dispatch. CI builds and tests the
   workspace on Linux.
 - **Rust 1.99.1**, pinned by
@@ -201,10 +202,13 @@ flowchart LR
    member by its configured weight and its provider's pacing. `pace` compares
    remaining quota with the time left in the window. Admission then picks a
    registered account with headroom.
-2. **Run.** The lane starts under a sandbox profile built from its access mode.
-   Read-only lanes cannot write; writers write only to their worktree and any
-   write roots you grant. Network-open profiles can read the existing gh login;
-   profiles deny access to SSH keys. Output, exit state,
+2. **Run.** A writer on a trusted route starts like the CLI started by hand,
+   in its own worktree with hosted-cloud keys stripped from its environment.
+   Read-only lanes, lanes with a narrowed network and listed routes start under
+   a sandbox profile built from their access mode: read-only lanes cannot
+   write, sandboxed writers write only to their worktree and granted roots, and
+   profiles deny access to SSH keys. See
+   [lane sandbox mode](docs/runbooks/configuration.md#lane-sandbox-mode). Output, exit state,
    tokens and cost go into the run record.
 3. **Deliver.** For a writer, the host fetches before launch and, afterwards,
    verifies the final commit and pushes it with its own Git authority.

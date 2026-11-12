@@ -291,6 +291,14 @@ pub(super) fn confinement_request(
             scope: write.scope,
         })?;
     }
+    let cache_reads = sandbox_cache_reads(
+        host_writes,
+        &project_id.to_string(),
+        writes
+            .iter()
+            .chain([grant(roots.scratch), grant(roots.private_state)].iter())
+            .chain(writer.map(|writer| grant(writer.worktree.path())).iter()),
+    );
     let mut policy = host_writes.policy_for_launch(roots.state, mandatory);
     policy.resolve_optional_aliases(resolve_policy_path)?;
     let network = policy
@@ -323,7 +331,7 @@ pub(super) fn confinement_request(
                     scope: PathScope::Exact,
                 }))
                 .collect(),
-            protected_roots: Vec::new(),
+            protected_roots: cache_reads,
             secret_roots: Vec::new(),
             selected_authentication: AdapterSpec::get(adapter)
                 .and_then(|spec| spec.authentication)
@@ -337,6 +345,71 @@ pub(super) fn confinement_request(
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
     })
+}
+
+/// Resolve the lane's sandbox from its route id (`adapter/model`), the
+/// sealed `lanes.sandbox` knob, the host-set parent flag and the access the
+/// plan grants. A knob value that is not a string sandboxes.
+pub(super) fn sandbox_mode(
+    host: &provenant_confinement::run_config::RunConfig,
+    route: &str,
+    task: &run::TaskRequest,
+    plan: &ConfinedPlan,
+) -> provenant_confinement::run_config::SandboxMode {
+    use provenant_confinement::run_config::{SANDBOX_KNOB, SandboxInputs};
+    let permissions = plan.permissions();
+    host.sandbox_for(SandboxInputs {
+        route,
+        knob: task
+            .profile
+            .knobs
+            .get(SANDBOX_KNOB)
+            .map(|value| value.as_str().unwrap_or("on")),
+        parent_sandboxed: task
+            .extra
+            .get(provenant_records::run::PARENT_SANDBOXED_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        network_narrowed: permissions.network != NetworkAccess::Open,
+        read_only: matches!(permissions.mode, AccessMode::ReadOnly),
+    })
+}
+
+/// Tell the lane its mode (`PROVENANT_SANDBOX=on|off`) and record it, with
+/// its source, in the applied route that the receipt and `status` read.
+pub(super) fn apply_sandbox_mode(
+    mode: provenant_confinement::run_config::SandboxMode,
+    environment: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    route: &mut provenant_records::run::RouteRecord,
+) {
+    use provenant_confinement::run_config::SANDBOX_ENV;
+    environment.retain(|(name, _)| name != SANDBOX_ENV);
+    environment.push((SANDBOX_ENV.into(), mode.env_value().into()));
+    route.extra.insert(
+        provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
+        serde_json::json!(mode),
+    );
+}
+
+/// The configured host caches a sandboxed lane reads but never writes. They
+/// render as protected roots: readable, with writes denied. A path that does
+/// not exist, or that overlaps one of the lane's own write roots, scratch,
+/// private state or worktree, is skipped so the lane keeps the grant it
+/// already has there.
+fn sandbox_cache_reads<'a>(
+    host: &provenant_confinement::run_config::RunConfig,
+    project: &str,
+    own: impl Iterator<Item = &'a PathGrant> + Clone,
+) -> Vec<PathGrant> {
+    host.sandbox_cache_reads_for(project)
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir())
+        .map(|path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        })
+        .filter(|cache| !own.clone().any(|grant| grant.overlaps(cache)))
+        .collect()
 }
 
 /// Resolve existing ancestors too: a mandatory store remains denied when the

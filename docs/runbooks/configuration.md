@@ -72,7 +72,51 @@ dropped whole.
 `[domains.run.host_policy]` (`deny_read`, `deny_write`, `network =
 "open|local|provider"`) adds optional restrictions on top of the mandatory
 boundaries; absolute paths only, no per-project override. The effective
-network is the narrower of the ceiling and the lane's request.
+network is the narrower of the ceiling and the lane's request. Path denials
+apply only to sandboxed lanes; keep a route in `sandboxed_routes` to keep a
+path from it. A narrowed network always sandboxes the lane.
+
+## Lane sandbox mode
+
+Each macOS attempt resolves whether it runs under Seatbelt. In order:
+
+1. **Floors** that no override removes: a lane submitted by a sandboxed lane
+   (`parent`; an unreadable parent record counts as sandboxed), a route id
+   (`adapter/model`, or `command/NAME`) starting with an entry of
+   `[domains.run] sandboxed_routes` (`route`; default `["opencode/opencode/"]`,
+   the OpenCode Zen tier, so `opencode/opencode-go/` is not listed), and an
+   effective network of `provider` or `local` (`network`).
+2. **The `lanes.sandbox` knob** (`auto|on|off`): `run --sandbox` /
+   `--no-sandbox`, graph and template `attempt.sandbox`, or host `[knobs]`.
+   `on` and `off` decide (`knob`).
+3. **Under `auto`**, read-only lanes are sandboxed (`read_only`), because only
+   the sandbox keeps them read-only; writers are not (`default`). Set host
+   `[knobs] "lanes.sandbox" = "off"` to run read-only lanes unsandboxed too.
+
+The lane sees `PROVENANT_SANDBOX=on|off`; the receipt's
+`applied_route.sandbox` and `status` record the mode and its source.
+
+`[domains.run] sandbox_cache_reads` (absolute directories, replaced per project
+by `[domains.run.projects."ID"] sandbox_cache_reads`) gives sandboxed lanes
+read-only access to host caches such as an sccache directory or prebuilt
+database clusters. Missing paths are skipped; paths overlapping the lane's own
+grants keep the grant. Unsandboxed lanes need no grant.
+
+What holds in each mode:
+
+- **Credentials.** Every lane's environment is rebuilt from the adapter's
+  allowlist, and hosted-cloud and API-key variables (`AWS_*`, `NEON_*`,
+  `CLOUDFLARE_*`, `*_API_KEY`, `*_ACCESS_TOKEN` and similar; `GH_TOKEN` is
+  kept for publishing) are stripped. An unsandboxed lane can read on-disk
+  credential stores such as `~/.aws` and `~/.ssh`: route trust replaces the
+  file denial.
+- **Git.** One writer per worktree, the lane's private Git directory and
+  host-owned delivery with object and expected-ref checks hold in both modes.
+  Only a sandboxed lane is kernel-denied writes to the shared Git directory;
+  an unsandboxed writer is trusted not to bypass its Git shim.
+- **Process tree.** Sandboxed lanes are walked by their sandbox mark,
+  unsandboxed lanes by ancestry, so heavy-lock accounting covers both. Cleanup
+  of escapees that left the process tree relies on the sandbox mark.
 
 ## Unreadable process census exceptions
 
