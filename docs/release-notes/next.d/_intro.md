@@ -1,1 +1,1 @@
-This patch release fixes `--route` pool launches being refused when a provider model list contains display names.
+This release runs writer lanes on trusted routes without the macOS sandbox by default, so they share host build caches; the OpenCode Zen tier, read-only and narrowed-network lanes, and lanes started by a distrusted lane stay sandboxed. Read Behaviour changes before upgrading.
