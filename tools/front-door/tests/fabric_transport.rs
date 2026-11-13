@@ -3459,10 +3459,26 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         .attempts
         .last()
         .ok_or("receiver attempt")?;
-    assert_eq!(
-        receiver_attempt.state,
-        provenant_fabric_runtime::graph::AttemptState::Terminal
-    );
+    // The checkpoint keeps launch history. Cancellation authority belongs to
+    // the run store, which must seal the actual accepted attempt as cancelled.
+    let receiver_context = provenant_run::ExecutionContext {
+        state_root: receiver_state,
+        project_id: peer_project,
+        actor_id: peer_actor.parse()?,
+        read_prompts: false,
+    };
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&receiver_context, &call)?;
+    assert!(matches!(
+        store.record(attempt, &call)?.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Cancelled,
+            ..
+        }
+    ));
     assert_eq!(
         receiver_attempt.attempt_ref.as_deref(),
         Some(format!("{peer}/{attempt}").as_str())
