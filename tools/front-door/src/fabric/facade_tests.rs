@@ -323,10 +323,44 @@ fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
     let error = run_error(provenant_run::RunError::PromptTooLarge { limit: 1_048_576 });
     let projection = error.diagnostic();
     assert_eq!(projection.code, "invalid_input");
+    assert!(matches!(error, FacadeError::InvalidInput {
+        detail: Some(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { ref field, limit: 1_048_576 })
+    } if field == "prompt"));
     let detail = projection.detail.unwrap();
-    assert!(detail.contains("prompt"));
-    assert!(detail.contains("1048576"));
-    assert!(projection.next.is_some());
+    assert_eq!(
+        detail,
+        "invalid input field `prompt`: exceeds 1048576 bytes"
+    );
+    assert_eq!(
+        projection.next.as_deref(),
+        Some("check the named input field and retry")
+    );
+}
+
+#[test]
+fn peer_output_binding_is_consumed_before_the_cli_projection() {
+    let origin = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "origin",
+        "worker",
+        1,
+    )
+    .unwrap();
+    let output = serde_json::from_value(serde_json::json!({
+        "kind":"chunk", "target":{"attempt":"11111111111111111111111111111111"},
+        "part":"result", "state":"succeeded", "reason":null, "offset":0,
+        "next_offset":2, "eof":true, "digest":provenant_core::Digest::from_bytes([2; 32]),
+        "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
+        "peer_origin_work_key":origin, "peer_graph":{}, "peer_origin_context":{},
+        "peer_graph_collected":true, "peer_subtree":{}
+    }))
+    .unwrap();
+    let checked = peer::checked_output_origin(output, &origin).unwrap();
+    let OutputResult::Chunk { extra, .. } = checked else {
+        panic!("chunk expected")
+    };
+    assert_eq!(extra.get("length"), Some(&serde_json::json!(2)));
+    assert!(extra.keys().all(|key| !key.starts_with("peer_")));
 }
 
 #[test]

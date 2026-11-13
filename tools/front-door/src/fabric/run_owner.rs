@@ -949,6 +949,7 @@ impl BinaryRunOwner<'_> {
         } = policy;
         let SubmitInput::Submit {
             operation_id,
+            origin_work_key,
             task,
             knobs,
             host,
@@ -1024,6 +1025,7 @@ impl BinaryRunOwner<'_> {
             );
             let input = Box::new(SubmitInput::Submit {
                 extra: Default::default(),
+                origin_work_key: Some(origin_work_key.ok_or(FacadeError::StateCorrupt)?),
                 operation_id: operation_id.clone(),
                 task,
                 knobs,

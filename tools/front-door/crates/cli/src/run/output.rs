@@ -38,7 +38,12 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     );
     out.read_only = true;
     if out.result.error.is_none() {
-        out.summary = Some(output_summary(&out.result.data, &out.human, headed));
+        out.summary = Some(output_summary(
+            &out.result.data,
+            &out.human,
+            headed,
+            Some(&command.target),
+        ));
         if warn_human
             && out
                 .result
@@ -82,7 +87,12 @@ pub fn output_from_host(
 /// What an agent needs from a read: how the attempt settled, what it changed,
 /// and the whole final text up to a generous bound, then its head and tail.
 /// Missing changed-file evidence stays null; it must never read as an empty diff.
-pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
+pub(super) fn output_summary(
+    data: &Value,
+    text: &str,
+    headed: bool,
+    target: Option<&crate::Target>,
+) -> crate::Summary {
     let mut lines = Vec::new();
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
@@ -157,11 +167,9 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
         let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
         lines.extend(body.lines().map(str::to_owned));
     }
-    let target = data["attempt_id"].as_str().map(|id| {
-        data["host"]
-            .as_str()
-            .map_or_else(|| id.to_owned(), |host| format!("{host}/{id}"))
-    });
+    // The graph handle retains placement without exposing the internal ID or
+    // adding summary-only fields to the public output data schema.
+    let target = target.map(ToString::to_string);
     let state = data["state"].as_str().unwrap_or_default();
     let next = target.and_then(|target| {
         if data["eof"] == json!(false) {
@@ -970,13 +978,48 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn output_followups_use_the_public_handle_for_local_and_peer_placements() {
+        for host in [
+            serde_json::Value::Null,
+            json!("11111111111111111111111111111111"),
+        ] {
+            let mut data = json!({
+                "attempt_id":"22222222222222222222222222222222", "host":host,
+                "state":"running", "eof":false,
+                "part":"result", "next_offset":42
+            });
+            let command = crate::Output {
+                target: "repair/writer#2".parse().unwrap(),
+                part: crate::Part::Result,
+                to: None,
+                path: false,
+                offset: 0,
+                tail: None,
+                max_bytes: 65536,
+            };
+            let rendered = super::render_output(command.clone(), Ok((data.clone(), String::new())));
+            let next = rendered.summary.unwrap().next.unwrap();
+            assert_eq!(
+                next,
+                "provenant output repair/writer#2 --part result --offset 42"
+            );
+            data["eof"] = json!(true);
+            let rendered = super::render_output(command, Ok((data, String::new())));
+            assert_eq!(
+                rendered.summary.unwrap().next.as_deref(),
+                Some("provenant wait repair/writer#2")
+            );
+        }
+    }
+
+    #[test]
     fn output_summary_names_planner_fallback_and_reason() {
         let data = json!({
             "attempt_id":"attempt",
             "state":"succeeded",
             "planner_fallback":{"stage":"static", "reason":"planner route failed"}
         });
-        let summary = output_summary(&data, "fallback completed", true);
+        let summary = output_summary(&data, "fallback completed", true, None);
         let text = summary.lines.join("\n");
         assert!(text.contains("planner fallback: static (reason: planner route failed)"));
     }
@@ -986,7 +1029,7 @@ mod tests {
         let data = json!({
             "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
         });
-        let summary = output_summary(&data, "fallback completed", true);
+        let summary = output_summary(&data, "fallback completed", true, None);
         let text = summary.lines.join("\n");
         assert!(text.contains("planner fallback: static (reason: fragment [31minvalid)"));
         assert!(!text.contains('\u{1b}'));

@@ -1632,8 +1632,12 @@ impl Factory {
             }
             result => result?,
         };
+        let replayed = result["replayed"].as_bool().unwrap_or(false);
+        if let Some(object) = result.as_object_mut() {
+            object.remove("replayed");
+        }
         result["named"] = json!({
-            "requested": requested, "graph": id, "replayed": false, "taken": taken,
+            "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
         });
         Ok(result)
     }
@@ -1659,7 +1663,8 @@ impl Factory {
             .map_err(scratch_prepare_error)?;
         let path = publish_graph_document(&scratch, &encode(&document)?)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let run = self.graph_with_scratch(
+        let mut replayed = false;
+        let run = self.graph_launch_result(
             GraphInput::Run {
                 extra: Default::default(),
                 document: path.clone(),
@@ -1672,9 +1677,15 @@ impl Factory {
                 .and_then(Value::as_u64)
                 .map(|_| budget),
             announce,
+            Some(&mut replayed),
         )?;
-        let run = self.wait_document(run, input, budget, cancel, &path, &scratch)?;
-        let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
+        let run = if replayed {
+            run
+        } else {
+            self.wait_document(run, input, budget, cancel, &path, &scratch)?
+        };
+        let timed_out = !replayed
+            && input.get("wait_seconds").and_then(Value::as_u64).is_some()
             && run.status == GraphStatus::Pending
             && !cancel.is_cancelled();
         let target = super::unified::GraphTarget {
@@ -1707,6 +1718,7 @@ impl Factory {
             )?;
         }
         let mut result = encode(run)?;
+        result["replayed"] = json!(replayed);
         report_launch_refusals(&mut result, &rows);
         result["timed_out"] = json!(timed_out);
         Ok(result)
@@ -3043,86 +3055,72 @@ mod tests {
 
     #[test]
     fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> Result {
-        use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
-        struct Owner;
-        impl AttemptOwner for Owner {
-            type Error = std::convert::Infallible;
-            fn actor(&self) -> String {
-                "rerun-fixture".into()
-            }
-            fn observe_or_start(
-                &mut self,
-                _: &graph::AttemptKey,
-                _: graph::NodeInput<'_>,
-                _: &graph::GraphRoute,
-                _: graph::AccessMode,
-                _: Option<&str>,
-                _: graph::Replay<'_>,
-            ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
-                Ok(graph::AttemptObservation::Terminal {
-                    attempt_ref: Some("fixture/first".into()),
-                    outcome: graph::AttemptOutcome::Succeeded,
-                    launched: true,
-                    result: None,
-                    result_warning: None,
-                    result_path: None,
-                    branch: None,
-                    commit: None,
-                    stop: None,
-                })
-            }
-        }
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut input =
-            json!({"op":"run","brief":"Original task","name":"recover-run","explain":true});
-        let document: GraphDocument = serde_json::from_value(
-            factory.graph_document(input.clone(), budget, &cancel)?["document"].clone(),
-        )?;
-        let id = document.graph_id.clone();
-        let mut journal = FileJournal::open(
-            &factory.context.roots.state,
-            factory.context.identity.project,
-            &id,
-            budget,
-            &cancel,
-            &factory.clock,
-        )?;
-        journal.bind(GraphExecution {
-            extra: Default::default(),
-            directory: factory.cwd.clone(),
-            document: document.clone(),
-            review_base: None,
-            integration_base: None,
-        })?;
-        let first = graph::advance_with_budget(
-            &document,
-            &mut Owner,
-            &mut journal,
-            &factory.context.config.graph.limits,
-            &factory.context.config.graph.budget,
-        )?;
-        assert_eq!(first.status, GraphStatus::Complete);
-        drop(journal);
-        assert_eq!(id, "recover-run");
-        input["explain"] = json!(false);
-        let replay = factory.graph_document(input, budget, &cancel)?;
-        assert_eq!(replay["named"]["replayed"], true);
-        assert_eq!(replay["checkpoint"]["graph_id"], id);
-        assert_eq!(replay["status"], "complete");
+        let mut document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"recover-run", "nodes":[{
+                "id":"worker", "access":"read_only", "prompt":"Original task",
+                "route":{"adapter":"fixture", "model":"fixture/model"}
+            }]
+        }))?;
+        document.set_replay_digest("identical-launch-input");
+        // Both submissions chose the same unbound name. Admission is real;
+        // provider execution is deferred at the process boundary.
+        let barrier = std::sync::Barrier::new(2);
+        let launch = || {
+            barrier.wait();
+            provenant_cli::run::with_deferred_provider_launch(|| {
+                factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            })
+        };
+        let results = std::thread::scope(|scope| {
+            let left = scope.spawn(launch);
+            let right = scope.spawn(launch);
+            [left.join().unwrap(), right.join().unwrap()]
+        });
+        let results = [
+            results[0].as_ref().map_err(|error| error.to_string())?,
+            results[1].as_ref().map_err(|error| error.to_string())?,
+        ];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["replayed"] == false)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["replayed"] == true)
+                .count(),
+            1
+        );
         let saved = FileJournal::read_checkpoint(
             &factory.context.roots.state,
             factory.context.identity.project,
-            &id,
+            "recover-run",
         )?
         .ok_or("checkpoint")?;
         assert_eq!(saved.nodes[0].attempts.len(), 1);
-        assert_eq!(
-            saved.nodes[0].attempts[0].attempt_ref.as_deref(),
-            Some("fixture/first")
-        );
+        let replay = factory.launch_submission(
+            document,
+            &json!({"wait_seconds":30}),
+            budget,
+            &cancel,
+            None,
+        )?;
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["timed_out"], false);
+        let after = FileJournal::read_checkpoint(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            "recover-run",
+        )?
+        .ok_or("replayed checkpoint")?;
+        assert_eq!(after, saved);
         Ok(())
     }
 

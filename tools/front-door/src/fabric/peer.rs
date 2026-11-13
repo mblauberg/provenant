@@ -853,10 +853,12 @@ pub(crate) fn peer_submit_graph(
     .to_string();
     let SubmitInput::Submit {
         operation_id,
+        origin_work_key,
         task,
         knobs,
         ..
     } = input;
+    let origin_work_key = origin_work_key.ok_or(FacadeError::StateCorrupt)?;
     let task = &task;
     let graph = peer_graph_name(actor, &operation_id)?;
     let mut route = match &task.route {
@@ -887,6 +889,14 @@ pub(crate) fn peer_submit_graph(
         .node_id
         .clone()
         .ok_or(FacadeError::InvalidInput { detail: None })?;
+    if origin.graph_id.as_deref() != Some(origin_work_key.graph())
+        || node != origin_work_key.node()
+        || origin
+            .attempt
+            .is_some_and(|attempt| attempt != origin_work_key.attempt())
+    {
+        return Err(FacadeError::StateCorrupt);
+    }
     let mut attempt = attempt;
     attempt.provider_timeout = attempt.provider_timeout.or(Some(task.timeout_seconds));
     attempt.account = task.account.clone().or(attempt.account);
@@ -919,6 +929,10 @@ pub(crate) fn peer_submit_graph(
     // comparison-base path as local graph nodes, including exact model routes.
     document.nodes[0].role = origin.role.clone();
     document.review_base = task.base.clone();
+    document.extra.insert(
+        "peer_origin_work_key".into(),
+        serde_json::json!(origin_work_key),
+    );
     document.nodes[0].source =
         task.head.as_ref().map(
             |head| provenant_fabric_runtime::graph::SourceBinding::Commit {
@@ -1142,13 +1156,7 @@ pub(crate) fn peer_graph_fields_page(
     else {
         return Ok(Default::default());
     };
-    let Some(checkpoint) = FileJournal::read_checkpoint(
-        &factory.context.roots.state,
-        factory.context.identity.project,
-        graph,
-    )
-    .map_err(graph_journal_error)?
-    else {
+    let collected = || -> Result<provenant_records::ExtraFields, FacadeError> {
         // Terminal checkpoints can be collected before their RunStore attempts.
         // Retain an explicit pointer so the origin can keep its own durable row.
         if !matches!(
@@ -1157,14 +1165,35 @@ pub(crate) fn peer_graph_fields_page(
         ) {
             return Err(FacadeError::StateCorrupt);
         }
-        return Ok([
+        Ok([
             (
                 "peer_graph".into(),
                 serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
             ),
             ("peer_graph_collected".into(), serde_json::json!(true)),
+            (
+                "peer_origin_work_key".into(),
+                serde_json::json!(
+                    FileJournal::peer_origin(
+                        &factory.context.roots.state,
+                        factory.context.identity.project,
+                        graph,
+                    )
+                    .map_err(graph_journal_error)?
+                    .ok_or(FacadeError::StateCorrupt)?
+                ),
+            ),
         ]
-        .into());
+        .into())
+    };
+    let Some(checkpoint) = FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )
+    .map_err(graph_journal_error)?
+    else {
+        return collected();
     };
     let reference = format!("{}/{}", factory.context.identity.host, attempt);
     if relay::historical_parent_of_attempt(&checkpoint, &reference).is_none() {
@@ -1177,7 +1206,7 @@ pub(crate) fn peer_graph_fields_page(
     )
     .map_err(graph_journal_error)?
     else {
-        return Ok(Default::default());
+        return collected();
     };
     let Some(origin) = execution.extra.get("peer_origin_context") else {
         return Ok(Default::default());
@@ -1229,9 +1258,51 @@ pub(crate) fn peer_graph_fields_page(
             serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
         ),
         ("peer_origin_context".into(), origin.clone()),
+        (
+            "peer_origin_work_key".into(),
+            execution
+                .document
+                .extra
+                .get("peer_origin_work_key")
+                .cloned()
+                .ok_or(FacadeError::StateCorrupt)?,
+        ),
         ("peer_subtree".into(), subtree),
     ]
     .into())
+}
+
+pub(super) fn peer_origin_matches(
+    extra: &provenant_records::ExtraFields,
+    expected: &provenant_records::WorkKey,
+) -> bool {
+    extra
+        .get("peer_origin_work_key")
+        .and_then(|value| serde_json::from_value::<provenant_records::WorkKey>(value.clone()).ok())
+        .as_ref()
+        == Some(expected)
+}
+
+pub(super) fn checked_output_origin(
+    mut output: OutputResult,
+    expected: &provenant_records::WorkKey,
+) -> Result<OutputResult, FacadeError> {
+    let (OutputResult::Chunk { extra, .. } | OutputResult::Artifact { extra, .. }) = &mut output;
+    if !peer_origin_matches(extra, expected) {
+        return Err(FacadeError::StateCorrupt);
+    }
+    // These authenticate the peer read; the CLI output schema contains lane
+    // fields only. Consume transport metadata before rendering the payload.
+    for field in [
+        "peer_graph",
+        "peer_origin_context",
+        "peer_origin_work_key",
+        "peer_graph_collected",
+        "peer_subtree",
+    ] {
+        extra.remove(field);
+    }
+    Ok(output)
 }
 
 pub(crate) fn peer_cancel_operation(

@@ -1457,6 +1457,7 @@ pub(super) fn upstream_results(
             .map(|(label, findings)| InputRequest {
                 label,
                 attempt_ref: None,
+                attempt_key: None,
                 inline_findings: Some(findings),
                 finding_prefix: None,
             })
@@ -1530,13 +1531,15 @@ pub(super) fn upstream_results(
             }
             return;
         }
+        let source = progress
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.attempt_ref.is_some());
         found.push(InputRequest {
             label: id.to_owned(),
-            attempt_ref: progress
-                .attempts
-                .iter()
-                .rev()
-                .find_map(|attempt| attempt.attempt_ref.clone()),
+            attempt_ref: source.and_then(|attempt| attempt.attempt_ref.clone()),
+            attempt_key: source.map(|attempt| attempt.key.clone()),
             inline_findings,
             finding_prefix: include_findings.then(|| prefix.to_owned()),
         });

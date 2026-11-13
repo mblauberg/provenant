@@ -17,12 +17,13 @@ use std::{
 #[derive(Clone, Debug)]
 enum Source {
     Graph(provenant_cli::Target),
+    UnreadableGraph(provenant_cli::Target, String),
     Pr(u64),
 }
 impl Source {
     fn label(&self) -> String {
         match self {
-            Self::Graph(target) => target.to_string(),
+            Self::Graph(target) | Self::UnreadableGraph(target, _) => target.to_string(),
             Self::Pr(number) => format!("#{number}"),
         }
     }
@@ -113,15 +114,25 @@ fn classify_rows(label: &str, rows: &[Value]) -> Reading {
 fn read(
     source: &Source,
     edge: &provenant_cli::run::Edge<'_>,
-    left: Duration,
+    deadline: Instant,
     pr_read_timeout: Duration,
     cancel: &CancelToken,
 ) -> Reading {
     let label = source.label();
+    let left = deadline.saturating_duration_since(Instant::now());
+    if cancel.is_cancelled() || left.is_zero() {
+        return Reading::unavailable(&label, "wait deadline or cancellation reached");
+    }
     match source {
+        Source::UnreadableGraph(_, error) => classify_rows(
+            &label,
+            &[json!({
+                "kind":"graph", "state":"unreadable", "reason":error,
+            })],
+        ),
         Source::Graph(target) => {
             match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
-                crate::fabric::read_status_rows(target, edge)
+                crate::fabric::read_status_rows(target, edge, deadline, cancel)
             }) {
                 Ok(rows) => classify_rows(&label, &rows),
                 Err(error) => Reading::unavailable(&label, &error.to_string()),
@@ -202,10 +213,23 @@ fn collect(
             return true;
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(update) = receiver.recv_timeout(left) else {
+        let Ok(mut update) = receiver.recv_timeout(left) else {
+            for reading in latest.iter_mut().flatten() {
+                if !reading.done() && reading.data.is_object() {
+                    reading.data["stale"] = json!(true);
+                }
+            }
             return false;
         };
         let index = update.target;
+        if update.reading.data.is_null()
+            && let Some(previous) = latest[index]
+                .as_ref()
+                .filter(|reading| reading.data.is_object())
+        {
+            update.reading.data = previous.data.clone();
+            update.reading.data["stale"] = json!(true);
+        }
         if latest[index].as_ref() == Some(&update.reading) {
             continue;
         }
@@ -241,6 +265,33 @@ fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, any: bool)
     }
 }
 
+fn preflight_error(
+    error: &(dyn std::error::Error + 'static),
+    deadline: Instant,
+    cancel: &CancelToken,
+    globals: &Globals,
+) -> u8 {
+    if cancel.is_cancelled() {
+        crate::fail(
+            "wait",
+            Outcome::Cancelled,
+            "CANCELLED",
+            "wait cancelled; the work continues",
+            globals,
+        )
+    } else if Instant::now() >= deadline {
+        crate::fail(
+            "wait",
+            Outcome::Timeout,
+            "TIMEOUT",
+            "wait timed out; the work continues",
+            globals,
+        )
+    } else {
+        crate::fabric::command_fail("wait", error, globals)
+    }
+}
+
 pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     use crate::roots::{Product, Workspace};
     let resolved = match crate::roots::resolve(globals, Workspace::Project, Product::Required) {
@@ -270,9 +321,25 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         assets: &resolved.assets,
         cwd: &resolved.project,
     };
+    let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout));
+    let stop = Stop::default();
     let mut sources: Vec<Source> = command.targets.iter().cloned().map(Source::Graph).collect();
-    if let Err(error) = crate::fabric::check_targets(&command.targets, &edge) {
-        return crate::fabric::command_fail("wait", error.as_ref(), globals);
+    let mut validation = std::collections::BTreeMap::new();
+    if let Err(error) = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
+        crate::fabric::check_targets(
+            &command.targets,
+            &edge,
+            deadline,
+            &stop.cancel,
+            |target, rows| {
+                validation.insert(
+                    target.to_string(),
+                    classify_rows(&target.to_string(), &rows),
+                );
+            },
+        )
+    }) {
+        return preflight_error(error.as_ref(), deadline, &stop.cancel, globals);
     }
     if command.targets.is_empty() && command.prs.is_empty() {
         if provenant_cli::fabric::in_lane() {
@@ -284,9 +351,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 globals,
             );
         }
-        match crate::fabric::unsettled_graphs(&edge) {
-            Ok(graphs) => sources.extend(graphs.into_iter().map(Source::Graph)),
-            Err(error) => return crate::fabric::command_fail("wait", error.as_ref(), globals),
+        match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
+            crate::fabric::unsettled_graphs(&edge, deadline, &stop.cancel)
+        }) {
+            Ok(graphs) => sources.extend(graphs.into_iter().map(|graph| match graph.error {
+                Some(error) => Source::UnreadableGraph(graph.target, error),
+                None => Source::Graph(graph.target),
+            })),
+            Err(error) => return preflight_error(error.as_ref(), deadline, &stop.cancel, globals),
         }
     }
     let mut prs = command.prs.clone();
@@ -302,29 +374,60 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             globals,
         );
     }
-    let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout));
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
-    let mut latest: Vec<Option<Reading>> = vec![None; sources.len()];
-    let mut settled = Vec::new();
+    let mut latest: Vec<Option<Reading>> = sources
+        .iter()
+        .map(|source| validation.get(&source.label()).cloned())
+        .collect();
+    let mut settled: Vec<usize> = latest
+        .iter()
+        .enumerate()
+        .filter_map(|(index, reading)| reading.as_ref().is_some_and(Reading::done).then_some(index))
+        .collect();
     let mut write_error = None;
-    let stop = Stop::default();
+    let mut transition = |index: usize, reading: &Reading| {
+        if command.follow && write_error.is_none() {
+            let line = if globals.json {
+                json!({"event":"transition","target":sources[index].label(),
+                    "settle":reading.settle,"line":reading.line})
+                .to_string()
+            } else {
+                reading.line.clone()
+            };
+            write_error = write_line(&line).err();
+        }
+    };
+    for (index, reading) in latest.iter().enumerate() {
+        if let Some(reading) = reading {
+            transition(index, reading);
+        }
+    }
     let (sender, receiver) = mpsc::sync_channel(128);
     let done = std::thread::scope(|scope| {
         for (index, source) in sources.iter().enumerate() {
+            if latest[index].as_ref().is_some_and(Reading::done) {
+                continue;
+            }
+            let sampled = latest[index].is_some();
             let sender = sender.clone();
             let edge = &edge;
             let stop = &stop;
             let interval = Duration::from_millis(match source {
                 Source::Pr(_) => settings.pr_interval_ms,
-                Source::Graph(_) => settings.local_interval_ms,
+                Source::Graph(_) | Source::UnreadableGraph(..) => settings.local_interval_ms,
             });
             scope.spawn(move || {
+                if sampled
+                    && !stop.pause(interval.min(deadline.saturating_duration_since(Instant::now())))
+                {
+                    return;
+                }
                 loop {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if stop.cancel.is_cancelled() {
                         break;
                     }
-                    let reading = read(source, edge, left, pr_read_timeout, &stop.cancel);
+                    let reading = read(source, edge, deadline, pr_read_timeout, &stop.cancel);
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -349,18 +452,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             &mut settled,
             deadline,
             command.any,
-            &mut |index, reading| {
-                if command.follow && write_error.is_none() {
-                    let line = if globals.json {
-                        json!({"event":"transition","target":sources[index].label(),
-                            "settle":reading.settle,"line":reading.line})
-                        .to_string()
-                    } else {
-                        reading.line.clone()
-                    };
-                    write_error = write_line(&line).err();
-                }
-            },
+            &mut transition,
         );
         stop.stop();
         drop(receiver);
@@ -419,6 +511,156 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_reread_retains_the_last_snapshot_as_stale() {
+        for failure_delivered in [false, true] {
+            let rows = json!({"rows":[{"kind":"graph","state":"pending"}]});
+            let mut latest = vec![Some(Reading {
+                settle: Settle::Pending,
+                line: "g pending".into(),
+                data: rows.clone(),
+            })];
+            let (sender, receiver) = mpsc::channel();
+            if failure_delivered {
+                sender
+                    .send(Update {
+                        target: 0,
+                        reading: Reading::unavailable("g", "relay timed out"),
+                    })
+                    .unwrap();
+            }
+            drop(sender);
+            let mut settled = Vec::new();
+            assert!(!collect(
+                &receiver,
+                &mut latest,
+                &mut settled,
+                Instant::now(),
+                false,
+                &mut |_, _| {}
+            ));
+            let last = latest[0].as_ref().unwrap();
+            assert_eq!(last.data["rows"], rows["rows"]);
+            assert_eq!(last.data["stale"], true);
+            assert_eq!(last.settle, Settle::Pending);
+            assert!(settled.is_empty());
+        }
+    }
+
+    #[test]
+    fn bare_wait_reports_an_unreadable_graph_as_unsuccessful()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::Clock;
+        use provenant_fabric_runtime::graph::FileJournal;
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = CancelToken::new();
+        drop(FileJournal::open(
+            &roots.state,
+            context.identity.project,
+            "broken",
+            provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+            &cancel,
+            &clock,
+        )?);
+        std::fs::write(
+            roots
+                .state
+                .as_path()
+                .join("fabric/graphs")
+                .join(context.identity.project.to_string())
+                .join("graph-broken.json"),
+            b"invalid checkpoint",
+        )?;
+        let edge = provenant_cli::run::Edge {
+            roots: &roots,
+            home: &rig.home,
+            assets: &rig.project,
+            cwd: &rig.project,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let discovered = crate::fabric::unsettled_graphs(&edge, deadline, &cancel)?;
+        let graph = discovered
+            .into_iter()
+            .find(|graph| graph.target.name == "broken")
+            .ok_or("broken graph was hidden")?;
+        let reading = read(
+            &Source::UnreadableGraph(graph.target, graph.error.ok_or("decode failure")?),
+            &edge,
+            deadline,
+            Duration::from_secs(1),
+            &cancel,
+        );
+        assert_eq!(reading.settle, Settle::Unsuccessful);
+        assert!(reading.done());
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_expiry_and_cancellation_use_wait_exit_codes() {
+        let cancel = CancelToken::new();
+        let globals = Globals::default();
+        let error = provenant_fabric_runtime::coordination::facade::FacadeError::Timeout;
+        assert_eq!(
+            preflight_error(&error, Instant::now(), &cancel, &globals),
+            124
+        );
+        cancel.cancel();
+        assert_eq!(
+            preflight_error(
+                &error,
+                Instant::now() + Duration::from_secs(30),
+                &cancel,
+                &globals
+            ),
+            130
+        );
+    }
+
+    #[test]
+    fn graph_wait_readers_share_the_callers_deadline_and_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let edge = provenant_cli::run::Edge {
+            roots: &roots,
+            home: &rig.home,
+            assets: &rig.project,
+            cwd: &rig.project,
+        };
+        let target = "missing".parse()?;
+        for cancelled in [false, true] {
+            let cancel = CancelToken::new();
+            let deadline = if cancelled {
+                cancel.cancel();
+                Instant::now() + Duration::from_secs(30)
+            } else {
+                Instant::now()
+            };
+            for error in [
+                crate::fabric::check_targets(
+                    std::slice::from_ref(&target),
+                    &edge,
+                    deadline,
+                    &cancel,
+                    |_, _| {},
+                )
+                .unwrap_err(),
+                crate::fabric::unsettled_graphs(&edge, deadline, &cancel).unwrap_err(),
+                crate::fabric::read_status_rows(&target, &edge, deadline, &cancel).unwrap_err(),
+            ] {
+                assert!(matches!(
+                    (cancelled, error.downcast_ref::<FacadeError>()),
+                    (true, Some(FacadeError::Cancelled)) | (false, Some(FacadeError::Timeout))
+                ));
+            }
+        }
+        Ok(())
+    }
 
     fn reading(settle: Settle) -> Reading {
         Reading {

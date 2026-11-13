@@ -221,8 +221,12 @@ returns when every target has. `--pr NUMBER` is satisfied when the pull
 request's required checks on its current head reach a verdict, or when it is
 merged or closed. `--timeout` takes a span, defaults to
 `domains.wait.timeout_seconds` and is at most four hours. `--follow` prints
-one line per transition before the result. A failed read is retried until the
-deadline rather than ending the wait. Neither expiry nor cancelling a wait
+one line per transition before the result. Bare wait includes unreadable graphs
+as unsuccessful targets. Other failed reads are retried until the shared
+deadline, which also bounds target validation, graph reads and peer enrichment.
+If a later read fails, the last successful data is retained and marked `stale`.
+Expiry also marks retained pending data `stale`, including when a reread ends too late.
+Neither expiry nor cancelling a wait
 stops the work.
 
 | Exit | Meaning |
@@ -230,7 +234,7 @@ stops the work.
 | 0 | Every target settled successfully; under `--any`, the first one did. A merged pull request, or one whose checks passed, counts as success. |
 | 1 | A target settled without success: failed, stopped or lost, or a pull request whose checks failed or that closed unmerged. The result names it. |
 | 2 | Invalid input, including a target that is not found or is ambiguous. `wait` resolves every target before it starts. |
-| 5 | A target needs input: an open owner ask, or a lane waiting to be steered. |
+| 5 | A graph target is paused for owner input. Node and attempt targets settle by their own state; an open lane ask or steering wait alone does not satisfy them. |
 | 124 | The budget expired with targets unsettled; the result names them. |
 | 130 | The wait was cancelled. |
 

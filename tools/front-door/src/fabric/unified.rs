@@ -436,18 +436,8 @@ fn mark_unreadable_attempt(row: &mut Value, attempt: &str, error: &provenant_rec
     ));
 }
 
-/// Enrich graph attempt rows from identity-checked host records. Checkpoint
-/// rows describe graph progress; the run owner retains typed terminal causes.
-pub(crate) fn enrich_status_rows(
-    rows: &mut [Value],
-    context: &Context,
-    clock: &SystemClock,
-    cancel: &CancelToken,
-) -> Result<(), FacadeError> {
-    let budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
-    enrich_status_rows_within(rows, context, clock, cancel, budget)
-}
-
+/// Enrich graph attempt rows from identity-checked host records within the
+/// caller's budget. The run owner retains typed terminal causes.
 pub(crate) fn enrich_status_rows_within(
     rows: &mut [Value],
     context: &Context,
@@ -541,28 +531,34 @@ pub(crate) fn enrich_status_rows_within(
         };
         // A peer owns a separate graph rooted at the submitted attempt. Its
         // authenticated status retains the origin binding beside that pointer.
-        if retain_collected_peer_row(row, &record, host, context.identity.host) {
-            continue;
-        }
         row["preparation_failure"] = json!(record.preparation_failure);
         row["settlement_reason"] = json!(record.settlement_reason);
-        let peer_origin = record.extra.get("peer_origin_context");
+        let target: provenant_cli::Target = row["id"]
+            .as_str()
+            .ok_or(FacadeError::StateCorrupt)?
+            .parse()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let expected = provenant_records::WorkKey::new(
+            context.identity.project,
+            target.name,
+            target.node.ok_or(FacadeError::StateCorrupt)?,
+            target.attempt.ok_or(FacadeError::StateCorrupt)?.get(),
+        )
+        .map_err(|_| FacadeError::StateCorrupt)?;
         let peer_graph = record.extra.get("peer_graph");
         let origin_matches = host != context.identity.host
             && peer_graph.is_some_and(|graph| {
                 graph["host"] == serde_json::json!(host)
                     && graph["graph_id"].as_str().is_some_and(|id| !id.is_empty())
             })
-            && peer_origin.is_some_and(|origin| {
-                origin["graph_id"] == row["graph_id"] && origin["node_id"] == row["node_id"]
-            });
-        if !origin_matches
-            && record.context.as_ref().is_none_or(|context| {
-                context.graph_id.as_deref() != row["graph_id"].as_str()
-                    || context.node_id.as_deref() != row["node_id"].as_str()
-            })
+            && super::peer::peer_origin_matches(&record.extra, &expected);
+        if (host != context.identity.host && !origin_matches)
+            || (host == context.identity.host && record.key != expected)
         {
             return Err(FacadeError::StateCorrupt);
+        }
+        if retain_collected_peer_row(row, &record, host, context.identity.host) {
+            continue;
         }
         for field in ["peer_graph", "peer_subtree"] {
             if let Some(value) = record.extra.get(field) {
@@ -1528,7 +1524,9 @@ fn host_graph_output(
     } else {
         Vec::new()
     };
-    let reply = graph_attempt_output(command.clone(), &reference, edge, factory, budget, cancel)?;
+    let mut selected = command.clone();
+    selected.target = resolved.target();
+    let reply = graph_attempt_output(selected, &reference, edge, factory, budget, cancel)?;
     Ok(with_graph_failures(reply, &failure_rows))
 }
 
@@ -1625,18 +1623,36 @@ fn graph_attempt_output(
             &owner.call(cancel),
         ));
     }
+    let origin = provenant_records::WorkKey::new(
+        factory.context.identity.project,
+        command.target.name.clone(),
+        command
+            .target
+            .node
+            .clone()
+            .ok_or(FacadeError::StateCorrupt)?,
+        command
+            .target
+            .attempt
+            .ok_or(FacadeError::StateCorrupt)?
+            .get(),
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?;
     Ok(provenant_cli::run::output_from_host(
         command,
         host,
         attempt,
         |input| {
-            owner.output(input, budget, cancel).map_err(|error| {
-                provenant_cli::run::Fail::new(
-                    provenant_records::Outcome::Error,
-                    provenant_run::ErrorKind::Fabric,
-                    error.to_string(),
-                )
-            })
+            owner
+                .output(input, budget, cancel)
+                .and_then(|output| super::peer::checked_output_origin(output, &origin))
+                .map_err(|error| {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Error,
+                        provenant_run::ErrorKind::Fabric,
+                        error.to_string(),
+                    )
+                })
         },
     ))
 }
@@ -1763,37 +1779,51 @@ fn read_context(edge: &provenant_cli::run::Edge<'_>) -> Result<Option<Context>, 
 }
 
 /// Resolve every target before a wait starts. Inside a lane the host performs
-/// one status read for validation, then wait reads each target again.
+/// one status read for validation and the wait's initial snapshot.
 pub(crate) fn check_targets(
     targets: &[provenant_cli::Target],
     edge: &provenant_cli::run::Edge<'_>,
+    deadline: std::time::Instant,
+    cancel: &CancelToken,
+    mut observed: impl FnMut(&provenant_cli::Target, Vec<Value>),
 ) -> Result<(), Box<dyn std::error::Error>> {
     if targets.is_empty() {
         return Ok(());
     }
+    wait_remaining(deadline, cancel)?;
     if provenant_cli::fabric::in_lane() {
         for target in targets {
+            let left = wait_remaining(deadline, cancel)?;
             let operation = provenant_fabric_runtime::graph::relay::RelayOp::Read {
                 input: json!({"op":"status","id":target.to_string()}),
             };
-            if let Err(error) = provenant_cli::fabric::graph_relay::from_lane(
-                &operation,
-                &CancelToken::new(),
-                std::time::Duration::from_secs(55),
-            ) {
-                let error = super::interface::relay_error(error);
-                if is_target_not_found(&error) {
-                    return Err(Box::new(target_fault(ResolveError::NotFound(
-                        target.to_string(),
-                    ))));
-                }
-                return Err(Box::new(error));
-            }
+            let value =
+                match provenant_cli::fabric::graph_relay::from_lane(&operation, cancel, left) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let error = super::interface::relay_error(error);
+                        if is_target_not_found(&error) {
+                            return Err(Box::new(target_fault(ResolveError::NotFound(
+                                target.to_string(),
+                            ))));
+                        }
+                        return Err(Box::new(error));
+                    }
+                };
+            wait_remaining(deadline, cancel)?;
+            observed(
+                target,
+                value["rows"]
+                    .as_array()
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .clone(),
+            );
         }
         return Ok(());
     }
     let context = read_context(edge)?;
     for target in targets {
+        wait_remaining(deadline, cancel)?;
         let Some(context) = &context else {
             return Err(Box::new(target_fault(ResolveError::NotFound(
                 target.to_string(),
@@ -1806,50 +1836,97 @@ pub(crate) fn check_targets(
             Want::Work,
         )
         .map_err(target_fault)?;
+        wait_remaining(deadline, cancel)?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct WaitGraph {
+    pub target: provenant_cli::Target,
+    pub error: Option<String>,
 }
 
 /// The project's running graphs: what a wait with no target waits for. A
 /// paused graph waits on its owner, so it is left out.
 pub(crate) fn unsettled_graphs(
     edge: &provenant_cli::run::Edge<'_>,
-) -> Result<Vec<provenant_cli::Target>, Box<dyn std::error::Error>> {
-    let Some(context) = read_context(edge)? else {
+    deadline: std::time::Instant,
+    cancel: &CancelToken,
+) -> Result<Vec<WaitGraph>, Box<dyn std::error::Error>> {
+    wait_remaining(deadline, cancel)?;
+    let context = read_context(edge)?;
+    wait_remaining(deadline, cancel)?;
+    let Some(context) = context else {
         return Ok(Vec::new());
     };
     let root = &context.roots.state;
     let project = context.identity.project;
     let mut graphs = Vec::new();
     for name in FileJournal::graph_ids(root, project)? {
-        if let Ok(Some(checkpoint)) = FileJournal::read_status_checkpoint(root, project, &name)
-            && graph_snapshot(checkpoint).status
-                == provenant_fabric_runtime::graph::GraphStatus::Pending
-        {
-            graphs.push(provenant_cli::Target {
+        wait_remaining(deadline, cancel)?;
+        let error = match FileJournal::read_status_checkpoint(root, project, &name) {
+            Ok(Some(checkpoint)) => {
+                if graph_snapshot(checkpoint).status
+                    != provenant_fabric_runtime::graph::GraphStatus::Pending
+                {
+                    continue;
+                }
+                None
+            }
+            Ok(_) => continue,
+            Err(error) => Some(error.to_string()),
+        };
+        graphs.push(WaitGraph {
+            target: provenant_cli::Target {
                 name,
                 node: None,
                 attempt: None,
-            });
-        }
+            },
+            error,
+        });
     }
+    wait_remaining(deadline, cancel)?;
     Ok(graphs)
+}
+
+/// Every wait phase spends the same wall-clock deadline and cancellation token.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "wait transport owns its real-time deadline"
+)]
+fn wait_remaining(
+    deadline: std::time::Instant,
+    cancel: &CancelToken,
+) -> Result<std::time::Duration, FacadeError> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if cancel.is_cancelled() {
+        Err(FacadeError::Cancelled)
+    } else if left.is_zero() {
+        Err(FacadeError::Timeout)
+    } else {
+        Ok(left)
+    }
 }
 
 /// The status rows one target names, read afresh: the wait verb's reader.
 pub(crate) fn read_status_rows(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
+    deadline: std::time::Instant,
+    cancel: &CancelToken,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let left = wait_remaining(deadline, cancel)?;
     if provenant_cli::fabric::in_lane() {
         let value = provenant_cli::fabric::graph_relay::from_lane(
             &provenant_fabric_runtime::graph::relay::RelayOp::Read {
                 input: json!({"op":"status","id":target.to_string()}),
             },
-            &CancelToken::new(),
-            std::time::Duration::from_secs(55),
+            cancel,
+            left,
         )
         .map_err(super::interface::relay_error)?;
+        wait_remaining(deadline, cancel)?;
         return Ok(value["rows"]
             .as_array()
             .ok_or(FacadeError::StateCorrupt)?
@@ -1869,12 +1946,16 @@ pub(crate) fn read_status_rows(
         attempt: resolved.attempt_ref,
     };
     let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
-    enrich_status_rows(
-        &mut rows,
-        &context,
-        &SystemClock::new(),
-        &CancelToken::new(),
-    )?;
+    let clock = SystemClock::new();
+    let left = wait_remaining(deadline, cancel)?;
+    let budget = WaitBudget::up_to(
+        clock.mono_now(),
+        provenant_core::DurationMicros::from_micros(
+            u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
+        ),
+    );
+    enrich_status_rows_within(&mut rows, &context, &clock, cancel, budget)?;
+    wait_remaining(deadline, cancel)?;
     Ok(rows)
 }
 

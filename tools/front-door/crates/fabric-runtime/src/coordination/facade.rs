@@ -81,6 +81,10 @@ bounded_input! {
     pub enum SubmitInput as WireSubmitInput {
         Submit {
             operation_id: OperationId,
+            /// Origin identity is mandatory for peer placement; receiver
+            /// attempts keep their own local WorkKeys.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            origin_work_key: Option<provenant_records::WorkKey>,
             /// One submission admits exactly one attempt.
             task: SubmittedTask,
             #[serde(default)]

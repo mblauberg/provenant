@@ -72,7 +72,7 @@ impl Target {
         let mut segments = spelling.split('/');
         let head = segments.next().unwrap_or_default();
         let node_part = segments.next();
-        if is_legacy_id(head) {
+        if check_name(head).is_err() && is_legacy_id(head) {
             return Err(TargetError::LegacyId);
         }
         if segments.next().is_some() {
@@ -477,8 +477,21 @@ mod tests {
 
     #[test]
     fn letter_led_names_that_look_like_hex_stay_names() {
-        for spelling in ["deadbeef", "abc", "face-lift"] {
-            assert_eq!(Target::parse(spelling).unwrap().name, spelling);
+        for spelling in [
+            "deadbeef",
+            "abc",
+            "face-lift",
+            "abcdef0123456789abcdef0123456789",
+        ] {
+            assert!(
+                provenant_fabric_runtime::graph::template::graph_name_fault(spelling).is_none()
+            );
+            for suffix in ["", "/writer", "/writer#2"] {
+                let target = format!("{spelling}{suffix}");
+                let parsed = Target::parse(&target).unwrap();
+                assert_eq!(parsed.name, spelling);
+                assert_eq!(parsed.to_string(), target);
+            }
         }
     }
 
