@@ -101,7 +101,7 @@ launches that provably never reached a guardian, and settles attempts proven
 to belong to a previous boot as `lost`. Reboot recovery releases the reservation
 after the terminal transaction and preserves all attempt artefacts and worktree
 contents. `stop` also performs this recovery. Other custody stays held or
-uncertain without being changed. `open_runs` lists runs with
+uncertain without being changed. `open_attempts` lists attempts with
 nonterminal work for a recovery scan.
 
 Provider preparation receives canonical per-attempt temporary and provider-state

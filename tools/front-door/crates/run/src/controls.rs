@@ -2633,17 +2633,17 @@ impl RunStore {
         Ok((run, ready))
     }
 
-    /// Up to `limit` runs needing recovery or terminal temporary cleanup in
+    /// Up to `limit` attempts needing recovery or terminal temporary cleanup in
     /// this project. Nonterminal work takes priority over temporary cleanup.
-    pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
+    pub fn open_attempts(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         self.cutover_writer_reservations(call)?;
-        self.open_runs_readonly(limit, call)
+        self.open_attempts_readonly(limit, call)
     }
 
     /// Inspect pending recovery independently of a failed custody cutover.
-    /// Callers report reservation issues alongside these known runs.
-    pub fn open_runs_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
+    /// Callers report reservation issues alongside these known attempts.
+    pub fn open_attempts_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = {
@@ -3908,7 +3908,7 @@ mod tests {
         std::fs::write(&source, serde_json::to_vec(&retained)?)?;
         std::fs::remove_file(&child)?;
         std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
-        let scan = store.open_runs(10, &call);
+        let scan = store.open_attempts(10, &call);
         let reconcile = store.reconcile_with_observer(
             run.attempt_id,
             &crate::dispatch_tests::Fake::default(),

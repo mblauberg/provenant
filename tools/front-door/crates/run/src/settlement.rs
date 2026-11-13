@@ -2176,7 +2176,7 @@ pub struct ResumeRequest {
     roots: crate::RootSeed,
     project: provenant_core::ProjectId,
     actor: provenant_core::ActorId,
-    run: provenant_core::AttemptId,
+    attempt: provenant_core::AttemptId,
     registry: std::path::PathBuf,
 }
 
@@ -2193,8 +2193,8 @@ impl ResumeRequest {
     pub fn actor(&self) -> provenant_core::ActorId {
         self.actor
     }
-    pub fn run(&self) -> provenant_core::AttemptId {
-        self.run
+    pub fn attempt(&self) -> provenant_core::AttemptId {
+        self.attempt
     }
 }
 
@@ -2210,7 +2210,7 @@ fn report_registry_error(run: provenant_core::AttemptId, error: &RunError) {
 #[serde(deny_unknown_fields)]
 struct WorkerProcessRefusal {
     schema_version: u64,
-    run: provenant_core::AttemptId,
+    attempt: provenant_core::AttemptId,
     expires: provenant_core::WallTime,
     used: u64,
     limit: u64,
@@ -2227,7 +2227,7 @@ impl crate::RunStore {
             read_sealed(&directory, "settlement-process-refusal.json", RECORD_LIMIT).ok()??;
         let refusal: WorkerProcessRefusal = crate::db::decode(&raw).ok()?;
         if refusal.schema_version != 1
-            || refusal.run != run
+            || refusal.attempt != run
             || call.clock.wall_now().ok()? >= refusal.expires
         {
             return None;
@@ -2497,7 +2497,7 @@ impl crate::RunStore {
                 },
                 project: self.context.project_id,
                 actor: self.context.actor_id,
-                run,
+                attempt: run,
                 registry: self.writer_registry.clone(),
             };
             let executable = std::env::current_exe()?;
@@ -2515,7 +2515,7 @@ impl crate::RunStore {
                     ".settlement-",
                     &crate::db::bytes(&QueuedWorker {
                         schema_version: 2,
-                        run,
+                        attempt: run,
                         expires: wall
                             .checked_add(provenant_core::DurationMicros::from_micros(
                                 UNKNOWN_OWNER_LIMIT_MS * 1000,
@@ -2538,7 +2538,7 @@ impl crate::RunStore {
                             .checked_add(provenant_core::DurationMicros::from_micros(60_000_000))
                             && let Ok(bytes) = crate::db::bytes(&WorkerProcessRefusal {
                                 schema_version: 1,
-                                run,
+                                attempt: run,
                                 expires,
                                 used,
                                 limit,
@@ -2579,7 +2579,7 @@ impl crate::RunStore {
 #[derive(Serialize, Deserialize)]
 struct QueuedWorker {
     schema_version: u64,
-    run: provenant_core::AttemptId,
+    attempt: provenant_core::AttemptId,
     expires: provenant_core::WallTime,
 }
 
@@ -2592,7 +2592,7 @@ impl QueuedWorker {
                 ..Default::default()
             },
         )?;
-        if marker.schema_version != 2 || marker.run != run {
+        if marker.schema_version != 2 || marker.attempt != run {
             return Err(RunError::Validation(
                 "settlement queue marker run or version mismatch",
             ));
@@ -2625,7 +2625,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         cancel: &cancel,
     };
     let store = crate::RunStore::open(&context, &call)?.with_writer_registry(&request.registry);
-    let directory = store.attempt_dir(request.run, false)?;
+    let directory = store.attempt_dir(request.attempt, false)?;
     // A queuing reader can briefly hold this lock while probing for a worker.
     // Wait through that probe instead of abandoning the queued request.
     let _worker = match directory.lock(
@@ -2649,8 +2649,12 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
             let (_wake, sleep) = mpsc::channel::<()>();
             let _ = sleep.recv_timeout(Duration::from_millis(delay_ms));
         }
-        let found =
-            store.reconcile_with_observer(request.run, providers, &call, &SystemProcessObserver)?;
+        let found = store.reconcile_with_observer(
+            request.attempt,
+            providers,
+            &call,
+            &SystemProcessObserver,
+        )?;
         if !found
             .iter()
             .any(|(_, state)| matches!(state, crate::Reconciled::Settling {..}) || matches!(state, crate::Reconciled::Uncertain { reason } if !matches!(reason, crate::UncertainReason::HostStalled)))

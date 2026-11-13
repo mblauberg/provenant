@@ -538,7 +538,7 @@ mod tests {
 case "$*" in
   *worktree*) printf '%s\n' '{"total":3}' '{"worktree":{"path":"/primary"}}' '{"worktree":{"path":"/lane","branch":"refs/heads/lane"}}' ;;
   *--all*) printf '%s\n' '{"total":0,"next":null}' ;;
-  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"run_id":"r","task_id":"t","attempt_id":"a","state":"running"}}' ;;
+  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"running"}}' ;;
 esac
 /bin/sleep 5
 "##,
@@ -564,7 +564,7 @@ esac
             crate::hooks::session_collection_deadline(host_deadline),
         );
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(digest.contains("g/a#1"), "{digest}");
         assert!(digest.contains("/lane"), "{digest}");
         assert!(
             digest.contains("1 lane record was not inspected"),
@@ -606,7 +606,7 @@ esac
             "hook response missed its deadline"
         );
         for text in [
-            "r/t/a",
+            "g/a#1",
             "/lane",
             "1 lane record was not inspected",
             "1 worktree skipped during inventory",
@@ -622,7 +622,7 @@ esac
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("lanes");
-        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":3,\"next\":7}' '{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}'\n/bin/sleep 5\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":3,\"next\":7}' '{\"cursor\":20,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"a\",\"attempt\":1},\"attempt_id\":\"a\",\"state\":\"running\"}}'\n/bin/sleep 5\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let executor = SystemExecutor::new(1).unwrap();
         let cli = Cli {
@@ -634,7 +634,7 @@ esac
         let (lanes, next, skipped) = cli
             .lane_listing(Instant::now() + Duration::from_secs(1), None)
             .unwrap();
-        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(next.as_deref(), Some("20"));
         assert_eq!(skipped, 2);
     }
@@ -642,10 +642,10 @@ esac
     #[test]
     fn lane_stream_preserves_partial_page_and_resumes_after_last_record() {
         use super::*;
-        let bytes = b"{\"total\":3,\"next\":7}\n{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}\n{\"cursor\":19";
+        let bytes = b"{\"total\":3,\"next\":7}\n{\"cursor\":20,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"a\",\"attempt\":1},\"attempt_id\":\"a\",\"state\":\"running\"}}\n{\"cursor\":19";
         let (lanes, next, skipped) = parse_lane_stream(bytes, None).unwrap();
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(next.as_deref(), Some("20"));
         assert_eq!(skipped, 2);
         let state = SessionState {
@@ -655,7 +655,7 @@ esac
             ..Default::default()
         };
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
-        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(digest.contains("g/a#1"), "{digest}");
         assert!(
             digest.contains("2 lane records were not inspected"),
             "{digest}"
@@ -664,10 +664,10 @@ esac
         let (_, next, skipped) = parse_lane_stream(b"{\"total\":1,\"next\":null}\n", None).unwrap();
         assert_eq!(next.as_deref(), Some(""));
         assert_eq!(skipped, 1);
-        let settled = b"{\"total\":2,\"next\":null}\n{\"cursor\":2,\"lane\":{\"state\":\"running\"}}\n{\"cursor\":1,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"done\",\"state\":\"failed\",\"finished_at\":\"2026-10-27T01:00:00Z\"}}\n";
+        let settled = b"{\"total\":2,\"next\":null}\n{\"cursor\":2,\"lane\":{\"state\":\"running\"}}\n{\"cursor\":1,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"done\",\"attempt\":1},\"attempt_id\":\"done\",\"state\":\"failed\",\"finished_at\":\"2026-10-27T01:00:00Z\"}}\n";
         let (lanes, next, skipped) = parse_lane_stream(settled, Some(0)).unwrap();
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].id, "r/t/done");
+        assert_eq!(lanes[0].id, "g/done#1");
         assert_eq!(next, None);
         assert_eq!(skipped, 0);
     }
@@ -766,14 +766,14 @@ esac
         use super::*;
         use serde_json::json;
         let data = json!({"lanes":[
-            {"run_id":"r","task_id":"t","attempt_id":"a","state":"running",
+            {"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"running",
              "applied_route":{"model":"m"}, "worktree":{"kind":"path","root":"/","relative":{"path":"w/x"}}},
-            {"run_id":"r","task_id":"t","attempt_id":"b","state":"queued",
+            {"key":{"graph":"g","node":"b","attempt":1},"attempt_id":"b","state":"queued",
              "requested_route":{"kind":"named","name":"utility"}}
         ],"next_cursor":"7"});
         let (lanes, next) = parse_lanes(&data, None);
         assert_eq!(next.as_deref(), Some("7"));
-        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(lanes[0].route, "m");
         assert_eq!(lanes[0].worktree.as_deref(), Some("/w/x"));
         assert_eq!(lanes[1].route, "utility");
@@ -785,9 +785,9 @@ esac
         use super::*;
         use serde_json::json;
         let data = json!({"lanes":[
-            {"run_id":"r","task_id":"t","attempt_id":"new","state":"failed","reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
-            {"run_id":"r","task_id":"t","attempt_id":"old","state":"succeeded","finished_at":"2026-10-27T00:00:00Z"},
-            {"run_id":"r","task_id":"t","attempt_id":"none","state":"lost"}
+            {"key":{"graph":"g","node":"new","attempt":1},"attempt_id":"new","state":"failed","reason":"boom","finished_at":"2026-10-27T01:00:00Z"},
+            {"key":{"graph":"g","node":"old","attempt":1},"attempt_id":"old","state":"succeeded","finished_at":"2026-10-27T00:00:00Z"},
+            {"key":{"graph":"g","node":"none","attempt":1},"attempt_id":"none","state":"lost"}
         ],"next_cursor":null});
         let after = "2026-10-27T00:30:00Z"
             .parse::<jiff::Timestamp>()
@@ -806,7 +806,7 @@ esac
         // More than a page of lanes: the settled listing is newest-queued
         // first, so a lane on a later page can still have finished recently.
         let data = json!({"lanes":[
-            {"run_id":"r","task_id":"t","attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
+            {"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"failed","finished_at":"2026-10-27T01:00:00Z"}
         ],"next_cursor":"1042"});
         let (lanes, next) = parse_lanes(&data, Some(0));
         let cwd = Path::new("/work");

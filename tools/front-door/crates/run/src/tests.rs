@@ -3154,7 +3154,7 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    assert_eq!(store.open_runs(10, &call)?, vec![input.attempt_id]);
+    assert_eq!(store.open_attempts(10, &call)?, vec![input.attempt_id]);
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -3162,7 +3162,7 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
         reaction.graph_done = true;
         Ok(())
     })?;
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(store.open_attempts(10, &call)?.is_empty());
     Ok(())
 }
 

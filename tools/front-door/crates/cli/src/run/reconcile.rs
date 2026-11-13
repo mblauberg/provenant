@@ -109,7 +109,7 @@ pub(super) fn reconcile_inner(
     let (attempts, truncated) = if command.targets.is_empty() {
         let call = request(&clock, &cancel)?;
         prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
-        let mut attempts = session.store.open_runs_readonly(SCAN + 1, &call)?;
+        let mut attempts = session.store.open_attempts_readonly(SCAN + 1, &call)?;
         let truncated = attempts.len() as u64 > SCAN;
         attempts.truncate(SCAN as usize);
         (attempts, truncated)

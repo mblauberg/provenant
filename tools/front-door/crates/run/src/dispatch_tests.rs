@@ -839,7 +839,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
 fn finish_reactions(store: &RunStore) -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    for run in store.open_runs(100, &call)? {
+    for run in store.open_attempts(100, &call)? {
         store.drain_reactions(run, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
@@ -1389,7 +1389,7 @@ fn recover_rebooted_writer_inner(
     }
     assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
     finish_reactions(&store)?;
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(store.open_attempts(10, &call)?.is_empty());
     Ok(())
 }
 

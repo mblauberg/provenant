@@ -638,7 +638,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             ..
         }
     ));
-    assert!(store.open_runs(100, &call)?.contains(&input.attempt_id));
+    assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
     std::fs::write(&marker, original)?;
 
     // A failed cleanup must retain its retry marker and the pin.
@@ -657,7 +657,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             .iter()
             .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
     );
-    assert!(store.open_runs(100, &call)?.contains(&input.attempt_id));
+    assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
         7,

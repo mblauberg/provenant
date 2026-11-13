@@ -185,7 +185,7 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     assert!(temporary.is_dir());
 
-    assert_eq!(store.open_runs(10, &call)?, vec![run.attempt_id]);
+    assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
     assert_eq!(
         store.reconcile_with_observer(
             run.attempt_id,
@@ -197,7 +197,7 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     );
     assert!(!temporary.exists());
     finish_reactions(&store)?;
-    assert!(store.open_runs(10, &call)?.is_empty());
+    assert!(store.open_attempts(10, &call)?.is_empty());
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
 }
@@ -375,7 +375,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             &call,
         )?;
         assert!(!temporary.exists());
-        assert_eq!(store.open_runs(10, &call)?, vec![run.attempt_id]);
+        assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         let found = store.reconcile_with_observer(
             run.attempt_id,
             &Fake::default(),
@@ -386,14 +386,14 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
             assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
             assert!(store.writer_fences()?.is_empty());
             finish_reactions(&store)?;
-            assert!(store.open_runs(10, &call)?.is_empty());
+            assert!(store.open_attempts(10, &call)?.is_empty());
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
                 if *attempt == id && matches!(reason, UncertainReason::WriterReservationRetained { .. }))
             );
             assert_eq!(store.writer_fences()?.len(), 1);
-            assert_eq!(store.open_runs(10, &call)?, vec![run.attempt_id]);
+            assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         }
         assert!(!temporary.exists());
     }
@@ -523,7 +523,7 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
             std::fs::create_dir_all(temporary.join("candidate-0/target"))?;
             symlink(&outside, temporary.join("candidate-0/target/outside.lock"))?;
         }
-        assert_eq!(store.open_runs(10, &call)?, vec![run.attempt_id]);
+        assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
         assert_eq!(
             store.reconcile_with_observer(
                 run.attempt_id,
