@@ -56,12 +56,10 @@ fn disk_policy_refusal_uses_resource_projection() {
 
 #[test]
 fn retained_import_refusal_names_worktree_attempt_and_recovery() {
-    let run_id = provenant_core::RunId::from_bytes([3; 16]);
     let attempt = AttemptId::from_bytes([4; 16]);
     let failure = check_launch_policy(&[run::Started::Refused {
         attempt: AttemptId::from_bytes([1; 16]),
         kind: run::RefusalKind::RetainedImport {
-            run: run_id,
             attempt,
             worktree: "/tmp/writer".into(),
         },
@@ -72,12 +70,10 @@ fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     assert!(failure.message.contains("/tmp/writer"));
     assert!(failure.message.contains(&attempt.to_string()));
     let diagnostic = failure.projection.expect("diagnostic");
-    assert!(
-        diagnostic
-            .next
-            .iter()
-            .any(|next| next.contains(&format!("reconcile --abandon {run_id}/{attempt}")))
-    );
+    // The attempt is named by its work key; the hint says how to find it.
+    assert!(diagnostic.next.iter().any(|next| {
+        next.contains(&attempt.to_string()) && next.contains("reconcile --abandon NAME/NODE#N")
+    }));
 }
 
 #[test]

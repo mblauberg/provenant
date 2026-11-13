@@ -249,7 +249,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             );
             assert!(note.len() > 160);
             session.store.start(
-                prepared.run_id,
+                prepared.attempt_id,
                 &Refusing { note: note.clone() },
                 &|_, _| unreachable!(),
                 &call,
@@ -258,7 +258,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
                 "{}; {note}",
                 provenant_records::run::TerminalCause::AccessPolicyRefused.detail()
             );
-            let attempt = prepared.attempts[0].attempt_id;
+            let attempt = prepared.attempt_id;
             let output_command = || Output {
                 target: crate::Target::parse("g/n").expect("fixture target"),
                 part: Part::Result,
@@ -309,15 +309,13 @@ fn explicit_output_keeps_the_disk_sample() -> Result<(), Box<dyn std::error::Err
                 "schema_version=1\n[gc]\nfree_floor='32212254720B'\n",
             )?;
             let mut prepared = trace_run(10, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
-            prepared.request.tasks[0].writer = Some(run::WriterRequest {
+            prepared.request.task.writer = Some(run::WriterRequest {
                 extra: Default::default(),
                 project: fixture.project.clone(),
                 worktree: fixture.tree.clone(),
             });
             session.store.create(&prepared, &call)?;
-            let mut lane = session
-                .store
-                .record(prepared.attempts[0].attempt_id, &call)?;
+            let mut lane = session.store.record(prepared.attempt_id, &call)?;
             lane.state = run::AttemptState::Starting {
                 extra: Default::default(),
             };

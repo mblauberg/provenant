@@ -440,7 +440,7 @@ impl Holder for HostHolder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
+    use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs};
     use provenant_records::CanonicalV1;
 
     #[test]
@@ -730,7 +730,6 @@ mod tests {
             },
             project_id: project,
             actor_id: ActorId::from_bytes([2; 16]),
-            run_id: RunId::from_bytes([3; 16]),
             attempt_id: AttemptId::from_bytes([4; 16]),
             host_delivery: None,
             sealed: None,
@@ -835,7 +834,7 @@ mod tests {
         use provenant_confinement::permissions::NetworkAccess;
         let temp = tempfile::tempdir()?;
         let (_, child) = child_fixture(temp.path(), &SystemClock::new())?;
-        let mut task = child.request.tasks[0].clone();
+        let mut task = child.request.task.clone();
         assert_eq!(
             seal_launch_task(child.request.digest()?, &task).effective_network,
             NetworkAccess::Open
@@ -894,20 +893,23 @@ mod tests {
             actor_id: ActorId::from_bytes([2; 16]),
             read_prompts: true,
         };
-        let task_id = TaskId::from_bytes([3; 16]);
         let id = AttemptId::from_bytes([6; 16]);
         let child = run::PreparedRun {
-            run_id: RunId::from_bytes([4; 16]),
+            attempt_id: id,
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![run::TaskRequest {
-                    context: None,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{id}")),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -915,7 +917,6 @@ mod tests {
                     head: None,
                     source_head: None,
                     base_ref: None,
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),
                     route: run::RequestedRoute::Model {
                         extra: Default::default(),
@@ -931,17 +932,12 @@ mod tests {
                     delivery_id: None,
                     deliver: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(2),
                 parent_attempt: Some(AttemptId::from_bytes([9; 16])),
             },
-            attempts: vec![run::NewAttempt {
-                task_id,
-                attempt_id: id,
-                prompt: "child".into(),
-            }],
+            prompt: "child".into(),
         };
         Ok((context, child))
     }

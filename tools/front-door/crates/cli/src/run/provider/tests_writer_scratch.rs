@@ -14,7 +14,7 @@ fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{
-        AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
+        AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget,
     };
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::ExecOptions;
@@ -123,7 +123,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
     std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
     let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
@@ -131,7 +130,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         operation_id: OperationId::parse("writer-temporary")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -155,7 +153,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         head: Some(review_oid.clone()),
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: provenant_records::run::HarnessProfile {
             knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
             ..Default::default()
@@ -262,7 +259,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             operation_id: paths.operation_id.clone(),
             task_index: paths.task_index,
             lane_depth: paths.lane_depth,
-            run_id: paths.run_id,
             deadline_unix_ms: paths.deadline_unix_ms,
             temporary_alias: None,
         };
@@ -358,7 +354,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
                 operation_id: paths.operation_id.clone(),
                 task_index: paths.task_index,
                 lane_depth: paths.lane_depth,
-                run_id: paths.run_id,
                 deadline_unix_ms: paths.deadline_unix_ms,
             };
             for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
@@ -591,7 +586,6 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
         temporary_alias: None,
     };
@@ -659,25 +653,27 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     )?;
     store.create(
         &run::PreparedRun {
-            run_id,
+            attempt_id,
             operation_id: paths.operation_id.clone(),
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![task.clone()],
-                concurrency: 1,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{attempt_id}")),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
+                    ..task.clone()
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![run::NewAttempt {
-                task_id: task.task_id,
-                attempt_id,
-                prompt: prompt.clone(),
-            }],
+            prompt: prompt.clone(),
             created_at: provenant_core::WallTime::from_micros(100)?,
         },
         &call,
@@ -748,7 +744,6 @@ printf 'agy 1.0.0\n'
                 operation_id: OperationId::parse(&format!("agy-fixture-{n}"))?,
                 task_index: 0,
                 lane_depth: 1,
-                run_id,
                 deadline_unix_ms: u64::MAX,
                 scratch: attempt.join("scratch"),
                 provider_state: attempt.join("provider-state"),
@@ -1275,7 +1270,6 @@ printf 'agy 1.0.0\n'
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
         scratch: attempt.join("publishing-scratch"),
         provider_state: attempt.join("publishing-provider-state"),
@@ -1615,7 +1609,6 @@ printf 'agy 1.0.0\n'
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
@@ -1673,7 +1666,6 @@ printf 'agy 1.0.0\n'
         operation_id: paths.operation_id.clone(),
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
@@ -1830,7 +1822,6 @@ printf 'agy 1.0.0\n'
         operation_id: OperationId::parse("different-resume-seed")?,
         task_index: paths.task_index,
         lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
         deadline_unix_ms: paths.deadline_unix_ms,
         scratch: attempt.join("continued-scratch"),
         provider_state: attempt.join("continued-provider-state"),

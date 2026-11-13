@@ -393,7 +393,6 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
     let previous = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([21; 16]),
         attempt: provenant_core::AttemptId::from_bytes([22; 16]),
         generation: 1,
     };
@@ -454,7 +453,6 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
         &cancel(),
     )?;
     let successor = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([23; 16]),
         attempt: provenant_core::AttemptId::from_bytes([24; 16]),
         generation: 1,
     };
@@ -478,7 +476,6 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
     let scope = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([11; 16]),
         attempt: provenant_core::AttemptId::from_bytes([12; 16]),
         generation: 1,
     };

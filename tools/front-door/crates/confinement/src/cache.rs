@@ -1852,7 +1852,7 @@ mod tests {
         #[test]
         fn gc_idle_releases_writer_lock_before_tombstone_cleanup_and_writer_retries()
         -> Result<(), Box<dyn std::error::Error>> {
-            use provenant_core::{AttemptId, GitOid, RunId};
+            use provenant_core::{AttemptId, GitOid};
             use provenant_os::clock::SystemClock;
             use provenant_os::fs::Directory;
             use provenant_supervisor::custody::{self, CustodyError, Scope, WriterBinding};
@@ -1891,7 +1891,6 @@ mod tests {
                         custody::acquire_writer(
                             Directory::open_anchor(&writer_home.join("writer-state"))?,
                             Scope {
-                                run: RunId::from_bytes([1; 16]),
                                 attempt: AttemptId::from_bytes([2; 16]),
                                 generation: 1,
                             },

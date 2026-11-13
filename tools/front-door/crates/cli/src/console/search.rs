@@ -190,8 +190,8 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, Clock, Digest, OperationId, RootInputs, RunId, TaskId};
-    use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
+    use provenant_core::{AttemptId, Clock, Digest, OperationId, RootInputs};
+    use provenant_run::{CanonicalRequest, PreparedRun};
 
     #[test]
     #[allow(clippy::disallowed_methods)] // The fixture edits SQLite state directly.
@@ -229,45 +229,37 @@ mod tests {
             &call,
         )?;
         let mut ids = Vec::new();
-        for batch in 0..16u16 {
-            let mut tasks = Vec::new();
-            let mut attempts = Vec::new();
-            for index in 0..64u16 {
-                let n = batch * 64 + index;
-                if n == 1001 {
-                    break;
-                }
-                let mut bytes = [0u8; 16];
-                bytes[..2].copy_from_slice(&n.to_be_bytes());
-                let task = TaskId::from_bytes(bytes);
-                let attempt = AttemptId::from_bytes(bytes);
-                let prompt = "searchable fixture";
-                tasks.push(json!({"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}));
-                attempts.push(NewAttempt {
-                    task_id: task,
-                    attempt_id: attempt,
-                    prompt: prompt.into(),
-                });
-                ids.push(attempt);
-            }
-            let request: CanonicalRequest = serde_json::from_value(
-                json!({"schema_version":1,"tasks":tasks,"concurrency":1,"parent":null,"lane_depth":1}),
-            )?;
-            let mut run_bytes = [0u8; 16];
-            run_bytes[..2].copy_from_slice(&batch.to_be_bytes());
+        let prompt = "searchable fixture";
+        let request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,
+            "task":{"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},
+            "parent":null,"lane_depth":1}))?;
+        for n in 0..1001u16 {
+            let mut bytes = [0u8; 16];
+            bytes[..2].copy_from_slice(&n.to_be_bytes());
+            let attempt = AttemptId::from_bytes(bytes);
+            let mut request = request.clone();
+            request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{attempt}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            });
             store.create(
                 &PreparedRun {
-                    run_id: RunId::from_bytes(run_bytes),
-                    operation_id: OperationId::parse(&format!("search-{batch}"))?,
+                    attempt_id: attempt,
+                    operation_id: OperationId::parse(&format!("search-{n}"))?,
                     created_at: clock.wall_now()?,
                     request,
-                    attempts,
+                    prompt: prompt.into(),
                 },
                 &call,
             )?;
+            ids.push(attempt);
             // This fixture retains attempts but does not model scheduler admission.
-            rusqlite::Connection::open(state.join("run.sqlite3"))?
-                .execute("DELETE FROM admission", [])?;
+            if n % 64 == 63 || n == 1000 {
+                rusqlite::Connection::open(state.join("run.sqlite3"))?
+                    .execute("DELETE FROM admission", [])?;
+            }
         }
         let page = read(&roots, "searchable", "prompt", None, 100, None)?;
         assert_eq!(page["matches"].as_array().ok_or("matches")?.len(), 100);

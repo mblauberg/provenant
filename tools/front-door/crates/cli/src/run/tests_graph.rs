@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn graph_quality_reports_missing_checkpoint_without_failing()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, ProjectId, TaskId, WallTime};
+    use provenant_core::{AttemptId, ProjectId, WallTime};
     use provenant_records::{AttemptFact, AttemptOutcome, Usage};
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
@@ -17,9 +17,8 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
             ..Default::default()
         }),
         attempt_id: AttemptId::from_bytes([1; 16]),
-        task_id: TaskId::from_bytes([2; 16]),
+        key: provenant_records::WorkKey::new(project, "retired", "node", 1)?,
         attempt_number: 1,
-        operation_id: OperationId::parse("quality-test")?,
         project_id: project,
         terminal_state: AttemptOutcome::Succeeded,
         exit_code: Some(0),

@@ -168,7 +168,9 @@ pub(super) fn read(
             let chair = match &chairs {
                 Ok(Some(index)) => {
                     match index.read(attempt.project_id, work_key.graph(), &chair_call) {
-                        Ok(Some(found)) if found.request_digest == lane.operation.request_digest => {
+                        Ok(Some(found))
+                            if found.request_digest == lane.operation.request_digest =>
+                        {
                             found.chair
                         }
                         Ok(None) => None,
@@ -229,8 +231,8 @@ mod tests {
 
     #[test]
     fn board_paging_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{AttemptId, Digest, OperationId, RootInputs, RunId, TaskId};
-        use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
+        use provenant_core::{AttemptId, Digest, OperationId, RootInputs};
+        use provenant_run::{CanonicalRequest, PreparedRun};
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         std::fs::create_dir(base.join("home"))?;
@@ -254,12 +256,11 @@ mod tests {
             read_prompts: false,
         };
         let store = RunStore::open(&context, &call)?;
-        let task = TaskId::from_bytes([3; 16]);
         let mut request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,
-            "tasks":[{"task_id":task,"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
+            "task":{"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
             "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},
-            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],
-            "concurrency":1,"parent":null,"lane_depth":1}))?;
+            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},
+            "parent":null,"lane_depth":1}))?;
         request.chair = Some(provenant_run::ChairBinding {
             extra: Default::default(),
             session: None,
@@ -275,16 +276,19 @@ mod tests {
             &call,
         )?;
         let prepared = |n: u8| -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            let mut request = request.clone();
+            request.task.context = Some(provenant_records::run::WorkContext {
+                graph_id: Some(format!("lane-{n}")),
+                node_id: Some("node".into()),
+                attempt: Some(1),
+                ..Default::default()
+            });
             Ok(PreparedRun {
-                run_id: RunId::from_bytes([n; 16]),
+                attempt_id: AttemptId::from_bytes([n; 16]),
                 operation_id: OperationId::parse(&format!("board-{n}"))?,
                 created_at: clock.wall_now()?,
-                request: request.clone(),
-                attempts: vec![NewAttempt {
-                    task_id: task,
-                    attempt_id: AttemptId::from_bytes([n; 16]),
-                    prompt: "private body".into(),
-                }],
+                request,
+                prompt: "private body".into(),
             })
         };
         let mut since = None;
@@ -402,7 +406,7 @@ mod tests {
         std::fs::write(
             &checkpoint,
             serde_json::to_vec(
-                &json!({"schema_version":1,"scope":{"run":RunId::from_bytes([101;16]),"attempt":id,"generation":0},"last_output_at":observed_at,"priority":15}),
+                &json!({"schema_version":1,"scope":{"attempt":id,"generation":0},"last_output_at":observed_at,"priority":15}),
             )?,
         )?;
         std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
@@ -417,7 +421,7 @@ mod tests {
         for bytes in [
             b"{".to_vec(),
             serde_json::to_vec(
-                &json!({"schema_version":1,"scope":{"run":RunId::from_bytes([101;16]),"attempt":id,"generation":999}}),
+                &json!({"schema_version":1,"scope":{"attempt":id,"generation":999}}),
             )?,
         ] {
             std::fs::write(&checkpoint, bytes)?;

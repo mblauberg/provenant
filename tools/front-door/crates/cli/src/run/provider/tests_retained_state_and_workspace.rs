@@ -1078,7 +1078,7 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
         repo_facts: Default::default(),
     };
     let mut task = super::super::tests::trace_run(50, AttemptId::from_bytes([51; 16]), WallTime::from_micros(100)?)?
-        .request.tasks.remove(0);
+        .request.task;
     task.writer = None;
     task.head = None;
     task.access.source_root = Some(scratch.clone());
@@ -1101,7 +1101,7 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
 #[test]
 fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+    use provenant_core::{AttemptId, OperationId, WallTime};
     use provenant_os::exec::{ExecOptions, Executor, Termination};
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -1191,8 +1191,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         WallTime::from_micros(100)?,
     )?
     .request
-    .tasks
-    .remove(0);
+    .task;
     task.head = Some(head.clone());
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
@@ -1207,7 +1206,6 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         operation_id: OperationId::parse("source-test")?,
         task_index: 0,
         lane_depth: 1,
-        run_id: RunId::from_bytes([53; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: base.join("scratch"),
         provider_state: base.join("provider-state"),
