@@ -593,7 +593,7 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
             "pick":"fixture/model"
         }
     }))?);
-    let summary = provenant_fabric_runtime::runs::AttemptSummary::try_from(attempt)?;
+    let summary = provenant_fabric_runtime::runs::AttemptSummary::from(attempt);
     let summary = serde_json::to_value(summary)?;
     assert_eq!(
         summary["applied_route"],

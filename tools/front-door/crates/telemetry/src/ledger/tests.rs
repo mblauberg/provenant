@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     BillingKind, ConfiguredModel, ConfiguredPrices, Rates, Window, stats, validate_prices,
 };
-use provenant_core::{AttemptId, OperationId, ProjectId};
+use provenant_core::{AttemptId, ProjectId};
 use provenant_os::clock::SystemClock;
 use provenant_records::{AttemptOutcome, RouteFact, Usage, WorkKey};
 use std::path::PathBuf;
@@ -53,9 +53,8 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
     Ok(AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
-        task_id: provenant_core::TaskId::from_bytes([1; 16]),
+        key: WorkKey::new(ProjectId::from_bytes([2; 16]), "g", "n", u32::try_from(number)?)?,
         attempt_number: number,
-        operation_id: OperationId::parse("ledger-operation")?,
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         exit_code: Some(0),

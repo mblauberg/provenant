@@ -772,24 +772,8 @@ fn stats_inner(
                 "time order or zero attempt number",
             ));
         }
-        let node = fact
-            .context
-            .as_ref()
-            .and_then(|context| context.graph_id.as_ref().zip(context.node_id.as_ref()));
-        let (work_label, work_attempt) = match node {
-            Some((graph, node)) => (
-                format!("{graph}/{node}"),
-                fact.context
-                    .as_ref()
-                    .and_then(|context| context.attempt)
-                    .map(u64::from)
-                    .unwrap_or(fact.attempt_number),
-            ),
-            // Older records have no WorkKey in AttemptFact. Keep their stable
-            // opaque task label for grouping until the records adaptor exposes
-            // the key; never present the label as a graph or node identity.
-            None => (fact.task_id.to_string(), fact.attempt_number),
-        };
+        let work_label = format!("{}/{}", fact.key.graph(), fact.key.node());
+        let work_attempt = u64::from(fact.key.attempt());
         if !attempts.insert(fact.attempt_id)
             || !numbers.insert((fact.project_id, work_label.clone(), work_attempt))
         {

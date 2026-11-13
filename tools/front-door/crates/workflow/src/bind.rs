@@ -162,9 +162,9 @@ mod tests {
         AttemptFact {
             context: None,
             attempt_id: AttemptId::from_bytes([1; 16]),
-            task_id: TaskId::from_bytes([2; 16]),
+            key: provenant_records::WorkKey::new(ProjectId::from_bytes([4; 16]), "g", "n", 1)
+                .unwrap(),
             attempt_number: 1,
-            operation_id: OperationId::parse("op").unwrap(),
             project_id: ProjectId::from_bytes([4; 16]),
             terminal_state: AttemptOutcome::Succeeded,
             exit_code: Some(0),

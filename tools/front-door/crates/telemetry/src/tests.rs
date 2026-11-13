@@ -1,6 +1,6 @@
 use super::*;
 use crate::{BillingKind, ConfiguredModel, ConfiguredPrices, Hosts, Rates, validate_prices};
-use provenant_core::{HostId, OperationId};
+use provenant_core::HostId;
 use provenant_records::RouteFact;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -39,9 +39,8 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
     AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
-        task_id: provenant_core::TaskId::from_bytes([1; 16]),
+        key: provenant_records::WorkKey::new(ProjectId::from_bytes([2; 16]), "g", "n", u32::try_from(number).unwrap()).unwrap(),
         attempt_number: number,
-        operation_id: OperationId::parse("test-operation").unwrap(),
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,
         exit_code: Some(0),

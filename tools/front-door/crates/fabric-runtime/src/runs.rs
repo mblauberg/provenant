@@ -5,7 +5,6 @@ use provenant_core::OperationId;
 use provenant_records::WorkKey;
 use provenant_records::run::{AttemptRecord, RunEvent};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// A successful submission acknowledgement. The operation id is the
 /// idempotency key; targets identify the attempts accepted by the owner.
@@ -36,7 +35,6 @@ pub struct AttemptSummary {
     pub extra: provenant_records::ExtraFields,
     pub key: WorkKey,
     pub attempt_id: provenant_core::AttemptId,
-    pub operation_id: OperationId,
     pub state: String,
     pub reason: Option<String>,
     pub exit_code: Option<i64>,
@@ -51,32 +49,19 @@ pub struct AttemptSummary {
     pub last_output_at: Option<provenant_core::WallTime>,
 }
 
-#[derive(Debug, Error)]
-pub enum AttemptSummaryError {
-    #[error("attempt record is missing its WorkKey")]
-    MissingWorkKey,
-}
-
-impl TryFrom<AttemptRecord> for AttemptSummary {
-    type Error = AttemptSummaryError;
-
-    fn try_from(record: AttemptRecord) -> Result<Self, Self::Error> {
+impl From<AttemptRecord> for AttemptSummary {
+    fn from(record: AttemptRecord) -> Self {
         let projected = provenant_records::wire::LaneRow::project(&record, Default::default());
-        let key = record
-            .key
-            .clone()
-            .ok_or(AttemptSummaryError::MissingWorkKey)?;
         let finished_at = match &record.state {
             provenant_records::run::AttemptState::Terminal { finished_at, .. } => {
                 Some(*finished_at)
             }
             _ => None,
         };
-        Ok(Self {
+        Self {
             extra: record.extra,
-            key,
+            key: record.key,
             attempt_id: record.attempt_id,
-            operation_id: record.operation_id,
             state: projected.state,
             reason: projected.reason,
             exit_code: projected.exit_code,
@@ -94,7 +79,7 @@ impl TryFrom<AttemptRecord> for AttemptSummary {
             queued_at: record.queued_at,
             started_at: record.started_at,
             last_output_at: record.last_output_at,
-        })
+        }
     }
 }
 

@@ -1059,7 +1059,7 @@ mod wire_parity {
                 extra: Default::default(),
                 page: AttemptPage {
                     extra: Default::default(),
-                    items: vec![AttemptSummary::try_from(record.clone()).unwrap()],
+                    items: vec![AttemptSummary::from(record.clone())],
                     next_after: None,
                     truncated: false,
                 },
