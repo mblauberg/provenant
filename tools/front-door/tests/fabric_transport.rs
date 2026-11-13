@@ -1741,7 +1741,7 @@ fn mcp_child_run_requires_the_parent_relay_before_any_local_submission() -> Resu
     let replies = mcp(
         &rig,
         &[
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"run","brief":"read only","tier":"senior"}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"run","brief":"read only","route":"senior"}}}),
         ],
     )?;
     let result = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
@@ -1968,6 +1968,31 @@ fn loopback_peer(rig: &mut TestRig) -> Result<provenant_core::HostId> {
     Ok(peer)
 }
 
+/// `run ARGS --name NAME`, then `wait NAME`, answering the launch's own exit
+/// and a `data.checkpoint` read after the wait. A replayed name reads the same
+/// graph again, so a replay and its first launch compare equal.
+fn launch_named_and_wait(
+    rig: &TestRig,
+    args: &[&str],
+    name: &str,
+    timeout: &str,
+) -> Result<(i64, Value)> {
+    let mut argv = vec!["run"];
+    argv.extend_from_slice(args);
+    argv.extend(["--name", name, "--json"]);
+    let (status, launched) = json_command(rig, &argv)?;
+    if launched["data"]["checkpoint"].is_null() {
+        return Ok((status, launched));
+    }
+    let waited = rig.command(&["wait", name, "--timeout", timeout, "--json"])?;
+    let _ = code(&waited);
+    let checkpoint = rig.checkpoint(name)?;
+    Ok((
+        status,
+        json!({"data": {"checkpoint": checkpoint}, "launch": launched}),
+    ))
+}
+
 fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
     let output = rig.command(args)?;
     let value = serde_json::from_slice(&output.stdout.bytes).map_err(|error| {
@@ -2002,22 +2027,23 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         ),
     )?;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
-    let launch = |rig: &TestRig, operation, wait| {
-        let mut args = vec![
-            "run",
+    let launch = |rig: &TestRig, name, wait| {
+        let args = [
+            "task",
             "fixture",
             "--host",
             "workshop",
             "--model",
             "codex/gpt-6-luna",
-            "--operation-id",
-            operation,
-            "--json",
         ];
         if wait {
-            args.push("--wait=15s");
+            launch_named_and_wait(rig, &args, name, "15s")
+        } else {
+            let mut argv = vec!["run"];
+            argv.extend_from_slice(&args);
+            argv.extend(["--name", name, "--json"]);
+            json_command(rig, &argv)
         }
-        json_command(rig, &args)
     };
     let (_, success) = launch(&rig, "probe-failure-success", true)?;
     let reference = success["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
@@ -2093,18 +2119,18 @@ fn peer_dispatch_set_host_reaches_the_peer_attempt() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
-    let (_, placed) = json_command(
+    let (_, placed) = launch_named_and_wait(
         &rig,
         &[
-            "run",
+            "task",
             "fixture",
             "--set",
             "attempt.host=\"workshop\"",
             "--model",
             "codex/gpt-6-luna",
-            "--wait=15s",
-            "--json",
         ],
+        "placed-peer",
+        "15s",
     )?;
     let reference = placed["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
@@ -2137,13 +2163,14 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
             &rig,
             &[
                 "run",
+                "task",
                 "--host",
                 "workshop",
                 "--model",
                 "agy/gemini-3.8-flash",
-                "--operation-id",
+                "--name",
                 "peer-frame-limit",
-                "--file",
+                "--brief-file",
                 prompt.to_str().ok_or("prompt")?,
                 "--json",
             ],
@@ -2179,6 +2206,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
         &rig,
         &[
             "run",
+            "task",
             "fixture",
             "--host",
             "workshop",
@@ -2200,6 +2228,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
             &rig,
             &[
                 "run",
+                "task",
                 "fixture",
                 "--host",
                 host,
@@ -2245,21 +2274,27 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
     )?;
     std::fs::set_permissions(rig.root.join("ssh"), std::fs::Permissions::from_mode(0o700))?;
     let start = std::time::Instant::now();
-    let (_, result) = json_command(
+    let (_, launched) = json_command(
         &rig,
         &[
             "run",
+            "task",
             "fixture",
             "--host",
             "workshop",
             "--model",
             "codex/gpt-6-luna",
-            "--operation-id",
+            "--name",
             "held-submit",
-            "--wait=10s",
             "--json",
         ],
     )?;
+    let waited = rig.command(&["wait", "held-submit", "--timeout", "10s", "--json"])?;
+    let result = json!({
+        "launch": launched,
+        "wait": String::from_utf8_lossy(&waited.stdout.bytes),
+        "wait_stderr": String::from_utf8_lossy(&waited.stderr.bytes),
+    });
     // The whole call shares this budget, so a loaded host that spends part of
     // it before the submission must still leave time to reach the peer.
     assert!(
@@ -2324,21 +2359,17 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
     let text = "x".repeat(117 * 1024);
     std::fs::write(&prompt, &text)?;
     let args = [
-        "run",
+        "task",
         "--host",
         "workshop",
         "--model",
         "agy/gemini-3.8-flash",
         "--effort",
         "high",
-        "--operation-id",
-        "peer-large-prompt",
-        "--file",
+        "--brief-file",
         prompt.to_str().ok_or("prompt")?,
-        "--wait=30s",
-        "--json",
     ];
-    let (_, placed) = json_command(&rig, &args)?;
+    let (_, placed) = launch_named_and_wait(&rig, &args, "peer-large-prompt", "30s")?;
     let node = &placed["data"]["checkpoint"]["nodes"][0];
     let reference = node["attempts"][0]["attempt_ref"]
         .as_str()
@@ -2354,7 +2385,7 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
         std::fs::read_to_string(directory.join("provider-state/candidate-0/launch-count"))?,
         "launched\n"
     );
-    let (_, replay) = json_command(&rig, &args)?;
+    let (_, replay) = launch_named_and_wait(&rig, &args, "peer-large-prompt", "30s")?;
     assert_eq!(
         replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
         reference
@@ -3150,7 +3181,7 @@ fn graph_coordination_io_does_not_disclose_private_paths() -> Result {
         &rig,
         &[
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"fabric_run","arguments":{"op":"run","brief":"read the code","tier":"senior"}
+                "name":"fabric_run","arguments":{"op":"run","brief":"read the code","route":"senior"}
             }}),
         ],
     )?;

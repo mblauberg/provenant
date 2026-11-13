@@ -291,6 +291,61 @@ impl TestRig {
         }
         Ok(result)
     }
+    /// `run ARGS --json`: the launch's exit code and envelope. `run` returns
+    /// once work is launched or refused; it never waits for it to settle.
+    pub fn launch(&self, args: &[&str]) -> Result<(ExecOutcome, serde_json::Value)> {
+        let mut argv = vec!["run"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let out = self.command(&argv)?;
+        let value = serde_json::from_slice(&out.stdout.bytes)
+            .map_err(|error| format!("launch output: {error}: {out:?}"))?;
+        Ok((out, value))
+    }
+
+    /// `run ARGS` then `wait NAME --timeout SPAN`, the way a caller waits for
+    /// the graph its launch named. The result keeps the launch envelope, the
+    /// wait's own outcome and the graph's checkpoint as the wait left it.
+    pub fn run_and_wait(&self, args: &[&str], timeout: &str) -> Result<Settled> {
+        let (launch, launch_value) = self.launch(args)?;
+        let graph = launch_value["data"]["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or_else(|| format!("launch named no graph: {launch_value}"))?
+            .to_owned();
+        let wait = self.command(&["wait", &graph, "--timeout", timeout, "--json"])?;
+        let wait_value = serde_json::from_slice(&wait.stdout.bytes)
+            .map_err(|error| format!("wait output: {error}: {wait:?}"))?;
+        let checkpoint = self.checkpoint(&graph)?;
+        Ok(Settled {
+            launch,
+            launch_value,
+            wait,
+            wait_value,
+            graph,
+            checkpoint,
+        })
+    }
+
+    /// A graph's checkpoint as JSON, read from its journal without a lock.
+    pub fn checkpoint(&self, graph: &str) -> Result<serde_json::Value> {
+        let identity = self.command(&["fabric", "identity", "--json"])?;
+        let identity: serde_json::Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        let project = identity["data"]["project"]
+            .as_str()
+            .ok_or("project id")?
+            .parse()?;
+        let mut inputs = provenant_core::RootInputs::new(self.home.clone(), self.project.clone());
+        inputs.state_dir = Some(self.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+            &roots.state,
+            project,
+            graph,
+        )?
+        .ok_or_else(|| format!("no checkpoint for {graph}"))?;
+        Ok(serde_json::to_value(checkpoint)?)
+    }
+
     pub fn assert_legacy_unchanged(&self) -> Result {
         for tail in [
             ".agents/sentinel",
@@ -313,3 +368,25 @@ pub fn code(output: &ExecOutcome) -> i64 {
 }
 
 pub mod mcp;
+
+/// A launched graph after `wait` returned: what the launch said, how the wait
+/// ended and where the graph stands.
+pub struct Settled {
+    pub launch: ExecOutcome,
+    pub launch_value: serde_json::Value,
+    pub wait: ExecOutcome,
+    pub wait_value: serde_json::Value,
+    pub graph: String,
+    pub checkpoint: serde_json::Value,
+}
+impl Settled {
+    /// The wait's exit code: 0 settled successfully, 1 unsuccessfully, 5 needs
+    /// input, 124 the budget expired.
+    pub fn exit(&self) -> i64 {
+        code(&self.wait)
+    }
+    /// Whether the wait ran out of time with the work unsettled.
+    pub fn timed_out(&self) -> bool {
+        self.wait_value["data"]["timed_out"] == true
+    }
+}

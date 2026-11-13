@@ -272,10 +272,9 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
         &rig,
         &[
             "run",
-            "Inspect the child",
-            "--use",
             "explore",
-            "--tier",
+            "Inspect the child",
+            "--route",
             "junior",
             "--json",
         ],
@@ -293,10 +292,9 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
         &rig,
         &[
             "run",
-            "Inspect the child",
-            "--use",
             "explore",
-            "--tier",
+            "Inspect the child",
+            "--route",
             "junior",
             "--json",
         ],
@@ -313,7 +311,7 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     rig.env.retain(|(key, _)| {
         key != provenant_core::RUN_STATE_DIRECTORY_ENV && key != provenant_run::LANE_DEPTH_ENV
     });
-    let launched = host(&rig, &["run", "Parent marker only", "--json"])?;
+    let launched = host(&rig, &["run", "task", "Parent marker only", "--json"])?;
     assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());
     let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
     let RelayOp::Add(child) = serde_json::from_value(frame)? else {
@@ -321,13 +319,13 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     };
     assert_eq!(child.brief, "Parent marker only");
     assert_eq!(child.template, "task");
-    let stopped = host(&rig, &["stop", "parent--child", "--json"])?;
+    let stopped = host(&rig, &["stop", "lane-graph/parent--child", "--json"])?;
     assert_eq!(stopped["data"]["parent_attempt"], attempt.to_string());
     let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
     let RelayOp::Stop { node } = serde_json::from_value(frame)? else {
         return Err("expected subtree stop through parent relay".into());
     };
-    assert_eq!(node, "parent--child");
+    assert_eq!(node, "lane-graph/parent--child");
     // Relay admission and control must not write a second run store in the lane.
     let child_store = rig.state.join("children").join(attempt.to_string());
     assert_eq!(std::fs::read_dir(child_store)?.count(), 0);
@@ -342,7 +340,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
         FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
     let mut rig = TestRig::new()?;
-    let explanation = host(&rig, &["run", "Initial", "--explain", "--json"])?;
+    let explanation = host(&rig, &["run", "task", "Initial", "--explain", "--json"])?;
     let document: GraphDocument = serde_json::from_value(explanation["data"]["document"].clone())?;
     let graph_id = document.graph_id.clone();
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -478,9 +476,8 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
         &rig,
         &[
             "run",
-            "Fix ${item}",
-            "--use",
             "implement",
+            "Fix ${item}",
             "--over",
             "one,two",
             "--detached",
@@ -514,7 +511,7 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
 }
 
 #[test]
-fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
+fn lane_run_receipts_match_mcp_and_mcp_reports_observation_errors() -> Result {
     use provenant_fabric_runtime::graph::relay::RelayOp;
     use std::sync::{
         Arc,
@@ -585,16 +582,19 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         ("Delayed child", false),
     ] {
         fail_observation.store(fail, Ordering::SeqCst);
-        let cli = host(&rig, &["run", brief, "--wait=1s", "--json"])?;
+        // The CLI launches and returns the receipt; waiting is `wait`.
+        let cli = host(&rig, &["run", "task", brief, "--json"])?;
+        assert_eq!(cli["data"]["revision"], 2, "{cli}");
+        assert!(cli["data"].get("children").is_none(), "{cli}");
+        assert!(cli["data"].get("observation_error").is_none(), "{cli}");
         let mcp = mcp(
             &rig,
             "fabric_run",
             json!({"op":"run","brief":brief,"wait_seconds":1}),
         )?;
         assert_ne!(mcp["isError"], true, "{mcp}");
-        let value = &cli["data"];
-        assert_eq!(*value, mcp["structuredContent"]);
-        assert_eq!(value["receipt"]["revision"], 2);
+        let value = &mcp["structuredContent"];
+        assert_eq!(value["receipt"], cli["data"]);
         if brief == "Delayed child" {
             assert_eq!(value["observation_error"], "child wait timed out");
             assert!(value.get("children").is_none());
@@ -665,11 +665,13 @@ fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Resu
         Err(error) => return Err(error.into()),
     };
     lane_environment(&mut rig, attempt)?;
-    let output = rig.command(&["run", "Delayed child", "--wait=1s", "--json"])?;
+    // Admission outlasting the former 55-second socket ceiling still yields
+    // the receipt.
+    let output = rig.command(&["run", "task", "Delayed child", "--json"])?;
     let receipt: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(receipt["data"]["receipt"]["revision"], 2, "{receipt}");
-    assert_eq!(receipt["data"]["observation_error"], "child wait timed out");
-    let output = rig.command(&["run", "Refused child", "--wait=1s", "--json"])?;
+    assert_eq!(code(&output), 0, "{receipt}");
+    assert_eq!(receipt["data"]["revision"], 2, "{receipt}");
+    let output = rig.command(&["run", "task", "Refused child", "--json"])?;
     let refused: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(refused["error"]["code"], "writer_lock_busy", "{refused}");
     assert!(

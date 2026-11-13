@@ -796,24 +796,16 @@ fn land_wait_handles_pending_checks_then_passes() -> Result {
     Ok(())
 }
 
-fn pr_status_waits_for_change_and_preserves_partial_results() -> Result {
+fn pr_status_preserves_partial_results() -> Result {
     let rig = self::rig()?;
     fs::write(
         rig.project.join("status-1668.json"),
         format!(r#"{{"state":"OPEN","headRefOid":"{HEAD}"}}"#),
     )?;
-    fs::write(
-        rig.project.join("status-1668.next.json"),
-        format!(r#"{{"state":"OPEN","headRefOid":"{OTHER}"}}"#),
-    )?;
-    let output = rig.command(&["pr", "status", "1668", "--wait=10s", "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(report["data"][0]["head"], OTHER);
     let output = rig.command(&["pr", "status", "1668", "9999", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(report["data"][0]["head"], OTHER);
+    assert_eq!(report["data"][0]["head"], HEAD);
     assert!(report["data"][1]["error"].is_string());
     Ok(())
 }
@@ -1175,8 +1167,8 @@ fn main() -> ExitCode {
                 land_wait_handles_pending_checks_then_passes,
             ),
             (
-                "pr_status_waits_for_change_and_preserves_partial_results",
-                pr_status_waits_for_change_and_preserves_partial_results,
+                "pr_status_preserves_partial_results",
+                pr_status_preserves_partial_results,
             ),
             (
                 "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer",

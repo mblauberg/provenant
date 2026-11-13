@@ -749,33 +749,34 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "subdirectory" => tree.join("nested/directory"),
         _ => rig.project.clone(),
     };
-    let output = rig.command(&[
-        "run",
-        "fixture writer shell",
-        "--tier",
-        "junior",
-        "--mode",
-        "worktree-write",
-        "--worktree",
-        tree.to_str().ok_or("tree")?,
-        "--wait=30s",
-        "--json",
-    ])?;
-    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let settled = rig.run_and_wait(
+        &[
+            "task",
+            "fixture writer shell",
+            "--route",
+            "junior",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            tree.to_str().ok_or("tree")?,
+        ],
+        "30s",
+    )?;
+    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
     let node = &response["data"]["checkpoint"]["nodes"][0];
     assert!(
         node["attempts"][0]["attempt_ref"].is_string(),
         "{location}: {response}; {}",
-        String::from_utf8_lossy(&output.stderr.bytes)
+        String::from_utf8_lossy(&settled.launch.stderr.bytes)
     );
     // Admission is checked on every host. Native execution is also checked
     // when the sandbox probe succeeds (CI requires that probe on macOS).
     if !native_available {
         return Ok(());
     }
-    assert_eq!(code(&output), 0, "{location}: {response}");
+    assert_eq!(settled.exit(), 0, "{location}: {response}");
     assert_eq!(node["state"], "succeeded", "{location}: {response}");
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let stderr = String::from_utf8_lossy(&settled.launch.stderr.bytes);
     assert_eq!(
         stderr
             .lines()
@@ -842,8 +843,8 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
     support::register_account(&rig, "codex", "fixture", &key, &rig.root.join("codex"))
         .map_err(|e| format!("register account: {e}"))?;
-    let args = vec![
-        "run",
+    let args = [
+        "task",
         "remote writer",
         "--mode",
         "worktree-write",
@@ -851,20 +852,17 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         "remote-only",
         "--base",
         "HEAD",
-        "--wait=30s",
-        "--json",
     ];
-    let output = rig
-        .command(&args)
+    let settled = rig
+        .run_and_wait(&args, "30s")
         .map_err(|e| format!("run {args:?}: {e}"))?;
     let combined = format!(
         "{} {}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
+        String::from_utf8_lossy(&settled.launch.stdout.bytes),
+        String::from_utf8_lossy(&settled.launch.stderr.bytes)
     );
-    assert_ne!(
-        code(&output),
-        0,
+    assert!(
+        code(&settled.launch) != 0 || settled.exit() != 0,
         "the fixture provider should remain unavailable"
     );
     let head = rig.execute(
@@ -877,7 +875,7 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         remote_tip,
         "writer must start at the remote branch tip"
     );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let report = &settled.launch_value;
     assert_eq!(
         report["data"]["checkpoint"]["nodes"][0]["source_commit"],
         remote_tip
@@ -890,12 +888,12 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
 
     let args = vec![
         "run",
+        "task",
         "remote writer",
         "--mode",
         "worktree-write",
         "--worktree",
         "unprovisioned",
-        "--wait=30s",
         "--json",
     ];
     for _ in 0..2 {
@@ -1531,10 +1529,10 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
                 .arg(&rig.state)
                 .args([
                     "run",
+                    "task",
                     &format!("parallel fixture {index}"),
-                    "--tier",
+                    "--route",
                     "junior",
-                    "--wait=30s",
                     "--json",
                 ])
                 .stdout(std::process::Stdio::piped())
@@ -1552,8 +1550,11 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
         assert!(!text.contains("UPGRADE_DRAIN_REQUIRED"), "{text}");
         assert!(output.status.success(), "{text}");
         let result: Value = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(result["data"]["status"], "complete", "{result}");
-        assert_eq!(result["data"]["outcome"], "succeeded", "{result}");
+        let graph = result["data"]["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or_else(|| format!("launch named no graph: {result}"))?;
+        let settled = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
+        assert_eq!(code(&settled), 0, "{graph}: {settled:?}");
     }
     Ok(())
 }
@@ -1572,7 +1573,7 @@ fn writer_registry_fixture() -> Result<TestRig> {
 
 /// Admission must survive repository-wide contention even without native execution.
 fn simultaneous_writer_launches_create_attempts() -> Result {
-    for wait in ["--wait=8s", "--wait=1s"] {
+    for _round in 0..2 {
         let rig = writer_registry_fixture()?;
         let _cleanup = rig.process_cleanup();
         let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
@@ -1592,8 +1593,9 @@ fn simultaneous_writer_launches_create_attempts() -> Result {
                         .arg(&rig.state)
                         .args([
                             "run",
+                            "task",
                             "fixture writer",
-                            "--tier",
+                            "--route",
                             "junior",
                             "--mode",
                             "worktree-write",
@@ -1601,7 +1603,6 @@ fn simultaneous_writer_launches_create_attempts() -> Result {
                             &format!("parallel-{index}"),
                             "--base",
                             "HEAD",
-                            wait,
                             "--json",
                         ])
                         .output()
@@ -1663,8 +1664,9 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
     let start = std::time::Instant::now();
     let output = rig.command(&[
         "run",
+        "task",
         "fixture writer",
-        "--tier",
+        "--route",
         "junior",
         "--mode",
         "worktree-write",
@@ -1672,7 +1674,6 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         "blocked-writer",
         "--base",
         "HEAD",
-        "--wait=1s",
         "--json",
     ])?;
     let elapsed = start.elapsed();
@@ -1815,7 +1816,7 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         &clock,
     )?;
     let start = std::time::Instant::now();
-    let output = rig.command(&["run", "--file", doc, "--wait=1s", "--json"])?;
+    let settled = rig.run_and_wait(&["--file", doc], "1s")?;
     let elapsed = start.elapsed();
     assert!(elapsed >= std::time::Duration::from_secs(2), "{elapsed:?}");
     assert!(
@@ -1823,10 +1824,9 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         "expanded provisioning exceeded its deadline: {elapsed:?}"
     );
     // The independent slow node keeps the graph waiting while the writer records its error.
-    assert_eq!(code(&output), 0, "{output:?}");
-    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(response["status"], "waiting", "{response}");
-    assert_eq!(response["data"]["timed_out"], true, "{response}");
+    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
+    assert_eq!(settled.exit(), 124, "{:?}", settled.wait);
+    assert!(settled.timed_out(), "{}", settled.wait_value);
     let writer = response["data"]["checkpoint"]["nodes"]
         .as_array()
         .and_then(|nodes| nodes.iter().find(|node| node["id"] == "writer"))
@@ -1895,13 +1895,12 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             )?,
         )?;
         let doc = document.to_str().ok_or("document")?;
-        let args = if wait {
-            vec!["run", "--file", doc, "--wait=1s", "--json"]
-        } else {
-            vec!["run", "--file", doc, "--json"]
-        };
-        let output = rig.command(&args)?;
-        let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let (_, response) = rig.launch(&["--file", doc])?;
+        if wait {
+            // The independent node keeps the graph unsettled for a waiter too.
+            let waited = rig.command(&["wait", "mixed-failure", "--timeout", "1s", "--json"])?;
+            assert_ne!(code(&waited), 0, "{waited:?}");
+        }
         assert_eq!(response["status"], "waiting", "{response}");
         let nodes = response["data"]["checkpoint"]["nodes"]
             .as_array()
@@ -1958,10 +1957,9 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
             }]
         }))?,
     )?;
-    let started = rig.command(&["run", "--file", "graph.json", "--wait=30s", "--json"])?;
-    assert_eq!(code(&started), 0, "{started:?}");
-    let status: Value = serde_json::from_slice(&started.stdout.bytes)?;
-    assert_eq!(status["data"]["status"], "complete", "{status}");
+    let started = rig.run_and_wait(&["--file", "graph.json"], "30s")?;
+    assert_eq!(started.exit(), 0, "{:?}", started.wait);
+    let status = json!({"data": {"checkpoint": started.checkpoint.clone()}});
     assert_eq!(
         status["data"]["checkpoint"]["nodes"][0]["state"], "succeeded",
         "{status}"
@@ -1996,7 +1994,7 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     };
     let first_id = attempt_id(&previous[0])?;
     let second_id = attempt_id(&attempts[0])?;
-    let lanes = rig.command(&["status", "--all", "--json"])?;
+    let lanes = rig.command(&["status", "quota-redraw", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let rows: Vec<_> = lanes["data"]["rows"]
@@ -2109,9 +2107,14 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
             "schema_version":2,"graph_id":"partial-quota","nodes":[node]
         }))?,
     )?;
-    let output = rig.command(&["run", "--file", "graph.json", "--wait=30s", "--json"])?;
-    assert_eq!(code(&output), if writer { 1 } else { 0 }, "{output:?}");
-    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let settled = rig.run_and_wait(&["--file", "graph.json"], "30s")?;
+    assert_eq!(
+        settled.exit(),
+        if writer { 1 } else { 0 },
+        "{:?}",
+        settled.wait
+    );
+    let result = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
     let node = &result["data"]["checkpoint"]["nodes"][0];
     let previous = node["previous_attempts"]
         .as_array()
@@ -2136,7 +2139,7 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
     };
     let first_id = attempt_id(&previous[0])?;
     let second_id = attempt_id(&current[0])?;
-    let status = rig.command(&["status", "--all", "--json"])?;
+    let status = rig.command(&["status", "partial-quota", "--json"])?;
     assert_eq!(code(&status), 0, "{status:?}");
     let lanes: Value = serde_json::from_slice(&status.stdout.bytes)?;
     let rows: Vec<_> = lanes["data"]["rows"]
@@ -3510,15 +3513,9 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
                 }]
             }))?,
         )?;
-        let out = rig.command(&[
-            "run",
-            "--file",
-            "preparation-refusal.json",
-            "--wait=5s",
-            "--json",
-        ])?;
-        let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
-        assert_eq!(code(&out), 1, "{response}");
+        let settled = rig.run_and_wait(&["--file", "preparation-refusal.json"], "5s")?;
+        let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
+        assert_eq!(settled.exit(), 1, "{response}");
         let node = &response["data"]["checkpoint"]["nodes"][0];
         assert_eq!(
             node["attempts"].as_array().ok_or("attempts")?.len(),
@@ -3584,9 +3581,9 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
             ]}),
         )?,
     )?;
-    let out = rig.command(&["run", "--file", "light-graph.json", "--wait=30s", "--json"])?;
-    let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(code(&out), 0, "{response}");
+    let settled = rig.run_and_wait(&["--file", "light-graph.json"], "30s")?;
+    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
+    assert_eq!(settled.exit(), 0, "{response}");
     let nodes = response["data"]["checkpoint"]["nodes"]
         .as_array()
         .ok_or("nodes")?;
@@ -3645,29 +3642,22 @@ fn run_graph_provider_with_wait(
         &document,
         serde_json::to_vec(&json!({"schema_version":2,"graph_id":graph_id,"nodes":[node]}))?,
     )?;
-    let out = rig.command(&[
-        "run",
-        "--file",
-        document.to_str().ok_or("document")?,
-        &format!("--wait={wait}"),
-        "--json",
-    ])?;
+    let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], wait)?;
+    let out = &settled.launch;
     if unlisted {
         let stderr = String::from_utf8_lossy(&out.stderr.bytes);
         assert!(stderr.contains("not in the catalogue"), "{stderr}");
     }
-    let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let expected_exit = match response["status"].as_str() {
-        Some("ok" | "waiting") => 0,
-        Some("failed" | "refused") => 1,
-        Some("cancelled") => 130,
-        other => {
-            return Err(format!("unexpected graph response status {other:?}: {response}").into());
-        }
-    };
-    assert_eq!(code(&out), expected_exit, "{response}");
+    let response = &settled.launch_value;
+    // The wait reports how the graph ended: settled, unsuccessful, needing
+    // input or still running when its budget expired.
+    assert!(
+        [0, 1, 5, 124].contains(&settled.exit()),
+        "{response}; {:?}",
+        settled.wait
+    );
     assert!(response["error"].is_null(), "{response}");
-    assert!(response["data"]["checkpoint"].is_object(), "{response}");
+    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
     let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("attempt reference missing: {response}"))?;
@@ -3902,7 +3892,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         assert_eq!(head.stdout.bytes, b"edited by lane shell\n");
         let run = lane["run_id"].as_str().ok_or("run")?;
         let id = lane["attempt_id"].as_str().ok_or("attempt")?;
-        let output = rig.command(&["output", id, "--json"])?;
+        let output = rig.command(&["output", "shell-evidence/writer#1", "--json"])?;
         let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(code(&output), 0, "{data}");
         assert!(
@@ -3926,7 +3916,7 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
             assert!(paths.contains(&tree.join(name)), "{paths:?}");
         }
-        let human = rig.command(&["output", id])?;
+        let human = rig.command(&["output", "shell-evidence/writer#1"])?;
         let human = String::from_utf8_lossy(&human.stdout.bytes);
         assert!(
             human.contains(&tree.join("AGENTS.md").display().to_string()),
@@ -3960,24 +3950,26 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
         ("fixture uncatalogued success", 0),
         ("fixture uncatalogued refusal", 1),
     ] {
-        let out = rig.command(&[
-            "run",
-            prompt,
-            "--model",
-            "codex/uncatalogued-fixture-model",
-            "--wait=30s",
-            "--json",
-        ])?;
-        assert_eq!(code(&out), expected, "{out:?}");
+        let settled = rig.run_and_wait(
+            &[
+                "task",
+                prompt,
+                "--model",
+                "codex/uncatalogued-fixture-model",
+            ],
+            "30s",
+        )?;
+        assert_eq!(settled.exit(), expected, "{:?}", settled.wait);
         assert!(
-            String::from_utf8_lossy(&out.stderr.bytes).contains("not in the catalogue"),
-            "{out:?}"
+            String::from_utf8_lossy(&settled.launch.stderr.bytes).contains("not in the catalogue"),
+            "{:?}",
+            settled.launch
         );
-        let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
-        let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        let node = settled.checkpoint["nodes"][0]["id"]
             .as_str()
-            .ok_or("attempt reference")?;
-        let output = rig.command(&["output", reference, "--part", "stderr", "--json"])?;
+            .ok_or("node id")?;
+        let target = format!("{}/{node}#1", settled.graph);
+        let output = rig.command(&["output", &target, "--part", "stderr", "--json"])?;
         assert_eq!(code(&output), 0, "{output:?}");
         if expected == 1 {
             assert!(
