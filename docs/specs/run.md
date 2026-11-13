@@ -419,8 +419,7 @@ differs.
   nested work from starting.
 - Test: `crates/supervisor/src/process_os/provider.rs::provider_and_descendant_inherit_priority`;
   `crates/supervisor/src/process_os/provider.rs::priority_failures_degrade_and_preserve_evidence`;
-  `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`;
-  `crates/cli/src/run/tests_lanes.rs::render_lanes_removes_peer_terminal_controls`
+  `crates/run/src/tests.rs::lanes_read_last_output_time_from_supervisor_checkpoint`
 - Owner: `crates/supervisor/src/process_os/provider.rs`, `crates/run/src/launch.rs`
 
 ## Immutable attempts, no writer replay
@@ -937,8 +936,7 @@ back to a fresh named launch under the existing resume policy.
 - Why (default): optional host features must declare their lane contract and keep its
   confinement and provenance through execution and recovery.
 - Test: `crates/records/src/adapters.rs::host_native_declares_a_fresh_named_writer_contract`;
-  `tests/graph_provider.rs::host_native_preparation_uses_the_provider_contract`;
-  `crates/cli/src/run/tests_graph.rs::host_native_attempts_do_not_resume_explicitly`
+  `tests/graph_provider.rs::host_native_preparation_uses_the_provider_contract`
 - Owner: `crates/records/src/adapters.rs`, `crates/cli/src/run/provider/mod.rs`
 
 ## Launch prompts
@@ -1590,8 +1588,7 @@ reassigned worktrees require a new owned checkout for fresh fallback;
 - Test: `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
   `crates/run/src/dispatch_lifecycle_tests.rs::resume_continues_a_terminal_attempt_once_with_its_route`;
   `crates/run/src/controls.rs::resume_preserves_explicit_worktrees_and_settled_lane_ownership`;
-  `crates/run/src/controls.rs::resume_refuses_a_pruned_worktree_reused_by_another_lane`;
-  `crates/cli/src/run/tests_graph.rs::displaced_fallback_reports_unavailable_history`
+  `crates/run/src/controls.rs::resume_refuses_a_pruned_worktree_reused_by_another_lane`
 - Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`
 
 ### Alias quota recovery

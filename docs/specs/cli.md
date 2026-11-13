@@ -256,8 +256,8 @@ keeps the envelope and `--full` shows complete detail.
 
 ### Removed spellings
 
-These spellings exit 2 with one line naming the replacement. The table in
-`crates/cli/src/lib.rs` (`REMOVED`) is the source.
+These common removed spellings exit 2 with one line naming the replacement.
+`crates/cli/src/lib.rs` (`REMOVED`) owns the full list.
 
 | Spelling | Replacement |
 |---|---|
@@ -481,8 +481,8 @@ text encoding.
 
 - Why (default): chairs can cite grep-able provenance without calling a writer a reviewer
   or guessing provider defaults.
-- Test: `tests/graph_provider.rs::receipt_output_resolves_run_task_and_attempt`;
-  `tests/graph_provider.rs::receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts`;
+- Test: `tests/graph_provider.rs::receipt_output_resolves_the_work_key`;
+  `tests/graph_provider.rs::receipt_output_classifies_writers_and_refuses_running_attempts`;
   `tests/graph_provider.rs::receipt_output_reports_unknown_route_for_settled_lost_attempt`;
   `crates/cli/src/lib.rs::wait_and_output_bounds`
 - Owner: `crates/cli/src/run.rs`
