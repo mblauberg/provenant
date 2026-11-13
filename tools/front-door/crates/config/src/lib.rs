@@ -34,6 +34,8 @@ pub use providers::{ProviderSettings, ProviderUpdate};
 mod project_binding;
 mod release;
 mod retention;
+mod worktrees;
+pub use worktrees::{ProjectWorktreeSettings, WorktreeSettings, WorktreeSetup};
 pub mod shared_settings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
 #[cfg(test)]
@@ -234,6 +236,7 @@ pub struct ResolvedConfig<D = NoDomains> {
     pub install: InstallSettings,
     pub gc: GcSettings,
     pub retention: RetentionSettings,
+    pub worktrees: WorktreeSettings,
     pub providers: BTreeMap<String, ProviderSettings>,
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,

@@ -67,6 +67,33 @@ dropped whole.
 - Retention and collection (`[retention]`, `[gc]`, `[gc.projects."ID"]`) are in
   [gc](gc.md).
 
+## Worktree setup
+
+Project setup uses the existing project-ID overrides in the selected state
+root's `config.toml`, rather than a repository overlay for `[knobs]`. Find the
+project ID with `provenant fabric identity`, then declare shell commands:
+
+```toml
+[worktrees.projects."PROJECT_ID"]
+setup = ["pnpm install --frozen-lockfile", "./scripts/check-links"]
+timeout_seconds = 300
+```
+
+`[worktrees]` supplies host-wide defaults for the same fields. Setup is unset
+by default (an empty command list); a project's list replaces the default,
+and `setup = []` disables it for that project. `config show` reports these
+settings and their sources; `config schema` lists their types and bounds.
+The total timeout across all commands defaults to 300 seconds and accepts
+1 to 3600 seconds.
+
+Commands run in order through `/bin/sh -c`, with the new worktree as their
+working directory, after `worktree create` or writer `run --branch/--base`
+creates it and before the writer starts. A nonzero exit, timeout or launch
+failure stops setup and warns with the captured output tail, leaving the
+worktree usable. Reusing an existing worktree never runs setup again; retry a
+failed setup manually from that worktree. Configure only commands you trust
+to run on the host.
+
 ## Run host policy
 
 `[domains.run.host_policy]` (`deny_read`, `deny_write`, `network =
