@@ -149,8 +149,6 @@ pub enum SandboxSource {
     Platform,
     /// The `lanes.sandbox` knob, from the run, graph node or host `[knobs]`.
     Knob,
-    /// A read-only lane under legacy `auto`.
-    ReadOnly,
     /// Default resolution: lanes run unsandboxed like the CLI started by hand.
     Default,
 }
@@ -179,8 +177,6 @@ pub struct SandboxMode {
     pub requested: bool,
     /// Whether the lane effectively runs under a sandbox.
     pub effective: bool,
-    /// Legacy alias for `effective`.
-    pub sandboxed: bool,
     /// Why the lane runs with or without the sandbox.
     pub source: SandboxSource,
     /// Warning emitted when an explicit request overrides a restriction or cannot be honored.
@@ -338,7 +334,7 @@ impl RunConfig {
     /// with a one-line warning naming the dropped restriction(s).
     ///
     /// An OS-inherited sandbox (the process is already inside Seatbelt) cannot be removed by
-    /// a child process and is always reported honestly as effective (`sandboxed: true`, `source: Parent`).
+    /// a child process and is always reported honestly as effective (`effective: true`, `source: Parent`).
     ///
     /// Off macOS (or when platform confinement is unsupported), every lane resolves as sandboxed
     /// (`source: Platform`).
@@ -367,7 +363,6 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Platform,
                 warning,
             };
@@ -382,7 +377,6 @@ impl RunConfig {
             return SandboxMode {
                 requested,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Parent,
                 warning,
             };
@@ -410,7 +404,6 @@ impl RunConfig {
             return SandboxMode {
                 requested: false,
                 effective: false,
-                sandboxed: false,
                 source: SandboxSource::Knob,
                 warning,
             };
@@ -420,7 +413,6 @@ impl RunConfig {
             return SandboxMode {
                 requested: true,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Knob,
                 warning: None,
             };
@@ -430,7 +422,6 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Parent,
                 warning: None,
             }
@@ -438,7 +429,6 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Route,
                 warning: None,
             }
@@ -446,7 +436,6 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: true,
-                sandboxed: true,
                 source: SandboxSource::Network,
                 warning: None,
             }
@@ -454,7 +443,6 @@ impl RunConfig {
             SandboxMode {
                 requested: false,
                 effective: false,
-                sandboxed: false,
                 source: SandboxSource::Default,
                 warning: None,
             }
@@ -932,7 +920,7 @@ mod tests {
                             };
                             let off_mode = config.sandbox_for(off_input);
                             assert!(
-                                !off_mode.effective && !off_mode.sandboxed,
+                                !off_mode.effective,
                                 "explicit off must always be unsandboxed on macos"
                             );
                             assert_eq!(off_mode.source, SandboxSource::Knob);
@@ -954,10 +942,7 @@ mod tests {
                                 ..base
                             };
                             let on_mode = config.sandbox_for(on_input);
-                            assert!(
-                                on_mode.effective && on_mode.sandboxed,
-                                "explicit on must always sandbox"
-                            );
+                            assert!(on_mode.effective, "explicit on must always sandbox");
                             assert_eq!(on_mode.source, SandboxSource::Knob);
                             assert!(on_mode.requested);
                             assert_eq!(on_mode.env_value(), "on");
@@ -998,7 +983,7 @@ mod tests {
                 };
                 let mode = default_config.sandbox_for(input);
                 assert!(
-                    mode.effective && mode.sandboxed,
+                    mode.effective,
                     "inherited OS sandbox must always be reported effective"
                 );
                 assert_eq!(mode.source, SandboxSource::Parent);
@@ -1020,11 +1005,24 @@ mod tests {
             };
             let mode = default_config.sandbox_for(input);
             assert!(
-                mode.effective && mode.sandboxed,
+                mode.effective,
                 "unsupported platform must always resolve sandboxed"
             );
             assert_eq!(mode.source, SandboxSource::Platform);
         }
+    }
+    #[test]
+    fn a_recorded_mode_names_effectiveness_once() -> Result<(), Box<dyn std::error::Error>> {
+        let mode = RunConfig::default().sandbox_for(writer("codex/gpt-6-luna"));
+        let value = serde_json::to_value(&mode)?;
+        let fields: Vec<_> = value
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.keys())
+            .collect();
+        assert!(fields.contains(&&"effective".to_string()), "{value}");
+        assert!(!fields.contains(&&"sandboxed".to_string()), "{value}");
+        Ok(())
     }
     #[test]
     fn sandboxed_routes_and_cache_reads_are_configurable_and_validated()
@@ -1034,16 +1032,16 @@ mod tests {
         assert!(
             !open
                 .sandbox_for(writer("opencode/opencode/glm-5.3-flash-free"))
-                .sandboxed
+                .effective
         );
         let wider: RunConfig =
             toml_edit::de::from_str("sandboxed_routes = [\"opencode/\", \"cursor/\"]")?;
         assert!(
             wider
                 .sandbox_for(writer("opencode/opencode-go/x"))
-                .sandboxed
+                .effective
         );
-        assert!(wider.sandbox_for(writer("cursor/grok-4.7")).sandboxed);
+        assert!(wider.sandbox_for(writer("cursor/grok-4.7")).effective);
         let bad: RunConfig = toml_edit::de::from_str("sandboxed_routes = [\"\", \"has space/\"]")?;
         let fields: Vec<_> = bad.validate().into_iter().map(|e| e.field).collect();
         assert_eq!(fields, ["sandboxed_routes.0", "sandboxed_routes.1"]);

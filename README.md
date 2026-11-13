@@ -87,8 +87,8 @@ should not depend on judgement:
 - **Records** of every attempt, its output, cost and final state.
 - **Coordination** between sessions through durable messages, tasks and claims.
 
-Templates expand into graphs: `provenant run --use NAME` starts a bundled,
-user or repository template. A plain `provenant run BRIEF` uses the `task`
+Templates expand into graphs: `provenant run TEMPLATE BRIEF` starts a bundled,
+user or repository template. `provenant run task BRIEF` runs the `task`
 template for one bounded assignment. `provenant run --file GRAPH` submits a
 hand-written graph; `--explain` inspects it before launch.
 
@@ -161,15 +161,15 @@ Start a read-only lane:
 > This starts a real agent and uses quota on whichever account is chosen.
 
 ```sh
-provenant run 'Summarise this repository structure in three bullets.' --tier junior
+provenant run task 'Summarise this repository structure in three bullets.' --route junior
 provenant status                        # active and recent lanes
 ```
 
 A writer lane gets its own worktree:
 
 ```sh
-provenant run --file BRIEF.md \
-  --tier senior --branch fix/example --base origin/main
+provenant run implement --brief-file BRIEF.md \
+  --route senior --branch fix/example --base origin/main
 ```
 
 Inside a harness, agents do the same through Fabric MCP tools, so in practice
@@ -214,7 +214,7 @@ flowchart LR
    verifies the final commit and pushes it with its own Git authority.
    `provenant lane deliver ATTEMPT --deliver pr` opens a pull request.
    `provenant pr status` watches CI, and `provenant land` checks CI and merges
-   the verified head. `provenant run --use review` plans review coverage from configurable path floors.
+   the verified head. `provenant run review BRIEF` plans review coverage from configurable path floors.
 
 Fabric runs alongside this path. Sessions on one machine, or on peer hosts,
 exchange messages, share tasks and claim work, so two harnesses can split a job

@@ -283,7 +283,7 @@ pub(super) fn prepare_command(
             policy.mandatory_mut().add_state_read(root)?;
         }
     }
-    if sandbox.sandboxed {
+    if sandbox.effective {
         set_cargo_profile(&mut spec.env, &settings);
         set_cargo_jobs(
             &mut spec.env,
@@ -338,7 +338,7 @@ pub(super) fn prepare_command(
         .collect(),
         ..Default::default()
     };
-    let sandboxed = sandbox.sandboxed;
+    let sandboxed = sandbox.effective;
     apply_sandbox_mode(sandbox, &mut spec.env, &mut route);
     Ok(run::PreparedLaunch {
         limits,

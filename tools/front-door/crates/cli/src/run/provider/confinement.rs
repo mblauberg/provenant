@@ -257,7 +257,7 @@ pub(super) fn confinement_request(
                     .network_for(access.network(writer.is_some())),
                 writer.is_none(),
             )
-            .sandboxed
+            .effective
         }
     };
     let mut mandatory =

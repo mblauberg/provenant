@@ -113,7 +113,7 @@ operation kind and a digest of the prompt, route, authority and execution
 controls. Reader waits are excluded from the digest. The same ID and digest
 return the recorded outcome without repeating effects. The same ID with a
 different digest fails with `operation_conflict` (exit 2). `--operation-id`
-exists on `retry`, `steer`, inbox, chair and Fabric writes; `run` and `stop`
+exists on `steer`, inbox, chair and Fabric writes; `run`, `stop` and `retry`
 do not take it, and a graph operation that carries `operation_id` is refused
 in one line naming `name`, never silently ignored.
 
@@ -905,7 +905,7 @@ could not read, truncated captures and `slices_complete: false`.
 
 ## The pinned source view names its failure
 
-An isolated lane (`--use review`) reads a pinned view of the subject commit,
+An isolated review lane reads a pinned view of the subject commit,
 built in the attempt's temporary directory from the shared object store: one
 `ls-tree` listing, blobs read through `cat-file --batch` in groups of at most
 32 MiB and 4096 objects, then a synthetic index. The subject need not be the
@@ -1346,7 +1346,7 @@ parent. Inside a lane `--name` names the child node, and a named child replays
 by name and input like a top-level launch; an unnamed child gets a fresh
 handle each time.
 
-`status`, `output` and `output --trace` inside a lane use the same relay. The
+`status`, `output` and `trace` inside a lane use the same relay. The
 host resolves the caller from its custody-bound attempt, accepts only targets
 in that graph, and invokes the ordinary readers. With no target, `status`
 selects the caller's graph. Node and attempt selectors from child launch
@@ -1561,9 +1561,9 @@ action where the host has an identifiable PR.
 ## Fresh continuation fallback
 
 This section covers a manual `provenant retry` of a terminal attempt. What follows a stop without
-one is decided under [What follows a stop](#what-follows-a-stop). Resume defaults to a fresh attempt when no provider/session was launched or
-retained continuation state is missing, expired or cannot be searched within
-its bound. `--no-fallback` gives a typed continuation refusal instead. The
+one is decided under [What follows a stop](#what-follows-a-stop). A retry always
+starts a fresh attempt; it never continues the provider session, so no
+continuation state need be retained. The
 new attempt preserves the parent, route, account, access, writer worktree,
 base, delivery and authority; it skips provider continuation and records
 `continuation: fresh` in the attempt and the bounded reason in its sealed
@@ -1595,10 +1595,9 @@ worktree owner's lane lineage. Launch snapshots durably record whether the tree
 was lane-owned. Explicit unowned and adopted trees resume in place unless a
 current lane owner names another lineage. Previously lane-owned trees still
 require a matching lane owner even if that owner record is later removed or
-replaced by adoption. Older attempts without launch evidence retain compatibility
-with explicit worktrees, but a current foreign lane owner always refuses. Missing or
-reassigned worktrees require a new owned checkout for fresh fallback;
-`--no-fallback` refuses them.
+replaced by adoption; a current foreign lane owner always refuses. Missing or
+reassigned worktrees require a new owned checkout for the fresh attempt, and the
+retry is refused without one.
 - Why (default): a missing provider handle should not require the chair to reconstruct
   context or bypass immutable attempt records and writer custody.
 - Test: `crates/run/src/dispatch_temporary_tests.rs::fresh_resume_preserves_lineage_and_authority_without_provider_state`;
@@ -1628,8 +1627,7 @@ This check does not create a run-policy `retry_of` relationship.
 
 ## A stop is sealed once
 
-Target behaviour for the format-2 cut-over (#3078); no caller reads these
-records yet. Work has one identity, the `WorkKey`: project, graph, node and
+Work has one identity, the `WorkKey`: project, graph, node and
 one-based attempt number, written `GRAPH/NODE#N`. A plain lane is a one-node
 graph. An attempt that ends without finishing its brief seals one `Stop` at
 settlement: a typed `cause` and the writer's `handoff`, decoded once by
@@ -1649,8 +1647,7 @@ refusal before launch seals a specific cause, never a generic one, and its
 message, redacted and bounded, is the stop's one-line reason unless a fixed
 note names the cause. `TerminalCause` maps to `StopCause` exhaustively
 (`From<TerminalCause> for StopCause`), and `Stop::declared` returns an error
-for a handoff that cannot be sealed. The `on_stop` entry is owned by the slice
-that reads the stop (W2-I). Each record keeps fields it does not know, so
+for a handoff that cannot be sealed. Each record keeps fields it does not know, so
 a newer writer's additions survive a rewrite; a `WorkKey` and a `NextStep`
 ignore them, because their identity is their known fields.
 
@@ -1715,9 +1712,11 @@ cause its outcome names. It applies the table as follows.
   configuration, the host-native routes and the exclusions the stopped attempt
   carried. No route the node already ran is offered again. The work waits for
   the stopped route's reset only when `routing.depletion_wait_seconds` is set
-  and the reset falls inside it; when no rung yields a route, the stop goes to
-  the chair. A host that keeps no routing facts restarts on the node's
-  declared routes instead, as does a facts read error. Ladder availability
+  and the reset falls inside it. The ladder reads readiness only for the
+  adapters the stopped attempt probed, so when no rung yields a route the
+  node's own untried declared routes go first, and only when none is left does
+  the stop go to the chair. A host that keeps no routing facts restarts on the
+  declared routes in the same way, as does a facts read error. Ladder availability
   observations are used for at most one hour. The ladder preserves a pinned
   account and does not raise the tier. A chair-bound stop is fenced once.
 - A restart patches the node in place: the worktree and its edits stay, prior
