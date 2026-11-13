@@ -32,7 +32,7 @@ impl provenant_os::capture::FrameDecoder for OpenCode {
     }
 }
 
-/// Only a line beginning with the provider's error class is live evidence.
+/// Recognise provider quota errors and its rate-limit retry notice live.
 pub struct StderrQuota;
 impl provenant_os::capture::FrameDecoder for StderrQuota {
     fn decode(
@@ -61,7 +61,7 @@ impl provenant_os::capture::FrameDecoder for StderrQuota {
             };
             line = &rest[end + 1..];
         }
-        line.starts_with("AI.Error.QuotaExceeded:")
+        line.starts_with("AI.Error.QuotaExceeded:") || rate_limit_retry(line)
     }
 }
 
@@ -539,6 +539,11 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
     })
 }
 
+fn rate_limit_retry(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("rate limit exceeded") && lower.contains("retrying")
+}
+
 /// Recognise OpenCode's unstructured quota errors without treating arbitrary
 /// provider output as protocol events. Pool and retry evidence come only from
 /// the matched line and the one after it, so unrelated stderr cannot steer them.
@@ -547,7 +552,9 @@ pub fn stderr_quota(stderr: &[u8]) -> Option<E> {
     let mut lines = text.lines();
     let matched = lines.find(|line| {
         let lower = line.to_ascii_lowercase();
-        lower.contains("ai.error.quotaexceeded") || lower.contains("usage limit exceeded")
+        lower.contains("ai.error.quotaexceeded")
+            || lower.contains("usage limit exceeded")
+            || rate_limit_retry(line)
     })?;
     let scope = format!("{matched}\n{}", lines.next().unwrap_or_default()).to_ascii_lowercase();
     let pool = if scope.contains("free tier") || scope.contains("free usage") {
@@ -838,6 +845,19 @@ mod tests {
                 .unwrap(),
             FrameEvent::Terminal
         );
+        for line in [
+            "Rate limit exceeded, retrying in 5 seconds",
+            "Rate limit exceeded, retrying in 10 seconds",
+        ] {
+            assert_eq!(
+                decoder.decode(line.as_bytes()).unwrap(),
+                FrameEvent::Terminal
+            );
+            assert!(matches!(
+                stderr_quota(line.as_bytes()),
+                Some(E::QuotaLimited { .. })
+            ));
+        }
         for text in [
             "The documentation mentions quota and usage limit exceeded",
             "example AI.Error.QuotaExceeded: Go usage limit exceeded",
