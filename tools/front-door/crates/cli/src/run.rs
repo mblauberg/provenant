@@ -182,6 +182,12 @@ impl Fail {
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
+        #[cfg(test)]
+        if std::thread::current().name()
+            == Some("run::tests::operation_replays_after_its_context_ref_moves_or_is_deleted")
+        {
+            eprintln!("replay fixture run error: {error:?}");
+        }
         let kind = ErrorKind::from(&error);
         let mut projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
         if projection.detail.is_none() {

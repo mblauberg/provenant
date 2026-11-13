@@ -997,15 +997,12 @@ mod wire_parity {
 
     fn attempt(provider_ms: Option<u64>) -> AttemptRecord {
         let mut record = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "attempt_id": AttemptId::from_bytes([1; 16]),
-            "run_id": "02020202020202020202020202020202",
-            "task_id": "04040404040404040404040404040404",
             "key": provenant_records::WorkKey::new(
                 provenant_core::ProjectId::from_bytes([3; 16]), "graph", "node", 1
             ).unwrap(),
             "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-            "operation_id": "wire-parity",
             "attempt_number": 1, "revision": 1, "generation": 0,
             "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
             "authority_digest": Digest::from_bytes([5; 32]),
