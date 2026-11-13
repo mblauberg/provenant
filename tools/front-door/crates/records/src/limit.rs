@@ -93,7 +93,8 @@ impl BudgetAction {
 }
 
 /// A bounded fractional grace above a token budget, stored in millionths so
-/// policy records retain equality and serialize the user-facing fraction.
+/// policy records retain equality. It serializes as decimal text ("0.1"),
+/// because sealed records carry no floats; input also accepts a JSON number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BudgetGrace(u64);
 
@@ -127,12 +128,24 @@ impl Default for BudgetGrace {
     }
 }
 
+impl std::fmt::Display for BudgetGrace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let whole = self.0 / Self::SCALE;
+        let part = self.0 % Self::SCALE;
+        if part == 0 {
+            return write!(formatter, "{whole}");
+        }
+        let digits = format!("{part:06}");
+        write!(formatter, "{whole}.{}", digits.trim_end_matches('0'))
+    }
+}
+
 impl Serialize for BudgetGrace {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        serializer.serialize_f64(self.as_fraction())
+        serializer.collect_str(self)
     }
 }
 
@@ -141,8 +154,17 @@ impl<'de> Deserialize<'de> for BudgetGrace {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = f64::deserialize(deserializer)?;
-        Self::from_fraction(value).ok_or_else(|| {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Text {
+            Number(f64),
+            Decimal(String),
+        }
+        let value = match Text::deserialize(deserializer)? {
+            Text::Number(value) => Some(value),
+            Text::Decimal(text) => text.trim().parse::<f64>().ok(),
+        };
+        value.and_then(Self::from_fraction).ok_or_else(|| {
             serde::de::Error::custom("budget grace must be a finite nonnegative fraction")
         })
     }

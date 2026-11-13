@@ -39,6 +39,8 @@ pub mod shared_settings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
 #[cfg(test)]
 mod edit_tests;
+#[cfg(test)]
+mod seal_tests;
 mod splice;
 #[cfg(test)]
 mod test_support;

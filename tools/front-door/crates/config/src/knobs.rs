@@ -176,9 +176,24 @@ impl<D> crate::ResolvedConfig<D> {
         );
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
+            // Sealed records carry no floats, so a fraction travels as its
+            // decimal text; readers parse it back.
             knobs: knobs
                 .into_iter()
-                .map(|(name, knob)| (name, knob.value))
+                .map(|(name, knob)| {
+                    let value = match knob.value {
+                        Value::Number(number)
+                            if registry
+                                .knobs
+                                .get(&name)
+                                .is_some_and(|spec| spec.kind == Kind::Fraction) =>
+                        {
+                            Value::String(number.to_string())
+                        }
+                        value => value,
+                    };
+                    (name, value)
+                })
                 .collect(),
             overrides: overrides.to_vec(),
             extra,
