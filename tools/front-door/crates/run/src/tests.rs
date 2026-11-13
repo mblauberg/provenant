@@ -213,7 +213,7 @@ fn lane_listings_do_not_flush_a_settled_attempts_delivery_receipt() -> TestResul
     let store = RunStore::open(&context, &call)?;
     let input = input();
     let id = input.attempts[0].attempt_id;
-    let run = store.create(&input, &call)?;
+    let _run = store.create(&input, &call)?;
     crate::dispatch_tests::seal_exit(&store, &exit())?;
     let settled = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
     assert!(matches!(
@@ -223,7 +223,7 @@ fn lane_listings_do_not_flush_a_settled_attempts_delivery_receipt() -> TestResul
             ..
         }
     ));
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let receipt = serde_json::json!({
         "schema_version": 1,
         "remote": "origin",
@@ -271,9 +271,9 @@ fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult 
     let store = RunStore::open(&context, &call)?;
     let input = input();
     let id = input.attempts[0].attempt_id;
-    let run = store.create(&input, &call)?;
+    let _run = store.create(&input, &call)?;
     let record = store.record(id, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let checkpoint = serde_json::json!({
         "schema_version": 1,
         "scope": RunStore::scope(&record),
@@ -358,7 +358,23 @@ pub(super) fn digest_prefix(digest: impl std::fmt::Display) -> ArtifactValue {
     let text = digest.to_string();
     ArtifactValue::Digest(text.trim_start_matches("sha256:")[..12].to_string())
 }
+/// Give every task of a fixture run its own key, derived from the run and
+/// task ids, so fixtures that mint ids also mint keys.
+pub(crate) fn rekey(prepared: &mut PreparedRun) {
+    let run = prepared.run_id;
+    for task in &mut prepared.request.tasks {
+        let context = task.context.get_or_insert_with(Default::default);
+        context.graph_id = Some(format!("lane-{run}"));
+        context.node_id = Some(task.task_id.to_string());
+        context.attempt = Some(1);
+    }
+}
 pub(super) fn input() -> PreparedRun {
+    let mut prepared = raw_input();
+    rekey(&mut prepared);
+    prepared
+}
+fn raw_input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
     PreparedRun {
         run_id: RunId::from_bytes([4; 16]),
@@ -534,6 +550,7 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
         input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
         input.run_id = RunId::from_bytes([n; 16]);
         input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        crate::tests::rekey(&mut input);
         store.record_refusal(
             &input,
             provenant_records::diagnostic::Diagnostic::new("REFUSED"),
@@ -586,6 +603,7 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
         input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
         input.run_id = RunId::from_bytes([n; 16]);
         input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        crate::tests::rekey(&mut input);
         let record = store.record_refusal(
             &input,
             provenant_records::diagnostic::Diagnostic::new("REFUSED"),
@@ -783,6 +801,7 @@ fn overview_bounds_aggregate_record_bytes_before_decoding() -> TestResult {
         value.request.tasks[0].task_id = TaskId::from_bytes([n; 16]);
         value.attempts[0].task_id = value.request.tasks[0].task_id;
         value.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        crate::tests::rekey(&mut value);
         value.request.tasks[0].title = Some("x".repeat(200));
         writer.create(&value, &call)?;
     }
@@ -854,7 +873,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     seal_exit_fixture(&store, &input)?;
     let id = input.attempts[0].attempt_id;
     let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -1245,13 +1264,12 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        .join(format!("attempts/{id}/result.md"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
-        let expected =
-            std::path::PathBuf::from(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        let expected = std::path::PathBuf::from(format!("attempts/{id}/result.md"));
         assert!(
             matches!(store.stream_result(id, &call, None), Err(RunError::UnsafePath { path, check: PathCheck::Mode }) if path == expected)
         );
@@ -1303,7 +1321,7 @@ fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        .join(format!("attempts/{id}/result.md"));
     // Grow the file through a second handle between the streamed EOF and the
     // final metadata check, so the streamed length and digest still match the
     // record and only the final unchanged check can refuse.
@@ -1340,10 +1358,10 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
     let input = input();
     store.create(&input, &call)?;
     let stored = store.run(input.run_id, &call)?.request_digest;
-    let path = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/request.json", input.run_id));
+    let path = context.state_root.as_path().join(format!(
+        "attempts/{}/request.json",
+        input.attempts[0].attempt_id
+    ));
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     value["concurrency"] = 99.into();
     let raw = crate::db::bytes(&value)?;
@@ -1385,10 +1403,10 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     assert_eq!(task.len(), 9);
     let mut raw = crate::db::bytes(&value)?;
     let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
-    let path = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/request.json", input.run_id));
+    let path = context.state_root.as_path().join(format!(
+        "attempts/{}/request.json",
+        input.attempts[0].attempt_id
+    ));
     std::fs::write(&path, &raw)?;
     let mut operation = store
         .operation(&input.operation_id, &call)?
@@ -1464,15 +1482,12 @@ fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestR
     let store = RunStore::open(&context, &call)?;
     let input = input();
     let id = input.attempts[0].attempt_id;
-    let run = store.create(&input, &call)?;
+    let _run = store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let mut done = publication();
     done.session = Some("sess-1848".into());
     store.publish_terminal(id, 1, &done, &exit(), &call)?;
-    let attempt = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
     let dir = attempt.join("provider-state/candidate-0/claude-config/projects/key");
     std::fs::create_dir_all(&dir)?;
     let secret = format!("ghp_{}", "a".repeat(36));
@@ -1711,7 +1726,7 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
     let input = input();
     store.create(&input, &call)?;
     let expected = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
-    let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+    let directory = store.attempt_dir(input.attempts[0].attempt_id, true)?;
     artifacts::seal(
         &directory,
         "process.json",
@@ -1763,7 +1778,7 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+        let directory = store.attempt_dir(input.attempts[0].attempt_id, true)?;
         artifacts::seal(
             &directory,
             "process.json",
@@ -1904,7 +1919,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+        .join(format!("attempts/{id}/result.md"));
     std::fs::write(path, &huge)?;
     assert!(matches!(
         store.read_output(
@@ -1981,10 +1996,7 @@ fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResul
     let id = input.attempts[0].attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let attempt = context
-        .state_root
-        .as_path()
-        .join(format!("runs/{}/attempts/{id}", input.run_id));
+    let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
     let outside = temp.path().join("outside");
     std::fs::create_dir(&outside)?;
     std::fs::write(outside.join("prompt.txt"), "credential sentinel")?;
@@ -2055,7 +2067,7 @@ fn publication_crash_worker() -> TestResult {
         return Err("crash phase was not reached".into());
     }
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let attempt = store.attempt_dir(input.attempts[0].attempt_id, false)?;
     crate::artifacts::seal(
         &attempt,
         "terminal-effects.json",
@@ -2249,7 +2261,7 @@ fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
         let id = input.attempts[0].attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
-        let dir = store.attempt_dir(input.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         super::artifacts::seal(&dir, "result.md", text.as_bytes(), RESULT_LIMIT)?;
         let mut facts = publication();
         facts.redacted = true;
@@ -2278,7 +2290,7 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     super::artifacts::seal(
-        &store.attempt_dir(input.run_id, id, false)?,
+        &store.attempt_dir(id, false)?,
         "result.md",
         publication().result.as_bytes(),
         RESULT_LIMIT,
@@ -2417,7 +2429,7 @@ fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
     let id = input.attempts[0].attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let effects = serde_json::json!({
         "schema_version": 1,
         "scope": RunStore::scope(&store.record(id, &call)?),
@@ -2463,7 +2475,7 @@ fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
                 .publish_terminal(id, 1, &publication(), &exit(), &call)
                 .is_err()
         );
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let sealed =
             crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
                 .ok_or("decision not sealed")?;
@@ -2528,7 +2540,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let id = input.attempts[0].attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let archive = crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
     let scope = RunStore::scope(&store.record(id, &call)?);
     let intended = crate::db::bytes(
@@ -2587,7 +2599,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let path = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/quarantine", input.run_id));
+        .join(format!("attempts/{id}/quarantine"));
     std::fs::rename(
         path.join("manifest.json"),
         path.join("manifest.conflict.json"),
@@ -2640,7 +2652,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
         });
         observation.cancel_delivered_before_exit = Some(false);
         seal_observation(&store, &input, &observation)?;
-        let dir = store.attempt_dir(input.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         crate::artifacts::seal(
             &dir,
             "cancel.json",
@@ -2686,7 +2698,7 @@ pub(super) fn seal_observation(
         .as_object_mut()
         .ok_or("exit fixture")?
         .insert("schema_version".into(), 1.into());
-    let dir = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let dir = store.attempt_dir(input.attempts[0].attempt_id, false)?;
     super::artifacts::seal(
         &dir,
         "process-exit.json",
@@ -3244,7 +3256,7 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
                 .publish_terminal(id, 1, &conflicting, &exit(), &call)
                 .is_err()
         );
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let intent =
             attempt.read_stable(std::ffi::OsStr::new("terminal-pending.json"), RECORD_LIMIT)?;
         assert!(!intent.is_empty());
@@ -3290,8 +3302,6 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let path = context
             .state_root
             .as_path()
-            .join("runs")
-            .join(input.run_id.to_string())
             .join("attempts")
             .join(id.to_string());
         let original = std::fs::read(path.join("terminal-pending.json"))?;
@@ -3384,6 +3394,7 @@ fn keyed_input(seed: u8, operation: &str, graph: &str, node: &str, attempt: u32)
     prepared.run_id = RunId::from_bytes([seed + 1; 16]);
     prepared.operation_id = OperationId::parse(operation).unwrap();
     prepared.request.tasks[0].task_id = task;
+    crate::tests::rekey(&mut prepared);
     prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
         graph_id: Some(graph.into()),
         node_id: Some(node.into()),
@@ -3406,6 +3417,37 @@ fn run_database(
     )?)
 }
 
+/// Every admitted row has a key, and the store never invents one.
+#[test]
+fn admission_requires_a_key_and_records_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    assert!(store.create(&raw_input(), &call).is_err());
+    let keyed = input();
+    store.create(&keyed, &call)?;
+    let record = store.record(keyed.attempts[0].attempt_id, &call)?;
+    let key = record.key.clone().ok_or("admitted attempt has no key")?;
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [record.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let persisted = crate::db::decode_attempt(&raw)?;
+    assert_eq!(persisted.key.as_ref(), Some(&key));
+    // A restarted host finds the same attempt by its key alone.
+    drop(store);
+    let restarted = RunStore::open(&context, &call)?;
+    assert_eq!(
+        restarted.attempt_by_key(&key, &call)?.attempt_id,
+        record.attempt_id
+    );
+    Ok(())
+}
+
 #[test]
 fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -3420,7 +3462,7 @@ fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
     store.create(&graph, &call)?;
     let plain_key = provenant_records::WorkKey::new(
         context.project_id,
-        plain.run_id.to_string(),
+        format!("lane-{}", plain.run_id),
         plain.attempts[0].task_id.to_string(),
         1,
     )?;

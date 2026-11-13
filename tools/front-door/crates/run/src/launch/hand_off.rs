@@ -172,7 +172,7 @@ impl RunStore {
             generation: record.generation,
         };
         let directory = || {
-            self.attempt_dir(record.run_id, id, false)
+            self.attempt_dir(id, false)
                 .map_err(|e| typed_local("attempt directory", &e))
         };
         let mut holder_context =
@@ -303,7 +303,7 @@ impl RunStore {
                     .with_repo_facts(self.repo_facts())
                     .cancellable(&setup_cancel)
                     .prepare(writer, deliver)?;
-                host.seal_launch_binding(&self.attempt_dir(record.run_id, id, false)?, scope)?;
+                host.seal_launch_binding(&self.attempt_dir(id, false)?, scope)?;
                 holder.host_delivery = Some(host);
                 holder.encode()
             };
@@ -400,12 +400,19 @@ impl RunStore {
             .as_ref()
             .filter(|c| c.writer.is_some())
             .and_then(|c| lane_port_plan_or_warn(&c.state_root));
+        let key = local_or_withdraw!(
+            record
+                .key
+                .clone()
+                .ok_or(RunError::Validation("attempt has no work key"))
+                .map_err(|e| typed_local("work key", &e))
+        );
         let command = ProviderCommand {
             profile_file,
             lane_ports,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
-            task: task.task_id,
+            key,
             requester,
             protected_commands: vec![],
             // OpenCode stores answering-model evidence in its shared XDG data
@@ -909,7 +916,7 @@ mod tests {
         )?;
         let record = store.record(id, &call)?;
         let scope = RunStore::scope(&record);
-        let directory = store.attempt_dir(request.run_id, id, false)?;
+        let directory = store.attempt_dir(id, false)?;
         // The launcher's setup token must not fire without a request.
         let setup = CancelToken::new();
         let watch = CancelWatch::start(directory.try_clone()?, scope, &setup, &cancel);
@@ -1019,7 +1026,7 @@ mod tests {
             Err(HandOff::Protected(reason)) => panic!("protected: {reason}"),
             Ok(()) => panic!("unexpected launch"),
         }
-        let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = store.attempt_dir(record.attempt_id, false)?;
         let lease = custody::acquire_reader(
             directory,
             RunStore::scope(&record),
@@ -1031,7 +1038,7 @@ mod tests {
         // Each handoff reserves a fresh publication file; these calls exercise
         // separate failure paths against the same attempt fixture.
         store
-            .attempt_dir(record.run_id, id, false)?
+            .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
             &request.request.tasks[0],
@@ -1063,7 +1070,7 @@ mod tests {
             Ok(()) => panic!("unexpected launch"),
         }
         store
-            .attempt_dir(record.run_id, id, false)?
+            .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
             &request.request.tasks[0],
@@ -1105,7 +1112,7 @@ mod tests {
             Ok(()) => panic!("unexpected launch"),
         }
         assert!(custody::reservation_present(
-            &store.attempt_dir(record.run_id, id, false)?,
+            &store.attempt_dir(id, false)?,
             RunStore::scope(&record),
         )?);
         Ok(())
@@ -1157,7 +1164,7 @@ mod tests {
         assert_eq!(recorded_route.model, route().model);
         assert_eq!(recorded_route.effort, route().effort);
         assert!(custody::reservation_present(
-            &store.attempt_dir(request.run_id, record.attempt_id, false)?,
+            &store.attempt_dir(record.attempt_id, false)?,
             RunStore::scope(&record)
         )?);
         assert!(start()?.is_empty());
@@ -1233,7 +1240,7 @@ mod tests {
             None,
             &call,
         )?;
-        let directory = store.attempt_dir(record.run_id, id, false)?;
+        let directory = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&record);
         let lease = custody::acquire_writer(
             directory.try_clone()?,
@@ -1280,7 +1287,7 @@ mod tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
         let scope = RunStore::scope(&record);
-        let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let directory = store.attempt_dir(record.attempt_id, false)?;
         let lease = custody::acquire_writer(
             directory.try_clone()?,
             scope,
@@ -1397,7 +1404,7 @@ mod tests {
             );
             let record = store.record(request.attempts[0].attempt_id, &call)?;
             assert!(custody::reservation_present(
-                &store.attempt_dir(request.run_id, record.attempt_id, false)?,
+                &store.attempt_dir(record.attempt_id, false)?,
                 RunStore::scope(&record)
             )?);
             assert!(launch()?.is_empty());

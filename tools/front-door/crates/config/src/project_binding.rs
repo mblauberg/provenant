@@ -249,7 +249,7 @@ pub fn transient_location(roots: &Roots, path: &Path) -> bool {
 }
 
 fn transient_location_at_state(state: &Path, path: &Path) -> bool {
-    if path.starts_with(state.join("runs")) || path.starts_with(state.join("children")) {
+    if path.starts_with(state.join("attempts")) || path.starts_with(state.join("children")) {
         return true;
     }
     if path
@@ -642,7 +642,7 @@ mod tests {
         let roots = roots(&temp);
         for path in [
             roots.state.as_path().join("probe-one"),
-            roots.state.as_path().join("runs/run"),
+            roots.state.as_path().join("attempts/run"),
             canonical_base(&temp).join(".provenant-staging.one/.git"),
             canonical_base(&temp).join("scratchpads/x"),
             canonical_base(&temp).join("not-git"),

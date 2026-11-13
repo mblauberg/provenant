@@ -92,7 +92,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let id = input.attempts[0].attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -267,7 +267,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     let id = input.attempts[0].attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",

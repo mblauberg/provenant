@@ -167,9 +167,9 @@ pub(super) fn worktree_grants_fixture() -> WorktreeWriteGrants {
 #[test]
 fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn std::error::Error>> {
     let (mut plan, profile) = write_grants_fixture();
-    let scratch = "/fixture/runs/run/attempts/own/tmp/candidate-0";
+    let scratch = "/fixture/attempts/own/tmp/candidate-0";
     plan.scratch.path = scratch.into();
-    let private_state = "/fixture/runs/run/attempts/own/provider-state/candidate-0";
+    let private_state = "/fixture/attempts/own/provider-state/candidate-0";
     plan.private_state.as_mut().expect("private state").path = private_state.into();
     plan.policy = Some(crate::run_config::RunConfig::default().policy_for_launch(
         Path::new("/fixture/runs"),

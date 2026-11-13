@@ -1338,7 +1338,7 @@ mod alias_tests {
 
     #[test]
     fn only_the_temporary_variables_move_to_the_alias() {
-        let scratch = Path::new("/state/runs/r/attempts/a/tmp/candidate-0");
+        let scratch = Path::new("/state/attempts/a/tmp/candidate-0");
         let alias = Path::new("/private/tmp/pv-0123/candidate-0");
         let os = std::ffi::OsString::from;
         let mut env = vec![

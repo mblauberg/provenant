@@ -490,19 +490,13 @@ pub fn writer_base(
     root: &std::path::Path,
     record: &AttemptRecord,
 ) -> Result<Option<provenant_core::GitOid>> {
-    let attempt = Directory::open_anchor(&root.join(format!(
-        "runs/{}/attempts/{}",
-        record.run_id, record.attempt_id
-    )))?;
+    let attempt = Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id)))?;
     crate::settlement::pinned_base(&attempt, RunStore::scope(record))
 }
 
 /// Read retained recovery coordinates without attempting Git import or cleanup.
 pub fn retained_git(root: &std::path::Path, record: &AttemptRecord) -> Result<RetainedGit> {
-    let attempt = Directory::open_anchor(&root.join(format!(
-        "runs/{}/attempts/{}",
-        record.run_id, record.attempt_id
-    )))?;
+    let attempt = Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id)))?;
     let head = crate::settlement::pinned_head(&attempt, RunStore::scope(record))
         .ok()
         .flatten()
@@ -557,7 +551,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             )
             .map_err(custody_error)?;
         let attempt = store
-            .attempt_dir(context.run_id, context.attempt_id, false)
+            .attempt_dir(context.attempt_id, false)
             .map_err(custody_error)?;
         let provider = record
             .applied_route
@@ -801,7 +795,7 @@ impl RunStore {
         if recovery.observe() != custody::RecoveryState::Absent {
             return Err(RunError::Validation("land writer custody is not absent"));
         }
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         self.settle_recovered(&attempt, recovery)
     }
 
@@ -1368,7 +1362,7 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<()> {
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         self.retry_terminal_effects(record, &attempt, &Completion::Recovered(None), call)
     }
 
@@ -1433,8 +1427,6 @@ impl RunStore {
             .context
             .state_root
             .as_path()
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(id.to_string())
             .join("provider-state");
@@ -2905,7 +2897,7 @@ mod disk_admission_tests {
                 None,
                 &call,
             )?;
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let context = HolderContext {
                 schema_version: 1,
                 roots: RootSeed {
@@ -3082,7 +3074,7 @@ mod writer_recovery_tests {
                 &call,
             )?;
             let scope = RunStore::scope(&record);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut launch = crate::prepare_writer(
                 &fixture.writer,
                 execution.state_root.as_path(),
@@ -3287,7 +3279,7 @@ mod writer_recovery_tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),
@@ -3385,7 +3377,7 @@ mod writer_recovery_tests {
                 None,
                 &call,
             )?;
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let context = HolderContext {
                 schema_version: 1,
                 roots: RootSeed {
@@ -3466,7 +3458,7 @@ mod writer_recovery_tests {
             )?;
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let scope = RunStore::scope(&record);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut launch = crate::prepare_writer(
                 &fixture.writer,
                 execution.state_root.as_path(),
@@ -3708,7 +3700,7 @@ mod writer_recovery_tests {
             )?;
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let scope = RunStore::scope(&record);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut launch = crate::prepare_writer(
                 &fixture.writer,
                 execution.state_root.as_path(),
@@ -3903,7 +3895,7 @@ mod writer_recovery_tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),
@@ -4031,7 +4023,7 @@ mod writer_recovery_tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),
@@ -4176,7 +4168,7 @@ mod writer_recovery_tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),
@@ -4589,7 +4581,7 @@ mod writer_recovery_tests {
             )?;
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let scope = RunStore::scope(&record);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut launch = crate::prepare_writer(
                 &fixture.writer,
                 execution.state_root.as_path(),
@@ -4692,7 +4684,7 @@ mod writer_recovery_tests {
             )?;
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let scope = RunStore::scope(&record);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut launch = crate::prepare_writer(
                 &fixture.writer,
                 execution.state_root.as_path(),
@@ -4834,7 +4826,7 @@ mod writer_recovery_tests {
             )?;
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let scope = RunStore::scope(&record);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut launch = crate::prepare_writer(
                 &fixture.writer,
                 execution.state_root.as_path(),
@@ -5044,7 +5036,7 @@ mod writer_recovery_tests {
                 let path = execution
                     .state_root
                     .as_path()
-                    .join(format!("runs/{}/attempts/{id}/quarantine", run.run_id));
+                    .join(format!("attempts/{id}/quarantine"));
                 drop(recovery);
                 drop(store);
                 let store = RunStore::open(&execution, &call)?;
@@ -5556,7 +5548,7 @@ mod writer_recovery_tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),

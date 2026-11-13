@@ -277,7 +277,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     assert!(expired.errors.is_empty(), "{:?}", expired.errors);
     assert!(store.reaction(attempt, &call)?.is_none());
     let candidate = child_path.join(format!(
-        "runs/{run}/attempts/{attempt}/provider-state/candidate-0"
+        "attempts/{attempt}/provider-state/candidate-0"
     ));
     fs::DirBuilder::new()
         .recursive(true)
@@ -363,7 +363,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     assert!(
         child_path
             .join(format!(
-                "runs/{run}/attempts/{attempt}/provider-history/candidate-0/sessions/session.jsonl"
+                "attempts/{attempt}/provider-history/candidate-0/sessions/session.jsonl"
             ))
             .exists()
     );

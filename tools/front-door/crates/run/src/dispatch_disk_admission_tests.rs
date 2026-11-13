@@ -102,7 +102,7 @@ fn prepared_write_grants_hold_admission_on_the_disk_floor() -> TestResult {
                 LaneClass::ReadOnly
             }
         );
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let result = store.admit(id, &attempt, &facts, &clock, &cancel);
         if writable {
             assert!(
@@ -197,7 +197,7 @@ fn guardian_admission_resource_refusals_survive_durable_exit_and_retained_status
         // refuses. Persist and reread it through normal custody observation.
         let process = ProcessExit::admission_refused(RunStore::scope(&record), &error);
         assert_eq!(process.launch_refusal.is_some(), !setting.is_empty());
-        let dir = store.attempt_dir(run.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         artifacts::seal(
             &dir,
             "process-exit.json",
@@ -216,13 +216,7 @@ fn guardian_admission_resource_refusals_survive_durable_exit_and_retained_status
         };
         assert_eq!(observed.launch_refusal, process.launch_refusal);
         let fake = Fake::default();
-        store.finish(
-            id,
-            &store.attempt_dir(run.run_id, id, false)?,
-            &observed,
-            &fake,
-            &call,
-        )?;
+        store.finish(id, &store.attempt_dir(id, false)?, &observed, &fake, &call)?;
         let record = store.record(id, &call)?;
         assert!(matches!(
             record.state,

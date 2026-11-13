@@ -21,7 +21,7 @@ pub(crate) fn guidance() -> &'static str {
 impl RunStore {
     /// Read the host's immutable settlement snapshot, never provider history.
     pub fn handoff(&self, record: &AttemptRecord) -> Result<Option<Handoff>> {
-        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
         read_snapshot(&attempt)
     }
 
@@ -76,8 +76,6 @@ impl RunStore {
             .context
             .state_root
             .as_path()
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(record.attempt_id.to_string())
             .join("provider-state");
@@ -265,13 +263,14 @@ mod tests {
         store.create(&input, &call)?;
         let mut record = store.record(input.attempts[0].attempt_id, &call)?;
         assert!(input.request.tasks[0].access.write_roots.is_empty());
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            record.run_id, record.attempt_id
-        ));
+        let base = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", record.attempt_id));
         let subtree = |path| PathGrant {
             path,
             scope: PathScope::Subtree,
@@ -386,7 +385,7 @@ mod tests {
         seal_observation(&store, &input, &exit())?;
         let id = input.attempts[0].attempt_id;
         let mut old = store.record(id, &call)?;
-        let attempt = store.attempt_dir(old.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let root = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&root, OsStr::new("candidate-1"), true)?;
         let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
@@ -410,10 +409,11 @@ mod tests {
             &serde_json::to_vec(&progress)?,
             HANDOFF_BYTES as u64,
         )?;
-        let candidate_path = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{id}/provider-state/candidate-1",
-            old.run_id
-        ));
+        let candidate_path = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{id}/provider-state/candidate-1"));
         grant(&mut old, &candidate_path)?;
         let route = RouteRecord {
             account_label: Some("one".into()),
@@ -470,7 +470,7 @@ mod tests {
                 let input = input();
                 store.create(&input, &call)?;
                 let record = store.record(input.attempts[0].attempt_id, &call)?;
-                let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+                let attempt = store.attempt_dir(record.attempt_id, false)?;
                 let secret = format!("{prefix}sk-abcdefghijklmnopqrstuvwx");
                 let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
                 value[field] = match field {
@@ -534,7 +534,7 @@ mod tests {
         seal_observation(&store, &input, &exit())?;
         let id = input.attempts[0].attempt_id;
         let old = store.record(id, &call)?;
-        let attempt = store.attempt_dir(old.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let mut result = decoded();
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
         store.capture_handoff(&attempt, &old, &result)?;
@@ -565,13 +565,14 @@ mod tests {
         let input = input();
         store.create(&input, &call)?;
         let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}/provider-state",
-            record.run_id, record.attempt_id
-        ));
+        let base = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}/provider-state", record.attempt_id));
         grant(&mut record, &base.join("candidate-0"))?;
         assert!(
             store
@@ -626,13 +627,14 @@ mod tests {
         let input = input();
         store.create(&input, &call)?;
         let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}/provider-state",
-            record.run_id, record.attempt_id
-        ));
+        let base = store
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}/provider-state", record.attempt_id));
         grant(&mut record, &base.join("candidate-0"))?;
         let outside = temp.path().join("outside.json");
         std::fs::write(&outside, snapshot("stopped_early"))?;

@@ -385,7 +385,7 @@ pub struct UtilityRuntime {
 /// Where a run's lane scratch and provider state live below the state
 /// directory: lanes write there, and the user's config never should.
 pub fn lane_state_roots(state: &Path) -> Vec<PathBuf> {
-    vec![state.join("runs"), state.join("children")]
+    vec![state.join("attempts"), state.join("children")]
 }
 
 /// Canonical project location and its verified Git origin, when present.

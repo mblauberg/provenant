@@ -227,8 +227,6 @@ fn receipt_failed_seal_does_not_commit_terminal() -> TestResult {
     let attempt = context
         .state_root
         .as_path()
-        .join("runs")
-        .join(input.run_id.to_string())
         .join("attempts")
         .join(id.to_string());
     std::fs::create_dir(attempt.join("terminal-pending.json"))?;

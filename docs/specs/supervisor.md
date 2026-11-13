@@ -42,6 +42,11 @@ there is no native child registry, a present host holder must affirm that no gra
 child remains. Spared and protected owners and their possible descendants stay excluded.
 A census listing or cwd observation alone never grants signal authority, and
 recovery signals only a PID whose recorded identity matches.
+
+A launch is named by its attempt's `WorkKey`: the guardian's launch summary
+records the key, and a stop request is identified by attempt and generation.
+A supervisor restart finds a live writer by the key through the attempt row,
+then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Test: `crates/supervisor/tests/process.rs::inherited_wait_policy_preserves_pid_reservation`;
   `crates/supervisor/tests/custody.rs::stale_complete_census_does_not_signal_a_late_shared_group_owner`;

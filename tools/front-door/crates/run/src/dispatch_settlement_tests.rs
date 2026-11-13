@@ -25,7 +25,7 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
             &call,
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let dir = store.attempt_dir(run.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
         let mut observed = exit();
         observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -74,14 +74,14 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let attempt = store
         .context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+        .join(format!("attempts/{id}"));
     let codex = attempt.join("provider-state/candidate-0/sessions/2026/10/24");
     std::fs::create_dir_all(&codex)?;
     let rollout = codex.join("rollout-2026-10-24T00-00-00-thread.jsonl");
@@ -155,7 +155,7 @@ fn empty_success_is_rejected_at_settlement() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -194,7 +194,7 @@ fn failed_lane_reason_reports_path_denial_without_captured_text() -> TestResult 
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
     artifacts::seal(
         &dir,
@@ -236,7 +236,7 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(
         &dir,
         "stdout.log",
@@ -279,7 +279,7 @@ fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResu
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
     artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
     let mut observed = exit();
@@ -318,7 +318,7 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(
         &dir,
         "stdout.log",
@@ -367,7 +367,7 @@ fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
     // The quota evidence is only in the sealed stderr: the settlement must
     // read it and hand it to the decoder for the outcome to be QuotaLimited.
@@ -408,7 +408,7 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -459,7 +459,7 @@ fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult 
             &call,
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let dir = store.attempt_dir(run.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
         let mut observed = exit();
         observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -512,7 +512,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     // The operator cancelled before the provider spawned. An over-long `://`
     // run makes the session scrub refuse a transcript.
@@ -526,7 +526,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
         .context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}", run.run_id));
+        .join(format!("attempts/{id}"));
     let sessions = attempt.join("provider-state/candidate-0/sessions");
     std::fs::create_dir_all(&sessions)?;
     let overlong = format!(
@@ -579,7 +579,7 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     artifacts::seal(&dir, "result.md", token.as_bytes(), RESULT_LIMIT)?;
@@ -762,7 +762,7 @@ fn identity_failure_names_requested_and_observed_models() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -809,7 +809,7 @@ fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
     artifacts::seal(
         &dir,
@@ -922,6 +922,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     spaced.operation_id = provenant_core::OperationId::parse("spaced")?;
     spaced.attempts[0].attempt_id = AttemptId::from_bytes([11; 16]);
     spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
+    crate::tests::rekey(&mut spaced);
     store.create(&spaced, &call)?;
     let id = spaced.attempts[0].attempt_id;
     store.mark_starting(
@@ -949,9 +950,10 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     expired.run_id = provenant_core::RunId::from_bytes([13; 16]);
     expired.operation_id = provenant_core::OperationId::parse("expired")?;
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
+    crate::tests::rekey(&mut expired);
     store.create(&expired, &call)?;
     let id = expired.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(expired.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -991,7 +993,7 @@ fn graph_readers_get_the_sealed_handoff_not_a_rereading_of_the_text() -> TestRes
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);

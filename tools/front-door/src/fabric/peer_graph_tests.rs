@@ -178,7 +178,7 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     assert_eq!(request.tasks[0].provider_timeout_seconds, 17);
     let directory = provenant_os::fs::Directory::open_anchor(
         &rig.state
-            .join(format!("runs/{}/attempts/{parent}", parent_record.run_id)),
+            .join(format!("attempts/{parent}")),
     )?;
     parent_store.admit(
         parent,

@@ -756,7 +756,7 @@ mod tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&store.record(id, &call)?);
         for explicit in [false, true] {
             let calls = std::cell::Cell::new(0);
@@ -816,7 +816,7 @@ mod tests {
             &call,
         )?;
         let lane = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&lane);
         let lease = provenant_supervisor::custody::acquire_reader(
             attempt.try_clone()?,
@@ -1027,7 +1027,7 @@ mod tests {
             let run = crate::tests::input();
             store.create(&run, &call)?;
             let id = run.attempts[0].attempt_id;
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let scope = crate::RunStore::scope(&store.record(id, &call)?);
             crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
             if fenced {
@@ -1214,10 +1214,7 @@ mod tests {
                         &call,
                     )?;
                 }
-                let path = context
-                    .state_root
-                    .as_path()
-                    .join(format!("runs/{}/attempts/{bad}", run.run_id));
+                let path = context.state_root.as_path().join(format!("attempts/{bad}"));
                 match failure {
                     "record" => {
                         store.db.execute(
@@ -1253,7 +1250,7 @@ mod tests {
                 assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
                 queued.unlink(OsStr::new("settlement-queued.json"))?;
                 crate::artifacts::seal(
-                    &store.attempt_dir(run.run_id, good, false)?,
+                    &store.attempt_dir(good, false)?,
                     "cancel.json",
                     b"{}",
                     RECORD_LIMIT,
@@ -1349,7 +1346,7 @@ mod tests {
             store.commit_lost(scope, "fixture", &call)?;
             store.set_temporary_retained(id, retained, &call)?;
             assert_eq!(store.pending_reactions(run.run_id, &call)?, [id]);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let attempt = store.attempt_dir(id, false)?;
             let mut spawned = false;
             store.queue_reconcile_mode(
                 run.run_id,
@@ -1482,7 +1479,7 @@ mod tests {
             found.as_slice(),
             [(_, crate::Reconciled::Uncertain { .. })]
         ));
-        let journal = read(&store.attempt_dir(run.run_id, id, false)?, scope)?;
+        let journal = read(&store.attempt_dir(id, false)?, scope)?;
         assert_eq!(journal.recovery_failures, 1);
         assert!(journal.blocking_reason.is_some());
         Ok(())
@@ -1513,7 +1510,7 @@ mod tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&store.record(id, &call)?);
         for n in 1..=LIMIT {
             let call = crate::tests::call(&clock, &cancel);
@@ -1626,7 +1623,7 @@ mod tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         for index in 1..=LIMIT {
@@ -2152,7 +2149,7 @@ impl crate::RunStore {
         }
         let reason = provenant_confinement::redact::bounded_line(reason, 4096);
         let mut record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
         let queued = matches!(record.state, crate::AttemptState::Queued { .. });
         // A cancelled, never-launched terminal row also permits retry after a
@@ -2463,7 +2460,7 @@ impl crate::RunStore {
                 if attempt.run_id != run {
                     return Err(RunError::Validation("writer fence run mismatch"));
                 }
-                let directory = self.attempt_dir(run, id, false)?;
+                let directory = self.attempt_dir(id, false)?;
                 let scope = Self::scope(&attempt);
                 let journal = read(&directory, scope)?;
                 if let Some(abandonment) = &journal.abandonment {

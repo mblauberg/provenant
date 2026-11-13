@@ -807,7 +807,7 @@ mod tests {
     #[test]
     fn state_inside_a_worktree_keeps_first_observation_ownership() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let temporary = temp.path().join("state/runs/run/attempts/a/tmp");
+        let temporary = temp.path().join("state/attempts/a/tmp");
         fs::create_dir_all(temporary.join("target"))?;
         fs::write(temporary.join("target/CACHEDIR.TAG"), "cache")?;
         fs::write(temporary.join("target/payload"), vec![1; 16384])?;

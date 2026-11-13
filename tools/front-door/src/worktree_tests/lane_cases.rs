@@ -243,8 +243,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             effort: None,
         };
         let attempt = roots.state.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            prepared.run_id, prepared.attempts[0].attempt_id
+            "attempts/{}", prepared.attempts[0].attempt_id
         ));
         // Launch preparation links a short alias to `tmp` on macOS. The name
         // is unique to this process and attempt, and the rig unlinks it.
@@ -457,7 +456,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 roots
                     .state
                     .as_path()
-                    .join("runs/other/attempts/other/custody.lock"),
+                    .join("attempts/other/custody.lock"),
             ] {
                 assert!(
                     !(grant.path == denied
@@ -1270,7 +1269,7 @@ if (process.argv[2] === 'child') {
         attempt.join("quarantine/probe"),
         attempt.join("quarantine-result.json"),
         attempt.join("process.json"),
-        state.join("runs/other/attempts/other/process.json"),
+        state.join("attempts/other/process.json"),
     ];
     for path in &denied {
         fs::create_dir_all(path.parent().ok_or("custody parent")?)?;

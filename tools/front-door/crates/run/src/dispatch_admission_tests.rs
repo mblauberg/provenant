@@ -114,7 +114,7 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
     let (first, second) = (lane(110, false), lane(111, false));
     let first_id = starting(&writable, &first, &call)?;
     let second_id = starting(&writable, &second, &call)?;
-    let attempt = writable.attempt_dir(first.run_id, first_id, false)?;
+    let attempt = writable.attempt_dir(first_id, false)?;
     writable.admit(first_id, &attempt, &HostFacts::new(100), &clock, &cancel)?;
     let waiting = writable.record(second_id, &call)?;
     let waits = |registry: Option<&std::path::Path>| -> Result<String> {
@@ -258,7 +258,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
     let call = stepped_call(&host, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let [lane_id] = writers(&store, [91], &call)?;
-    let attempt = store.attempt_dir(lane(91, true).run_id, lane_id, false)?;
+    let attempt = store.attempt_dir(lane_id, false)?;
     for (readable, name) in [
         (&host.host_readable, "monotonic clock"),
         (&host.boot_readable, "boot identity"),
@@ -374,7 +374,7 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     let (delayed, rival) = (lane(70, true), lane(71, true));
     let delayed_id = starting(&store, &delayed, &call)?;
     let rival_id = starting(&store, &rival, &call)?;
-    let attempt = store.attempt_dir(delayed.run_id, delayed_id, false)?;
+    let attempt = store.attempt_dir(delayed_id, false)?;
     // `admit` samples the time, then the probe stalls while the rival's
     // writer starts one second later. The delayed lane must see that start.
     let probe = RivalStarts {
@@ -424,7 +424,7 @@ fn memory_floor_warns_for_both_lane_classes() -> TestResult {
         });
         let run = lane(seed, writer);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let admitted = store.admit(id, &attempt, &HostFacts::new(available), &clock, &cancel);
         assert_eq!(
             admitted?.state,
@@ -451,7 +451,7 @@ fn admission_warns_for_unconfigured_memory_floor_without_refusing() -> TestResul
         });
         let run = lane(60, false);
         let id = starting(&store, &run, &call)?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let admitted = store.admit(
             id,
             &attempt,
@@ -492,7 +492,7 @@ fn total_lane_caps_report_setting_and_source_for_read_only_lanes() -> TestResult
         for seed in 80..84 {
             let run = lane(seed, false);
             let id = starting(&store, &run, &call)?;
-            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let dir = store.attempt_dir(id, false)?;
             let result = store.admit(id, &dir, &facts, &clock, &cancel);
             if seed < 83 {
                 assert!(matches!(result?.state, AttemptState::Running { .. }));
@@ -636,6 +636,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
         run.operation_id = provenant_core::OperationId::parse("serial-waits")?;
         run.attempts[0].attempt_id = AttemptId::from_bytes([111; 16]);
         run.attempts[1].attempt_id = AttemptId::from_bytes([112; 16]);
+        crate::tests::rekey(&mut run);
         run
     };
     store.create(&serial, &call)?;

@@ -1000,7 +1000,7 @@ fn landed_writer_fence_fixture(
         &call,
     )?;
     let scope = RunStore::scope(&record);
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     if !matches!(case, LandedWriterFenceCase::Nonterminal) {
         let mut exit = tests::exit();
         exit.scope = scope;

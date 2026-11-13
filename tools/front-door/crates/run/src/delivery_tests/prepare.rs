@@ -231,7 +231,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     input.request.tasks[0].deliver = Some(request.clone());
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     // A lane that rewrites the stored destination after launch cannot steer
     // the host's push: the destination bound at prepare wins.
     let rewritten = WriterDeliveryRequest {
@@ -309,10 +309,11 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     idle.run_id = provenant_core::RunId::from_bytes([17; 16]);
     idle.operation_id = provenant_core::OperationId::parse("idle-delivery")?;
     idle.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([18; 16]);
+    crate::tests::rekey(&mut idle);
     idle.request.tasks[0].writer = Some(idle_writer.clone());
     idle.request.tasks[0].deliver = Some(idle_request.clone());
     store.create(&idle, &call)?;
-    let idle_attempt = store.attempt_dir(idle.run_id, idle.attempts[0].attempt_id, false)?;
+    let idle_attempt = store.attempt_dir(idle.attempts[0].attempt_id, false)?;
     let idle_receipt = deliver_once(
         &idle_host,
         &idle_writer,
@@ -333,6 +334,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     interrupted.run_id = provenant_core::RunId::from_bytes([14; 16]);
     interrupted.operation_id = provenant_core::OperationId::parse("interrupted-delivery")?;
     interrupted.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([16; 16]);
+    crate::tests::rekey(&mut interrupted);
     interrupted.request.tasks[0].writer = Some(writer);
     interrupted.request.tasks[0].deliver = Some(WriterDeliveryRequest {
         branch: "interrupted".into(),
@@ -340,7 +342,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     });
     store.create(&interrupted, &call)?;
     let id = interrupted.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(interrupted.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let pending = WriterDeliveryReceipt {
         branch: "interrupted".into(),
         state: WriterDeliveryState::Failed {
@@ -654,7 +656,7 @@ fn publication_cleanup_never_removes_another_import_pin()
     )?;
     let reference = format!("refs/provenant/import/{head}");
     fixture.git(&["update-ref", &reference, &head.to_string()])?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut driver = crate::settlement::Guard::claim(&attempt, RunStore::scope(&record), &clock)?
         .ok_or("old driver")?;
     driver.set_head(head)?;
@@ -763,7 +765,7 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     input.request.tasks[0].writer = Some(writer.clone());
     input.request.tasks[0].deliver = Some(request.clone());
     store.create(&input, &call)?;
-    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let attempt = store.attempt_dir(input.attempts[0].attempt_id, false)?;
     assert!(matches!(
         deliver_once(&host, &writer, &request, &attempt, "fixture receipt"),
         Err(RunError::Delivery(WriterDeliveryStage::Push))

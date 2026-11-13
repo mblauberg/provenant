@@ -903,7 +903,8 @@ pub struct ProviderCommand {
     pub priority: u8,
     pub resolved_route: String,
     pub permission_plan_digest: Digest,
-    pub task: provenant_core::TaskId,
+    /// The attempt's work identity; the guardian names the launch by it.
+    pub key: provenant_records::WorkKey,
     pub requester: ActorId,
     /// Native diagnostic command names that must be spared during cleanup.
     pub protected_commands: Vec<String>,
@@ -1249,8 +1250,8 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         schema_version: 1,
         scope: handle.scope,
         request_id: provenant_core::OperationId::parse(&format!(
-            "{}.{}.{}.cancel",
-            handle.scope.run, handle.scope.attempt, handle.scope.generation
+            "{}.{}.cancel",
+            handle.scope.attempt, handle.scope.generation
         ))
         .map_err(|_| CustodyError::InvalidRecord)?,
         requester: handle.requester,
@@ -2686,3 +2687,17 @@ pub use orphans::{OrphanReport, resume_orphaned_builds};
 #[cfg(test)]
 #[path = "custody_tests.rs"]
 mod tests;
+
+/// A fixed work key for fixtures that need a custody command.
+#[cfg(any(test, feature = "fixture"))]
+#[doc(hidden)]
+#[allow(clippy::expect_used)]
+pub fn fixture_key(seed: u8) -> provenant_records::WorkKey {
+    provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([seed; 16]),
+        "fixture",
+        "node",
+        1,
+    )
+    .expect("fixture key is valid")
+}

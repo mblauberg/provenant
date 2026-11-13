@@ -62,9 +62,9 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
     let state = base.join("state");
     let source = base.join("repo");
     let assets = base.join("assets");
-    let scratch = state.join("runs/run/attempts/attempt/tmp/candidate-0");
-    let private_state = state.join("runs/run/attempts/attempt/provider-state/candidate-0");
-    let view = state.join("runs/run/attempts/attempt/tmp/source-snapshot");
+    let scratch = state.join("attempts/attempt/tmp/candidate-0");
+    let private_state = state.join("attempts/attempt/provider-state/candidate-0");
+    let view = state.join("attempts/attempt/tmp/source-snapshot");
     for path in [
         &home,
         &state,

@@ -402,7 +402,7 @@ fn settle_with_turns(
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
+    let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
@@ -442,7 +442,7 @@ pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult 
     let object = value.as_object_mut().ok_or("exit fixture")?;
     object.remove("publication");
     object.insert("schema_version".into(), 1.into());
-    let dir = store.attempt_dir(exit.scope.run, exit.scope.attempt, false)?;
+    let dir = store.attempt_dir(exit.scope.attempt, false)?;
     artifacts::seal(
         &dir,
         "process-exit.json",
@@ -626,7 +626,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let parent_record = store
         .claim_observed(parent_id, &clock, &call, &facts)?
         .ok_or("parent claim")?;
-    let parent_dir = store.attempt_dir(parent.run_id, parent_id, false)?;
+    let parent_dir = store.attempt_dir(parent_id, false)?;
     artifacts::seal(&parent_dir, "stdout.log", b"parent work", CAPTURE_LIMIT)?;
     let child_id = starting(&store, &child, &call)?;
     assert!(
@@ -672,7 +672,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
             b"parent work"
         );
     }
-    let child_dir = store.attempt_dir(child.run_id, child_id, false)?;
+    let child_dir = store.attempt_dir(child_id, false)?;
     artifacts::seal(&child_dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
     let child_exit = ExitObservation {
         scope: RunStore::scope(&child_record),
@@ -704,7 +704,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
             store.record(parent_id, &call)?.state,
             AttemptState::Running { .. }
         ));
-        let dir = store.attempt_dir(child.run_id, id, false)?;
+        let dir = store.attempt_dir(id, false)?;
         artifacts::seal(&dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
         let observed = ExitObservation {
             scope: RunStore::scope(&record),
@@ -767,6 +767,7 @@ fn batch(seed: u8, tasks: u64) -> PreparedRun {
     let template = run.request.tasks[0].clone();
     run.run_id = provenant_core::RunId::from_bytes([seed; 16]);
     run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
+    crate::tests::rekey(&mut run);
     run.request.concurrency = tasks.min(8);
     run.request.tasks.clear();
     run.attempts.clear();
@@ -802,7 +803,7 @@ fn assert_unreadable_prompt_rejected(
     let prompt = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/prompt.txt", run.run_id));
+        .join(format!("attempts/{id}/prompt.txt"));
     damage(&prompt)?;
     let fake = Fake::default();
     let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
@@ -855,7 +856,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
         &call,
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
@@ -1005,7 +1006,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         })?;
     }
     let scope = RunStore::scope(&store.record(id, &call)?);
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let custody = store
         .writer_registry
         .join("worktrees")
@@ -1234,7 +1235,7 @@ fn recover_rebooted_writer_inner(
         .ok_or("not admitted")?;
     let before = store.record(id, &call)?;
     let scope = RunStore::scope(&before);
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let custody = if writer {
         store
             .writer_registry
@@ -1242,10 +1243,7 @@ fn recover_rebooted_writer_inner(
             .join(context.project_id.to_string())
             .join(provenant_confinement::worktrees::state_dir_name(&worktree))
     } else {
-        context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{id}", run.run_id))
+        context.state_root.as_path().join(format!("attempts/{id}"))
     };
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -1317,7 +1315,7 @@ fn recover_rebooted_writer_inner(
     let history = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}/provider-state", run.run_id));
+        .join(format!("attempts/{id}/provider-state"));
     std::fs::write(history.join("session"), "history")?;
 
     if removed {
@@ -1571,7 +1569,7 @@ fn read_only_disk_floor_warning_is_emitted_once_by_admit() -> TestResult {
     let store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
     let run = lane(99, false);
     let id = starting(&store, &run, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let probe = LowDisk {
         facts: HostFacts::new(100),
         probes: Cell::new(0),

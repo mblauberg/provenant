@@ -197,6 +197,7 @@ mod tests {
             input.run_id = RunId::from_bytes([n; 16]);
             input.operation_id = provenant_core::OperationId::parse(&format!("board-{n}"))?;
             input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+            crate::tests::rekey(&mut input);
             input.request.tasks[0].title = Some(format!("Task {n}"));
             store.create(&input, &call)?;
         }
@@ -229,6 +230,7 @@ mod tests {
         later.run_id = RunId::from_bytes([6; 16]);
         later.operation_id = provenant_core::OperationId::parse("board-6")?;
         later.attempts[0].attempt_id = AttemptId::from_bytes([6; 16]);
+        crate::tests::rekey(&mut later);
         store.create(&later, &call)?;
         let snapshot = store.board_page(None, true, 100, 0, Some(high_water), &call)?;
         assert_eq!(

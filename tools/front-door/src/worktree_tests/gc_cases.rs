@@ -1016,7 +1016,7 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
     )?;
     let attempt = rig
         .state
-        .join(format!("runs/{}/attempts/{id}", input.run_id));
+        .join(format!("attempts/{id}"));
     let temporary = attempt.join("tmp");
     fs::DirBuilder::new().mode(0o700).create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;

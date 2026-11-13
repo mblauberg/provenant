@@ -118,7 +118,7 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     let artifact = |name: &str, item: Option<&provenant_run::ArtifactRecord>| {
         item.map(|item| {
             let present = item.path.to_relative_path().ok().is_some_and(|path| {
-                std::fs::symlink_metadata(state_path.join("runs").join(record.run_id.to_string()).join(path.as_path()))
+                std::fs::symlink_metadata(state_path.join(path.as_path()))
                     .is_ok_and(|metadata| metadata.is_file())
             });
             json!({"name":name,"bytes":item.bytes,"digest":item.digest,"complete":item.complete,"redacted":item.redacted,"present":present})

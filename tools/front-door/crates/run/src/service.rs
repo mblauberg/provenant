@@ -360,7 +360,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
-                context: task.context,
+                context: Some(crate::store::lane_context(task.context, task.task_id)),
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
                 title: task.title,
@@ -517,27 +517,10 @@ impl<'a> Service<'a> {
             ),
             refusal_chair: self.refusal.chair.clone().or_else(|| input.chair.clone()),
         };
-        // A graph launch is refused under the work key it would have taken.
-        let named = task.context.as_ref().and_then(|context| {
-            Some((
-                context.graph_id.clone()?,
-                context.node_id.clone()?,
-                context.attempt?,
-            ))
-        });
-        let saved = match named {
-            Some((graph, node, attempt)) => {
-                let key = provenant_records::WorkKey::new(
-                    self.store.context.project_id,
-                    graph,
-                    node,
-                    attempt,
-                )
-                .map_err(|_| RunError::Validation("work key"))?;
-                self.store.insert_refusal_under(&key, record, call)?
-            }
-            None => self.store.insert_refusal(record, call)?,
-        };
+        // A launch is refused under the work key it would have taken.
+        let context = crate::store::lane_context(task.context.clone(), task.task_id);
+        let key = crate::store::work_key(self.store.context.project_id, Some(&context))?;
+        let saved = self.store.insert_refusal_under(&key, record, call)?;
         if saved.state != OperationState::Refused {
             return Err(RunError::OperationConflict);
         }
@@ -667,7 +650,7 @@ impl<'a> Service<'a> {
                 Some(!self.store.custody_released(&record, call).unwrap_or(false));
             let restored = self
                 .store
-                .attempt_dir(record.run_id, record.attempt_id, false)
+                .attempt_dir(record.attempt_id, false)
                 .ok()
                 .and_then(|attempt| {
                     crate::artifacts::read_sealed_observed(

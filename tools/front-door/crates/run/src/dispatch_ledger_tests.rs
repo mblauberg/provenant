@@ -74,7 +74,7 @@ fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> Test
             .len()
             > 16 * RECORD_LIMIT as usize
     );
-    let attempt = store.attempt_dir(prepared.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let terminal =
         crate::artifacts::read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?
             .ok_or("terminal decision")?;

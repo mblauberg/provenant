@@ -1177,7 +1177,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     let run_id = RunId::from_bytes([2; 16]);
     let attempt = rig
         .state
-        .join(format!("runs/{run_id}/attempts/{attempt_id}"));
+        .join(format!("attempts/{attempt_id}"));
     let paths = provenant_run::LaunchPaths {
         attempt_id,
         run_id,

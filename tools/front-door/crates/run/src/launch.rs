@@ -436,7 +436,7 @@ pub struct PreparedStart {
     pub task: TaskRequest,
     pub attempt: AttemptId,
     pub plan: std::cell::RefCell<Option<PreparedLaunch>>,
-    runs: provenant_os::fs::Directory,
+    attempts: provenant_os::fs::Directory,
     run: RunId,
     retained: bool,
 }
@@ -446,24 +446,16 @@ impl Drop for PreparedStart {
             // No attempt record survives for retention to find the alias by,
             // so unlink it before its attempt directory is deleted.
             let attempt = crate::artifacts::subdir(
-                &self.runs,
-                std::ffi::OsStr::new(&self.run.to_string()),
+                &self.attempts,
+                std::ffi::OsStr::new(&self.attempt.to_string()),
                 false,
-            )
-            .and_then(|run| crate::artifacts::subdir(&run, std::ffi::OsStr::new("attempts"), false))
-            .and_then(|attempts| {
-                crate::artifacts::subdir(
-                    &attempts,
-                    std::ffi::OsStr::new(&self.attempt.to_string()),
-                    false,
-                )
-            });
+            );
             if let Ok(attempt) = attempt {
                 crate::short_temporary::remove(&attempt);
             }
             let _ = crate::artifacts::remove_entry_tree(
-                &self.runs,
-                std::ffi::OsStr::new(&self.run.to_string()),
+                &self.attempts,
+                std::ffi::OsStr::new(&self.attempt.to_string()),
             );
         }
     }
@@ -586,26 +578,28 @@ impl RunStore {
         let [attempt] = input.attempts.as_slice() else {
             return Err(RunError::Validation("continuation attempt count"));
         };
-        let runs = crate::artifacts::subdir(&self.root, std::ffi::OsStr::new("runs"), true)?;
+        let attempts =
+            crate::artifacts::subdir(&self.root, std::ffi::OsStr::new("attempts"), true)?;
         // Exclusive creation makes cleanup safe even if admission races a replay.
-        runs.mkdir(std::ffi::OsStr::new(&input.run_id.to_string()), 0o700)?;
+        attempts.mkdir(std::ffi::OsStr::new(&attempt.attempt_id.to_string()), 0o700)?;
         let mut ready = PreparedStart {
             task: task.clone(),
             attempt: attempt.attempt_id,
             plan: std::cell::RefCell::new(None),
-            runs,
+            attempts,
             run: input.run_id,
             retained: false,
         };
-        ready.runs.sync()?;
-        let directory = self.attempt_dir(input.run_id, attempt.attempt_id, true)?;
+        ready.attempts.sync()?;
+        let directory = self.attempt_dir(attempt.attempt_id, true)?;
         for name in ["scratch", "provider-state", "tmp"] {
             crate::artifacts::subdir(&directory, std::ffi::OsStr::new(name), true)?;
         }
-        let base = self.context.state_root.as_path().join(format!(
-            "runs/{}/attempts/{}",
-            input.run_id, attempt.attempt_id
-        ));
+        let base = self
+            .context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", attempt.attempt_id));
         let paths = LaunchPaths {
             attempt_id: attempt.attempt_id,
             operation_id: input.operation_id.clone(),
@@ -1137,7 +1131,7 @@ impl RunStore {
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
             let prompt = match self
-                .artifact_bytes(run, &record.prompt, RECORD_LIMIT)
+                .artifact_bytes(&record.prompt, RECORD_LIMIT)
                 .and_then(|bytes| {
                     String::from_utf8(bytes)
                         .map_err(|_| RunError::Validation("prompt is not UTF-8"))
@@ -1179,9 +1173,9 @@ impl RunStore {
                 .context
                 .state_root
                 .as_path()
-                .join(format!("runs/{run}/attempts/{id}"));
+                .join(format!("attempts/{id}"));
             let prompt = output_prompt(&directory, &prompt);
-            let attempt = self.attempt_dir(record.run_id, id, false)?;
+            let attempt = self.attempt_dir(id, false)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("scratch"), true)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("provider-state"), true)?;
             crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("tmp"), true)?;
@@ -1189,8 +1183,6 @@ impl RunStore {
                 .context
                 .state_root
                 .as_path()
-                .join("runs")
-                .join(record.run_id.to_string())
                 .join("attempts")
                 .join(id.to_string());
             let paths = LaunchPaths {
@@ -1439,7 +1431,7 @@ impl RunStore {
                         };
                         // Cancellation decides the outcome, but an independent
                         // preparation failure remains evidence for the chair.
-                        let cancelled = self.attempt_dir(run, id, false).is_ok_and(|attempt| {
+                        let cancelled = self.attempt_dir(id, false).is_ok_and(|attempt| {
                             crate::store::cancel_requested(&attempt, Self::scope(&record))
                         });
                         let (outcome, reason) = if cancelled {

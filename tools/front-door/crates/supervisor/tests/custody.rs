@@ -520,7 +520,7 @@ fn start_with_profile(
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([3; 16]),
+        key: provenant_supervisor::custody::fixture_key(3),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(scenario, extra)?,
@@ -1365,7 +1365,7 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([3; 16]),
+        key: provenant_supervisor::custody::fixture_key(3),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv("exit")?,
@@ -1423,7 +1423,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([3; 16]),
+        key: provenant_supervisor::custody::fixture_key(3),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv("terminal-stdin")?,
@@ -2503,14 +2503,16 @@ fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str)
     Ok(())
 }
 
-fn guardian_sigterm_uses_supervisor_signal_path(root: &Path) -> Result<()> {
-    guardian_signal_requests_provider_stop(root, libc::SIGTERM, "term")
-}
-fn guardian_sigint_uses_supervisor_signal_path(root: &Path) -> Result<()> {
-    guardian_signal_requests_provider_stop(root, libc::SIGINT, "int")
-}
-fn guardian_sighup_uses_supervisor_signal_path(root: &Path) -> Result<()> {
-    guardian_signal_requests_provider_stop(root, libc::SIGHUP, "hup")
+/// Each terminating signal takes the supervisor's stop path, not a default one.
+fn guardian_signals_use_supervisor_signal_path(root: &Path) -> Result<()> {
+    for (signal, label) in [
+        (libc::SIGTERM, "term"),
+        (libc::SIGINT, "int"),
+        (libc::SIGHUP, "hup"),
+    ] {
+        guardian_signal_requests_provider_stop(root, signal, label)?;
+    }
+    Ok(())
 }
 
 fn wait_for_zombie(identity: &ProcessIdentity) -> Result<()> {
@@ -3289,16 +3291,8 @@ const CASES: &[Case] = &[
         stale_complete_census_does_not_signal_a_late_shared_group_owner,
     ),
     (
-        "guardian_sigterm_uses_supervisor_signal_path",
-        guardian_sigterm_uses_supervisor_signal_path,
-    ),
-    (
-        "guardian_sigint_uses_supervisor_signal_path",
-        guardian_sigint_uses_supervisor_signal_path,
-    ),
-    (
-        "guardian_sighup_uses_supervisor_signal_path",
-        guardian_sighup_uses_supervisor_signal_path,
+        "guardian_signals_use_supervisor_signal_path",
+        guardian_signals_use_supervisor_signal_path,
     ),
     (
         "checkpoint_failure_preserves_terminal_publication",

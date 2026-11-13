@@ -125,7 +125,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("writer-temporary")?,
@@ -742,7 +742,7 @@ printf 'agy 1.0.0\n'
                 request.writer = None;
             }
             let attempt_id = AttemptId::from_bytes([n; 16]);
-            let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+            let attempt = state.join(format!("attempts/{attempt_id}"));
             let paths = run::LaunchPaths {
                 attempt_id,
                 operation_id: OperationId::parse(&format!("agy-fixture-{n}"))?,

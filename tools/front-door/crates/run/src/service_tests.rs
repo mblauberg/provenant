@@ -38,7 +38,7 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
     let input = super::tests::input();
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let custody = attempt.try_lock(
         std::ffi::OsStr::new("custody.lock"),
         provenant_os::fs::LockMode::Exclusive,

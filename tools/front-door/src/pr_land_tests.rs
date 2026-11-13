@@ -123,8 +123,8 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             let replay = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
             assert_eq!(replay.run_id, run.run_id);
             let diagnostic = fs::read_to_string(context.state_root.as_path().join(format!(
-                "runs/{}/pr-contribution-diagnostic.txt",
-                run.run_id
+                "attempts/{}/pr-contribution-diagnostic.txt",
+                attempt
             )))?;
             assert!(diagnostic.contains("PR contribution capture failed"));
             db.execute(
@@ -444,8 +444,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     assert!(text.contains("peer_attempts: unknown (known hosts: unreachable)"));
     let first = store.record(ids[0].parse()?, &call)?;
     let log = context.state_root.as_path().join(format!(
-        "runs/{}/attempts/{}/stdout.log",
-        first.run_id, first.attempt_id
+        "attempts/{}/stdout.log", first.attempt_id
     ));
     fs::write(&log, vec![b'x'; 128 * 1024])?;
     let gc = command(&landing.rig, &["gc", "--apply", "--json"])?;
@@ -750,7 +749,7 @@ fn contribution_terminal(
     let directory = context
         .state_root
         .as_path()
-        .join(format!("runs/{}/attempts/{id}", record.run_id));
+        .join(format!("attempts/{id}"));
     for (name, bytes) in [
         ("process-exit.json", serde_json::to_vec(&evidence)?),
         (
@@ -1682,7 +1681,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
         let attempt = context
             .state_root
             .as_path()
-            .join(format!("runs/{}/attempts/{id}", input.run_id));
+            .join(format!("attempts/{id}"));
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope,

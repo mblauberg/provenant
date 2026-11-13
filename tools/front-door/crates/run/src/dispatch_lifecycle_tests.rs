@@ -131,7 +131,7 @@ fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResu
     store.resume(&resumed, &call)?;
     let record = store.record(resumed.attempt_id, &call)?;
     store.mark_starting(&record, &route(), &[], &Default::default(), None, &call)?;
-    let directory = store.attempt_dir(resumed.run_id, resumed.attempt_id, false)?;
+    let directory = store.attempt_dir(resumed.attempt_id, false)?;
     assert!(
         matches!(directory.metadata_at("process.json".as_ref(), false), Err(error) if error.is_not_found())
     );
@@ -144,17 +144,8 @@ fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResu
     );
     let state = context.state_root.as_path();
     for path in [
-        state.join("runs"),
-        state.join("runs").join(resumed.run_id.to_string()),
-        state
-            .join("runs")
-            .join(resumed.run_id.to_string())
-            .join("attempts"),
-        state
-            .join("runs")
-            .join(resumed.run_id.to_string())
-            .join("attempts")
-            .join(resumed.attempt_id.to_string()),
+        state.join("attempts"),
+        state.join("attempts").join(resumed.attempt_id.to_string()),
     ] {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
@@ -324,11 +315,18 @@ fn nested_continuation_preflight_does_not_reuse_crashed_staging() -> TestResult 
     let expected =
         correlation::child_run_id(store.context.project_id, &canonical, &resume.operation_id)?
             .unwrap();
+    let derived = correlation::child_attempt_id(
+        store.context.project_id,
+        expected,
+        &canonical,
+        child.attempts[0].task_id,
+    )?
+    .unwrap();
     let stale = store
         .context
         .state_root
         .as_path()
-        .join(format!("runs/{expected}"));
+        .join(format!("attempts/{derived}"));
     std::fs::DirBuilder::new().mode(0o700).create(&stale)?;
     std::fs::write(stale.join("retained"), "stale staging")?;
     let (continued, _) = store.resume_fresh_prepared(&resume, "fixture", None, &Ready, &call)?;
