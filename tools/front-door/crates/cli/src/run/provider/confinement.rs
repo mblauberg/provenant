@@ -194,6 +194,8 @@ pub(super) enum InventoryContext<'a> {
     Sandboxed,
 }
 
+// Composition edge keeps launch authority and inventory mode explicit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn confinement_request(
     project_id: ProjectId,
     roots: ConfinementRoots<'_>,

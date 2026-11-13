@@ -3512,21 +3512,19 @@ pub(super) fn prepare_candidates(
         if let Some(gh) = publishing_gh
             .clone()
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
+            && reader_gh
+            && !gh_attempted
+            && let Some(warning) = super::gh_auth::inject(
+                &executor,
+                &gh,
+                &home,
+                &|key| host_provider_var(registry, key),
+                cancel,
+                &mut gh_login,
+                &mut spec.env,
+            )
         {
-            if reader_gh
-                && !gh_attempted
-                && let Some(warning) = super::gh_auth::inject(
-                    &executor,
-                    &gh,
-                    &home,
-                    &|key| host_provider_var(registry, key),
-                    cancel,
-                    &mut gh_login,
-                    &mut spec.env,
-                )
-            {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
-            }
+            let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
         }
         if adapter_spec.is_some_and(|spec| {
             spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
