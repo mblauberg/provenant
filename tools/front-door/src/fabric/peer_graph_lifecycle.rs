@@ -709,7 +709,9 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
             preview["explain"] = serde_json::json!(true);
             preview
         }, budget, &cancel).map_err(|error| format!("preview controls (writer={writer}, new={new_worktree}, delivery={delivery_mode:?}): {error:?}"))?;
-        assert_eq!(preview["document"]["graph_id"], "g-e813e34cbb5c0bf4b1ee8313250533");
+        // An unnamed launch takes TEMPLATE-K (cli.md "Names and replay").
+        let generated = preview["document"]["graph_id"].as_str().ok_or("graph ID missing")?;
+        assert!(generated.strip_prefix("task-").and_then(|k| k.parse::<u32>().ok()).is_some_and(|k| k > 0), "{generated}");
         assert_eq!(preview["document"]["limits"]["concurrency"], 3);
         let node = &preview["document"]["nodes"][0];
         assert_eq!(node["attempt"]["host"], "local");

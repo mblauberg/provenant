@@ -3560,7 +3560,8 @@ type = "string"
         "--file",
         path,
         "--set",
-        "subject='code'",
+        // A string parameter takes the text as written (cli.md).
+        "subject=code",
         "--over",
         "one",
         "--over",

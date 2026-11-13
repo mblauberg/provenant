@@ -3112,7 +3112,9 @@ mod tests {
             json!({"attempt.host":""}),
             json!({"attempt.account":[]}),
             json!({"attempt.build_heavy":1}),
-            json!({"attempt.confidential":"true"}),
+            // `--set` text is typed by the field (cli.md), so "true" binds;
+            // text no field reading accepts is still refused.
+            json!({"attempt.confidential":"maybe"}),
             json!({"attempt.provider_timeout":0}),
             json!({"attempt.provider_timeout":-1}),
             json!({"attempt.provider_timeout":1.5}),

@@ -4328,6 +4328,7 @@ mod journal_error_tests {
             context: provenant_records::run::WorkContext {
                 graph_id: Some(key.graph_id.clone()),
                 node_id: Some(key.node_id.clone()),
+                attempt: Some(1),
                 ..Default::default()
             },
             read_roots: &[],
@@ -4448,10 +4449,16 @@ mod journal_error_tests {
         let unsupported: graph::GraphRoute = serde_json::from_value(serde_json::json!({
             "adapter":"cursor", "model":"cursor/m", "effort":"high"
         }))?;
+        // A distinct attempt of the node takes the next work-key number.
+        let service_node = |prompt| {
+            let mut input = node(prompt);
+            input.context.attempt = Some(2);
+            input
+        };
         let service_refusal = owner
             .observe_or_start(
                 &service_key,
-                node("service preflight"),
+                service_node("service preflight"),
                 &unsupported,
                 graph::AccessMode::ReadOnly,
                 None,
@@ -4470,7 +4477,7 @@ mod journal_error_tests {
         let repeated = owner
             .observe_or_start(
                 &service_key,
-                node("service preflight"),
+                service_node("service preflight"),
                 &unsupported,
                 graph::AccessMode::ReadOnly,
                 None,
@@ -4481,7 +4488,7 @@ mod journal_error_tests {
         let changed = owner
             .observe_or_start(
                 &service_key,
-                node("changed service input"),
+                service_node("changed service input"),
                 &unsupported,
                 graph::AccessMode::ReadOnly,
                 None,

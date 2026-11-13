@@ -2958,6 +2958,7 @@ mod provisioned_writer_submission_tests {
                 prior_attempts: &[], family_peers: &[],
                 context: provenant_records::run::WorkContext {
                     graph_id: Some(key.graph_id.clone()), node_id: Some(key.node_id.clone()),
+                    attempt: Some(u32::from(key.route_index) + 1),
                     ..Default::default()
                 },
                 read_roots: &[], attachments: &[], capabilities: None, capability_sources: None,

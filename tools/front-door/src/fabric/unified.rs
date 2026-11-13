@@ -2013,8 +2013,17 @@ mod tests {
         project_node_waits(&mut rows);
         assert_eq!(rows[1]["waiting_for"], wait);
         let reading = render_graph_status(&rows);
-        assert!(reading.contains(&format!("node g/parent running: {wait}")));
-        assert_eq!(rows[1]["next"], "provenant status g/parent --wait");
+        // The node line (`NAME/NODE#N STATE MODEL`) carries the wait, and the
+        // next step is the wait verb on that node.
+        let parent = reading
+            .lines()
+            .find(|line| line.starts_with("g/parent#"))
+            .unwrap();
+        assert!(
+            parent.contains(" running ") && parent.ends_with(wait),
+            "{reading}"
+        );
+        assert_eq!(rows[1]["next"], "provenant wait g/parent");
 
         // A historical attempt's wait must not leak onto a later live parent.
         rows[1]["waiting_for"] = Value::Null;
@@ -2040,16 +2049,31 @@ mod tests {
             attempt: None,
         };
         let rows = status_rows(&graph_snapshot(checkpoint), &target);
+        // One graph row, then many node and attempt rows.
         let mut many = rows.clone();
         for _ in 0..100 {
-            many.extend(rows.clone());
+            many.extend(rows.iter().filter(|row| row["kind"] != "graph").cloned());
         }
         let reading = render_graph_status(&many);
-        assert!(reading.len() <= 2048);
-        assert!(reading.starts_with("node g/parent failed"));
-        assert!(reading.contains("AUTH_REQUIRED"));
-        assert!(reading.ends_with("next: provenant retry g/parent\n"));
-        assert!(reading.contains("more rows"));
+        // The owner summary bound (cli.md "Agent output"): the graph line, at
+        // most LISTING_ROWS node lines, the omission count and `next`, each
+        // line within SUMMARY_ROW_BYTES.
+        use provenant_cli::limits::{LISTING_ROWS, SUMMARY_ROW_BYTES};
+        assert!(reading.lines().count() <= 1 + LISTING_ROWS + 2, "{reading}");
+        assert!(
+            reading.lines().all(|line| line.len() <= SUMMARY_ROW_BYTES),
+            "{reading}"
+        );
+        // Failed work is listed first, after the graph line.
+        let first_node = reading.lines().nth(1).unwrap();
+        assert!(first_node.starts_with("g/parent"), "{reading}");
+        assert!(first_node.contains(" failed "), "{reading}");
+        assert!(first_node.contains("AUTH_REQUIRED"), "{reading}");
+        assert!(
+            reading.ends_with("next: provenant retry g/parent\n"),
+            "{reading}"
+        );
+        assert!(reading.contains("more nodes; --json lists every row"));
         assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
         assert_eq!(rows[1]["next"], "provenant retry g/parent");
     }
@@ -2158,7 +2182,7 @@ mod tests {
             json!({"kind":"attempt","id":"old","state":"terminal","outcome":"task_failed","next":"provenant retry g/a"}),
         ];
         let reading = render_graph_status(&rows);
-        assert!(reading.starts_with("graph g complete"));
+        assert!(reading.starts_with("g complete"), "{reading}");
         assert!(reading.ends_with("next: provenant output g\n"));
     }
 

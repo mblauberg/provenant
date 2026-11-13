@@ -463,9 +463,11 @@ pub(crate) mod peer_tests {
 
 
     fn graph_test_context(key: &provenant_fabric_runtime::graph::AttemptKey) -> provenant_records::run::WorkContext {
+        // Graph advance stamps the work key's one-based launch order.
         provenant_records::run::WorkContext {
             graph_id: Some(key.graph_id.clone()),
             node_id: Some(key.node_id.clone()),
+            attempt: Some(u32::from(key.route_index) + 1),
             ..Default::default()
         }
     }
