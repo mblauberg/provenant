@@ -726,7 +726,7 @@ pub fn cutover_writer_reservations(
     }
 }
 
-/// A carried fence remains exclusive until its owner settles and clears it.
+/// Unresolved and carried fences exclude new attempts until recovery clears them.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
@@ -751,6 +751,12 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             serde_json::from_value(value.clone()).map_err(|_| CustodyError::Fenced)?;
         validate_anchor(&child, &reservation).map_err(|_| CustodyError::Fenced)?;
         if name != OsStr::new(&reservation.scope.attempt.to_string()) {
+            return Err(CustodyError::Fenced);
+        }
+        // Providers no longer inherit writer.lock. After guardian loss the
+        // durable unresolved reservation must exclude every new attempt, not
+        // just readmission of its original attempt, even with a free flock.
+        if reservation.unresolved_cleanup {
             return Err(CustodyError::Fenced);
         }
         match value.get("slot_exclusive") {

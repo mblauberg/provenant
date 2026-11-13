@@ -72,7 +72,7 @@ explicit executable inputs (secrets and confinement profiles) cross that edge;
 the private guardian handoff retains its capability transfer. An ordinary
 service detached by an unsandboxed provider therefore cannot retain the lane's
 inherited writer lease. Guardian loss still leaves the durable unresolved
-reservation fenced, even if the kernel lease is free.
+reservation fenced against every new attempt, even if the kernel lease is free.
 
 Cleanup has a bounded stop budget. At its deadline a separate, cooperatively
 bounded diagnostic census names observable PIDs, short native command names and
