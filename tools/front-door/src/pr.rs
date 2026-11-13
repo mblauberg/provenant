@@ -289,7 +289,8 @@ type Observed = std::result::Result<Vec<observer::Check>, observer::ObserveError
 
 /// Follow the CI of one head until no check is pending, then require that
 /// every check passed or was skipped and that at least one passed. A head
-/// with no check yet waits `UNREPORTED_WAIT` for its first one.
+/// with no check yet, or only skipped ones, waits `UNREPORTED_WAIT` for one
+/// that runs.
 fn watch_with(
     read: &mut dyn FnMut() -> Observed,
     sleep: &dyn Fn(Duration),
@@ -299,7 +300,12 @@ fn watch_with(
     loop {
         let checks = read()
             .map_err(|error| wait::ci_failure(error, &format!("provenant pr watch {number}")))?;
-        if checks.is_empty() {
+        // Skipped jobs finish at once, so right after a push they can be the
+        // only checks reported; wait for the real workflows as for none.
+        if checks.iter().all(|check| check.bucket == "skipping") {
+            if waited >= UNREPORTED_WAIT && !checks.is_empty() {
+                return Err("CI checks have not passed".into());
+            }
             if waited >= UNREPORTED_WAIT {
                 return Err(wait::failure(
                     "CI_NOT_SCHEDULED",
@@ -622,6 +628,25 @@ mod unreported_checks_tests {
     }
 
     #[test]
+    fn watch_waits_past_checks_that_skipped_before_ci_registered() {
+        let reads = Cell::new(0);
+        watch_with(
+            &mut || {
+                reads.set(reads.get() + 1);
+                Ok(match reads.get() {
+                    1 => vec![check("skipping")],
+                    _ => vec![check("pass"), check("skipping")],
+                })
+            },
+            &|_| {},
+            "7",
+        )
+        .expect("the real workflow registered and passed");
+        let error = watch_with(&mut || Ok(vec![check("skipping")]), &|_| {}, "7");
+        assert!(error.is_err(), "only skipped checks at the bound");
+    }
+
+    #[test]
     fn watch_reports_unscheduled_checks_at_the_bound() {
         let slept = Cell::new(Duration::ZERO);
         let error = watch_with(
@@ -640,7 +665,11 @@ mod unreported_checks_tests {
 
     #[test]
     fn watch_fails_a_finished_run_that_did_not_pass_without_waiting() {
-        for buckets in [vec!["fail"], vec!["pass", "cancel"], vec!["skipping"]] {
+        for buckets in [
+            vec!["fail"],
+            vec!["pass", "cancel"],
+            vec!["fail", "skipping"],
+        ] {
             let error = watch_with(
                 &mut || Ok(buckets.iter().map(|bucket| check(bucket)).collect()),
                 &|_| panic!("a finished run must not wait"),
