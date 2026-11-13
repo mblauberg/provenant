@@ -1,5 +1,23 @@
 use super::*;
 
+/// Use the launch host's inventory even when preparation runs in a guardian
+/// with no ambient environment. Named commands retain literal-name lookup.
+pub(super) fn preparation_executable(
+    host: Option<&run::HostLaunchContext>,
+    command: bool,
+    name: &str,
+) -> Result<PathBuf, String> {
+    match host {
+        Some(host) if command => find_command_on_path(name, &host.executable_search_path),
+        Some(host) => host_executable(host, name),
+        None if command => {
+            let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
+            find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
+        }
+        None => resolve_executable(name),
+    }
+}
+
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Repeated preparation must never reuse a lane's mutable Git state. Keep the
@@ -430,18 +448,11 @@ pub(crate) fn prepare(
         prompt_text,
         paths,
         resume,
-        |name| match registry.host {
-            Some(host) if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if AdapterSpec::get(provider).is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)) => {
-                find_command_on_path(name, &host.executable_search_path)
-            }
-            None if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if AdapterSpec::get(provider).is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)) =>
-            {
-                let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
-                find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
-            }
-            _ if name == "gh" => resolve_executable(name),
-            Some(host) => host_executable(host, name),
-            None => resolve_executable(name),
+        |name| {
+            let command = matches!(&task.route, run::RequestedRoute::Adapter { provider, .. }
+                if AdapterSpec::get(provider).is_some_and(|spec|
+                    spec.named_entry == provenant_records::NamedEntry::Command));
+            preparation_executable(registry.host, command, name)
         },
         None,
         wait,
@@ -1885,15 +1896,26 @@ pub(super) fn prepare_candidates(
         .map(|writer| writer_source_context(writer, task, &git))
         .transpose()?
         .flatten();
-    // Publishing is on by default for every networked lane and `lanes.publish=false`
-    // withholds it: it hands the lane the GitHub credential. Missing gh tools, or both
-    // configuration and a host token, leave the lane able to work without it.
-    let publishing_gh = publishing_requested(
+    // Let the host login lookup diagnose missing credentials, including relocated
+    // stores and keychain logins, rather than guessing from the ambient home.
+    let publishing = publishing_requested(
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
-    )
-    .then(|| publishing_executable(&home, &locate, std::env::var_os("GH_TOKEN").as_deref()))
-    .flatten();
+    );
+    let publishing_gh = if publishing {
+        match publishing_executable(&locate) {
+            Ok(gh) => Some(gh),
+            Err(cause) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: GitHub publishing unavailable: {cause}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let git_context = task
         .base
         .as_deref()
@@ -3281,6 +3303,12 @@ pub(super) fn prepare_candidates(
             spec.configure_shell(scratch, adapter_spec);
         }
         let mut gh_attempted = false;
+        if publishing && !github_auth_permitted(&plan, &spec.profile.spec) {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: {label}: GitHub publishing credentials withheld by the access policy"
+            );
+        }
         if let Some(gh) = publishing_gh
             .as_ref()
             .filter(|_| sandbox.sandboxed && github_auth_permitted(&plan, &spec.profile.spec))

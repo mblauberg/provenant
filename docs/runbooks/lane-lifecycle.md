@@ -56,6 +56,11 @@ writer is on by default and gives it your GitHub credential; set
 delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
 `projects/PROJECT_ID/github.json`; it guards against accident, not as a boundary.
 
+GitHub login lookup uses the host-recorded executable search path and GitHub
+configuration paths for initial launches and background retries alike. Missing
+GitHub tools, failed login lookup or access policy restrictions produce a warning;
+ordinary lane work can continue without publishing credentials.
+
 ## Recovery
 
 Read `status TARGET`, `output TARGET` and `output TARGET --trace` before
