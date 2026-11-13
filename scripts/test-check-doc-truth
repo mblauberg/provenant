@@ -245,6 +245,20 @@ class DocTruthTests(unittest.TestCase):
             "docs/runbooks/example.md:8: error: unresolved command `provenant gone`",
         ])
 
+    def test_unknown_skill_and_ambient_commands_and_flags_fail(self):
+        skill = self.root / "skills/example/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Example\n\nRun `provenant route list --vanished`.\n\n"
+                         "```sh\nprovenant route list --pool example\nprovenant gone --json\n```\n")
+        (self.root / "GLOBAL-AGENTS.md").write_text("Run `provenant gone`.\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "GLOBAL-AGENTS.md:1: error: unresolved command `provenant gone`",
+            "skills/example/SKILL.md:3: error: unresolved flag `--vanished`",
+            "skills/example/SKILL.md:7: error: unresolved command `provenant gone`",
+        ])
+
     def test_unknown_commands_in_specs_stay_advisory_even_when_fenced(self):
         (self.root / "docs/specs/example.md").write_text(
             "# Spec\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n\n"

@@ -22,8 +22,8 @@ one scheduling host per repository. Without entries, `provenant tick` reports
 sweeps; use `provenant stop TARGET` for a graph already launched.
 
 Run `provenant tick --json` through the host’s existing tick schedule. A due
-entry submits `use = "steward"` through the ordinary graph service, with the
-bundled junior tier. Tick reports `launched`, `running`, `not_due` or `failed`;
+entry submits the `steward` template through the ordinary graph service, with
+the bundled junior route. Tick reports `launched`, `running`, `not_due` or `failed`;
 a failure includes its reason. Scheduling state is durable and shared by all
 aliases of the same project. A live or paused sweep prevents a second run, even
 after its cadence expires. Uncertain submissions reuse their operation identity.
@@ -31,7 +31,7 @@ Inspect and recover paused or failed graphs through `status`, `output` and
 `retry`; tick does not bypass graph admission or provider policy.
 
 Inspect the brief with `provenant templates steward --json` or
-`provenant run --use steward --explain`. Manual runs use the same template;
+`provenant run steward --explain`. Manual runs use the same template;
 the tick single-flight guard covers scheduled runs. The brief discovers the
 repository from its checkout, gathers hybrid-search candidates with `is:issue`,
 then judges their bodies and acceptance criteria. Its only tracker write is a

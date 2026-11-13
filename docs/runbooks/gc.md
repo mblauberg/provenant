@@ -97,7 +97,7 @@ resource path alone never authorises killing them.
 If cleanup reaches its stop deadline, warnings name an observable PID, short
 command and writer-lock resource, or state that the holder is unknown. Close
 an identified service through its normal controls, or wait for it to exit, then
-run `provenant reconcile --id ATTEMPT`. Descriptor discovery is bounded and may
+run `provenant reconcile NAME/NODE#N`. Descriptor discovery is bounded and may
 be incomplete. A remaining unresolved reservation is a custody fence: do not
 unlink `writer.lock` or delete the worktree to bypass it. Guardian loss retains
 that fence even when no process holds the kernel lock.

@@ -21,7 +21,7 @@ overridable in the selected state's `config.toml`.
 - Edit pools with `route set POOL MODEL [--weight N] [--effort E]`,
   `route remove POOL MODEL`, `route reset POOL`; provider pacing with
   `route pacing PROVIDER pace|spend|max|off`.
-- Default bounded work to `provenant run --tier junior --file BRIEF --explain`.
+- Default bounded work to `provenant run task --brief-file BRIEF --route junior --explain`.
   An unlisted exact model ID warns and is tried unverified; an explicit
   `--effort` on it is refused. OpenCode free routes take no effort.
 
@@ -72,8 +72,8 @@ RFC 3339, `tz`, hour `windows`). `model_suffix` matches the end of a native ID.
 its sources. Malformed rules are dropped with a warning, or refuse configuration
 when they carry an enforced restriction (`read_only`, `max_context`,
 `max_turns`). Retired timing keys (`starts_unix_seconds`, `expires_unix_seconds`,
-top-level `windows`) block every configuration write until
-`provenant config migrate` rewrites them.
+top-level `windows`) block every configuration write until they are removed by
+hand; `provenant config check` reports them.
 
 `max_context`, `max_turns` and cache keys are guidance, not kills.
 A graph node's `on_stop` and the graph-wide `limits.continuations` (default 2)
@@ -108,7 +108,7 @@ tier alone does not. `[review.minimum_family_counts]` in a run document is
 advisory unless `review.diversity = "strict"`.
 
 ```sh
-provenant run --use review --file brief.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain
+provenant run review --brief-file brief.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain
 ```
 
 The bundled panel is one `review-shape` composite. The host binds the launch
@@ -139,9 +139,9 @@ write_scope = ["src"]
 brief = "Meet the approved acceptance criteria and run the named checks."
 ```
 
-`provenant run --use deliver --file delivery.toml --explain`, inspect authority
-and gates, then submit without `--explain`. `--wait` only bounds observation.
-Binding a writer may block longer than a short `--wait` (the allowance is
+`provenant run --file delivery.toml --explain`, inspect authority
+and gates, then submit without `--explain`. `wait` only bounds observation.
+Binding a writer may take longer than a short `wait` (the allowance is
 `domains.fabric.graph.writer_launch_seconds`, default 55); a busy registry
 returns `writer_lock_busy`.
 
@@ -160,15 +160,14 @@ returns `writer_lock_busy`.
   supported on a loop or a `repeat`.
 - Identity: `identity = "fresh"` (`task`) starts a new graph every time;
   `"content"` (`review`, `deliver`) reuses an equal submission at the same Git
-  HEAD, so a new commit starts a new review. Use a new `operation_id` for new
-  work.
+  HEAD, so a new commit starts a new review. Give new work a new `--name`:
+  a replayed name returns its existing graph.
 - `light` (`--set 'attempt.preset="light"'`) trims read-only lanes (shared source
   view, minimal supervision, no receipts); writers refuse `shared` isolation.
 - Repair: `deliver` and `batch` hand only confirmed findings to a repair writer
   (`max_repair_cycles`, default 3); a third round asks the principal for design
   judgement rather than ending the work.
-- Inside a worker, `run --use TEMPLATE` adds children to the same graph.
+- Inside a worker, `run TEMPLATE` adds children to the same graph.
   `edit GRAPH --file PATCH` reshapes unstarted nodes only. Observe with
-  `status --wait=5m --target graph:GRAPH`, `output GRAPH --trace`, `stop`,
-  `retry`. A synthesis never waives a failed gate; land only after exact-head CI
+  `wait GRAPH --timeout 5m`, `trace GRAPH`, `stop` and `retry`. A synthesis never waives a failed gate; land only after exact-head CI
   and required review.

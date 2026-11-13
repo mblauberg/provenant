@@ -9,14 +9,11 @@ this page holds the steps and sharp edges. Cost is an API-equivalent estimate,
 not a bill, and an unknown cost is never zero: unpriced attempts make a total a
 lower bound.
 
-## Backfill the usage ledger once per host
+## The usage ledger
 
 Settled attempts are recorded in `<state>/usage-ledger/`, which outlives the run
-store. After installing 1.8.0 run `provenant telemetry backfill` once on each
-host to copy attempts settled before the upgrade; a later release removes run
-history, and the ledger is then the only record of earlier lane usage. Repeating
-it adds nothing. Unreadable ledger lines are reported by segment and line and
-kept, not repaired.
+store, so it keeps lane usage after run history is removed. Unreadable ledger
+lines are reported by segment and line and kept, not repaired.
 
 ## Native session ingest
 
@@ -34,20 +31,20 @@ store had lines over 1 MiB, they are not migrated: the file is kept as
 `ingest.jsonl.unmigrated` and one line says how many.
 
 To attribute chair sessions, launch with the registered account's directory:
-`CLAUDE_CONFIG_DIR=~/.claude-work claude`. `provenant quota usage` lists chair
-and lane tokens per account and project.
+`CLAUDE_CONFIG_DIR=~/.claude-work claude`. `provenant telemetry cost --by account`
+reports usage per account.
 
 ## Reading the reports
 
-- `telemetry stats [--by issue|graph|preset|role|pr] [--since T]` is the
-  default report, and `--json` carries the same summary rows; per-attempt
-  arrays need `--detail`, and a result over 1 MiB is refused with
-  `RESULT_TOO_LARGE`, so narrow it with `--since`. `--detail`, `--usage` (CLI verb and MCP tool counters),
-  `--outcomes` and `--suggest` extend it. `T` is seconds ago, a date or RFC3339. `--by pr` joins the local contribution store to PRs GitHub
-  reports as merged (needs `gh`); missing weights count at full value and are
-  reported as unknown allocations.
-- `telemetry cost [TARGET] [--by route|account|model|graph|node]` is small enough
-  to call from inside a lane. `telemetry value` gives one row per account with a
+- `telemetry stats [--since T]` is the default report, and `--json` carries the
+  same summary rows. A result over 1 MiB is refused with `RESULT_TOO_LARGE`, so
+  narrow it with `--since`. `telemetry stats --help` lists its extensions. `T` is
+  seconds ago, a date or RFC3339.
+- `telemetry cost [TARGET] [--by route|account|node|role|preset|pr|band|day]` is
+  small enough to call from inside a lane. `--by pr` joins the local contribution
+  store to PRs GitHub reports as merged (needs `gh`); missing weights count at
+  full value and are reported as unknown allocations.
+  `telemetry value` gives one row per account with a
   quota reading and a configured plan; compare a full billing period before
   acting on it.
 - `telemetry mileage` is what one quota point costs: it joins quota history with

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check provenant commands, long flags, repo paths and ADRs against the CLI.
 
-Unknown commands and flags in runbooks fail, inline or in fenced `provenant`
-lines; in other documents, and for paths and ADRs, they are advisory warnings.
+Unknown commands and flags in runbooks, skills and ambient instructions fail,
+inline or in fenced `provenant` lines; in other documents, and for paths and
+ADRs, they are advisory warnings.
 Deleted commands, research index omissions and projection mismatches fail;
 strict options enforce inventory, Anchor paths, diagram metadata and explicit
 test citations. Runtime absolute paths and templates are excluded. Commands
@@ -182,15 +183,25 @@ def resolves_path(root, document, reference, gone):
     return False
 
 
+AMBIENT_DOCS = ("AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md", "MAINTAINING.md")
+
+
+def is_strict(root, document):
+    """Runbooks, skills and ambient instructions must name only real commands and flags."""
+    return (document.parent == root / "docs/runbooks"
+            or (root / "skills") in document.parents
+            or (document.parent == root and document.name in AMBIENT_DOCS))
+
+
 def check_references(root, document, commands, adrs, gone):
     """Report unresolved references; return the number that fail the check."""
     display = document.relative_to(root)
     text = document.read_text()
-    runbook = document.parent == root / "docs/runbooks"
-    level = "error" if runbook else "warning"
+    strict = is_strict(root, document)
+    level = "error" if strict else "warning"
     failures = 0
     references = list(inline_code(text))
-    if runbook:
+    if strict:
         references += list(fenced_commands(text))
     for line, reference, context in references:
         if RETIRED.search(context):
@@ -198,7 +209,7 @@ def check_references(root, document, commands, adrs, gone):
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing and missing not in HIDDEN:
             warn(display, line, "command", missing, level)
-            failures += runbook
+            failures += strict
         if commands and scopes:
             known_flags = (set().union(*(flags(commands[scope]) for scope in scopes))
                            | flags(commands["provenant"]))
@@ -207,7 +218,7 @@ def check_references(root, document, commands, adrs, gone):
             for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", reference)):
                 if flag not in known_flags:
                     warn(display, line, "flag", flag, level)
-                    failures += runbook
+                    failures += strict
         for number in dict.fromkeys(re.findall(r"\bADR[ -]+(\d{1,4})\b", reference, re.I)):
             if int(number) not in adrs:
                 warn(display, line, "ADR", f"ADR {number}")
@@ -572,8 +583,9 @@ def main():
     projection_errors = check_projections(root)
     reference_errors = 0
     if not args.inventory_only:
-        agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
-        for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
+        ambient = [root / name for name in AMBIENT_DOCS]
+        skills = sorted((root / "skills").rglob("*.md"))
+        for document in [path for path in ambient if path.exists()] + skills + documents + maintained + adr_documents:
             reference_errors += check_references(root, document, commands, adrs, gone)
     return int(bool(command_errors) or bool(projection_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 

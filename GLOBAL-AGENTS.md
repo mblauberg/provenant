@@ -27,7 +27,7 @@ These rules apply in every project and harness. A named skill binds: load its
   same-account work, and Provenant lanes for writers, other providers or
   accounts, durable work, and landing or review that must count; a same-family
   writer the user can watch in the session is also valid. Juniors take bounded
-  work (`run --route junior`), seniors plan (`run --use plan`) and review,
+  work (`run --route junior`), seniors plan (`run plan`) and review,
   principals rarely. `provenant help --all` lists commands.
 - **Continuity.** Use `session` at session start, before compaction and at
   handoff, and `tracker` for work tracked in GitHub issues.
@@ -62,8 +62,7 @@ These rules apply in every project and harness. A named skill binds: load its
   risk requires (`code-review`). No author certifies its own work; lens
   coverage comes before provider family.
 - **Waiting.** Never poll with `sleep` or repeated reads. Block on
-  `provenant status --wait --target ...` or `provenant pr watch` in the
-  background and carry on.
+  `provenant wait` or `provenant pr watch` in the background and carry on.
 - **Memory.** Durable knowledge goes in project docs, cross-project preferences
   in these rules or a skill. Private memory holds only what must outlive the
   session but justifies neither; delete each entry once promoted or obsolete.

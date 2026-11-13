@@ -11,8 +11,8 @@ prevented the observed cost. A clean routine cycle returns `no change`.
 ## Retrospect
 
 Read what exists and mark what is absent `unknown`, never success inferred from
-a clean final answer: `provenant telemetry stats --by preset` (or `pr`,
-`issue`, `role`), `telemetry cost --by route`, `telemetry value`, `telemetry
+a clean final answer: `provenant telemetry cost --by preset` (or `pr`,
+`role`), `telemetry cost --by route`, `telemetry value`, `telemetry
 trace`, `telemetry experiments show NAME`, `quota history`; review and repair
 history, escaped defects, PR threads and human corrections of unattended runs;
 test-suite health (added against removed, mock ratio, loosened assertions). A
