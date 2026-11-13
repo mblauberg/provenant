@@ -11,9 +11,6 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     let mut out = reply(
         "output",
         read.and_then(|(mut data, mut text)| {
-            // The graph resolver owns placement; this public handle reaches the
-            // same host again without exposing its internal attempt ID.
-            data["target"] = json!(command.target.to_string());
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
@@ -41,7 +38,12 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Re
     );
     out.read_only = true;
     if out.result.error.is_none() {
-        out.summary = Some(output_summary(&out.result.data, &out.human, headed));
+        out.summary = Some(output_summary(
+            &out.result.data,
+            &out.human,
+            headed,
+            Some(&command.target),
+        ));
         if warn_human
             && out
                 .result
@@ -85,7 +87,12 @@ pub fn output_from_host(
 /// What an agent needs from a read: how the attempt settled, what it changed,
 /// and the whole final text up to a generous bound, then its head and tail.
 /// Missing changed-file evidence stays null; it must never read as an empty diff.
-pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
+pub(super) fn output_summary(
+    data: &Value,
+    text: &str,
+    headed: bool,
+    target: Option<&crate::Target>,
+) -> crate::Summary {
     let mut lines = Vec::new();
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
@@ -160,7 +167,9 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
         let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
         lines.extend(body.lines().map(str::to_owned));
     }
-    let target = data["target"].as_str();
+    // The graph handle retains placement without exposing the internal ID or
+    // adding summary-only fields to the public output data schema.
+    let target = target.map(ToString::to_string);
     let state = data["state"].as_str().unwrap_or_default();
     let next = target.and_then(|target| {
         if data["eof"] == json!(false) {
@@ -1010,7 +1019,7 @@ mod tests {
             "state":"succeeded",
             "planner_fallback":{"stage":"static", "reason":"planner route failed"}
         });
-        let summary = output_summary(&data, "fallback completed", true);
+        let summary = output_summary(&data, "fallback completed", true, None);
         let text = summary.lines.join("\n");
         assert!(text.contains("planner fallback: static (reason: planner route failed)"));
     }
@@ -1020,7 +1029,7 @@ mod tests {
         let data = json!({
             "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
         });
-        let summary = output_summary(&data, "fallback completed", true);
+        let summary = output_summary(&data, "fallback completed", true, None);
         let text = summary.lines.join("\n");
         assert!(text.contains("planner fallback: static (reason: fragment [31minvalid)"));
         assert!(!text.contains('\u{1b}'));

@@ -2091,6 +2091,8 @@ mod result_tests {
             *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes(),
         );
         let locator = ProjectLocator::new(&factory.context.identity, &rig.home)?;
+        let origin =
+            provenant_records::WorkKey::new(factory.context.identity.project, "g", "review", 1)?;
         let mut reply = PeerResponse {
             extra: Default::default(),
             version: 1,
@@ -2100,7 +2102,7 @@ mod result_tests {
             result: PeerResult::Output {
                 extra: Default::default(),
                 data: OutputResult::Chunk {
-                    extra: Default::default(),
+                    extra: [("peer_origin_work_key".into(), serde_json::json!(origin))].into(),
                     target,
                     part: OutputPart::Result,
                     state: "succeeded".into(),
@@ -2117,6 +2119,13 @@ mod result_tests {
         let request = |label: &str, attempt_ref: Option<&str>| InputRequest {
             label: label.into(),
             attempt_ref: attempt_ref.map(str::to_owned),
+            attempt_key: attempt_ref.map(|_| AttemptKey {
+                extra: Default::default(),
+                graph_id: "g".into(),
+                node_id: label.into(),
+                route_index: 0,
+                attempt: 1,
+            }),
             inline_findings: None,
             finding_prefix: None,
         };
@@ -2251,6 +2260,22 @@ mod result_tests {
             } else {
                 remote_host
             };
+            if let PeerResult::Output {
+                data: OutputResult::Chunk { extra, .. },
+                ..
+            } = &mut reply.result
+            {
+                extra.insert(
+                    "peer_origin_work_key".into(),
+                    serde_json::json!(provenant_records::WorkKey::new(
+                        factory.context.identity.project,
+                        document.graph_id.clone(),
+                        "producer",
+                        1
+                    )?),
+                );
+            }
+            std::fs::write(&response, serde_json::to_vec(&reply)?)?;
             let mut owner = FixtureOwner {
                 factory: &factory,
                 reference: format!("{host}/{attempt}"),
@@ -2281,6 +2306,7 @@ mod result_tests {
         } = &mut reply.result
         {
             extra.insert("length".into(), serde_json::json!(text.len()));
+            extra.insert("peer_origin_work_key".into(), serde_json::json!(origin));
             *next_offset = 5;
             *eof = false;
             *bytes = OutputBytes::Utf8(text[..5].into());
@@ -2311,6 +2337,29 @@ mod result_tests {
         )?)?;
         assert_eq!(index[0]["status"], "capped");
         assert_eq!(index[0]["attempt_ref"], format!("{remote_host}/{attempt}"));
+        if let PeerResult::Output {
+            data: OutputResult::Chunk { extra, .. },
+            ..
+        } = &mut reply.result
+        {
+            extra.insert(
+                "peer_origin_work_key".into(),
+                serde_json::json!(origin.next_attempt().unwrap()),
+            );
+        }
+        std::fs::write(&response, serde_json::to_vec(&reply)?)?;
+        let refused = graph_inputs::materialise(
+            &factory,
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &CancelToken::new(),
+            &key,
+            &[request("review", Some(&format!("{remote_host}/{attempt}")))],
+            5,
+        );
+        assert!(matches!(
+            refused.entries[0],
+            MaterialisedInput::Unavailable { .. }
+        ));
         let finding: graph::Finding = serde_json::from_value(
             serde_json::json!({"id":"ci-1","severity":"high","file":"","summary":"failed check","status":"open"}),
         )?;
@@ -2322,6 +2371,7 @@ mod result_tests {
             &[InputRequest {
                 label: "ci".into(),
                 attempt_ref: None,
+                attempt_key: None,
                 inline_findings: Some(vec![finding]),
                 finding_prefix: None,
             }],

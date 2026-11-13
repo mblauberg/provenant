@@ -4320,12 +4320,16 @@ mod writer_recovery_tests {
                 _ => provenant_records::StopCause::LaneTokenLost,
             };
             assert_eq!(stop.cause(), expected_stop);
-            let result = String::from_utf8(
-                read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?,
-            )?;
-            let handoff = provenant_records::handoff::Handoff::from_result(&result)?
-                .ok_or("result handoff")?;
+            let handoff = stop.handoff().ok_or("sealed stop handoff")?;
             assert_eq!(handoff.note, "Parser done; renderer next");
+            if host_outcome == Outcome::AuthRequired {
+                let result = String::from_utf8(
+                    read_sealed(&attempt, "result.md", RESULT_LIMIT)?.ok_or("result")?,
+                )?;
+                let rendered = provenant_records::handoff::Handoff::from_result(&result)?
+                    .ok_or("result handoff")?;
+                assert_eq!(rendered.note, handoff.note);
+            }
             assert_eq!(
                 std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
                 "uncommitted work before the token was lost\n"

@@ -1852,6 +1852,8 @@ pub struct NodeInput<'a> {
 pub struct InputRequest {
     pub label: String,
     pub attempt_ref: Option<String>,
+    /// Origin identity of the attempt that produced this input.
+    pub attempt_key: Option<AttemptKey>,
     /// Findings from a non-attempt member, such as a CI gate with no result file.
     pub inline_findings: Option<Vec<Finding>>,
     /// Composite qualification to apply to IDs in the source result.
