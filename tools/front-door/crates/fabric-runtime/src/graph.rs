@@ -2818,8 +2818,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             tier: route.alias.clone(),
                             // The work key's attempt: one-based launch order
                             // within the node, never reused.
-                            attempt: u32::try_from(checkpoint.nodes[node_index].attempts.len())
-                                .ok(),
+                            attempt: u32::try_from(
+                                checkpoint.nodes[node_index].recorded_attempts().count(),
+                            )
+                            .ok(),
                             ..node_context(&plan, node)
                         },
                         read_roots: &node.read_roots,

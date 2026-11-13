@@ -2887,16 +2887,6 @@ mod provisioned_writer_submission_tests {
     }
 
     #[test]
-    fn foreign_writer_continues_after_quota_fallback() -> Result<(), Box<dyn std::error::Error>> {
-        if super::peer_tests::host_test(
-            "fabric::provisioned_writer_submission_tests::foreign_writer_continues_after_quota_fallback",
-        )? {
-            return Ok(());
-        }
-        writer_continuation_fixture(true, true)
-    }
-
-    #[test]
     fn foreign_writer_continues_after_retry_and_replays_delivery()
     -> Result<(), Box<dyn std::error::Error>> {
         if super::peer_tests::host_test(
@@ -2904,7 +2894,10 @@ mod provisioned_writer_submission_tests {
         )? {
             return Ok(());
         }
-        writer_continuation_fixture(true, false)
+        for quota in [false, true] {
+            writer_continuation_fixture(true, quota)?;
+        }
+        Ok(())
     }
 
     #[test]

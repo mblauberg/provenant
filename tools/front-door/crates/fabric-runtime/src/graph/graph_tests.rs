@@ -49,6 +49,7 @@ struct FakeOwner {
     fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<(AttemptKey, GraphRoute)>,
+    attempt_numbers: Vec<Option<u32>>,
     titles: Vec<String>,
     prompts: Vec<String>,
     permissions: Vec<(AccessMode, Option<String>)>,
@@ -412,6 +413,7 @@ impl AttemptOwner for FakeOwner {
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
         self.retry_budgets.push(node.settlement_retries);
         self.launch_actors.push(replay.launch_actor.to_owned());
+        self.attempt_numbers.push(node.context.attempt);
         self.calls.push((key.clone(), route.clone()));
         self.permissions.push((access, worktree.map(str::to_owned)));
         if !self.family_pool.is_empty() {
