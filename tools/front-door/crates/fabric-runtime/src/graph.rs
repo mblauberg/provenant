@@ -70,6 +70,8 @@ mod fallback_invariants;
 #[cfg(test)]
 mod implement_invariants;
 #[cfg(test)]
+mod implementation_delivery_invariants;
+#[cfg(test)]
 mod next_step_tests;
 #[cfg(test)]
 mod typed_records_tests;

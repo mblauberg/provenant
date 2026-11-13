@@ -222,7 +222,7 @@ impl AttemptOwner for Owner {
         key: &AttemptKey,
         input: NodeInput<'_>,
         _: &GraphRoute,
-        _: AccessMode,
+        access: AccessMode,
         worktree: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
@@ -241,7 +241,13 @@ impl AttemptOwner for Owner {
             branch: replay.branch.map(str::to_owned),
         });
         let (result, branch, commit) = match key.node_id.as_str() {
-            "write" | "delivery--implement" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
+            "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
+            _ if self.repair_fixture
+                && access == AccessMode::WorktreeWrite
+                && replay.branch.is_none() =>
+            {
+                (None, self.writer_branch.clone(), Some(WRITE_HEAD))
+            }
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
                 let mut capture = crate::result_capture::ResultCapture::new(None);

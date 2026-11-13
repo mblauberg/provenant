@@ -744,6 +744,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
             }
         }
     }
+    composites::resolve_writer_targets(document);
 }
 
 /// Rounds of a loop that a patch added are derived again from their names,

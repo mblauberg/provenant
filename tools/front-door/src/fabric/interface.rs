@@ -2376,6 +2376,7 @@ fn add(row: &mut Value, key: &str, value: u64) {
     reason = "the custom worktree driver omits libtest functions"
 )]
 mod tests {
+    include!("interface_implement_invariants.rs");
     #[test]
     fn tier_override_preserves_leaf_family_constraints() {
         use provenant_fabric_runtime::graph::GraphNode;
@@ -3426,7 +3427,8 @@ mod tests {
             json!({"worktree":".worktrees/fix"}),
             json!({"branch":"fix","base":"origin/main"}),
         ] {
-            let mut input = json!({"op":"run","template":"implement","brief":"Fix it"});
+            let mut input =
+                json!({"op":"run","template":"implement","brief":"Fix it","set":{"bounded":true}});
             input
                 .as_object_mut()
                 .unwrap()
@@ -3441,7 +3443,7 @@ mod tests {
             assert_eq!(node["access"], "worktree_write");
         }
 
-        let mut explicit_read = json!({"op":"run","template":"implement","brief":"Fix it","access":"read_only","worktree":".worktrees/fix"});
+        let mut explicit_read = json!({"op":"run","template":"implement","brief":"Fix it","set":{"bounded":true},"access":"read_only","worktree":".worktrees/fix"});
         assert!(factory.child_request(&explicit_read).is_err());
         explicit_read["access"] = json!("worktree_write");
         let explicit_write = factory.child_request(&explicit_read)?;
@@ -3693,9 +3695,9 @@ mod tests {
     fn child_launch_retains_writer_access_and_has_a_stable_logical_identity() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
-        let input = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "idempotency_key":"parser-launch"});
+        let input = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"bounded":true}, "idempotency_key":"parser-launch"});
         let first = factory.child_request(&input)?;
-        let unkeyed = json!({"op":"run", "template":"implement", "brief":"Fix the parser"});
+        let unkeyed = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"bounded":true}});
         assert_ne!(
             factory.child_request(&unkeyed)?.id,
             factory.child_request(&unkeyed)?.id
@@ -3726,7 +3728,7 @@ mod tests {
                 .id,
             first.id
         );
-        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
+        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
         let controlled = factory.child_request(&json!({"op":"run", "template":"implement",
             "brief":"Bound controls", "branch":"fix/child", "base":"HEAD",
             "write_scope":["src"], "detached":true}))?;
@@ -3738,7 +3740,7 @@ mod tests {
         );
         assert_eq!(controlled.write_scope, ["src"]);
         assert!(controlled.detached);
-        let nested = json!({"op":"run", "document":{"use":"implement", "brief":"Nested replay",
+        let nested = json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Nested replay",
             "idempotency_key":"nested-child", "detached":true}});
         let nested_first = factory.child_request(&nested)?;
         assert_eq!(factory.child_request(&nested)?, nested_first);
@@ -4488,7 +4490,7 @@ mod tests {
                     "schema_version":2, "graph_id":format!("writer-review-{risk}"),
                     "review_base":original, "context":{"risk_tier":risk},
                     "nodes":[
-                        {"id":"writer", "use":"implement", "worktree":rig.project, "write_scope":["."], "delivery":"push"},
+                        {"id":"writer", "use":"implement", "with":{"bounded":true}, "worktree":rig.project, "write_scope":["."], "delivery":"push"},
                         {"id":"review", "use":"review-panel", "after":["writer"], "source":{"type":"head","node":"writer"}}
                     ]
                 }

@@ -89,6 +89,9 @@ impl AttemptOwner for Owner {
     fn actor(&self) -> String {
         "chair".into()
     }
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        provenant_core::WallTime::from_unix_seconds(100).ok()
+    }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
     }

@@ -565,10 +565,12 @@ fn delivery_templates_admit_bounded_review_repairs() {
         resolvers: &resolvers,
     };
     for template in ["deliver", "batch"] {
-        let node = compiler
-            .compile(&json!({"id":"delivery", "use":template,
-            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}}))
-            .unwrap();
+        let mut raw = json!({"id":"delivery", "use":template,
+            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}});
+        if template == "deliver" {
+            raw["with"]["bounded"] = json!(true);
+        }
+        let node = compiler.compile(&raw).unwrap();
         let mut doc = document(vec![node]);
         if template == "batch" {
             doc.integration_branch = Some("batch/integration".into());
