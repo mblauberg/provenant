@@ -687,7 +687,7 @@ mod graph_writer_admission_tests {
         saved.state = provenant_run::OperationState::Blocked;
         saved.blocked_reason = Some("fixture custody release pending".into());
         let database = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
-        database.execute("UPDATE operations SET record=?1 WHERE run=?2", rusqlite::params![
+        database.execute("UPDATE attempts SET operation_record=?1 WHERE run=?2", rusqlite::params![
             provenant_records::CanonicalV1::bytes(&saved)?.as_bytes(), saved.run_id.to_string()
         ])?;
         assert!(matches!(binary.receipt(&session, blocked_operation, &queued_run, &[], &call), Err(FacadeError::DispatchRefused { .. })));
@@ -2887,16 +2887,6 @@ mod provisioned_writer_submission_tests {
     }
 
     #[test]
-    fn foreign_writer_continues_after_quota_fallback() -> Result<(), Box<dyn std::error::Error>> {
-        if super::peer_tests::host_test(
-            "fabric::provisioned_writer_submission_tests::foreign_writer_continues_after_quota_fallback",
-        )? {
-            return Ok(());
-        }
-        writer_continuation_fixture(true, true)
-    }
-
-    #[test]
     fn foreign_writer_continues_after_retry_and_replays_delivery()
     -> Result<(), Box<dyn std::error::Error>> {
         if super::peer_tests::host_test(
@@ -2904,7 +2894,10 @@ mod provisioned_writer_submission_tests {
         )? {
             return Ok(());
         }
-        writer_continuation_fixture(true, false)
+        for quota in [false, true] {
+            writer_continuation_fixture(true, quota)?;
+        }
+        Ok(())
     }
 
     #[test]

@@ -801,7 +801,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
             .get::<_, i64>(0))?,
         2
     );
-    let index = rusqlite::Connection::open(rig.state.join(provenant_run::WORK_INDEX_FILE))?;
+    let index = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     index.pragma_update(None, "user_version", 2)?;
     std::fs::write(&path, serde_json::to_vec(&draft)?)?;
     let failed = call(

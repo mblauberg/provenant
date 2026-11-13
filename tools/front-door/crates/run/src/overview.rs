@@ -46,7 +46,7 @@ impl RunStore {
         call.check()?;
         let limit = limit.min(128);
         let mut statement = self.db.prepare(
-            "WITH recent AS (SELECT sequence, length(record) AS bytes FROM attempts ORDER BY sequence DESC LIMIT ?1), \
+            "WITH recent AS (SELECT sequence, length(record) AS bytes FROM attempts WHERE refused=0 ORDER BY sequence DESC LIMIT ?1), \
              sized AS (SELECT sequence, bytes, sum(bytes) OVER (ORDER BY sequence DESC) AS total FROM recent) \
              SELECT a.project, a.run, a.task, a.id, s.bytes, s.total, \
              CASE WHEN s.total <= ?2 AND s.bytes <= 1048576 THEN a.record END \

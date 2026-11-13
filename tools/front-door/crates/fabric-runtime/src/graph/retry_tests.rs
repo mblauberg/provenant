@@ -2474,3 +2474,79 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
         template::ParameterFault::Unknown { key: Some(ref key), .. } if key == "brief"
     ));
 }
+
+#[test]
+fn attempt_numbers_increase_across_retry_and_continuation_but_replay_is_stable() {
+    for generations in 1..=4 {
+        let mut task = node("work", route("first"));
+        task.route = None;
+        task.routes = Some(vec![route("first"), route("fallback")]);
+        let document = graph(vec![task]);
+        let mut owner = FakeOwner {
+            retry_limit: Some(1),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let mut launches: Vec<(AttemptKey, u32)> = Vec::new();
+        for generation in 0..generations {
+            if generation > 0 {
+                retry(
+                    &document,
+                    journal.0.as_mut().unwrap(),
+                    None,
+                    &|_| Ok(()),
+                    None,
+                )
+                .unwrap();
+            }
+            // Each launch is replayed before settlement. Quota settlement
+            // continues automatically on the fallback route within this redo.
+            for outcome in [AttemptOutcome::UsageLimited, AttemptOutcome::Succeeded] {
+                owner.observations.extend([
+                    AttemptObservation::Pending { attempt_ref: None },
+                    AttemptObservation::Pending { attempt_ref: None },
+                    terminal(outcome),
+                ]);
+            }
+            while !owner.observations.is_empty() {
+                let queued = owner.observations.len();
+                advance(&document, &mut owner, &mut journal).unwrap();
+                assert!(
+                    owner.observations.len() < queued,
+                    "advance consumes an observation"
+                );
+                // Reload durable state, including the pre-reference crash window.
+                journal.0 = Some(
+                    serde_json::from_value(
+                        serde_json::to_value(journal.0.take().unwrap()).unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
+            assert_eq!(
+                journal.0.as_ref().unwrap().nodes[0].state,
+                NodeState::Succeeded
+            );
+        }
+        for ((key, _), number) in owner.calls.iter().zip(&owner.attempt_numbers) {
+            let number = number.expect("every graph launch has an attempt number");
+            if let Some((_, previous)) = launches.iter().find(|(seen, _)| seen == key) {
+                assert_eq!(number, *previous, "replay keeps its attempt number");
+            } else {
+                if let Some((_, previous)) = launches.last() {
+                    assert!(
+                        number > *previous,
+                        "new launches increase across the full history"
+                    );
+                }
+                launches.push((key.clone(), number));
+            }
+        }
+        assert_eq!(
+            launches.len(),
+            journal.0.as_ref().unwrap().nodes[0]
+                .recorded_attempts()
+                .count()
+        );
+    }
+}

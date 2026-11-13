@@ -1,0 +1,340 @@
+//! The one command target form, `NAME[/NODE[#N]]`, as `docs/specs/cli.md#Targets`
+//! defines it. Parsing is syntactic: whether the graph or node exists is the
+//! resolver's question, answered later as `NOT_FOUND`.
+
+use std::fmt;
+use std::num::NonZeroU32;
+use std::str::FromStr;
+
+use provenant_records::work_key::{NODE_ID_BYTES, valid_node};
+
+/// Longest graph name in bytes.
+pub const NAME_BYTES: usize = 48;
+
+/// Spellings that earlier versions accepted as a target prefix.
+const LEGACY_PREFIXES: [&str; 5] = ["lane", "graph", "run", "operation", "land"];
+
+/// One parsed target: a graph, optionally narrowed to a node and an attempt.
+/// An attempt only has meaning with a node, so `Display` omits it otherwise.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub name: String,
+    pub node: Option<String>,
+    pub attempt: Option<NonZeroU32>,
+}
+
+/// One variant per distinct fault. Each renders as one line that shows the
+/// accepted form.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TargetError {
+    #[error("empty target; use NAME[/NODE[#N]]")]
+    Empty,
+    #[error("the {prefix}: prefix is removed; use NAME[/NODE[#N]]")]
+    LegacyPrefix { prefix: String },
+    #[error("ids are no longer targets; use the graph NAME, as in NAME[/NODE[#N]]")]
+    LegacyId,
+    #[error("a name starts with a lowercase letter; use NAME[/NODE[#N]]")]
+    NameStart,
+    #[error("a name has lowercase letters, digits and hyphens only; use NAME[/NODE[#N]]")]
+    NameCharacter,
+    #[error("a name has single hyphens and does not end in one; use NAME[/NODE[#N]]")]
+    NameHyphen,
+    #[error("a name is at most {NAME_BYTES} bytes; use NAME[/NODE[#N]]")]
+    NameTooLong,
+    #[error("a node is missing after '/'; use NAME[/NODE[#N]]")]
+    NodeEmpty,
+    #[error("a node has letters, digits, '.', '_' and '-' only; use NAME[/NODE[#N]]")]
+    NodeCharacter,
+    #[error("a node is at most {NODE_ID_BYTES} bytes; use NAME[/NODE[#N]]")]
+    NodeTooLong,
+    #[error("a target has one '/', between name and node; use NAME[/NODE[#N]]")]
+    TooManySegments,
+    #[error("an attempt needs a node before '#'; use NAME[/NODE[#N]]")]
+    AttemptWithoutNode,
+    #[error("an attempt is a positive decimal without a leading zero; use NAME[/NODE[#N]]")]
+    AttemptNotNumber,
+    #[error("attempts count from 1, so #0 names nothing; use NAME[/NODE[#N]]")]
+    AttemptZero,
+}
+
+impl Target {
+    pub fn parse(spelling: &str) -> Result<Target, TargetError> {
+        if spelling.is_empty() {
+            return Err(TargetError::Empty);
+        }
+        if let Some((prefix, _)) = spelling.split_once(':')
+            && LEGACY_PREFIXES.contains(&prefix)
+        {
+            return Err(TargetError::LegacyPrefix {
+                prefix: prefix.to_owned(),
+            });
+        }
+        let mut segments = spelling.split('/');
+        let head = segments.next().unwrap_or_default();
+        let node_part = segments.next();
+        if is_legacy_id(head) {
+            return Err(TargetError::LegacyId);
+        }
+        if segments.next().is_some() {
+            return Err(TargetError::TooManySegments);
+        }
+        let Some(node_part) = node_part else {
+            if head.contains('#') {
+                return Err(TargetError::AttemptWithoutNode);
+            }
+            check_name(head)?;
+            return Ok(Target {
+                name: head.to_owned(),
+                node: None,
+                attempt: None,
+            });
+        };
+        check_name(head)?;
+        let (node, attempt) = match node_part.split_once('#') {
+            Some((node, attempt)) => (node, Some(parse_attempt(attempt)?)),
+            None => (node_part, None),
+        };
+        check_node(node)?;
+        Ok(Target {
+            name: head.to_owned(),
+            node: Some(node.to_owned()),
+            attempt,
+        })
+    }
+}
+
+impl FromStr for Target {
+    type Err = TargetError;
+
+    fn from_str(spelling: &str) -> Result<Self, Self::Err> {
+        Self::parse(spelling)
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)?;
+        if let Some(node) = &self.node {
+            write!(f, "/{node}")?;
+            if let Some(attempt) = self.attempt {
+                write!(f, "#{attempt}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A hexadecimal id or prefix. A name starts with a letter, so a segment that
+/// starts with a digit and is all hex cannot be a name. Pure digits are left to
+/// the name check: they read as a number, not an id.
+fn is_legacy_id(segment: &str) -> bool {
+    let hex = !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_hexdigit());
+    hex && ((segment.as_bytes()[0].is_ascii_digit()
+        && !segment.bytes().all(|b| b.is_ascii_digit()))
+        || segment.len() == 32 && segment.bytes().any(|byte| byte.is_ascii_digit()))
+}
+
+fn check_name(name: &str) -> Result<(), TargetError> {
+    let Some(first) = name.bytes().next() else {
+        return Err(TargetError::Empty);
+    };
+    if !first.is_ascii_lowercase() {
+        return Err(TargetError::NameStart);
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(TargetError::NameCharacter);
+    }
+    if name.len() > NAME_BYTES {
+        return Err(TargetError::NameTooLong);
+    }
+    if name.ends_with('-') || name.contains("--") {
+        return Err(TargetError::NameHyphen);
+    }
+    Ok(())
+}
+
+fn check_node(node: &str) -> Result<(), TargetError> {
+    if node.is_empty() {
+        return Err(TargetError::NodeEmpty);
+    }
+    if !valid_node(node) {
+        // `valid_node` rejects both faults; tell them apart for the message.
+        return Err(
+            if node.len() > NODE_ID_BYTES
+                && node
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                TargetError::NodeTooLong
+            } else {
+                TargetError::NodeCharacter
+            },
+        );
+    }
+    Ok(())
+}
+
+fn parse_attempt(digits: &str) -> Result<NonZeroU32, TargetError> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(TargetError::AttemptNotNumber);
+    }
+    if digits == "0" {
+        return Err(TargetError::AttemptZero);
+    }
+    if digits.starts_with('0') {
+        return Err(TargetError::AttemptNotNumber);
+    }
+    digits
+        .parse::<NonZeroU32>()
+        .map_err(|_| TargetError::AttemptNotNumber)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(name: &str, node: Option<&str>, attempt: Option<u32>) -> Target {
+        Target {
+            name: name.into(),
+            node: node.map(Into::into),
+            attempt: attempt.and_then(NonZeroU32::new),
+        }
+    }
+
+    #[test]
+    fn accepts_each_depth() {
+        let cases = [
+            ("fix-login", target("fix-login", None, None)),
+            ("a", target("a", None, None)),
+            ("build2", target("build2", None, None)),
+            ("fix/review", target("fix", Some("review"), None)),
+            (
+                "fix/Review_1.a-b",
+                target("fix", Some("Review_1.a-b"), None),
+            ),
+            ("fix/review#1", target("fix", Some("review"), Some(1))),
+            ("fix/review#12", target("fix", Some("review"), Some(12))),
+            (
+                "fix/review#4294967295",
+                target("fix", Some("review"), Some(u32::MAX)),
+            ),
+            ("fix/7", target("fix", Some("7"), None)),
+        ];
+        for (spelling, expected) in cases {
+            assert_eq!(Target::parse(spelling), Ok(expected), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn round_trips_through_display() {
+        for spelling in ["fix-login", "fix/review", "fix/review#3", "a1-b2/x.y_z-0#9"] {
+            let parsed = Target::parse(spelling).unwrap();
+            assert_eq!(parsed.to_string(), spelling);
+            assert_eq!(Target::parse(&parsed.to_string()), Ok(parsed));
+            assert_eq!(spelling.parse::<Target>(), Target::parse(spelling));
+        }
+    }
+
+    #[test]
+    fn name_length_boundary() {
+        let longest = format!("a{}", "b".repeat(NAME_BYTES - 1));
+        assert_eq!(Target::parse(&longest).unwrap().name, longest);
+        let over = format!("{longest}b");
+        assert_eq!(Target::parse(&over), Err(TargetError::NameTooLong));
+    }
+
+    #[test]
+    fn node_length_boundary() {
+        let longest = "n".repeat(NODE_ID_BYTES);
+        assert_eq!(
+            Target::parse(&format!("g/{longest}")).unwrap().node,
+            Some(longest.clone())
+        );
+        assert_eq!(
+            Target::parse(&format!("g/{longest}n")),
+            Err(TargetError::NodeTooLong)
+        );
+    }
+
+    #[test]
+    fn refuses_each_fault() {
+        let cases = [
+            ("", TargetError::Empty),
+            ("Fix", TargetError::NameStart),
+            ("1fix", TargetError::NameStart),
+            ("-fix", TargetError::NameStart),
+            ("42", TargetError::NameStart),
+            ("fix_login", TargetError::NameCharacter),
+            ("fixLogin", TargetError::NameCharacter),
+            ("fix login", TargetError::NameCharacter),
+            ("fix.login", TargetError::NameCharacter),
+            ("fix-", TargetError::NameHyphen),
+            ("fix--login", TargetError::NameHyphen),
+            ("/node", TargetError::Empty),
+            ("fix/", TargetError::NodeEmpty),
+            ("fix/#2", TargetError::NodeEmpty),
+            ("fix/no de", TargetError::NodeCharacter),
+            ("fix/a:b", TargetError::NodeCharacter),
+            ("fix/a#b", TargetError::AttemptNotNumber),
+            ("fix/a/b", TargetError::TooManySegments),
+            ("fix/a/b/c", TargetError::TooManySegments),
+            ("fix#2", TargetError::AttemptWithoutNode),
+            ("fix/a#", TargetError::AttemptNotNumber),
+            ("fix/a#0", TargetError::AttemptZero),
+            ("fix/a#00", TargetError::AttemptNotNumber),
+            ("fix/a#01", TargetError::AttemptNotNumber),
+            ("fix/a#-1", TargetError::AttemptNotNumber),
+            ("fix/a#+1", TargetError::AttemptNotNumber),
+            ("fix/a#1x", TargetError::AttemptNotNumber),
+            ("fix/a#1#2", TargetError::AttemptNotNumber),
+            ("fix/a#4294967296", TargetError::AttemptNotNumber),
+        ];
+        for (spelling, expected) in cases {
+            assert_eq!(Target::parse(spelling), Err(expected), "{spelling:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_removed_spellings() {
+        for prefix in ["lane", "graph", "run", "operation", "land"] {
+            for rest in ["abc", "42", "fix/review"] {
+                assert_eq!(
+                    Target::parse(&format!("{prefix}:{rest}")),
+                    Err(TargetError::LegacyPrefix {
+                        prefix: prefix.into()
+                    }),
+                );
+            }
+        }
+        let attempt_id = "0123456789abcdef0123456789abcdef";
+        for spelling in [
+            attempt_id,
+            "3f2a9c",
+            "1e",
+            &format!("{attempt_id}/{attempt_id}"),
+            &format!("{attempt_id}/task/{attempt_id}"),
+            "3f2a9c/review",
+        ] {
+            assert_eq!(
+                Target::parse(spelling),
+                Err(TargetError::LegacyId),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn letter_led_names_that_look_like_hex_stay_names() {
+        for spelling in ["deadbeef", "abc", "face-lift"] {
+            assert_eq!(Target::parse(spelling).unwrap().name, spelling);
+        }
+    }
+
+    #[test]
+    fn display_leaves_out_an_attempt_without_a_node() {
+        assert_eq!(target("fix", None, Some(2)).to_string(), "fix");
+    }
+}

@@ -189,7 +189,7 @@ impl RunStore {
         }
         let rows: Vec<(String, String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
-                "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",
+                "SELECT id,run,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
             let rows = query.query_map([], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -421,25 +421,27 @@ impl RunStore {
         let _publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
         let continuing: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
-            [&id], |row| row.get(0))?;
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE continues=?1 AND terminal=0)",
+            [&id],
+            |row| row.get(0),
+        )?;
         // Host retention spans attribution projects. Verify the sealed
         // request against its own indexed run before following a writer's
         // persisted source-project custody namespace.
         let custody_project =
             match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)? {
                 Some(raw) => {
-                    let indexed: Vec<u8> = self.db.query_row(
-                        "SELECT record FROM runs WHERE id=?1 AND project=?2",
-                        rusqlite::params![record.run_id.to_string(), record.project_id.to_string()],
+                    let indexed: String = self.db.query_row(
+                        "SELECT digest FROM attempts WHERE id=?1 AND run=?2 AND project=?3",
+                        rusqlite::params![
+                            id,
+                            record.run_id.to_string(),
+                            record.project_id.to_string()
+                        ],
                         |row| row.get(0),
                     )?;
-                    let indexed: RunRecord = crate::db::decode(&indexed)?;
                     let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
-                    if indexed.run_id != record.run_id
-                        || indexed.project_id != record.project_id
-                        || indexed.request_digest != digest
-                    {
+                    if indexed != digest.to_string() {
                         return Err(RunError::Validation("retention request identity"));
                     }
                     let request: CanonicalRequest = crate::db::decode(&raw)?;
@@ -795,7 +797,7 @@ impl RunStore {
     ) -> Result<()> {
         let rows: Vec<(String, String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
-                "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",
+                "SELECT id,run,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
             let rows = query.query_map([], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))

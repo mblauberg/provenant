@@ -373,7 +373,7 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
         .ok_or(RunError::NotFound)?;
     operation.state = OperationState::Prepared;
     store.db.execute(
-        "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+        "UPDATE attempts SET operation_record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
         rusqlite::params![
             crate::db::bytes(&operation)?,
             store.context.project_id.to_string(),

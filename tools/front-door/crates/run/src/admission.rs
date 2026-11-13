@@ -9,9 +9,7 @@ use crate::{
 };
 use provenant_confinement::valid_read_only_writable;
 use provenant_core::retry::Backoff;
-use provenant_core::{
-    AttemptId, CancelToken, Clock, DurationMicros, GitOid, OperationId, WallTime,
-};
+use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WallTime};
 use provenant_os::build_slots::{SlotWait, WaitKind};
 use provenant_os::{
     fs::Directory,
@@ -127,15 +125,6 @@ impl std::fmt::Display for AdmissionTimeoutOrigin {
 pub struct EffectiveAdmissionTimeout {
     pub seconds: u64,
     pub origin: AdmissionTimeoutOrigin,
-}
-
-/// Persisted admission window for an operation before admission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdmissionWindow {
-    /// Absolute end of the admission window on the wall clock.
-    pub deadline: WallTime,
-    /// Earliest next reprobe / admission retry.
-    pub wake_at: Option<WallTime>,
 }
 
 pub use provenant_records::run::LaneWait;
@@ -303,83 +292,6 @@ impl RunStore {
     }
     pub fn set_admission_policy(&mut self, policy: AdmissionPolicy) {
         self.policy = policy;
-    }
-    /// Return the persisted admission window for an operation, if one was recorded.
-    pub fn admission_window(
-        &self,
-        operation: &OperationId,
-        call: &Request<'_>,
-    ) -> Result<Option<AdmissionWindow>> {
-        call.check()?;
-        let row: Option<(i64, Option<i64>)> = self
-            .db
-            .query_row(
-                "SELECT deadline, wake_at FROM admission_windows WHERE project=?1 AND actor=?2 AND operation=?3",
-                params![
-                    self.context.project_id.to_string(),
-                    self.context.actor_id.to_string(),
-                    operation.as_str(),
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-
-        let Some((deadline_micros, wake_micros)) = row else {
-            return Ok(None);
-        };
-        let deadline =
-            WallTime::from_micros(deadline_micros).map_err(|_| RunError::Validation("deadline"))?;
-        let wake_at = wake_micros
-            .map(|micros| {
-                WallTime::from_micros(micros).map_err(|_| RunError::Validation("wake_at"))
-            })
-            .transpose()?;
-        Ok(Some(AdmissionWindow { deadline, wake_at }))
-    }
-
-    /// Save or update an admission window for an operation before admission.
-    /// If an admission window already exists for this operation, its original
-    /// deadline is preserved (never renewed across restarts/reprobes), and only
-    /// `wake_at` is updated.
-    pub fn save_admission_window(
-        &self,
-        operation: &OperationId,
-        window: AdmissionWindow,
-        call: &Request<'_>,
-    ) -> Result<AdmissionWindow> {
-        self.write(call, |tx| {
-            let deadline_int = window.deadline.as_micros();
-            let wake_int = window.wake_at.map(|w| w.as_micros());
-            tx.execute(
-                "INSERT INTO admission_windows (project, actor, operation, deadline, wake_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(project, actor, operation) DO UPDATE SET wake_at = excluded.wake_at",
-                params![
-                    self.context.project_id.to_string(),
-                    self.context.actor_id.to_string(),
-                    operation.as_str(),
-                    deadline_int,
-                    wake_int,
-                ],
-            )?;
-            let (effective_deadline, effective_wake): (i64, Option<i64>) = tx.query_row(
-                "SELECT deadline, wake_at FROM admission_windows WHERE project=?1 AND actor=?2 AND operation=?3",
-                params![
-                    self.context.project_id.to_string(),
-                    self.context.actor_id.to_string(),
-                    operation.as_str(),
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let deadline = WallTime::from_micros(effective_deadline)
-                .map_err(|_| RunError::Validation("deadline"))?;
-            let wake_at = effective_wake
-                .map(|micros| {
-                    WallTime::from_micros(micros).map_err(|_| RunError::Validation("wake_at"))
-                })
-                .transpose()?;
-            Ok(AdmissionWindow { deadline, wake_at })
-        })
     }
     pub(crate) fn queue_ticket(
         &self,
@@ -1978,49 +1890,5 @@ mod process_wait_tests {
                 origin: AdmissionTimeoutOrigin::ShippedDefault,
             }
         );
-    }
-
-    #[test]
-    fn admission_window_deadline_is_preserved_on_restart()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let call = crate::tests::call(&clock, &cancel);
-        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
-        let op = OperationId::parse("admission-op-1")?;
-
-        let initial_deadline = WallTime::from_micros(1_000_000)?;
-        let window = AdmissionWindow {
-            deadline: initial_deadline,
-            wake_at: None,
-        };
-        let saved = store.save_admission_window(&op, window, &call)?;
-        assert_eq!(saved.deadline, initial_deadline);
-        assert_eq!(saved.wake_at, None);
-
-        // Reprobe / retry: update wake_at with a later deadline
-        let later_deadline = WallTime::from_micros(5_000_000)?;
-        let wake = WallTime::from_micros(1_500_000)?;
-        let updated = store.save_admission_window(
-            &op,
-            AdmissionWindow {
-                deadline: later_deadline,
-                wake_at: Some(wake),
-            },
-            &call,
-        )?;
-
-        // The original deadline must be preserved, never renewed.
-        assert_eq!(updated.deadline, initial_deadline);
-        assert_eq!(updated.wake_at, Some(wake));
-
-        // Read back directly
-        let read = store
-            .admission_window(&op, &call)?
-            .expect("window must exist");
-        assert_eq!(read.deadline, initial_deadline);
-        assert_eq!(read.wake_at, Some(wake));
-        Ok(())
     }
 }

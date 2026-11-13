@@ -16,7 +16,9 @@ impl RunStore {
     /// creating missing directories. Nested child stores are counted once.
     pub fn disk_usage(&self, report: &mut DiskReport) -> Result<()> {
         let terminal = {
-            let mut query = self.db.prepare("SELECT run,id,terminal FROM attempts")?;
+            let mut query = self
+                .db
+                .prepare("SELECT run,id,terminal FROM attempts WHERE refused=0")?;
             let rows = query.query_map([], |row| {
                 Ok((
                     (row.get::<_, String>(0)?, row.get::<_, String>(1)?),

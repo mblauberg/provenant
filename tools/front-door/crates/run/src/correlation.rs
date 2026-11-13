@@ -1,18 +1,9 @@
-//! Host-owned membership facts. Lane stores are never lookup authority.
-use crate::{
-    db::{decode, immediate, open_database},
-    *,
-};
+//! Host-owned membership facts, sealed on the host store's attempt rows.
+//! Lane stores are never lookup authority.
+use crate::{db::open_database, *};
 use provenant_core::{AttemptId, GitOid, ProjectId, RunId, TaskId};
 use provenant_records::AbsolutePath;
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
-use std::path::Path;
-pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
-    sql: include_str!("work_index_schema.sql"),
-    version: 1,
-};
-pub const WORK_INDEX_FILE: &str = "work-index.sqlite3";
+use rusqlite::{OptionalExtension, params};
 const ROW_LIMIT: usize = 64;
 const MEMBER_BYTES: usize = 64 * 1024;
 /// Run selectors also need a host-verifiable namespace, including for runs
@@ -84,150 +75,138 @@ pub fn validate_work(
     selection: &WorkSelector,
     call: &Request<'_>,
 ) -> Result<WorkCoverage> {
-    WorkIndex::open(host.as_path(), call)?.validate(selection, call)
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Membership {
-    schema_version: u64,
-    project: ProjectId,
-    run: RunId,
-    task: TaskId,
-    attempt: AttemptId,
-    repository: Option<AbsolutePath>,
-    head: Option<GitOid>,
-}
-/// Open only at the trusted host root. Consumers cannot insert membership.
-/// Reads perform no nested traversal, Git probes or provider I/O.
-/// ```compile_fail
-/// use provenant_run::{WorkIndex, Request};
-/// fn untrusted(path: &std::path::Path, call: &Request<'_>) {
-///     let _ = WorkIndex::open(path, call);
-/// }
-/// ```
-pub struct WorkIndex(pub(crate) Connection);
-impl WorkIndex {
-    pub(crate) fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
-        let (_, db, _lock) = open_database(host, WORK_INDEX_FILE, call)?;
-        provenant_sqlite::ensure_schema(&db, SCHEMA)?;
-        Ok(Self(db))
-    }
-    pub fn validate(&self, selection: &WorkSelector, call: &Request<'_>) -> Result<WorkCoverage> {
+    call.check()?;
+    let (_, db, initialisation) = open_database(host.as_path(), "run.sqlite3", call)?;
+    provenant_sqlite::ensure_schema(&db, crate::db::SCHEMA)?;
+    drop(initialisation);
+    // Exact predicates let SQLite use the run index even when a selector is
+    // absent or names unknown work.
+    let task = if selection.task.is_some() {
+        "task=?3"
+    } else {
+        "?3 IS NULL"
+    };
+    let attempt = if selection.attempt.is_some() {
+        "id=?4"
+    } else {
+        "?4 IS NULL"
+    };
+    let mut query = db.prepare(&format!(
+        "SELECT substr(repository,1,{read_bytes}),head FROM attempts
+        WHERE run=?2 AND project=?1 AND {task} AND {attempt} AND sealed=1 AND refused=0
+        ORDER BY task,id LIMIT {row_limit}",
+        read_bytes = MEMBER_BYTES + 1,
+        row_limit = ROW_LIMIT + 1
+    ))?;
+    let mut rows = query.query(params![
+        selection.project.to_string(),
+        selection.run.to_string(),
+        selection.task.map(|id| id.to_string()),
+        selection.attempt.map(|id| id.to_string())
+    ])?;
+    let mut coverage = WorkCoverage::Unindexed;
+    let qualified = selection.task.is_some() || selection.attempt.is_some();
+    for n in 0..=ROW_LIMIT {
         call.check()?;
-        // Exact predicates let SQLite use the attempt or project/run/task
-        // index even when a selector is absent or names unknown work.
-        let task = if selection.task.is_some() {
-            "task=?3"
-        } else {
-            "?3 IS NULL"
+        let Some(row) = rows.next()? else {
+            if !qualified && coverage != WorkCoverage::Unindexed {
+                return Ok(coverage.max(WorkCoverage::Partial));
+            }
+            return Ok(coverage);
         };
-        let attempt = if selection.attempt.is_some() {
-            "attempt=?4"
-        } else {
-            "?4 IS NULL"
-        };
-        let mut query = self.0.prepare(&format!(
-            "SELECT substr(record,1,{read_bytes}) FROM membership
-            WHERE project=?1 AND run=?2 AND {task} AND {attempt}
-            ORDER BY task,attempt LIMIT {row_limit}",
-            read_bytes = MEMBER_BYTES + 1,
-            row_limit = ROW_LIMIT + 1
-        ))?;
-        let mut rows = query.query(params![
-            selection.project.to_string(),
-            selection.run.to_string(),
-            selection.task.map(|id| id.to_string()),
-            selection.attempt.map(|id| id.to_string())
-        ])?;
-        let mut coverage = WorkCoverage::Unindexed;
-        let qualified = selection.task.is_some() || selection.attempt.is_some();
-        for n in 0..=ROW_LIMIT {
-            let Some(row) = rows.next()? else {
-                if !qualified && coverage != WorkCoverage::Unindexed {
-                    return Ok(coverage.max(WorkCoverage::Partial));
-                }
-                return Ok(coverage);
-            };
-            if n == ROW_LIMIT {
-                return Ok(if coverage == WorkCoverage::Mismatch {
-                    coverage
-                } else {
-                    WorkCoverage::Limit
-                });
-            }
-            let raw: Vec<u8> = row.get(0)?;
-            if raw.len() > MEMBER_BYTES {
-                return Err(RunError::Validation("work membership size"));
-            }
-            let value: Membership = decode(&raw)?;
-            if value.schema_version != 1
-                || value.project != selection.project
-                || value.run != selection.run
-                || selection.task.is_some_and(|task| task != value.task)
-                || selection
-                    .attempt
-                    .is_some_and(|attempt| attempt != value.attempt)
-            {
-                return Err(RunError::Validation("work membership identity"));
-            }
-            if selection
-                .repository
-                .as_ref()
-                .is_some_and(|repo| value.repository.as_ref().is_some_and(|v| v != repo))
-                || selection
-                    .head
-                    .is_some_and(|head| value.head.is_some_and(|v| v != head))
-            {
-                coverage = WorkCoverage::Mismatch;
-                continue;
-            }
-            if selection.repository.is_some() && value.repository.is_none() {
-                coverage = coverage.max(WorkCoverage::RepositoryUnavailable);
-            } else if selection.head.is_some() && value.head.is_none() {
-                coverage = coverage.max(WorkCoverage::HeadUnavailable);
+        if n == ROW_LIMIT {
+            return Ok(if coverage == WorkCoverage::Mismatch {
+                coverage
             } else {
-                coverage = coverage.max(WorkCoverage::Verified);
-            }
+                WorkCoverage::Limit
+            });
         }
-        Ok(coverage)
+        let repository: Option<String> = row.get(0)?;
+        if repository
+            .as_ref()
+            .is_some_and(|raw| raw.len() > MEMBER_BYTES)
+        {
+            return Err(RunError::Validation("work membership size"));
+        }
+        let repository: Option<AbsolutePath> = repository
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|_| RunError::Validation("work membership repository"))?;
+        let head = row
+            .get::<_, Option<String>>(1)?
+            .map(|raw| GitOid::parse(&raw))
+            .transpose()
+            .map_err(|_| RunError::Validation("work membership head"))?;
+        if selection
+            .repository
+            .as_ref()
+            .is_some_and(|repo| repository.as_ref().is_some_and(|v| v != repo))
+            || selection
+                .head
+                .is_some_and(|wanted| head.is_some_and(|v| v != wanted))
+        {
+            coverage = WorkCoverage::Mismatch;
+            continue;
+        }
+        if selection.repository.is_some() && repository.is_none() {
+            coverage = coverage.max(WorkCoverage::RepositoryUnavailable);
+        } else if selection.head.is_some() && head.is_none() {
+            coverage = coverage.max(WorkCoverage::HeadUnavailable);
+        } else {
+            coverage = coverage.max(WorkCoverage::Verified);
+        }
     }
-    fn seal(&self, value: &Membership, call: &Request<'_>) -> Result<()> {
-        let canonical = provenant_records::CanonicalV1::bytes(value)?;
-        let raw = canonical.as_bytes();
-        if raw.len() > MEMBER_BYTES {
+    Ok(coverage)
+}
+impl RunStore {
+    /// Seal launch membership facts on a queued attempt row. A replay with the
+    /// same facts succeeds; different facts conflict.
+    pub(crate) fn seal_membership(
+        &self,
+        attempt: AttemptId,
+        repository: Option<&AbsolutePath>,
+        head: Option<GitOid>,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let repository = repository
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| RunError::Validation("work membership repository"))?;
+        if repository
+            .as_ref()
+            .is_some_and(|raw| raw.len() > MEMBER_BYTES)
+        {
             return Err(RunError::TooLarge {
                 limit: MEMBER_BYTES as u64,
             });
         }
-        immediate(&self.0, call, |tx| {
-            let previous: Option<Vec<u8>> = tx
+        let head = head.map(|head| head.to_string());
+        self.write(call, |tx| {
+            let (sealed, terminal, stored_repository, stored_head): (bool, bool, Option<String>, Option<String>) = tx
                 .query_row(
-                    "SELECT record FROM membership WHERE attempt=?1",
-                    [value.attempt.to_string()],
-                    |r| r.get(0),
+                    "SELECT sealed,terminal,repository,head FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                    params![attempt.to_string(), self.context.project_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
-                .optional()?;
-            if let Some(raw) = previous {
-                return if decode::<Membership>(&raw)? == *value {
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            if sealed {
+                return if stored_repository == repository && stored_head == head {
                     Ok(())
                 } else {
                     Err(RunError::Conflict)
                 };
             }
+            if terminal {
+                return Err(RunError::Conflict);
+            }
             tx.execute(
-                "INSERT INTO membership(project,run,task,attempt,record) VALUES(?1,?2,?3,?4,?5)",
-                params![
-                    value.project.to_string(),
-                    value.run.to_string(),
-                    value.task.to_string(),
-                    value.attempt.to_string(),
-                    raw
-                ],
+                "UPDATE attempts SET sealed=1,repository=?1,head=?2 WHERE id=?3 AND sealed=0 AND terminal=0",
+                params![repository, head, attempt.to_string()],
             )?;
             Ok(())
         })
     }
-}
-impl RunStore {
     pub(crate) fn seal_work(
         &self,
         record: &AttemptRecord,
@@ -237,16 +216,10 @@ impl RunStore {
         if self.context.state_root.as_path() != self.writer_registry() {
             return Ok(());
         }
-        WorkIndex::open(self.writer_registry(), call)?.seal(
-            &Membership {
-                schema_version: 1,
-                project: self.context.project_id,
-                run: record.run_id,
-                task: record.task_id,
-                attempt: record.attempt_id,
-                repository: plan.repository.clone(),
-                head: plan.observed_head,
-            },
+        self.seal_membership(
+            record.attempt_id,
+            plan.repository.as_ref(),
+            plan.observed_head,
             call,
         )
     }
@@ -257,6 +230,7 @@ mod tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
+    use std::path::Path;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
     type Fixture = (
         tempfile::TempDir,
@@ -274,46 +248,58 @@ mod tests {
     fn request_correlation_lookup() -> TestResult {
         let (_temp, context, clock, cancel) = fixture()?;
         let call = call(&clock, &cancel);
-        let index = WorkIndex::open(context.state_root.as_path(), &call)?;
+        let store = RunStore::open(&context, &call)?;
         let input = input();
-        let value = Membership {
-            schema_version: 1,
+        store.create(&input, &call)?;
+        let repository = AbsolutePath::new(Path::new("/repo/.git"))?;
+        let head = GitOid::parse(&"a".repeat(40))?;
+        let mut selection = WorkSelector {
             project: context.project_id,
             run: input.run_id,
-            task: input.attempts[0].task_id,
-            attempt: input.attempts[0].attempt_id,
-            repository: Some(AbsolutePath::new(Path::new("/repo/.git"))?),
-            head: Some(GitOid::parse(&"a".repeat(40))?),
+            task: Some(input.attempts[0].task_id),
+            attempt: Some(input.attempts[0].attempt_id),
+            repository: Some(repository.clone()),
+            head: Some(head),
         };
-        let mut selection = WorkSelector {
-            project: value.project,
-            run: value.run,
-            task: Some(value.task),
-            attempt: Some(value.attempt),
-            repository: value.repository.clone(),
-            head: value.head,
-        };
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Unindexed);
+        let host = &context.state_root;
+        assert_eq!(
+            validate_work(host, &selection, &call)?,
+            WorkCoverage::Unindexed
+        );
         let mut run_only = selection.clone();
         run_only.task = None;
         run_only.attempt = None;
-        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Unindexed);
-        index.seal(&value, &call)?;
-        index.seal(&value, &call)?;
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
+        assert_eq!(
+            validate_work(host, &run_only, &call)?,
+            WorkCoverage::Unindexed
+        );
+        let id = input.attempts[0].attempt_id;
+        store.seal_membership(id, Some(&repository), Some(head), &call)?;
+        store.seal_membership(id, Some(&repository), Some(head), &call)?;
+        assert!(matches!(
+            store.seal_membership(id, None, Some(head), &call),
+            Err(RunError::Conflict)
+        ));
+        assert_eq!(
+            validate_work(host, &selection, &call)?,
+            WorkCoverage::Verified
+        );
+        assert_eq!(
+            validate_work(host, &run_only, &call)?,
+            WorkCoverage::Partial
+        );
         selection.head = Some(GitOid::parse(&"b".repeat(40))?);
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
-        selection.head = value.head;
+        assert_eq!(
+            validate_work(host, &selection, &call)?,
+            WorkCoverage::Mismatch
+        );
+        selection.head = Some(head);
         selection.repository = Some(AbsolutePath::new(Path::new("/other/.git"))?);
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
-        let mut unqualified = selection.clone();
-        unqualified.task = None;
-        unqualified.attempt = None;
-        assert_eq!(index.validate(&unqualified, &call)?, WorkCoverage::Mismatch);
-        unqualified.repository = value.repository.clone();
-        unqualified.head = Some(GitOid::parse(&"b".repeat(40))?);
-        assert_eq!(index.validate(&unqualified, &call)?, WorkCoverage::Mismatch);
-        selection.repository = value.repository.clone();
+        assert_eq!(
+            validate_work(host, &selection, &call)?,
+            WorkCoverage::Mismatch
+        );
+        selection.repository = Some(repository);
         for field in 0..4 {
             let mut foreign = selection.clone();
             match field {
@@ -322,61 +308,16 @@ mod tests {
                 2 => foreign.task = Some(TaskId::from_bytes([99; 16])),
                 _ => foreign.attempt = Some(AttemptId::from_bytes([99; 16])),
             }
-            assert_eq!(index.validate(&foreign, &call)?, WorkCoverage::Unindexed);
+            assert_eq!(
+                validate_work(host, &foreign, &call)?,
+                WorkCoverage::Unindexed
+            );
         }
-        let mut forged = value.clone();
-        forged.task = TaskId::from_bytes([99; 16]);
+        cancel.cancel();
         assert!(matches!(
-            index.seal(&forged, &call),
-            Err(RunError::Conflict)
+            validate_work(host, &selection, &call),
+            Err(RunError::Cancelled)
         ));
-        drop(index);
-        let index = WorkIndex::open(context.state_root.as_path(), &call)?;
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
-        assert_eq!(index.validate(&run_only, &call)?, WorkCoverage::Partial);
-        Ok(())
-    }
-
-    #[test]
-    fn request_correlation_survives_attempt_record_removal() -> TestResult {
-        let (_temp, context, clock, cancel) = fixture()?;
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let prepared = input();
-        store.create(&prepared, &call)?;
-        store.start(
-            prepared.run_id,
-            &crate::dispatch_tests::Ready,
-            &|_, _| Err(RunError::Validation("fixture handoff")),
-            &call,
-        )?;
-        let selector = WorkSelector {
-            project: context.project_id,
-            run: prepared.run_id,
-            task: Some(prepared.attempts[0].task_id),
-            attempt: Some(prepared.attempts[0].attempt_id),
-            repository: None,
-            head: None,
-        };
-        assert_eq!(
-            validate_work(&context.state_root, &selector, &call)?,
-            WorkCoverage::Verified
-        );
-        // Model lane-local cleanup without touching the host membership index.
-        store
-            .db
-            .execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_terminal_delete;")?;
-        assert_eq!(
-            store.db.execute(
-                "DELETE FROM attempts WHERE id=?1",
-                [prepared.attempts[0].attempt_id.to_string()]
-            )?,
-            1
-        );
-        assert_eq!(
-            validate_work(&context.state_root, &selector, &call)?,
-            WorkCoverage::Verified
-        );
         Ok(())
     }
 
@@ -384,78 +325,34 @@ mod tests {
     fn request_correlation_missing_facts_and_bounds() -> TestResult {
         let (_temp, context, clock, cancel) = fixture()?;
         let call = call(&clock, &cancel);
-        let index = WorkIndex::open(context.state_root.as_path(), &call)?;
+        let store = RunStore::open(&context, &call)?;
         let input = input();
-        let mut value = Membership {
-            schema_version: 1,
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        store.seal_membership(id, None, None, &call)?;
+        let mut selection = WorkSelector {
             project: context.project_id,
             run: input.run_id,
-            task: input.attempts[0].task_id,
-            attempt: input.attempts[0].attempt_id,
-            repository: None,
-            head: None,
-        };
-        index.seal(&value, &call)?;
-        let mut selection = WorkSelector {
-            project: value.project,
-            run: value.run,
-            task: Some(value.task),
+            task: Some(input.attempts[0].task_id),
             attempt: None,
             repository: Some(AbsolutePath::new(Path::new("/repo/.git"))?),
             head: None,
         };
+        let host = &context.state_root;
         assert_eq!(
-            index.validate(&selection, &call)?,
+            validate_work(host, &selection, &call)?,
             WorkCoverage::RepositoryUnavailable
         );
-        let contradictory = Membership {
-            attempt: AttemptId::from_bytes([99; 16]),
-            repository: Some(AbsolutePath::new(Path::new("/other/.git"))?),
-            ..value.clone()
-        };
-        index.seal(&contradictory, &call)?;
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
-        index.0.execute(
-            "DELETE FROM membership WHERE attempt=?1",
-            [contradictory.attempt.to_string()],
-        )?;
         selection.repository = None;
         selection.head = Some(GitOid::parse(&"a".repeat(40))?);
         assert_eq!(
-            index.validate(&selection, &call)?,
+            validate_work(host, &selection, &call)?,
             WorkCoverage::HeadUnavailable
         );
-        value.repository = Some(AbsolutePath::new(Path::new("/repo/.git"))?);
-        for n in 1..=64_u8 {
-            value.attempt = AttemptId::from_bytes([n; 16]);
-            if value.attempt == input.attempts[0].attempt_id {
-                continue;
-            }
-            index.seal(&value, &call)?;
-        }
-        value.attempt = AttemptId::from_bytes([65; 16]);
-        index.seal(&value, &call)?;
-        selection.task = None;
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Limit);
-        selection.head = None;
-        selection.repository = Some(AbsolutePath::new(Path::new("/other/.git"))?);
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Mismatch);
-        selection.repository = None;
-        selection.attempt = Some(value.attempt);
-        selection.head = None;
-        assert_eq!(index.validate(&selection, &call)?, WorkCoverage::Verified);
-        value.repository = Some(AbsolutePath::new(Path::new(&format!(
-            "/{}",
-            "x".repeat(66000)
-        )))?);
+        let long = AbsolutePath::new(Path::new(&format!("/{}", "x".repeat(66000))))?;
         assert!(matches!(
-            index.seal(&value, &call),
+            store.seal_membership(id, Some(&long), None, &call),
             Err(RunError::TooLarge { limit: 65536 })
-        ));
-        cancel.cancel();
-        assert!(matches!(
-            index.validate(&selection, &call),
-            Err(RunError::Cancelled)
         ));
         Ok(())
     }
@@ -493,124 +390,12 @@ mod tests {
     }
 
     #[test]
-    fn request_correlation_capture_failures_leave_work_queued() -> TestResult {
-        use provenant_os::fs::{Directory, LockMode};
-        let (_temp, context, clock, cancel) = fixture()?;
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let prepared = input();
-        store.create(&prepared, &call)?;
-        let index = WorkIndex::open(store.writer_registry(), &call)?;
-        let directory = Directory::open_anchor(store.writer_registry())?;
-        let lock = directory.try_lock_existing(
-            std::ffi::OsStr::new("work-index.sqlite3.lock"),
-            LockMode::Exclusive,
-        )?;
-        let contended =
-            provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
-                store.start(
-                    prepared.run_id,
-                    &crate::dispatch_tests::Ready,
-                    &|_, _| Err(RunError::Validation("must not reach handoff")),
-                    &call,
-                )
-            });
-        assert!(matches!(contended, Err(RunError::Contention)));
-        assert_eq!(
-            store.record(prepared.attempts[0].attempt_id, &call)?.state,
-            AttemptState::Queued {
-                extra: Default::default()
-            }
-        );
-        drop(lock);
-        cancel.cancel();
-        let result = store.start(
-            prepared.run_id,
-            &crate::dispatch_tests::Ready,
-            &|_, _| unreachable!("cancelled call reached handoff"),
-            &call,
-        );
-        let fresh_cancel = CancelToken::new();
-        let call = Request {
-            cancel: &fresh_cancel,
-            ..call
-        };
-        assert!(matches!(result, Err(RunError::Cancelled)));
-        assert_eq!(
-            store.record(prepared.attempts[0].attempt_id, &call)?.state,
-            AttemptState::Queued {
-                extra: Default::default()
-            }
-        );
-        index.0.execute_batch("CREATE TRIGGER reject_membership BEFORE INSERT ON membership BEGIN SELECT RAISE(ABORT,'fixture seal failure'); END;")?;
-        let result = store.start(
-            prepared.run_id,
-            &crate::dispatch_tests::Ready,
-            &|_, _| unreachable!("seal failure reached handoff"),
-            &call,
-        );
-        assert!(matches!(result, Err(RunError::Sqlite(_))));
-        assert_eq!(
-            store.record(prepared.attempts[0].attempt_id, &call)?.state,
-            AttemptState::Queued {
-                extra: Default::default()
-            }
-        );
-        index.0.execute_batch("DROP TRIGGER reject_membership;")?;
-        let before = store.record(prepared.attempts[0].attempt_id, &call)?;
-        let head = Some(GitOid::parse(&"a".repeat(40))?);
-        // Launcher A has captured its observed HEAD but has not claimed Starting.
-        index.seal(
-            &Membership {
-                schema_version: 1,
-                project: context.project_id,
-                run: prepared.run_id,
-                task: before.task_id,
-                attempt: before.attempt_id,
-                repository: None,
-                head,
-            },
-            &call,
-        )?;
-        // Launcher B prepared different facts (HEAD unavailable). It must not
-        // withdraw the queued attempt before A can claim it.
-        let second = store.start(
-            prepared.run_id,
-            &crate::dispatch_tests::Ready,
-            &|_, _| unreachable!("conflicting capture reached handoff"),
-            &call,
-        );
-        assert!(matches!(second, Err(RunError::Conflict)));
-        assert_eq!(
-            store.record(before.attempt_id, &call)?.state,
-            AttemptState::Queued {
-                extra: Default::default()
-            }
-        );
-        let claimed = store.mark_starting(
-            &before,
-            &crate::tests::route(),
-            &[],
-            &Default::default(),
-            head,
-            &call,
-        )?;
-        assert_eq!(
-            claimed.state,
-            AttemptState::Starting {
-                extra: Default::default()
-            }
-        );
-        Ok(())
-    }
-    #[test]
     fn request_correlation_host_resumes_seal_through_start() -> TestResult {
         let (_temp, context, clock, cancel) = fixture()?;
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let original = input();
         store.create(&original, &call)?;
-        let index = WorkIndex::open(store.writer_registry(), &call)?;
         let mut prior = original.attempts[0].attempt_id;
         store.start(
             original.run_id,
@@ -642,7 +427,10 @@ mod tests {
                 repository: None,
                 head: None,
             };
-            assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Unindexed);
+            assert_eq!(
+                validate_work(&context.state_root, &selector, &call)?,
+                WorkCoverage::Unindexed
+            );
             let handed = std::cell::Cell::new(false);
             store.start(
                 run.run_id,
@@ -655,7 +443,10 @@ mod tests {
                 &call,
             )?;
             assert!(handed.get());
-            assert_eq!(index.validate(&selector, &call)?, WorkCoverage::Verified);
+            assert_eq!(
+                validate_work(&context.state_root, &selector, &call)?,
+                WorkCoverage::Verified
+            );
             prior = next.attempt_id;
         }
         Ok(())

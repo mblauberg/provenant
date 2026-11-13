@@ -58,6 +58,8 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             )
             .unwrap();
             assert_eq!(status.checkpoint.nodes[0].state, NodeState::Failed);
+            assert!(owner.attempt_numbers.iter().all(Option::is_some));
+            assert!(owner.attempt_numbers.windows(2).all(|pair| pair[0] < pair[1]));
             assert_eq!(owner.calls.len(), 3);
             assert!(owner.calls.iter().all(|(_, route)| route == &alias));
             assert_ne!(owner.calls[0].0, owner.calls[1].0);

@@ -2120,36 +2120,6 @@ impl RunStore {
             generation: record.generation,
         }
     }
-    /// Bind a cancel operation to its target before any attempt is touched.
-    /// The same ID for the same target is a replay; for another target it is
-    /// an operation conflict.
-    pub fn bind_cancel(
-        &self,
-        operation: &OperationId,
-        target: &str,
-        call: &Request<'_>,
-    ) -> Result<()> {
-        call.check()?;
-        let (project, actor) = (
-            self.context.project_id.to_string(),
-            self.context.actor_id.to_string(),
-        );
-        let bound: String = {
-            self.db.execute(
-                "INSERT INTO cancellations VALUES (?1,?2,?3,?4) ON CONFLICT DO NOTHING",
-                params![project, actor, operation.as_str(), target],
-            )?;
-            self.db.query_row(
-                "SELECT target FROM cancellations WHERE project=?1 AND actor=?2 AND operation=?3",
-                params![project, actor, operation.as_str()],
-                |r| r.get(0),
-            )?
-        };
-        if bound != target {
-            return Err(RunError::OperationConflict);
-        }
-        Ok(())
-    }
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
@@ -2642,7 +2612,7 @@ impl RunStore {
         if !replay {
             let generation: i64 = {
                 self.db.query_row(
-                    "SELECT COUNT(*) FROM continuations WHERE target=?1",
+                    "SELECT COUNT(*) FROM attempts WHERE continues=?1 AND refused=0",
                     [input.prior.to_string()],
                     |r| r.get(0),
                 )?
@@ -2768,7 +2738,8 @@ impl RunStore {
         if runs.len() < limit as usize {
             let owed: Vec<String> = {
                 let mut query = self.db.prepare(
-                    "SELECT run FROM reactions WHERE project=?1 AND pending=1 GROUP BY run ORDER BY MIN(rowid) LIMIT ?2",
+                    "SELECT a.run FROM reactions r JOIN attempts a ON a.id=r.attempt \
+                     WHERE r.project=?1 AND r.pending=1 GROUP BY a.run ORDER BY MIN(r.rowid) LIMIT ?2",
                 )?;
                 let rows = query
                     .query_map(params![self.context.project_id.to_string(), limit], |r| {

@@ -2375,7 +2375,7 @@ impl crate::RunStore {
                 // follows only this graph project's accepted run namespace.
                 if !all_scopes && project != self.context.project_id {
                     let belongs: bool = self.db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND project=?2)",
+                        "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND project=?2 AND refused=0)",
                         rusqlite::params![
                             reservation.scope.run.to_string(),
                             self.context.project_id.to_string()

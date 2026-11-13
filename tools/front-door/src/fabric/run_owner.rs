@@ -1553,9 +1553,6 @@ impl BinaryRunOwner<'_> {
                 let call = self.call(cancel);
                 let reason = format!("cancelled by Fabric operation {operation_id}");
                 let service = provenant_run::Service::new(&store);
-                service
-                    .bind_cancel(operation_id, &target.attempt.to_string(), &call)
-                    .map_err(run_error)?;
                 let receipt = service
                     .cancel(target.attempt, &reason, &call)
                     .map_err(run_error)?;

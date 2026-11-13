@@ -9,9 +9,21 @@ use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, Revie
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
+type AttemptIndexKey = (String, String, u32);
+type AttemptIndexRow = (
+    Vec<u8>,
+    String,
+    String,
+    i64,
+    i64,
+    bool,
+    String,
+    AttemptIndexKey,
+);
+
 #[cfg(test)]
 thread_local! {
-    /// Runs once on the next `record_with_run`, after the attempt row is read
+    /// Runs once on the next `record_row`, after the attempt row is read
     /// and before the rest of the record: a commit landing mid-read.
     pub(crate) static AFTER_ATTEMPT_ROW: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -48,7 +60,7 @@ pub struct Attempts<'a> {
 }
 impl Attempts<'_> {
     fn page(&self) -> Result<VecDeque<(i64, String)>> {
-        let mut statement = self.store.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND terminal=1 AND sequence>?2 AND sequence<=?3 AND (?4 IS NULL OR run=?4) AND (?5 IS NULL OR task=?5) ORDER BY sequence LIMIT 64")?;
+        let mut statement = self.store.db.prepare("SELECT sequence,id FROM attempts WHERE project=?1 AND terminal=1 AND refused=0 AND sequence>?2 AND sequence<=?3 AND (?4 IS NULL OR run=?4) AND (?5 IS NULL OR task=?5) ORDER BY sequence LIMIT 64")?;
         let rows = statement.query_map(
             params![
                 self.store.context.project_id.to_string(),
@@ -215,9 +227,9 @@ impl RunStore {
     /// opened it. The usage backfill reads each one through its own context.
     pub fn terminal_projects(&self, call: &Request<'_>) -> Result<Vec<ProjectId>> {
         call.check()?;
-        let mut statement = self
-            .db
-            .prepare("SELECT DISTINCT project FROM attempts WHERE terminal=1 ORDER BY project")?;
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT project FROM attempts WHERE terminal=1 AND refused=0 ORDER BY project",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| {
             ProjectId::parse(&row?).map_err(|_| RunError::Validation("attempt project ID"))
@@ -295,7 +307,7 @@ pub struct LaneTarget {
     pub attempt: Option<AttemptId>,
 }
 /// Optional lane filters: the submitting actor, and terminal lanes already seen.
-const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR run IN (SELECT run FROM operations WHERE project=?1 AND actor=?5)) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
+const UNSEEN_OWNED: &str = " AND (?5 IS NULL OR actor=?5) AND (?6 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?6))";
 const UNSEEN_TARGET: &str = " AND (?7 IS NULL OR terminal=0 OR EXISTS(SELECT 1 FROM events WHERE attempt=attempts.id AND sequence>?7))";
 #[derive(Clone, Debug)]
 pub struct LaneQuery {
@@ -350,31 +362,45 @@ impl RunStore {
             .transpose()
     }
 
+    /// The adaptor operation record for a caller's operation ID, kept until
+    /// work keys replace operation IDs. Every row of the operation carries
+    /// it; an admitted operation reads as terminal once all its rows are.
     pub fn operation(
         &self,
         id: &OperationId,
         call: &Request<'_>,
     ) -> Result<Option<OperationRecord>> {
         call.check()?;
-        let raw: Option<Vec<u8>> = self
-            .db
+        self.operation_on(&self.db, id)
+    }
+    pub(crate) fn operation_on(
+        &self,
+        db: &rusqlite::Connection,
+        id: &OperationId,
+    ) -> Result<Option<OperationRecord>> {
+        let row: Option<(Vec<u8>, bool)> = db
             .query_row(
-                "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                "SELECT operation_record, NOT EXISTS(SELECT 1 FROM attempts p WHERE p.project=a.project \
+                 AND p.actor=a.actor AND p.operation=a.operation AND p.terminal=0) \
+                 FROM attempts a WHERE project=?1 AND actor=?2 AND operation=?3 ORDER BY sequence LIMIT 1",
                 params![
                     self.context.project_id.to_string(),
                     self.context.actor_id.to_string(),
                     id.as_str()
                 ],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        raw.map(|raw| {
-            let op: OperationRecord = decode(&raw)?;
+        row.map(|(raw, settled)| {
+            let mut op: OperationRecord = decode(&raw)?;
             if op.project_id != self.context.project_id
                 || op.actor_id != self.context.actor_id
                 || op.operation_id != *id
             {
                 return Err(RunError::Validation("operation index identity"));
+            }
+            if settled && op.state != OperationState::Refused {
+                op.state = OperationState::Terminal;
             }
             Ok(op)
         })
@@ -382,14 +408,15 @@ impl RunStore {
     }
 
     /// Read the submitting actor's recent refused operations, newest first.
-    /// A refusal has no attempt row and therefore cannot appear in lane queries.
+    /// A refusal is a terminal attempt row with no attempt record, so it never
+    /// appears in lane queries.
     pub fn recent_refusals(&self, limit: u64, call: &Request<'_>) -> Result<Vec<OperationRecord>> {
         call.check()?;
         if !(1..=100).contains(&limit) {
             return Err(RunError::Validation("refusal page limit"));
         }
         let mut statement = self.db.prepare(
-            "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3",
+            "SELECT operation,operation_record FROM attempts WHERE project=?1 AND actor=?2 AND refused=1 ORDER BY sequence DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(
             params![
@@ -431,7 +458,7 @@ impl RunStore {
             .collect())
     }
 
-    /// Page by the immutable SQLite row ID, so failed notices cannot starve later rows.
+    /// Page by the immutable attempt sequence, so failed notices cannot starve later rows.
     pub fn pending_refusal_notices_after(
         &self,
         limit: u64,
@@ -443,7 +470,7 @@ impl RunStore {
             return Err(RunError::Validation("refusal page limit"));
         }
         let mut statement = self.db.prepare(
-            "SELECT rowid,operation,record FROM operations WHERE project=?1 AND actor=?2 AND CASE WHEN json_valid(CAST(record AS TEXT)) THEN json_extract(CAST(record AS TEXT),'$.state')='refused' AND json_type(CAST(record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(record AS TEXT),'$.refusal_notice_done'),0) != 1 ELSE 0 END AND rowid > ?4 ORDER BY rowid LIMIT ?3",
+            "SELECT sequence,operation,operation_record FROM attempts WHERE project=?1 AND actor=?2 AND refused=1 AND CASE WHEN json_valid(CAST(operation_record AS TEXT)) THEN json_type(CAST(operation_record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(operation_record AS TEXT),'$.refusal_notice_done'),0) != 1 ELSE 0 END AND sequence > ?4 ORDER BY sequence LIMIT ?3",
         )?;
         let mut records = Vec::new();
         let mut cursor = after;
@@ -471,7 +498,7 @@ impl RunStore {
                 cursor = rowid;
                 scanned += 1;
                 // Corrupt evidence cannot produce a notice. Advance by its raw
-                // row ID so a full page of it cannot hide later valid notices.
+                // sequence so a full page of it cannot hide later valid notices.
                 let Ok(id) = OperationId::parse(&operation) else {
                     continue;
                 };
@@ -498,37 +525,103 @@ impl RunStore {
             }
         }
     }
-    /// Whether the store holds any run record.
+    /// Whether the store holds any admitted attempt.
     pub fn has_runs(&self, call: &Request<'_>) -> Result<bool> {
         call.check()?;
-        Ok(self
-            .db
-            .query_row("SELECT EXISTS(SELECT 1 FROM runs)", [], |row| row.get(0))?)
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE refused=0)",
+            [],
+            |row| row.get(0),
+        )?)
     }
     pub fn run(&self, id: RunId, call: &Request<'_>) -> Result<RunRecord> {
         call.check()?;
         let run = self.run_on(&self.db, id)?;
         Ok(run)
     }
+    /// The adaptor run record, derived from the run's attempt rows. It is kept
+    /// until callers address work by key; nothing stores it.
     pub(crate) fn run_on(&self, db: &rusqlite::Connection, id: RunId) -> Result<RunRecord> {
-        let raw: Vec<u8> = db
-            .query_row(
-                "SELECT record FROM runs WHERE id=?1 AND project=?2",
-                params![id.to_string(), self.context.project_id.to_string()],
-                |r| r.get(0),
-            )
-            .optional()?
-            .ok_or(RunError::NotFound)?;
-        let run: RunRecord = decode(&raw)?;
-        if run.run_id != id || run.project_id != self.context.project_id {
-            return Err(RunError::Validation("run index identity"));
+        Self::run_in(db, self.context.project_id, id)
+    }
+    pub(crate) fn run_in(
+        db: &rusqlite::Connection,
+        project: ProjectId,
+        id: RunId,
+    ) -> Result<RunRecord> {
+        let mut query = db.prepare(
+            "SELECT task,operation_record,record,terminal FROM attempts \
+             WHERE run=?1 AND project=?2 AND refused=0 ORDER BY sequence",
+        )?;
+        let mut rows = query.query(params![id.to_string(), project.to_string()])?;
+        let mut run: Option<RunRecord> = None;
+        while let Some(row) = rows.next()? {
+            let task = TaskId::parse(&row.get::<_, String>(0)?)
+                .map_err(|_| RunError::Validation("attempt index task"))?;
+            let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(2)?)?;
+            if attempt.run_id != id || attempt.task_id != task {
+                return Err(RunError::Validation("run index identity"));
+            }
+            let terminal: bool = row.get(3)?;
+            let finished = match attempt.state {
+                AttemptState::Terminal { finished_at, .. } => Some(finished_at),
+                _ => None,
+            };
+            if terminal != finished.is_some() {
+                return Err(RunError::Validation("run index identity"));
+            }
+            let run = match &mut run {
+                Some(run) => run,
+                None => {
+                    let op: OperationRecord = decode(&row.get::<_, Vec<u8>>(1)?)?;
+                    if op.run_id != id || op.project_id != project {
+                        return Err(RunError::Validation("run index identity"));
+                    }
+                    run.insert(RunRecord {
+                        extra: Default::default(),
+                        schema_version: 1,
+                        run_id: id,
+                        project_id: op.project_id,
+                        actor_id: op.actor_id,
+                        parent_attempt: op
+                            .extra
+                            .get("parent_attempt")
+                            .map(|value| serde_json::from_value(value.clone()))
+                            .transpose()
+                            .map_err(|_| RunError::Validation("run parent attempt"))?,
+                        operation_id: op.operation_id,
+                        request_digest: op.request_digest,
+                        task_ids: Vec::new(),
+                        parent: attempt.retry_of,
+                        children: vec![],
+                        revision: 1,
+                        generation: 0,
+                        created_at: attempt.queued_at,
+                        closed_at: Some(attempt.queued_at),
+                        closure: Closure::Closed,
+                    })
+                }
+            };
+            run.task_ids.push(task);
+            match finished {
+                Some(finished) => {
+                    run.revision = run.revision.checked_add(1).ok_or(RunError::Conflict)?;
+                    if run.closure == Closure::Closed {
+                        run.closed_at = run.closed_at.max(Some(finished));
+                    }
+                }
+                None => {
+                    run.closure = Closure::Open;
+                    run.closed_at = None;
+                }
+            }
         }
-        Ok(run)
+        run.ok_or(RunError::NotFound)
     }
     /// Every settled attempt of a run, oldest first.
     pub fn terminal_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
         let ids: Vec<String> = {
-            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=1 ORDER BY sequence")?;
+            let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=1 AND refused=0 ORDER BY sequence")?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
                 |row| row.get(0),
@@ -566,6 +659,61 @@ impl RunStore {
     /// feeding the checkpoint observation into a write.
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.read_record(id, call, RecordRead::Durable)
+    }
+    /// The admitted attempt recorded under a work key. A refused admission
+    /// under the key reads as its recorded refusal.
+    pub fn attempt_by_key(
+        &self,
+        key: &provenant_records::WorkKey,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        call.check()?;
+        if key.project() != self.context.project_id {
+            return Err(RunError::NotFound);
+        }
+        let (id, refused, operation): (String, bool, Vec<u8>) = self
+            .db
+            .query_row(
+                "SELECT id,refused,operation_record FROM attempts \
+                 WHERE project=?1 AND graph=?2 AND node=?3 AND attempt=?4",
+                params![
+                    key.project().to_string(),
+                    key.graph(),
+                    key.node(),
+                    key.attempt()
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        if refused {
+            let op: OperationRecord = decode(&operation)?;
+            return Err(RunError::RecordedRefusal(Box::new(
+                op.refusal
+                    .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+            )));
+        }
+        let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+        self.read_record(id, call, RecordRead::Observed)
+    }
+    /// The work key of an attempt row, admitted or refused, by its internal ID.
+    pub fn work_key(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<provenant_records::WorkKey> {
+        call.check()?;
+        let (graph, node, attempt): (String, String, u32) = self
+            .db
+            .query_row(
+                "SELECT graph,node,attempt FROM attempts WHERE id=?1 AND project=?2",
+                params![id.to_string(), self.context.project_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        provenant_records::WorkKey::new(self.context.project_id, graph, node, attempt)
+            .map_err(|_| RunError::Validation("attempt work key"))
     }
     /// Resolve a worktree owner by its globally unique attempt ID. The owner
     /// can belong to another project scope; only its state is used for lineage.
@@ -605,8 +753,7 @@ impl RunStore {
         call: &Request<'_>,
         read: RecordRead,
     ) -> Result<AttemptRecord> {
-        let (_, record) = self.record_with_run(id, call, read)?;
-        Ok(record)
+        self.record_row(id, call, read)
     }
     /// A terminal row may precede the guardian releasing writer custody.
     pub fn custody_released(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<bool> {
@@ -654,12 +801,12 @@ impl RunStore {
             Ok(false)
         ))
     }
-    fn record_with_run(
+    fn record_row(
         &self,
         id: AttemptId,
         call: &Request<'_>,
         read: RecordRead,
-    ) -> Result<(RunRecord, AttemptRecord)> {
+    ) -> Result<AttemptRecord> {
         call.check()?;
         // One read snapshot for every row below. Terminal publication writes
         // the attempt and its settlement receipt in one transaction, so reading
@@ -674,7 +821,7 @@ impl RunStore {
         } else {
             None
         };
-        let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
+        let (raw, run_id, task_id, number, revision, terminal, operation, key): AttemptIndexRow = self.db.query_row("SELECT record,run,task,number,revision,terminal,operation,graph,node,attempt FROM attempts WHERE id=?1 AND project=?2 AND refused=0", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, (r.get(7)?, r.get(8)?, r.get(9)?)))).optional()?.ok_or(RunError::NotFound)?;
         #[cfg(test)]
         if let Some(hook) = AFTER_ATTEMPT_ROW.with(|hook| hook.borrow_mut().take()) {
             hook();
@@ -687,13 +834,18 @@ impl RunStore {
             || sql_int(record.attempt_number)? != number
             || sql_int(record.revision)? != revision
             || matches!(record.state, AttemptState::Terminal { .. }) != terminal
+            || record.operation_id.as_str() != operation
+            || record.key.as_ref().is_some_and(|stored| {
+                (stored.graph(), stored.node(), stored.attempt())
+                    != (key.0.as_str(), key.1.as_str(), key.2)
+            })
         {
             return Err(RunError::Validation("attempt index identity"));
         }
-        let run = self.run_on(&self.db, record.run_id)?;
-        if run.operation_id != record.operation_id || !run.task_ids.contains(&record.task_id) {
-            return Err(RunError::Validation("attempt run association"));
-        }
+        record.key = Some(
+            provenant_records::WorkKey::new(self.context.project_id, key.0, key.1, key.2)
+                .map_err(|_| RunError::Validation("attempt work key"))?,
+        );
         validate_attempt(&record)?;
         let receipt: Option<(i64, Vec<u8>)> = self
             .db
@@ -817,7 +969,7 @@ impl RunStore {
                 }
             }
         }
-        Ok((run, record))
+        Ok(record)
     }
     pub fn read_output(
         &self,
@@ -993,9 +1145,9 @@ impl RunStore {
             let mut found = Vec::new();
             if query.targets.is_empty() {
                 let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND (?2=0 OR sequence<?2) AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence DESC LIMIT ?4"
                 } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND sequence>?2 AND (?3 OR terminal=0)".to_owned() + UNSEEN_OWNED + " ORDER BY sequence LIMIT ?4"
                 };
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(
@@ -1008,9 +1160,9 @@ impl RunStore {
             }
             for target in &query.targets {
                 let sql = if query.newest_first {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND (?2=0 OR sequence<?2) AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?6"
                 } else {
-                    "SELECT sequence,id FROM attempts WHERE project=?1 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
+                    "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND sequence>?2 AND run=?3 AND (?4 IS NULL OR task=?4) AND (?5 IS NULL OR id=?5)".to_owned() + UNSEEN_TARGET + " ORDER BY sequence LIMIT ?6"
                 };
                 let mut statement = self.db.prepare(&sql)?;
                 let page = statement.query_map(

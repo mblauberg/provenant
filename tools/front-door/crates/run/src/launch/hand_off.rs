@@ -1185,7 +1185,7 @@ mod tests {
         let prior = store
             .operation(&request.operation_id, &call)?
             .ok_or("operation")?;
-        store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
         assert!(matches!(
             store.launch_unknown(request.run_id, &call),
             Err(RunError::Sqlite(_))
@@ -1246,7 +1246,7 @@ mod tests {
                     })
                     .expect("change attempt before handoff");
                 if fail_save {
-                    store.db.execute_batch("CREATE TEMP TRIGGER fail_blocked BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'fixture blocked write'); END;").expect("inject write failure");
+                    store.db.execute_batch("CREATE TEMP TRIGGER fail_blocked BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture blocked write'); END;").expect("inject write failure");
                 }
                 Ok(lease)
             };

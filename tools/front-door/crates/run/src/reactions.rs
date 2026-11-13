@@ -184,10 +184,9 @@ impl RunStore {
 
     pub(crate) fn insert_reaction(tx: &rusqlite::Connection, reaction: &Reaction) -> Result<()> {
         tx.execute(
-            "INSERT OR IGNORE INTO reactions(attempt,run,project,settled_at,pending,payload) VALUES (?1,?2,?3,?4,1,?5)",
+            "INSERT OR IGNORE INTO reactions(attempt,project,settled_at,pending,payload) VALUES (?1,?2,?3,1,?4)",
             params![
                 reaction.attempt.to_string(),
-                reaction.run.to_string(),
                 reaction.project.to_string(),
                 reaction.finished_micros.div_euclid(1_000_000),
                 bytes(reaction)?
@@ -201,7 +200,8 @@ impl RunStore {
         call.check()?;
         let ids: Vec<String> = {
             let mut query = self.db.prepare(
-                "SELECT attempt FROM reactions WHERE run=?1 AND project=?2 AND pending=1 ORDER BY rowid",
+                "SELECT r.attempt FROM reactions r JOIN attempts a ON a.id=r.attempt \
+                 WHERE a.run=?1 AND r.project=?2 AND r.pending=1 ORDER BY r.rowid",
             )?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],

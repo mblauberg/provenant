@@ -382,7 +382,6 @@ fn priority_selection_failure_uses_compiled_default_and_starts_siblings() -> Tes
             (sibling, Some(5))
         ]
     );
-    let index = WorkIndex::open(store.writer_registry(), &call)?;
     let selector = |attempt| WorkSelector {
         project: store.context.project_id,
         run: prepared.run_id,
@@ -391,12 +390,13 @@ fn priority_selection_failure_uses_compiled_default_and_starts_siblings() -> Tes
         repository: None,
         head: None,
     };
+    let host = store.context.state_root.clone();
     assert_eq!(
-        index.validate(&selector(first), &call)?,
+        validate_work(&host, &selector(first), &call)?,
         WorkCoverage::Verified
     );
     assert_eq!(
-        index.validate(&selector(sibling), &call)?,
+        validate_work(&host, &selector(sibling), &call)?,
         WorkCoverage::Verified
     );
     assert_eq!(terminal(&store, first, &call)?, Outcome::Rejected);

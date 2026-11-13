@@ -276,7 +276,7 @@ pub(crate) fn open_database(
 /// The run store's only schema.
 pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
     sql: include_str!("schema.sql"),
-    version: 10,
+    version: 11,
 };
 
 pub(crate) fn private(directory: &Directory) -> Result<()> {

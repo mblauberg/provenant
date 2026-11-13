@@ -98,7 +98,7 @@ pub(super) fn host_indexes_protected(
     [
         "fabric/fabric.sqlite3",
         "fabric/host.sqlite3",
-        run::WORK_INDEX_FILE,
+        "run.sqlite3",
     ]
     .iter()
     .flat_map(|file| {

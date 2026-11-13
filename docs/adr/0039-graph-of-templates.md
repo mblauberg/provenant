@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-11-06, #2867.
+Changed: 2026-11-06, #2867; 2026-11-11, #3173 (attempts keyed by work key).
 
 ## Context
 
@@ -16,7 +16,10 @@ Keep the graph kernel, its checkpoint-before-launch discipline and the compiled
 `GraphNode` as an internal form. Expose four concepts above it.
 
 - **Attempt:** one provider process under custody. Retries and continuations are
-  new attempts with lineage.
+  new attempts with lineage. The run store keys each attempt by its work key
+  (project, graph, node, attempt number); the graph assigns the number and the
+  store only enforces its uniqueness. A plain lane is a one-node graph, so the
+  store keeps no run or operation table.
 - **Template:** TOML with parameters and either a leaf (brief, tier, access,
   outputs) or `nodes`. A composite is a
   template with nodes; a dotted name is a flavour (`review.security`). Layers are

@@ -517,7 +517,27 @@ impl<'a> Service<'a> {
             ),
             refusal_chair: self.refusal.chair.clone().or_else(|| input.chair.clone()),
         };
-        let saved = self.store.insert_refusal(record, call)?;
+        // A graph launch is refused under the work key it would have taken.
+        let named = task.context.as_ref().and_then(|context| {
+            Some((
+                context.graph_id.clone()?,
+                context.node_id.clone()?,
+                context.attempt?,
+            ))
+        });
+        let saved = match named {
+            Some((graph, node, attempt)) => {
+                let key = provenant_records::WorkKey::new(
+                    self.store.context.project_id,
+                    graph,
+                    node,
+                    attempt,
+                )
+                .map_err(|_| RunError::Validation("work key"))?;
+                self.store.insert_refusal_under(&key, record, call)?
+            }
+            None => self.store.insert_refusal(record, call)?,
+        };
         if saved.state != OperationState::Refused {
             return Err(RunError::OperationConflict);
         }
@@ -695,16 +715,6 @@ impl<'a> Service<'a> {
     ) -> Result<OutputChunk> {
         self.store
             .read_output(id, part, range, &self.store.context, call)
-    }
-    /// Bind a cancel operation to its target once per command, before any
-    /// attempt is asked to stop.
-    pub fn bind_cancel(
-        &self,
-        operation: &OperationId,
-        target: &str,
-        call: &Request<'_>,
-    ) -> Result<()> {
-        self.store.bind_cancel(operation, target, call)
     }
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         self.store.cancel(id, reason, call)
