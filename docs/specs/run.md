@@ -90,7 +90,21 @@ alphanumeric. Run scopes it by caller and project, and binds it to the
 operation kind and a digest of the prompt, route, authority and execution
 controls. Reader waits are excluded from the digest. The same ID and digest
 return the recorded outcome without repeating effects. The same ID with a
-different digest fails with `operation_conflict` (exit 2).
+different digest fails with `operation_conflict` (exit 2). `--operation-id`
+exists on `retry`, `steer`, inbox, chair and Fabric writes; `run` and `stop`
+do not take it.
+
+A graph launch replays by name and digest instead. `--name` is only a handle: a
+graph name is its graph id, a lowercase letter then lowercase letters, digits
+and single hyphens, at most 48 bytes, with no trailing hyphen. The host digests
+the template (or graph document), brief, typed `--set` values, placement and
+route flags, and the source commit. The same digest under a name returns that
+graph with exit 0 and launches nothing, checking every graph in the family
+(`NAME`, `NAME-2`, ...). A different digest launches the next free `NAME-k`
+and says so in one line; no conflict is raised. Without `--name` the host
+assigns `TEMPLATE-K` (dots become hyphens) and never replays. A name with no
+room for a suffix within 48 bytes is refused in one line. The digest is stored
+on the graph document, so a lost reply that is repeated returns the graph.
 
 Each attempt row also carries its work key: project, graph, node and attempt
 number. The graph assigns the number, one-based in launch order within the
@@ -104,20 +118,25 @@ remain an adaptor on the attempt row; there is no operation or run table.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;
   `crates/run/src/service_tests.rs::dispatch_replay_output_and_cancel_share_the_service`;
   `crates/run/src/tests.rs::plain_lane_and_one_node_graph_store_the_same_attempt_row`;
-  `crates/run/src/tests.rs::concurrent_creates_of_one_work_key_admit_one_attempt`
-- Owner: `crates/core/src/ids.rs`, `crates/run/src/store.rs`
+  `crates/run/src/tests.rs::concurrent_creates_of_one_work_key_admit_one_attempt`;
+  `crates/fabric-runtime/src/graph/template_tests.rs::a_name_replays_its_digest_and_takes_the_next_suffix_for_a_new_one`;
+  `src/fabric/interface.rs::a_named_launch_with_the_same_digest_returns_its_graph_without_launching`;
+  `tests/graph_cli.rs::a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name`
+- Owner: `crates/core/src/ids.rs`, `crates/run/src/store.rs`,
+  `crates/fabric-runtime/src/graph/template.rs`
 
 ### Refusal before admission
 
-After an operation identity is assigned, a permanent refusal before a run is
-admitted belongs to that operation, even when writer preparation cannot produce
+After an operation identity is assigned (for a graph launch, its name), a
+permanent refusal before a run is admitted belongs to that operation, even when writer preparation cannot produce
 a canonical run request. Retain its safe diagnostic and any bound submitting
 chair before reporting the refusal. A storage failure
 returns the storage error; it cannot acknowledge an unrecorded outcome.
 Replaying that operation returns its retained refusal without consulting changed
 worktree state or repeating preparation. A different request under the same
-operation identity still conflicts. Correct the cause and start a new attempt
-through `retry` to try again.
+operation identity still conflicts; a graph launch with a changed digest takes
+the next name instead. Correct the cause and start a new attempt through
+`retry` to try again.
 
 A refusal is stored as a terminal attempt row under the work key it would have
 been admitted with, with no attempt record. That key is never reused, and
@@ -1299,8 +1318,11 @@ reader cancellation; a wait selection excludes the caller and its ancestors.
 
 A lane's `run` adds a child to its host-owned graph through the attempt-bound
 relay. Children share graph budget, cancellation and trace; attached live
-children are cancelled when the parent settles. Use `--wait` to collect them
-before exiting, or explicitly detach work that should outlive its parent.
+children are cancelled when the parent settles. Use `provenant wait NAME` to
+collect them before exiting, or explicitly detach work that should outlive its
+parent. Inside a lane `--name` names the child node, and a named child replays
+by name and input like a top-level launch; an unnamed child gets a fresh
+handle each time.
 
 `status`, `output` and `output --trace` inside a lane use the same relay. The
 host resolves the caller from its custody-bound attempt, accepts only targets
