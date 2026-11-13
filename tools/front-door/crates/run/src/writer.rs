@@ -811,7 +811,7 @@ pub struct LaunchConfinement {
     pub writer: Option<WriterLaunch>,
     /// Canonical host home; the writer's lane cargo cache derives from it.
     pub home: PathBuf,
-    /// Opt in to cloning the host Cargo registry into a fresh writer cache.
+    /// Opt in to shared lane downloads and private host target seeding.
     pub cargo_registry_seed: bool,
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
@@ -909,7 +909,7 @@ impl LaunchConfinement {
             cancel,
         )
     }
-    /// Prepare the private Cargo caches while writer custody is held.
+    /// Prepare shared downloads and a private target while writer custody is held.
     pub(crate) fn seed_cargo(
         &self,
         environment: &[(OsString, OsString)],

@@ -46,6 +46,7 @@ pub struct LaneBuildSettings {
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
+    /// Compiler jobs per lane; at most two by default to bound memory on laptops.
     pub cargo_build_jobs: Option<u64>,
     /// Most lanes of any class live at once across the host.
     #[serde(default, deserialize_with = "deserialize_auto")]
@@ -258,7 +259,7 @@ impl LaneBuildSettings {
     }
     /// Concurrent cargo builds the host allows: the setting (clamped to 1..=64)
     /// or max(1, min(cores / cargo_build_jobs, total GiB / 6)), so a 10-core
-    /// 16 GiB host with 5 jobs gets 2.
+    /// 16 GiB host with the default 2 jobs gets 2.
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         if let Some(limit) = self.max_concurrent_builds {
             return limit.clamp(1, 64);
@@ -308,7 +309,7 @@ impl LaneBuildSettings {
     }
     pub fn jobs(&self) -> u64 {
         self.cargo_build_jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1) as u64)
+            std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 2) as u64)
         })
     }
 }
@@ -901,6 +902,7 @@ mod build_tests {
         };
         assert_eq!(settings.build_limit(1), 3);
         assert_eq!(settings.jobs(), 7);
+        assert!((1..=2).contains(&LaneBuildSettings::default().jobs()));
         assert!(LaneBuildSettings::default().build_limit(0) >= 1);
         // Out-of-range values are rejected at config load and clamped here.
         let wild = LaneBuildSettings {

@@ -1250,3 +1250,91 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
     ));
     Ok(())
 }
+
+#[test]
+fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let native =
+        |key: &str| (key == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+    for sandboxed in [true, false] {
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        if !sandboxed {
+            input.host_var = &native;
+        }
+        let launch = crate::codex::Codex.prepare(input)?;
+        for (key, expected) in [
+            (
+                "CARGO_HOME",
+                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",
+            ),
+            (
+                "CARGO_TARGET_DIR",
+                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
+            ),
+            ("RUSTUP_HOME", "/fixture/home/.rustup"),
+            ("RUSTUP_AUTO_INSTALL", "0"),
+            ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY", "never"),
+        ] {
+            let values: Vec<_> = launch.env.iter().filter(|(name, _)| name == key).collect();
+            assert_eq!(values.len(), 1, "{key} sandboxed={sandboxed}");
+            assert_eq!(values[0].1, expected);
+        }
+        if sandboxed {
+            assert!(
+                launch
+                    .profile
+                    .spec
+                    .tool_writes
+                    .iter()
+                    .any(|grant| grant.path
+                        == Path::new("/fixture/home/Library/Caches/provenant-cargo-downloads"))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fresh_codex_home_setup_never_includes_provider_history() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let native =
+        |key: &str| (key == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+    for sandboxed in [true, false] {
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        if !sandboxed {
+            input.host_var = &native;
+        }
+        let launch = crate::codex::Codex.prepare(input)?;
+        // Setup is declarative. No step can walk a history tree: fresh Codex
+        // homes receive only auth/skill links and attempt-local directories.
+        for step in &launch.setup {
+            let paths = match step {
+                crate::launch::SetupStep::CreateDir(path) => vec![path],
+                crate::launch::SetupStep::WriteFile { path, .. }
+                | crate::launch::SetupStep::WriteExecutable { path, .. } => vec![path],
+                crate::launch::SetupStep::Symlink { link, target } => vec![link, target],
+            };
+            for path in paths {
+                assert!(
+                    !path.components().any(|part| [
+                        "sessions",
+                        "archived_sessions",
+                        "rollouts",
+                        "history.jsonl"
+                    ]
+                    .iter()
+                    .any(|name| part.as_os_str() == *name)),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}

@@ -1049,7 +1049,7 @@ mod git_tests {
 
 /// The lane's private, writable cache root: the writer's lane cache
 /// (`Library/Caches/provenant-lane-cargo/<sha256>`) or a read-only lane's
-/// scratch. Package-manager caches live here, never in shared host stores.
+/// scratch. Build output and mutable package-manager configuration live here.
 pub(crate) fn lane_cache<'a>(input: &'a PrepareInput<'_>) -> &'a Path {
     match &input.confined.permissions().mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => {
@@ -1072,13 +1072,10 @@ pub(crate) fn add_existing_tool(executable: &Path, tool_exec_roots: &mut Vec<Pat
     }
 }
 
-/// Rust tools for every shell-capable lane. The user's `~/.cargo` is read-only
-/// (its `bin` proxies and the rustup toolchains stay executable); the host
-/// later builds from its registry and Git checkouts unconfined, so no lane
-/// may write them. Cargo gets a lane-private `CARGO_HOME` in the lane cache
-/// and downloads crates into its own registry. A missing toolchain fails
-/// clearly instead of installing. Build output stays in the lane's own cache.
-/// The compiler hard-denies Cargo credentials.
+/// Rust tools for every shell-capable lane. Installed toolchains and the host's
+/// Cargo sources stay read-only. Writers share a separate download store, with
+/// private configuration and build output. Native lanes use the same cache
+/// environment so their target can be verified and seeded before launch.
 pub(crate) fn rust_tools(
     input: &PrepareInput<'_>,
     access: Access,
@@ -1086,9 +1083,7 @@ pub(crate) fn rust_tools(
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
-    if !input.sandboxed() {
-        return;
-    }
+    let native = !input.sandboxed();
     // Subtree grants must anchor to existing directories. Keep this decision
     // here so every adapter gets the same system-tool fallback on non-Rust
     // hosts; the grants below it hold either way.
@@ -1101,6 +1096,14 @@ pub(crate) fn rust_tools(
             env,
             setup,
         );
+    }
+    if access == Access::WorktreeWrite && rust_tools_available(input.home) {
+        requirements.writes.push(subtree(
+            input.home.join("Library/Caches/provenant-cargo-downloads"),
+        ));
+    }
+    if native {
+        return;
     }
     system_tools(access, &mut requirements.reads, &mut requirements.exec, env);
     crate::swift::swift_tools(input, access, requirements, env, setup);
@@ -1167,6 +1170,37 @@ fn rust_toolchain(
             target: cargo.join(name),
         }));
     }
+    // Replace inherited native values too: seeding and the launched Cargo must
+    // agree on one home, compiler and target. No duplicate selectors.
+    env.retain(|(key, _)| {
+        ![
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "RUSTUP_AUTO_INSTALL",
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+            "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
+        ]
+        .iter()
+        .any(|name| key == *name)
+    });
+    env.push(("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()));
+    if !input.sandboxed() {
+        for (name, value) in [
+            (
+                "CARGO_BUILD_JOBS",
+                provenant_config::LaneBuildSettings::default()
+                    .jobs()
+                    .to_string(),
+            ),
+            ("CARGO_INCREMENTAL", "0".into()),
+            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only".into()),
+        ] {
+            if !env.iter().any(|(key, _)| key == name) {
+                env.push((name.into(), value.into()));
+            }
+        }
+    }
     env.extend([
         ("CARGO_HOME".into(), cargo_home.into_os_string()),
         ("RUSTUP_HOME".into(), rustup.into_os_string()),
@@ -1189,7 +1223,6 @@ fn rust_toolchain(
     }
     if access == Access::ReadOnly {
         // Cache clean-up must not touch shared stores behind the links.
-        env.push(("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()));
         if input.confined.permissions().network
             != provenant_confinement::permissions::NetworkAccess::Open
         {
