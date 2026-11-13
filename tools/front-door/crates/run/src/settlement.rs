@@ -1016,6 +1016,70 @@ mod tests {
     }
 
     #[test]
+    fn queued_abandonment_preserves_evidence_and_refuses_custody() -> TestResult {
+        for fenced in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = crate::RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let scope = crate::RunStore::scope(&store.record(id, &call)?);
+            crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
+            if fenced {
+                let slot = context
+                    .state_root
+                    .as_path()
+                    .join("worktrees")
+                    .join(context.project_id.to_string())
+                    .join("fixture-slot");
+                std::fs::create_dir_all(&slot)?;
+                drop(provenant_supervisor::custody::acquire_reader(
+                    Directory::open_anchor(&slot)?,
+                    scope,
+                    call.lock_budget(),
+                    &cancel,
+                    &clock,
+                )?);
+            }
+            let reason = "unresolvable retained route";
+            let result = store.abandon_settlement(id, reason, &call);
+            if fenced {
+                assert!(result.is_err());
+                assert!(matches!(
+                    store.record(id, &call)?.state,
+                    crate::AttemptState::Queued { .. }
+                ));
+                assert!(abandoned(&attempt, scope)?.is_none());
+            } else {
+                assert!(
+                    matches!(result?, crate::Reconciled::Abandoned { reason: saved } if saved == reason)
+                );
+                assert!(matches!(store.record(id, &call)?.state,
+                    crate::AttemptState::Terminal { outcome: crate::Outcome::Cancelled, reason: Some(saved), .. } if saved == reason));
+                assert!(matches!(
+                    store.abandon_settlement(id, reason, &call)?,
+                    crate::Reconciled::Abandoned { .. }
+                ));
+                assert!(
+                    store
+                        .abandon_settlement(id, "different reason", &call)
+                        .is_err()
+                );
+            }
+            assert_eq!(
+                read_sealed(&attempt, "retained-evidence", RECORD_LIMIT)?.as_deref(),
+                Some(b"keep".as_slice())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn terminal_fence_without_retained_data_or_reactions_is_queued() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
@@ -1979,7 +2043,87 @@ pub(crate) fn abandoned(attempt: &Directory, scope: Scope) -> Result<Option<crat
         .map(|a| crate::Reconciled::Abandoned { reason: a.reason }))
 }
 
+/// A withdrawal may commit before its final abandonment journal is durable.
+/// Only its unchanged generation and never-launched terminal row protect evidence.
+pub(crate) fn queued_abandonment_pending(
+    attempt: &Directory,
+    record: &crate::AttemptRecord,
+) -> Result<bool> {
+    if record.provider_launched != Some(false)
+        || !matches!(
+            record.state,
+            crate::AttemptState::Terminal {
+                outcome: crate::Outcome::Cancelled,
+                ..
+            }
+        )
+    {
+        return Ok(false);
+    }
+    Ok(
+        read_sealed(attempt, "queued-abandonment.json", RECORD_LIMIT)?
+            .map(|raw| crate::db::decode::<(Scope, String)>(&raw))
+            .transpose()?
+            .is_some_and(|(scope, _)| scope == crate::RunStore::scope(record)),
+    )
+}
+
 impl crate::RunStore {
+    fn require_unstarted_abandonment(
+        &self,
+        record: &crate::AttemptRecord,
+        attempt: &Directory,
+        call: &crate::Request<'_>,
+    ) -> Result<()> {
+        let listing = self.writer_fence_listing()?;
+        if !listing.issues.is_empty()
+            || record.started_at.is_some()
+            || record.provider_launched == Some(true)
+            || record.exit_evidence.is_some()
+            || record.resolved_route.is_some()
+            || record.custody_pending == Some(true)
+            || listing
+                .reservations
+                .iter()
+                .any(|f| f.scope.attempt == record.attempt_id)
+        {
+            return Err(RunError::Validation(
+                "abandonment requires never-dispatched queued attempt",
+            ));
+        }
+        if provenant_supervisor::custody::reservation_present(attempt, Self::scope(record))? {
+            return Err(RunError::Validation(
+                "abandonment requires absent attempt custody",
+            ));
+        }
+        for name in ["launch.json", "process.json", "process-exit.json"] {
+            if read_sealed(attempt, name, RECORD_LIMIT)?.is_some() {
+                return Err(RunError::Validation(
+                    "abandonment requires absent process evidence",
+                ));
+            }
+        }
+        if let Some(slot) =
+            self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?
+        {
+            match Directory::open_anchor(&slot) {
+                Ok(slot) => {
+                    if provenant_supervisor::custody::reservation_present(
+                        &slot,
+                        Self::scope(record),
+                    )? {
+                        return Err(RunError::Validation(
+                            "abandonment requires absent writer custody",
+                        ));
+                    }
+                }
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Explicit chair recovery. Native writer exclusion and proven absence are
     /// mandatory; abandonment never removes attempt evidence or private Git.
     pub fn abandon_settlement(
@@ -1995,13 +2139,62 @@ impl crate::RunStore {
             ));
         }
         let reason = provenant_confinement::redact::bounded_line(reason, 4096);
-        let record = self.record(id, call)?;
+        let mut record = self.record(id, call)?;
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
+        let queued = matches!(record.state, crate::AttemptState::Queued { .. });
+        // A cancelled, never-launched terminal row also permits retry after a
+        // crash between withdrawal and the abandonment journal publication.
+        let intent = read_sealed(&attempt, "queued-abandonment.json", RECORD_LIMIT)?
+            .map(|raw| crate::db::decode::<(Scope, String)>(&raw))
+            .transpose()?;
+        let unstarted =
+            queued
+                || intent.as_ref().is_some_and(|(scope, saved)| {
+                    *scope == Self::scope(&record) && saved == &reason
+                }) && matches!(
+                    record.state,
+                    crate::AttemptState::Terminal {
+                        outcome: crate::Outcome::Cancelled,
+                        ..
+                    }
+                ) && record.provider_launched == Some(false);
+        let unfenced = if unstarted {
+            self.require_unstarted_abandonment(&record, &attempt, call)?;
+            true
+        } else {
+            false
+        };
+        if queued {
+            crate::artifacts::seal(
+                &attempt,
+                "queued-abandonment.json",
+                &crate::db::bytes(&(Self::scope(&record), &reason))?,
+                RECORD_LIMIT,
+            )?;
+            record = self
+                .withdraw_preserving_evidence(
+                    id,
+                    crate::store::Withdrawal {
+                        expected: record.state.clone(),
+                        outcome: crate::Outcome::Cancelled,
+                        reason: &reason,
+                        finished_at: call
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
+                        failure: None,
+                        terminal_cause: None,
+                        terminal_note: None,
+                    },
+                    call,
+                )?
+                .ok_or(RunError::Conflict)?;
+        }
         if !matches!(record.state, crate::AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
         }
         let scope = Self::scope(&record);
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
-        let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
         let mut journal = read(&attempt, scope)?;
         let now = now_ms(call.clock)?;
         if journal.owner.as_ref().is_some_and(|owner| {
@@ -2030,7 +2223,7 @@ impl crate::RunStore {
                 ));
             }
             Some(recovery)
-        } else if journal.abandonment.is_some() {
+        } else if journal.abandonment.is_some() || unfenced {
             None
         } else {
             return Err(RunError::Validation("retained writer fence missing"));
