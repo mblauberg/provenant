@@ -352,6 +352,15 @@ fn inspect<T: DeserializeOwned + Serialize>(
         &mut issues,
         crate::RetentionSettings::validate,
     );
+    let mut worktrees_item = user.remove("worktrees");
+    let worktrees = recover_settings::<crate::WorktreeSettings>(
+        &mut worktrees_item,
+        "worktrees",
+        &user_sites,
+        &user_origin,
+        &mut issues,
+        crate::WorktreeSettings::validate,
+    );
     let mut providers_item = user.remove("providers");
     let mut providers = crate::providers::defaults();
     if let Some(item) = &mut providers_item {
@@ -547,6 +556,18 @@ fn inspect<T: DeserializeOwned + Serialize>(
         origins
             .entry(format!("gc.projects.{project}.foreign_worktrees"))
             .or_insert_with(|| compiled.clone());
+    }
+    for key in [
+        "worktrees.setup",
+        "worktrees.timeout_seconds",
+        "worktrees.projects",
+    ] {
+        origins.insert(key.into(), compiled.clone());
+    }
+    if let Some(item) = &worktrees_item {
+        walk_item(item, "worktrees", None, &mut |key, _, _| {
+            origins.insert(key.into(), user_origin.clone());
+        });
     }
     origins.insert("install.targets".into(), compiled.clone());
     origins.insert("retention.provider_state_days".into(), compiled.clone());
@@ -744,6 +765,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         ("install", serde_json::to_value(&install)),
         ("gc", serde_json::to_value(&gc)),
         ("retention", serde_json::to_value(&retention)),
+        ("worktrees", serde_json::to_value(&worktrees)),
         ("providers", serde_json::to_value(&providers)),
         ("domains", serde_json::to_value(&domains)),
     ] {
@@ -762,6 +784,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             install,
             gc,
             retention,
+            worktrees,
             providers,
             knobs,
             origins,

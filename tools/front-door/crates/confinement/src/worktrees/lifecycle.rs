@@ -585,6 +585,12 @@ fn create_with_default(
     // The mutation and registration checks are complete. The advisory census
     // must not keep other branches from acquiring the repository registry.
     drop(_lock);
+    warnings.extend(setup::run(context, &target, cancel));
+    // Setup may leave build output or local edits; report those honestly
+    // without turning an advisory setup failure into a creation refusal.
+    let dirty = verify_probed_worktree(context, &target, cancel)
+        .and_then(|tree| worktree_dirty_at(context, tree.repo(), cancel))
+        .unwrap_or(WorktreeCondition::Unknown);
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
     let writer = worker.get(&target).cloned().unwrap_or_else(|| {
         Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())
@@ -594,7 +600,7 @@ fn create_with_default(
         path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
-        dirty: WorktreeCondition::Clean,
+        dirty,
         owner: Ok(None),
         primary: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),

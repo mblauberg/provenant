@@ -1,5 +1,88 @@
 use super::*;
 
+pub(super) fn project_setup_runs_once_and_failure_retains_the_worktree() -> Result {
+    let rig = repository()?;
+    let (roots, execution) = writer_context(&rig)?;
+    let config = rig.state.join("config.toml");
+    let marker_path = rig.state.join("setup-runs");
+    let setup = format!(
+        "pwd >> '{}'",
+        marker_path
+            .to_str()
+            .ok_or("marker path")?
+            .replace('\'', "'\"'\"'")
+    );
+    fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[worktrees]\nsetup = ['exit 42']\n[worktrees.projects.{}]\nsetup = [{}]\n",
+            execution.project_id,
+            serde_json::to_string(&setup)?
+        ),
+    )?;
+    let created = ok(
+        &rig,
+        &["worktree", "create", "setup", "--base", "HEAD", "--json"],
+    )?;
+    let path = rig.project.join(".worktrees/setup");
+    let marker = fs::read(&marker_path)?;
+    assert_eq!(
+        fs::canonicalize(String::from_utf8(marker.clone())?.trim())?,
+        fs::canonicalize(&path)?
+    );
+    let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    // Writer provisioning reuses this checkout without executing setup again.
+    provenant_cli::fabric::graph_relay::provision_writer(
+        &context,
+        ".worktrees/setup",
+        "setup",
+        created["data"]["head"].as_str().ok_or("created head")?,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        &cancel,
+    )?;
+    assert_eq!(fs::read(&marker_path)?, marker);
+    fs::write(
+        &config,
+        "schema_version = 1\n[worktrees]\nsetup = ['echo setup-tail >&2; exit 7', 'touch must-not-run']\n",
+    )?;
+    let failed = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "setup-failure",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+    assert!(
+        failed["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("setup-tail"))))
+    );
+    let retained = rig.project.join(".worktrees/setup-failure");
+    assert!(retained.join(".git").is_file());
+    assert!(!retained.join("must-not-run").exists());
+    assert!(
+        !git(
+            &rig,
+            &[
+                "-C",
+                retained.to_str().ok_or("worktree path")?,
+                "rev-parse",
+                "HEAD"
+            ]
+        )?
+        .is_empty()
+    );
+    Ok(())
+}
+
 pub(super) fn create_from_remote_base_reports_ok_and_exists() -> Result {
     let upstream = repository()?;
     let rig = repository()?;
