@@ -1430,7 +1430,7 @@ impl AttemptRecord {
         self.applied_route.as_ref()?.extra.get("user_skills")
     }
 
-    /// The recorded sandbox of a launched attempt: `{"sandboxed", "source"}`.
+    /// The recorded sandbox of a launched attempt: requested/effective/source.
     pub fn sandbox(&self) -> Option<&serde_json::Value> {
         self.applied_route.as_ref()?.extra.get(SANDBOX_ROUTE_FIELD)
     }
@@ -1591,8 +1591,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_sandbox_forced_by_distrust_floors_children() {
-        let floors = |value: serde_json::Value| sandbox_floors_children(Some(&value));
+    fn only_a_sandbox_forced_by_distrust_floors_children() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let project = ProjectId::from_bytes([1; 16]);
+        let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "key":crate::WorkKey::new(project, "sandbox-test", "lane", 1)?,
+            "attempt_id":AttemptId::from_bytes([2; 16]), "project_id":project,
+            "attempt_number":1, "revision":1, "generation":1,
+            "requested_route":{"kind":"named","name":"fixture"},
+            "authority_digest":Digest::from_bytes([3; 32]), "queued_at":WallTime::from_micros(1)?,
+            "state":{"state":"queued"}, "usage":{},
+            "prompt":{"path":{"encoding":"utf8","path":"prompt"},
+                "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
+        }))?;
+        assert!(record.floors_children());
+        let mut floors = |value: serde_json::Value| {
+            record.applied_route = Some(RouteRecord {
+                extra: [(SANDBOX_ROUTE_FIELD.into(), value)].into(),
+                ..Default::default()
+            });
+            record.floors_children()
+        };
         for source in ["route", "parent", "knob", "platform", "unknown"] {
             assert!(
                 floors(serde_json::json!({"effective":true,"source":source})),
@@ -1617,7 +1636,7 @@ mod tests {
         assert!(floors(
             serde_json::json!({"effective":true,"source":"read_only"})
         ));
-        assert!(sandbox_floors_children(None));
+        Ok(())
     }
 
     #[test]

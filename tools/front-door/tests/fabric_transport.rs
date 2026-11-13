@@ -3272,8 +3272,33 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     )?;
     assert_eq!(code(&peer_identity), 0);
     let peer_identity: Value = serde_json::from_slice(&peer_identity.stdout.bytes)?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let actor = identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?;
     // A receiver owns its own graph; its WorkKey is not the origin's key.
-    let receiver_graph = "peer-cancel-fixture";
+    // Match the receiver's submission identity, rather than relying on the
+    // legacy by-reference fallback when no receiver graph is found.
+    let key = provenant_fabric_runtime::graph::AttemptKey {
+        extra: Default::default(),
+        graph_id: "remote-graph".into(),
+        node_id: "one".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    let digest = provenant_records::CanonicalV1::record_digest("graph-attempt-operation", 1, &key)?;
+    let submission = provenant_core::OperationId::parse(&format!(
+        "graph-{}",
+        provenant_core::hex(digest.as_bytes())
+    ))?;
+    let origin_actor: provenant_core::ActorId = actor.parse()?;
+    let digest = provenant_records::CanonicalV1::record_digest(
+        "peer-subgraph",
+        1,
+        &(origin_actor, submission),
+    )?;
+    let receiver_graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..40]);
     let context =
         serde_json::from_value(json!({"graph_id":receiver_graph,"node_id":"one","attempt":1}))?;
     let (attempt, _) = seed_attempt_in_state(
@@ -3284,11 +3309,6 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         false,
         Some(context),
     )?;
-    let identity = rig.command(&["fabric", "identity", "--json"])?;
-    assert_eq!(code(&identity), 0);
-    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
-    let actor = identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?;
     let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
     roots.state_dir = Some(rig.state.clone());
     let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
@@ -3347,7 +3367,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let mut receiver = FileJournal::open(
         &receiver_state,
         peer_project,
-        receiver_graph,
+        &receiver_graph,
         budget,
         &cancel,
         &clock,
@@ -3378,7 +3398,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         provenant_fabric_runtime::graph::NodeState::Running
     );
     drop(receiver);
-    let execution = FileJournal::execution(&receiver_state, peer_project, receiver_graph)?
+    let execution = FileJournal::execution(&receiver_state, peer_project, &receiver_graph)?
         .ok_or("receiver execution")?;
     assert_eq!(
         execution.document.extra["peer_origin_work_key"],
@@ -3421,7 +3441,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         FileJournal::read_checkpoint(&state, project, "remote-graph")?.ok_or("checkpoint")?;
     assert_eq!(stopped.cancel_reason.as_deref(), Some("peer test"));
     let receiver_stopped =
-        FileJournal::read_checkpoint(&receiver_state, peer_project, receiver_graph)?
+        FileJournal::read_checkpoint(&receiver_state, peer_project, &receiver_graph)?
             .ok_or("receiver checkpoint")?;
     assert!(
         receiver_stopped.nodes.iter().all(|node| !matches!(
