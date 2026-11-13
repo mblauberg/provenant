@@ -75,7 +75,9 @@ extend: Vec::new(),
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
         }))?;
-        bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
+        // The subject is the recorded submission, so the provider launch
+        // stays queued after admission.
+        provenant_cli::run::with_deferred_provider_launch(|| bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
             distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
@@ -83,7 +85,7 @@ extend: Vec::new(),
             inputs_dir: None,
         }, &alias, graph::AccessMode::ReadOnly, None, graph::Replay {
             delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
-        })?;
+        }))?;
         let operation = graph_operation("graph-attempt-operation", &key)?;
         let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
         let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;

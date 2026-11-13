@@ -234,10 +234,8 @@ fn settled_attempt(
             },
             result: if success {
                 "child result reached parent"
-            } else if graph == "lane-read-children" {
-                "child provider failure details"
             } else {
-                "unrelated project secret"
+                "child provider failure details"
             },
             complete: true,
             redacted: false,
@@ -303,40 +301,6 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     })?;
     journal.save(&checkpoint)?;
     drop(journal);
-    // A graph ID can equal a permitted bare attempt ID. Its result must never
-    // replace the attempt selected by the relay's authorisation.
-    let collision = success.to_string();
-    let unrelated_attempt = settled_attempt(&context, &rig, false, &collision)?;
-    let unrelated_document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":2,"graph_id":collision,"nodes":[
-            {"id":"parent--failure","access":"read_only","prompt":"unrelated","route":{"alias":"junior"}}
-        ]
-    }))?;
-    let unrelated_checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":collision,"plan_digest":"fixture",
-        "nodes":[{"id":"parent--failure","state":"failed","attempts":[{
-            "key":{"graph_id":collision,"node_id":"parent--failure","route_index":0},
-            "launched":true,"route":{"alias":"junior"},"state":"terminal",
-            "attempt_ref":reference(unrelated_attempt),"launch_actor":"fixture","outcome":"task_failed"
-        }]}]
-    }))?;
-    let mut unrelated = FileJournal::open(
-        &context.roots.state,
-        context.identity.project,
-        &collision,
-        budget,
-        &cancel,
-        &clock,
-    )?;
-    unrelated.bind(GraphExecution {
-        review_base: None,
-        extra: Default::default(),
-        integration_base: None,
-        directory: rig.project.clone(),
-        document: unrelated_document,
-    })?;
-    unrelated.save(&unrelated_checkpoint)?;
-    drop(unrelated);
     let mut holder = provenant_run::HolderContext {
         schema_version: 1,
         roots: provenant_run::RootSeed {
@@ -435,34 +399,43 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     assert!(!host_holder.has_live_children(&serde_json::to_vec(&foreign_holder)?)?);
     let foreign_read = super::read_lane_graph(
         &foreign_holder,
-        json!({"op":"output","id":"parent--success"}),
+        json!({"op":"output","id":"lane-read-children/parent--success"}),
         &cancel,
         std::time::Duration::from_secs(30),
         &provenant_confinement::worktrees::SystemWorkerObserver,
     )?;
     assert_eq!(foreign_read["bytes"]["data"], "child result reached parent");
-    let unrelated_result = super::read_lane_graph(
-        &holder,
-        json!({"op":"output","id":collision}),
-        &cancel,
-        std::time::Duration::from_secs(30),
-        &provenant_confinement::worktrees::SystemWorkerObserver,
-    )?;
-    assert_eq!(
-        unrelated_result["bytes"]["data"],
-        "unrelated project secret"
-    );
+    // A malformed target is the caller's input, never a host I/O failure.
+    assert!(matches!(
+        super::read_lane_graph(
+            &holder,
+            json!({"op":"output","id":"parent--success"}),
+            &cancel,
+            std::time::Duration::from_secs(30),
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+        ),
+        Err(ServiceError::Facade(FacadeError::InvalidInput { .. }))
+    ));
     let result = read(json!({"op":"output","id":"parent--success"}))?;
     assert_eq!(
         result["bytes"]["data"], "child result reached parent",
         "{result}"
     );
-    for selector in [success.to_string(), reference(success)] {
+    // Inside a lane, targets name the calling graph's own nodes; attempt IDs
+    // are not targets (cli.md "Targets").
+    for selector in [
+        "lane-read-children/parent--success",
+        "lane-read-children/parent--success#1",
+        "parent--success#1",
+    ] {
         let output = read(json!({"op":"output","id":selector}))?;
         assert_eq!(
             output["bytes"]["data"], "child result reached parent",
             "{output}"
         );
+    }
+    for selector in [success.to_string(), reference(success)] {
+        assert!(read(json!({"op":"output","id":selector})).is_err());
     }
     let failure_result = read(json!({"op":"output","id":"parent--failure"}))?;
     assert_eq!(
@@ -493,7 +466,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             .ok_or("host trace events")?
             .is_empty()
     );
-    for selector in [success.to_string(), reference(success)] {
+    for selector in ["parent--success", "lane-read-children/parent--success"] {
         let trace = read(json!({"op":"trace","id":selector}))?;
         let events = trace["events"].as_array().ok_or("child attempt trace")?;
         assert!(!events.is_empty());
@@ -627,9 +600,10 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     );
     let denied = lane_command(&rig, &["output", "another-graph/parent", "--json"], 3)?;
     assert!(
-        denied["data"]["error"]
+        denied["error"]["message"]
             .as_str()
-            .is_some_and(|reason| reason.contains("not_found"))
+            .is_some_and(|reason| reason.contains("not_found")),
+        "{denied}"
     );
     assert_eq!(std::fs::read_dir(child_state)?.count(), 0);
     if let Some(launch) = native_lane(&rig, caller)? {
@@ -682,7 +656,8 @@ fn native_lane(
         }
     };
     let scratch = rig.root.join("native-lane-scratch");
-    std::fs::create_dir(&scratch)?;
+    // Lane scratch is private to the user, as the launcher creates it.
+    provenant_os::fixture::private_state_dir(&scratch)?;
     let grant = |path, scope| PathGrant { path, scope };
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let git = std::fs::canonicalize(provenant_os::git::git_executable().ok_or("Git unavailable")?)?;

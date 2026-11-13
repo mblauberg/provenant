@@ -1985,6 +1985,30 @@ fn launch_named_and_wait(
     ))
 }
 
+/// Run the host tick until `settled` holds for NAME's checkpoint or `limit`
+/// passes. A wait only observes (retry-owner.md); the tick advances due
+/// launch retries and observes peer settlement for the origin graph.
+#[allow(clippy::disallowed_methods)] // A real tick cadence against real processes.
+fn tick_until(
+    rig: &TestRig,
+    name: &str,
+    limit: std::time::Duration,
+    settled: impl Fn(&Value) -> bool,
+) -> Result<Value> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        let ticked = rig.command(&["tick", "--json"])?;
+        let checkpoint = rig.checkpoint(name)?;
+        if settled(&checkpoint) || std::time::Instant::now() > deadline {
+            return Ok(json!({
+                "data": {"checkpoint": checkpoint},
+                "tick": String::from_utf8_lossy(&ticked.stdout.bytes),
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
     let output = rig.command(args)?;
     let value = serde_json::from_slice(&output.stdout.bytes).map_err(|error| {
@@ -2042,15 +2066,15 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .as_str()
         .ok_or_else(|| format!("missing peer attempt: {success}"))?;
     assert!(reference.starts_with(&format!("{peer}/")), "{success}");
-    let runs = rig.root.join("peer-state/runs");
-    let existing: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let peer_attempts = rig.root.join("peer-state/attempts");
+    let existing: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     std::fs::write(&lost, "")?;
     // Observe the lost receipt before a waited submission advances its due retry.
     let (_, unknown) = launch(&rig, "probe-failure-retry", false)?;
     assert!(unknown.to_string().contains("LAUNCH_UNKNOWN"), "{unknown}");
-    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after_loss.difference(&existing).count(), 1, "{unknown}");
@@ -2081,12 +2105,18 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
-    let (_, recovered) = launch(&rig, "probe-failure-retry", true)?;
+    // A replayed name starts nothing, so the host tick advances the due retry.
+    let recovered = tick_until(
+        &rig,
+        "probe-failure-retry",
+        std::time::Duration::from_secs(20),
+        |checkpoint| checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+    )?;
     let reference = recovered["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing recovered peer attempt: {recovered}"))?;
     assert!(reference.starts_with(&format!("{peer}/")), "{recovered}");
-    let after: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let after: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after.difference(&existing).count(), 1, "{recovered}");
@@ -2095,7 +2125,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
         reference
     );
-    let replayed: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+    let replayed: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(replayed, after);
@@ -2129,7 +2159,7 @@ fn peer_dispatch_set_host_reaches_the_peer_attempt() -> Result {
         .ok_or_else(|| format!("missing peer attempt: {placed}"))?;
     assert!(reference.starts_with(&format!("{peer}/")), "{placed}");
     assert_eq!(
-        std::fs::read_dir(rig.root.join("peer-state/runs"))?.count(),
+        std::fs::read_dir(rig.root.join("peer-state/attempts"))?.count(),
         1
     );
     rig.assert_legacy_unchanged()?;
@@ -2150,7 +2180,9 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     std::fs::write(config, settings.to_string())?;
     // JSON escaping exceeds the peer frame cap although the brief itself fits.
     std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
-    for _ in 0..2 {
+    // The second identical launch replays the refused graph (cli.md "Names and
+    // replay": exit 0 with its recorded state); neither contacts the peer.
+    for replay in [false, true] {
         let (status, refused) = json_command(
             &rig,
             &[
@@ -2167,7 +2199,11 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
                 "--json",
             ],
         )?;
-        assert_ne!(status, 0, "{refused}");
+        assert_eq!(status == 0, replay, "{refused}");
+        assert_eq!(
+            refused["data"]["checkpoint"]["graph_id"],
+            "peer-frame-limit"
+        );
         assert_eq!(
             refused["data"]["checkpoint"]["nodes"][0]["advance_error_code"], "launch_refused",
             "{refused}"
@@ -2180,7 +2216,7 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
         );
     }
     assert!(!rig.root.join("peer-stderr").exists());
-    assert!(!rig.root.join("peer-state/runs").exists());
+    assert!(!rig.root.join("peer-state/attempts").exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -2232,7 +2268,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
         assert!(unknown.to_string().contains("UNKNOWN_HOST"), "{unknown}");
     }
     assert!(!contacted.exists());
-    assert!(!rig.root.join("peer-state/runs").exists());
+    assert!(!rig.root.join("peer-state/attempts").exists());
     rig.assert_legacy_unchanged()
 }
 
@@ -2265,6 +2301,14 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
         ),
     )?;
     std::fs::set_permissions(rig.root.join("ssh"), std::fs::Permissions::from_mode(0o700))?;
+    // `run` has no wait flag, so the peer exchange bound is what ends an
+    // unanswered submission.
+    let config = rig.state.join("config.toml");
+    let text = std::fs::read_to_string(&config)?;
+    std::fs::write(
+        &config,
+        format!("{text}[domains.fabric.limits]\npeer_seconds=5\n"),
+    )?;
     let start = std::time::Instant::now();
     let (_, launched) = json_command(
         &rig,
@@ -2281,16 +2325,11 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
             "--json",
         ],
     )?;
-    let waited = rig.command(&["wait", "held-submit", "--timeout", "10s", "--json"])?;
-    let result = json!({
-        "launch": launched,
-        "wait": String::from_utf8_lossy(&waited.stdout.bytes),
-        "wait_stderr": String::from_utf8_lossy(&waited.stderr.bytes),
-    });
-    // The whole call shares this budget, so a loaded host that spends part of
-    // it before the submission must still leave time to reach the peer.
+    let result = json!({"launch": launched});
+    // Health and submission share the five-second peer bound; the rest is
+    // process start on a loaded host.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(25),
+        start.elapsed() < std::time::Duration::from_secs(20),
         "{result}"
     );
     assert!(
@@ -2302,7 +2341,7 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
         !result.to_string().contains("home_unavailable"),
         "a deadline is not an unavailable home: {result}"
     );
-    assert!(!rig.root.join("peer-state/runs").exists());
+    assert!(!rig.root.join("peer-state/attempts").exists());
     Ok(())
 }
 
@@ -2333,7 +2372,9 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
          task=${1#Read the file at }\n\
          task=${task% first and treat its full contents as your task instructions.}\n\
          [ \"$(wc -c <\"$task\")\" -gt 119808 ] || exit 3\n\
-         echo launched >>\"$HOME/launch-count\"\necho 'peer large prompt fixture' >&2\n",
+         echo 'peer large prompt fixture' >&2\n\
+         printf '%s\\n' '{\"event\":\"init\",\"conversation_id\":\"fixture\",\"init\":{\"model\":\"gemini-3.8-flash\"}}'\n\
+         printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"fixture\",\"status\":\"SUCCESS\",\"response\":\"## Findings\\nlaunched\\n## Evidence\\nread the prompt file\",\"error\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}'\n",
     )?;
     std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
     std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
@@ -2361,27 +2402,39 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
         "--brief-file",
         prompt.to_str().ok_or("prompt")?,
     ];
-    let (_, placed) = launch_named_and_wait(&rig, &args, "peer-large-prompt", "30s")?;
+    let mut argv = vec!["run"];
+    argv.extend_from_slice(&args);
+    argv.extend(["--name", "peer-large-prompt", "--json"]);
+    let (status, launched) = json_command(&rig, &argv)?;
+    assert_eq!(status, 0, "{launched}");
+    let placed = tick_until(
+        &rig,
+        "peer-large-prompt",
+        std::time::Duration::from_secs(20),
+        |checkpoint| checkpoint["nodes"][0]["state"] != "running",
+    )?;
     let node = &placed["data"]["checkpoint"]["nodes"][0];
     let reference = node["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing peer attempt: {placed}"))?;
     let (host, attempt) = reference.split_once('/').ok_or("attempt reference")?;
     assert_eq!(host, peer.to_string());
+    // Success needs the fixture's own check that the prompt file it was
+    // pointed at holds the whole brief, so the brief did not travel in argv.
     assert_eq!(node["state"], "succeeded", "{placed}");
-    let runs = rig.root.join("peer-state/runs");
-    let run = std::fs::read_dir(&runs)?.next().ok_or("peer run")??.path();
-    let directory = run.join("attempts").join(attempt);
+    // Format 2 keeps one directory per attempt (docs/specs/state.md).
+    let attempts = rig.root.join("peer-state/attempts");
+    let directory = attempts.join(attempt);
     assert!(std::fs::read_to_string(directory.join("prompt.md"))?.ends_with(&text));
-    assert_eq!(
-        std::fs::read_to_string(directory.join("provider-state/candidate-0/launch-count"))?,
-        "launched\n"
-    );
-    let (_, replay) = launch_named_and_wait(&rig, &args, "peer-large-prompt", "30s")?;
+    let launched = std::fs::read_dir(&attempts)?.count();
+    // An identical named launch replays the settled graph and starts nothing.
+    let (status, replay) = json_command(&rig, &argv)?;
+    assert_eq!(status, 0, "{replay}");
     assert_eq!(
         replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
         reference
     );
+    assert_eq!(std::fs::read_dir(&attempts)?.count(), launched, "{replay}");
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
