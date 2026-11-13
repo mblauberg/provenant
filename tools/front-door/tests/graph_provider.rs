@@ -4332,6 +4332,8 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
         "codex-commit-source",
         json!({
             "id":"review", "use":"task", "brief":"fixture commit source verdict",
+            // This probe asserts the immutable source view's denied writes.
+            "attempt":{"sandbox":"on"},
             "access":"read_only", "source":{"type":"commit", "commit":head},
             "route":{"adapter":"codex", "model":"gpt-6-luna", "effort":"low"}
         }),
