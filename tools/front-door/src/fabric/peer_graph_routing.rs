@@ -2,64 +2,10 @@
 use super::*;
 
 #[test]
-fn unmatched_settlement_hints_wait_for_tick() -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_graph_routing::unmatched_settlement_hints_wait_for_tick")? { return Ok(()); }
-    use provenant_fabric_runtime::graph;
-    struct Seed { reference: String, actor: String }
-    impl graph::AttemptOwner for Seed {
-        type Error = std::convert::Infallible;
-        fn actor(&self) -> String { self.actor.clone() }
-        fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
-            _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
-            Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
-        }
-    }
-    for hint in [None, Some("unknown"), Some("other")] {
-        let mut fixture = SettlementFixture::settled_fixture("graph-fixture", hint)?;
-        let clock = SystemClock;
-        let cancel = CancelToken::new();
-        let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
-        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-        for id in ["owner", "other"] {
-            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-                "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
-                "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
-            }))?;
-            let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, id, budget, &cancel, &clock)?;
-            journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
-                directory: fixture.rig.project.clone(), document: document.clone() })?;
-            let attempt = if id == "owner" { fixture.settled.attempt_id } else { AttemptId::from_bytes([99; 16]) };
-            let mut seed = Seed { reference: format!("{}/{attempt}", identity.host), actor: identity.inbox.actor.to_string() };
-            graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
-        }
-        fixture.settled.launch = Some(provenant_run::HostLaunchContext {
-            graph_directory: None,
-            configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
-            executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
-            credential_roots: Default::default(),
-            github_roots: Default::default(),
-            provider_path_environment: Default::default(),
-            cargo_build_jobs: None, fixture_state_write: false,
-        });
-        advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
-        let owner = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
-        assert_eq!(owner.nodes[0].state, graph::NodeState::Running, "hint: {hint:?}");
-        let resolved = crate::roots::Resolved { assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
-            project: fixture.rig.project.clone(), roots: fixture.roots.clone(), claude_config: None, codex_home: None };
-        let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
-        assert!(tick.advanced > 0, "hint: {hint:?}");
-        let owner = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
-        assert_eq!(owner.nodes[0].state, graph::NodeState::Succeeded, "hint: {hint:?}");
-        assert!(fixture.worktree.exists());
-    }
-    Ok(())
-}
-
-#[test]
-fn settlement_without_hint_does_not_advance_unrelated_graphs()
+fn failed_settlement_does_not_advance_unrelated_graphs()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_graph_routing::settlement_without_hint_does_not_advance_unrelated_graphs",
+        "fabric::peer_tests::peer_graph_routing::failed_settlement_does_not_advance_unrelated_graphs",
     )? {
         return Ok(());
     }
@@ -90,7 +36,9 @@ fn settlement_without_hint_does_not_advance_unrelated_graphs()
             })
         }
     }
-    let mut fixture = SettlementFixture::resumed()?;
+    // Each graph binds an attempt admitted under its own work key, so A's
+    // settlement names only A.
+    let mut fixture = SettlementFixture::for_node("a-settlement-error", "one")?;
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -105,29 +53,11 @@ fn settlement_without_hint_does_not_advance_unrelated_graphs()
     .identity;
     // Two different terminal attempts let the settlement error be attributed
     // to A alone. B's journal still needs its running node to be observed.
-    let continuation = provenant_run::Resume {
-extend: Vec::new(),
-        prior: fixture.settled.attempt_id,
-        expected_generation: 0,
-        operation_id: "graph-b-attempt".parse()?,
-
-        attempt_id: AttemptId::from_bytes([41; 16]),
-        prompt: "continue".into(),
-        created_at: clock.wall_now()?,
-    };
-    fixture
-        .store
-        .resume_fresh(&continuation, "fixture", &call)?;
-    let second = fixture.store.record(continuation.attempt_id, &call)?;
-    let head = fixture
-        .store
-        .record(fixture.settled.attempt_id, &call)?
-        .head
-        .ok_or("head")?;
+    let (second, head) = fixture.dispatch_keyed("graph-b-attempt", "b-completes", "one", &call)?;
     publish_success(&fixture.rig, &fixture.store, &second, head, &call)?;
     for (id, attempt) in [
         ("a-settlement-error", fixture.settled.attempt_id),
-        ("b-completes", continuation.attempt_id),
+        ("b-completes", second.attempt_id),
     ] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
@@ -159,8 +89,8 @@ extend: Vec::new(),
         )?;
         assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
     }
-    // An unsafe receipt path makes settlement fail. With no graph hint,
-    // neither graph is advanced by this settlement.
+    // An unsafe receipt path makes settlement fail; the failure advances
+    // neither A nor the unrelated B.
     let receipt_path = fixture
         .rig
         .state
@@ -191,15 +121,15 @@ extend: Vec::new(),
         .err()
         .ok_or("settlement failure must propagate")?;
     assert_eq!(error.to_string(), settlement_error);
-    assert_eq!(
-        FileJournal::read_advance_error(
-            &fixture.roots.state,
-            fixture.settled.project_id,
-            "a-settlement-error"
-        )?
-        .as_deref(),
-        None
-    );
+    // The failure is recorded on A, the graph its work key names, and on no
+    // other graph.
+    let recorded = FileJournal::read_advance_error(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "a-settlement-error",
+    )?
+    .ok_or("A records its settlement failure")?;
+    assert_eq!(recorded, settlement_error);
     let completed = FileJournal::read_checkpoint(
         &fixture.roots.state,
         fixture.settled.project_id,
@@ -265,7 +195,8 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
             })
         }
     }
-    let fixture = SettlementFixture::resumed()?;
+    // Each graph binds an attempt admitted under its own work key.
+    let fixture = SettlementFixture::for_node("corrupt-result", "parent")?;
     let factory = Factory {
         context: Context::open(
             fixture.roots.clone(),
@@ -285,10 +216,17 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let artifact = fixture.rig.state.join(format!(
-        "attempts/{}/result.md", fixture.settled.attempt_id
-    ));
-    std::fs::write(&artifact, b"XX")?;
+    let call = provenant_run::Request {
+        clock: &factory.clock,
+        cancel: &cancel,
+    };
+    let (required_record, head) =
+        fixture.dispatch_keyed("graph-corrupt-required", "corrupt-required", "parent", &call)?;
+    publish_success(&fixture.rig, &fixture.store, &required_record, head, &call)?;
+    for attempt in [fixture.settled.attempt_id, required_record.attempt_id] {
+        let artifact = fixture.rig.state.join(format!("attempts/{attempt}/result.md"));
+        std::fs::write(&artifact, b"XX")?;
+    }
     for required in [None, Some("VERDICT: PASS")] {
         let id = if required.is_some() {
             "corrupt-required"
@@ -315,10 +253,12 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
             directory: fixture.rig.project.clone(),
             document: document.clone(),
         })?;
-        let mut seed = Seed(format!(
-            "{}/{}",
-            factory.context.identity.host, fixture.settled.attempt_id
-        ));
+        let attempt = if required.is_some() {
+            required_record.attempt_id
+        } else {
+            fixture.settled.attempt_id
+        };
+        let mut seed = Seed(format!("{}/{attempt}", factory.context.identity.host));
         graph::advance_with_budget(
             &document,
             &mut seed,
@@ -368,29 +308,8 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
 
     // A corrupt authentication failure must not consume a fallback route,
     // even for a read-only node where that provider outcome normally would.
-    let call = provenant_run::Request {
-        clock: &factory.clock,
-        cancel: &cancel,
-    };
-    let continuation = provenant_run::Resume {
-extend: Vec::new(),
-        prior: fixture.settled.attempt_id,
-        expected_generation: 0,
-        operation_id: "graph-corrupt-auth".parse()?,
-
-        attempt_id: AttemptId::from_bytes([44; 16]),
-        prompt: "continue".into(),
-        created_at: factory.clock.wall_now()?,
-    };
-    fixture
-        .store
-        .resume_fresh(&continuation, "fixture", &call)?;
-    let record = fixture.store.record(continuation.attempt_id, &call)?;
-    let head = fixture
-        .store
-        .record(fixture.settled.attempt_id, &call)?
-        .head
-        .ok_or("head")?;
+    let (record, head) =
+        fixture.dispatch_keyed("graph-corrupt-auth", "corrupt-auth", "parent", &call)?;
     publish_outcome(
         &fixture.rig,
         &fixture.store,
@@ -400,7 +319,7 @@ extend: Vec::new(),
         &call,
     )?;
     let artifact = fixture.rig.state.join(format!(
-        "attempts/{}/result.md", continuation.attempt_id
+        "attempts/{}/result.md", record.attempt_id
     ));
     std::fs::write(&artifact, b"XX")?;
     let id = "corrupt-auth";
@@ -428,7 +347,7 @@ extend: Vec::new(),
     })?;
     let mut seed = Seed(format!(
         "{}/{}",
-        factory.context.identity.host, continuation.attempt_id
+        factory.context.identity.host, record.attempt_id
     ));
     graph::advance_with_budget(
         &document,
@@ -471,7 +390,20 @@ extend: Vec::new(),
             .iter()
             .any(|warning| warning.contains("digest or length"))
     );
-    std::fs::remove_file(&artifact)?;
+    // A missing result is the same integrity loss as a corrupt one.
+    let (missing, head) =
+        fixture.dispatch_keyed("graph-missing-auth", "missing-auth-result", "parent", &call)?;
+    publish_outcome(
+        &fixture.rig,
+        &fixture.store,
+        &missing,
+        head,
+        Outcome::AuthRequired,
+        &call,
+    )?;
+    std::fs::remove_file(fixture.rig.state.join(format!(
+        "attempts/{}/result.md", missing.attempt_id
+    )))?;
     let mut missing_document = document.clone();
     missing_document.graph_id = "missing-auth-result".into();
     let mut journal = graph::FileJournal::open(
@@ -490,7 +422,7 @@ extend: Vec::new(),
     })?;
     let mut seed = Seed(format!(
         "{}/{}",
-        factory.context.identity.host, continuation.attempt_id
+        factory.context.identity.host, missing.attempt_id
     ));
     graph::advance_with_budget(
         &missing_document,
@@ -578,24 +510,10 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
         clock: &factory.clock,
         cancel: &cancel,
     };
-    // The upstream attempt ran in the OpenAI family.
-    let upstream = provenant_run::Resume {
-extend: Vec::new(),
-        prior: fixture.settled.attempt_id,
-        expected_generation: 0,
-        operation_id: "graph-exact-upstream".parse()?,
-
-        attempt_id: AttemptId::from_bytes([54; 16]),
-        prompt: "continue".into(),
-        created_at: factory.clock.wall_now()?,
-    };
-    fixture.store.resume_fresh(&upstream, "fixture", &call)?;
-    let record = fixture.store.record(upstream.attempt_id, &call)?;
-    let head = fixture
-        .store
-        .record(fixture.settled.attempt_id, &call)?
-        .head
-        .ok_or("head")?;
+    // The upstream attempt ran in the OpenAI family, admitted under the
+    // author node's own work key.
+    let (record, head) =
+        fixture.dispatch_keyed("graph-exact-upstream", "exact-separation", "author", &call)?;
     publish_routed(
         &fixture.rig,
         &fixture.store,
@@ -633,7 +551,7 @@ extend: Vec::new(),
         &document,
         &mut Seed(format!(
             "{}/{}",
-            factory.context.identity.host, upstream.attempt_id
+            factory.context.identity.host, record.attempt_id
         )),
         &mut journal,
         &Default::default(),
@@ -650,7 +568,7 @@ extend: Vec::new(),
         prices: None,
         tick: false,
     };
-    let prior = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
+    let prior = format!("{}/{}", factory.context.identity.host, record.attempt_id);
     assert_eq!(owner.prior_models(&[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna", "codex/gpt-6-luna"]);
     assert_eq!(provenant_fabric_runtime::graph::AttemptOwner::attempt_models(&mut owner, &[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna", "codex/gpt-6-luna"]);
     // Resolve the same alias again with the host's per-node exclusion list.

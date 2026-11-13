@@ -37,7 +37,8 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 .observe_or_start(key, node, route, access, worktree, replay)
         }
     }
-    let fixture = SettlementFixture::settled_fixture("graph-round-one", Some("loop-settlement"))?;
+    // Each round attempt is admitted under its round node's work key.
+    let fixture = SettlementFixture::for_node("loop-settlement", "revise--r1--repair")?;
     let factory = Factory {
         context: Context::open(
             fixture.roots.clone(),
@@ -76,7 +77,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                     source_head: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
-                    node_id: Some("repair".into()),
+                    node_id: Some("revise--r2--repair".into()),
                     attempt: Some(1),
                     ..Default::default()
                 }),

@@ -196,25 +196,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
 }
 
 #[test]
-fn reservation_listing_flags_unscoped_evidence() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    drop(acquire(&path)?);
-    std::fs::write(path.join("reservation.json"), b"legacy crash evidence")?;
-    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
-    assert_eq!(listing.reservations.len(), 1);
-    assert_eq!(listing.reservations[0].scope, scope());
-    assert_eq!(listing.issues.len(), 1);
-    assert_eq!(
-        listing.issues[0].reservation,
-        PathBuf::from("writer/reservation.json")
-    );
-    assert!(listing.issues[0].reason.contains("reconciliation"));
-    Ok(())
-}
-
-#[test]
 fn worktree_settlement_retains_flock_until_recovery_is_dropped() -> TestResult {
     for read_only in [false, true] {
         let root = tempfile::tempdir()?;

@@ -688,7 +688,7 @@ pub(crate) mod peer_tests {
 
         /// A settled lane whose head is one commit past its base.
         pub(crate) fn resumed_with_lane_commit() -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build("settlement-resume", None, true)
+            Self::build("settlement-resume", None, "lane", true)
         }
 
         fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -696,10 +696,68 @@ pub(crate) mod peer_tests {
         }
 
         fn settled_fixture(operation: &str, graph_id: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-            Self::build(operation, graph_id, false)
+            Self::build(operation, graph_id, "lane", false)
         }
 
-        fn build(operation: &str, graph_id: Option<&str>, lane_commit: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        /// A settled attempt admitted under `graph`'s `node`, attempt 1: the
+        /// work key a graph binding this attempt to that node must carry.
+        pub(crate) fn for_node(graph: &str, node: &str) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::build(&format!("settled-{graph}"), Some(graph), node, false)
+        }
+
+        /// Dispatch another attempt in this store under `graph`'s `node`,
+        /// attempt 1, from the fixture's lane head. The caller publishes its
+        /// terminal state.
+        pub(crate) fn dispatch_keyed(
+            &self,
+            operation: &str,
+            graph: &str,
+            node: &str,
+            call: &provenant_run::Request<'_>,
+        ) -> Result<(provenant_run::AttemptRecord, provenant_core::GitOid), Box<dyn std::error::Error>> {
+            let head = self.store.record(self.settled.attempt_id, call)?.head.ok_or("head")?;
+            let run = provenant_run::Service::new(&self.store).dispatch(
+                provenant_run::DispatchRequest {
+                    chair: None,
+                    operation_id: operation.parse()?,
+                    lane_depth: 1,
+                    parent_attempt: None,
+                    task: provenant_run::DispatchTask {
+                        source_head: None,
+                        context: Some(provenant_records::run::WorkContext {
+                            graph_id: Some(graph.into()),
+                            node_id: Some(node.into()),
+                            attempt: Some(1),
+                            ..Default::default()
+                        }),
+                        build_heavy: false,
+                        title: None,
+                        prompt: "reply OK".into(),
+                        base: Some(head.to_string()),
+                        pinned_base: None,
+                        head: None,
+                        profile: Default::default(),
+                        route: provenant_run::RequestedRoute::Model {
+                            extra: Default::default(),
+                            provider: "fixture".into(),
+                            model: "fixture/model".into(),
+                            effort: None,
+                        },
+                        account: None,
+                        timeout_seconds: 30,
+                        delivery_id: None,
+                        deliver: None,
+                        worktree: Some(self.worktree.clone()),
+                        access: Default::default(),
+                    },
+                },
+                &self.rig.project,
+                call,
+            )?;
+            Ok((self.store.record(run.attempt_id, call)?, head))
+        }
+
+        fn build(operation: &str, graph_id: Option<&str>, node: &str, lane_commit: bool) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -763,7 +821,7 @@ pub(crate) mod peer_tests {
                     source_head: None,
                         context: Some(provenant_records::run::WorkContext {
                             graph_id: Some(graph_id.unwrap_or("lane-resumed").to_owned()),
-                            node_id: Some("lane".into()),
+                            node_id: Some(node.into()),
                             attempt: Some(1),
                             ..Default::default()
                         }),
@@ -1059,7 +1117,8 @@ extend: Vec::new(),
                 task: provenant_run::DispatchTask {
                     source_head: None,
                     context: Some(provenant_records::run::WorkContext {
-                        graph_id: Some("lane-writer-output".into()),
+                        // The work key the graph's writer node binds below.
+                        graph_id: Some("writer-output-lens-graph".into()),
                         node_id: Some("writer".into()),
                         attempt: Some(1),
                         ..Default::default()

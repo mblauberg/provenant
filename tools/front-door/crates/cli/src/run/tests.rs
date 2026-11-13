@@ -694,8 +694,11 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 .join("worktrees")
                 .join(session.context.project_id.to_string())
                 .join("orphan");
-            std::fs::create_dir_all(&slot)?;
-            let path = slot.join("reservation.json");
+            // Recovery evidence is attempt-scoped inside the slot; a malformed
+            // reservation there is reported and retained, never discarded.
+            let attempt = slot.join(AttemptId::from_bytes([7; 16]).to_string());
+            std::fs::create_dir_all(&attempt)?;
+            let path = attempt.join("reservation.json");
             std::fs::write(&path, b"malformed retained reservation")?;
             let reply = reconcile(
                 Reconcile {
@@ -716,56 +719,6 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 json!(path)
             );
             assert_eq!(std::fs::read(&path)?, b"malformed retained reservation");
-            // A valid orphan whose destination cannot be published reports the
-            // storage failure too, rather than only a generic retained fence.
-            use provenant_supervisor::custody::{self, Scope};
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::remove_file(&path)?;
-            let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
-            let scope = Scope {
-                attempt: AttemptId::from_bytes([7; 16]),
-                generation: 1,
-            };
-            drop(custody::acquire_reader(
-                directory.try_clone()?,
-                scope,
-                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
-                &cancel,
-                &clock,
-            )?);
-            let child_path = slot.join(scope.attempt.to_string());
-            let child = child_path.join("reservation.json");
-            let mut retained: Value = serde_json::from_slice(&std::fs::read(&child)?)?;
-            let anchor = directory.metadata()?;
-            retained["reservation_device"] = anchor.device.into();
-            retained["reservation_inode"] = anchor.inode.into();
-            std::fs::write(&path, serde_json::to_vec(&retained)?)?;
-            std::fs::remove_file(&child)?;
-            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
-            let reply = reconcile(
-                Reconcile {
-                    targets: Vec::new(),
-                    abandon: None,
-                    reason: None,
-                },
-                edge,
-            );
-            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert!(
-                reply.result.data["writer_reservation_errors"]
-                    .as_array()
-                    .ok_or("issues")?
-                    .iter()
-                    .any(|issue| issue["reason"]
-                        .as_str()
-                        .is_some_and(|reason| reason.contains("cut over writer reservations")))
-            );
-            assert_eq!(
-                serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
-                retained
-            );
-            assert!(!child.exists());
             Ok(())
         },
     )??;

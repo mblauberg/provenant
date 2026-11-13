@@ -5,7 +5,7 @@ fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestRe
     recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true, false)
 }
 #[test]
-fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
+fn reconcile_rebooted_handoff_after_device_numbers_change() -> TestResult {
     let observer = RebootObserver(NEW_BOOT);
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -53,20 +53,20 @@ fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
         &cancel,
         &clock,
     )?);
+    // The attempt-scoped reservation survives a reboot that renumbered the
+    // devices while it was handing off.
     let child_reservation = custody.join(id.to_string()).join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&child_reservation)?)?;
-    let old_device = slot.metadata()?.device + 1;
+    let shift = |value: &serde_json::Value| value.as_u64().map(|device| device + 1);
     value["boot"] = OLD_BOOT.into();
     value["launch_state"] = "handing_off".into();
-    value["reservation_device"] = old_device.into();
-    value["reservation_inode"] = slot.metadata()?.inode.into();
-    value["attempt_device"] = old_device.into();
-    value["attempt_inode"] = attempt.metadata()?.inode.into();
-    std::fs::write(
-        custody.join("reservation.json"),
-        serde_json::to_vec(&value)?,
-    )?;
-    std::fs::remove_file(&child_reservation)?;
+    value["reservation_device"] = shift(&value["reservation_device"])
+        .ok_or("reservation device")?
+        .into();
+    let attempt_meta = attempt.metadata()?;
+    value["attempt_device"] = (attempt_meta.device + 1).into();
+    value["attempt_inode"] = attempt_meta.inode.into();
+    std::fs::write(&child_reservation, serde_json::to_vec(&value)?)?;
 
     assert_eq!(
         store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
@@ -74,7 +74,6 @@ fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
     );
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     assert!(store.writer_fences()?.is_empty());
-    assert!(!custody.join("reservation.json").exists());
     assert!(!child_reservation.exists());
     assert_eq!(
         std::fs::read_to_string(worktree.join("unfinished.rs"))?,

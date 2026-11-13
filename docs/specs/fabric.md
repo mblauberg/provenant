@@ -230,7 +230,7 @@ Graph delivery opens at most one final PR, only after every active path
 succeeds and custody is released; settlement advances only the matching graph.
 - Why: a partial graph must never publish, and settlement must not scan unrelated graphs.
 - Test: `crates/fabric-runtime/src/graph/graph_delivery_and_routes_tests.rs::graph_delivers_nodes_and_opens_one_final_pr_only_after_success`;
-  `src/fabric/peer_graph_routing.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
+  `src/fabric/peer_graph_routing.rs::failed_settlement_does_not_advance_unrelated_graphs`
 
 ## Peer hosts
 
