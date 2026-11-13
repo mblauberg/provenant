@@ -13,11 +13,14 @@ fn envelope(output: &provenant_os::exec::ExecOutcome) -> Result<Value> {
 #[allow(clippy::disallowed_methods)] // Asserts the real wait deadline is not consumed.
 fn an_unknown_target_fails_before_waiting() -> Result {
     let rig = TestRig::new()?;
+    // A budget far beyond any process start-up: returning well inside it shows
+    // the target was refused before the wait began, however slow the host.
+    let budget = Duration::from_secs(3600);
     let started = Instant::now();
-    let out = rig.command(&["wait", "no-such-graph", "--timeout", "30s", "--json"])?;
+    let out = rig.command(&["wait", "no-such-graph", "--timeout", "1h", "--json"])?;
     assert_eq!(code(&out), 2, "{out:?}");
     assert_eq!(envelope(&out)?["error"]["code"], "NOT_FOUND");
-    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(started.elapsed() < budget / 4, "{:?}", started.elapsed());
     Ok(())
 }
 

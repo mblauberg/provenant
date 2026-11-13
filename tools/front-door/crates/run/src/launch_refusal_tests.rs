@@ -1,9 +1,13 @@
-//! Launch refusals must survive settlement without exposing provider/error text.
+//! Launch refusals survive settlement with a specific cause; a refusal's own
+//! message reaches the reason only redacted and bounded.
 use super::tests::{call, clock, context, input};
 use super::*;
 use provenant_core::CancelToken;
 use provenant_records::wire::LaneRow;
 use provenant_supervisor::custody::ExitObservation;
+
+/// A secret-shaped value in a provider's refusal message.
+const PROVIDER_TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
 #[test]
 fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
@@ -37,7 +41,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
             let mut refusal = PrepareRefusal::new(
                 TerminalCause::RouteResolutionRefused,
-                "PROVIDER_SECRET_SENTINEL",
+                format!("PROVIDER_SECRET_SENTINEL {PROVIDER_TOKEN}"),
             );
             if self.source_overlap {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -147,6 +151,9 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             // With no fixed note, the refusal's own message is sealed.
             assert!(reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         }
+        // Whatever the reason carries, a secret-shaped value never reaches it.
+        assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
+        assert!(!label.contains(PROVIDER_TOKEN), "{label}");
     }
     Ok(())
 }

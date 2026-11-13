@@ -37,7 +37,11 @@ fn rule_sets_retain_vocabulary_and_legal_severity() {
     }
     assert!(
         matcher(RuleSet::General)
-            .scan(Path::new("a.md"), "simple clean prose\n")
+            // Rule words inside longer words or hyphenated compounds do not match.
+            .scan(
+                Path::new("a.md"),
+                "state-of-the-art highly-fledged robustness\n"
+            )
             .unwrap()
             .is_empty()
     );

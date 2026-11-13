@@ -504,15 +504,22 @@ def check_deleted_commands(root):
             continue
         text = document.read_text()
         findings = {}
+        # A section headed as removed or retired lists old spellings on purpose.
+        retired_lines, heading = set(), ""
+        for number, line in enumerate(text.splitlines(), 1):
+            if match := re.match(r"^#{1,6}\s+(.*)", line):
+                heading = match[1]
+            if RETIRED.search(heading):
+                retired_lines.add(number)
         # Explicit commands include fenced shell examples and table cells.
         for number, line in enumerate(text.splitlines(), 1):
-            if RETIRED.search(line):
+            if RETIRED.search(line) or number in retired_lines:
                 continue
             for match in re.finditer(r"\bprovenant\s+", line):
                 if command := deleted_command(line[match.end():]):
                     findings.setdefault(number, set()).add(command)
         for number, reference, context in inline_code(text):
-            if RETIRED.search(context):
+            if RETIRED.search(context) or number in retired_lines:
                 continue
             # Bare names may be template names or structured field values. A
             # following argument, or an explicit command/tool label, makes the

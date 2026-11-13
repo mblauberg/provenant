@@ -659,7 +659,8 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         incremental: true,
     };
     ingest(&f.roots, &request(&chairs))?;
-    ingest(&f.roots, &request(&recorded_chairs))?;
+    // Recording the chair re-attributes stored rows; the source is not reread.
+    assert_eq!(ingest(&f.roots, &request(&recorded_chairs))?.bytes_read, 0);
     let rows = read_rows(&f.roots, &RowFilter::default())?;
     assert_eq!(
         rows.len(),

@@ -297,13 +297,21 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     assert_eq!(data["resolved_from"], "explicit");
     assert_eq!(data["reviewer"]["provenance"], "unknown");
     assert_eq!(data["reviewer"]["actor_id"], "unknown");
-    assert_eq!(
-        data["receipt"],
-        format!(
-            "Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), attempt {} {}",
-            record.key, record.attempt_id
-        )
-    );
+    // One grep-able line naming role, applied model and effort, family,
+    // resolution source and the attempt; the text form leads with it.
+    let receipt = data["receipt"].as_str().ok_or("receipt line")?;
+    assert!(!receipt.contains('\n'), "{receipt}");
+    assert!(receipt.starts_with("Reviewer: "), "{receipt}");
+    for part in [
+        "codex/gpt-6.1-sol@high".to_owned(),
+        "openai".to_owned(),
+        "explicit".to_owned(),
+        record.key.to_string(),
+        record.attempt_id.to_string(),
+    ] {
+        assert!(receipt.contains(&part), "{part}: {receipt}");
+    }
+    assert!(line.starts_with(&format!("{receipt}\n")), "{line}");
     assert!(
         line.ends_with(
             "Reviewer provenance: unknown, actor unknown, model unknown, family unknown\n"

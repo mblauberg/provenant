@@ -1890,26 +1890,30 @@ fn registered_knobs_have_production_readers() {
     }
 }
 
+/// A retired routing timing key warns with its repair (the table its value now
+/// belongs under); an unknown domain key warns without one.
 #[test]
-fn misplaced_domain_knob_warns_with_manual_repair() {
-    let config = load(
-        &roots(),
-        Some(&b"schema_version=1\n[knobs]\n'domains.routing.capacity_cooldown_seconds'=30"[..]),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(config.warnings[0].message.contains("move its timing value"));
-}
-
-#[test]
-fn unknown_domain_knob_warns_without_retired_key_repair() {
-    let config = load(
-        &roots(),
-        Some(&b"schema_version=1\n[knobs]\n'domains.routing.future'=1"[..]),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(!config.warnings[0].message.contains("config migrate"));
+fn misplaced_domain_knobs_warn_and_only_retired_keys_name_their_new_table() {
+    let warning_for = |key: &str| {
+        let text = format!("schema_version=1\n[knobs]\n'{key}'=30");
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, "unknown_key");
+        config.warnings[0].message.clone()
+    };
+    for key in [
+        "domains.routing.capacity_cooldown_seconds",
+        "domains.routing.settlement_retries",
+        "domains.routing.capacity_retry_seconds",
+        "domains.routing.capacity_retry_max_seconds",
+        "domains.routing.retry_delay_ceiling_seconds",
+    ] {
+        let message = warning_for(key);
+        assert!(message.contains(key), "{message}");
+        assert!(message.contains("domains.routing.schedule"), "{message}");
+    }
+    let message = warning_for("domains.routing.future");
+    assert!(message.contains("domains.routing.future"), "{message}");
+    assert!(!message.contains("domains.routing.schedule"), "{message}");
 }
 
 #[test]

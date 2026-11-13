@@ -1805,14 +1805,12 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
     ]}))?;
     let output = rig.command().args(["run", "--file"]).arg(path).output()?;
     assert!(output.status.success(), "{output:?}");
+    let (_, before) = rig.run(&["status", "two-nodes"])?;
     let (output, refusal) = rig.run(&["retry", "two-nodes", "--brief", "corrected"])?;
     assert!(!output.status.success(), "{refusal}");
+    // The typed code is the contract; the refusal changes nothing.
     assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
-    assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("several nodes")),
-        "{refusal}"
-    );
+    let (_, after) = rig.run(&["status", "two-nodes"])?;
+    assert_eq!(after["data"]["rows"], before["data"]["rows"], "{after}");
     Ok(())
 }

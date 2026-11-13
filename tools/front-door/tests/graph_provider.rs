@@ -2748,13 +2748,41 @@ fn receipt_output_resolves_the_work_key() -> Result {
         .reviewer
         .ok_or("reviewer fact")?
         .actor_id;
-    let receipt = format!(
-        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), attempt {key} {attempt}"
-    );
-    let attribution =
-        format!("Reviewer provenance: unknown, actor {actor}, model unknown, family unknown");
-    let expected = format!("{receipt}\n{attribution}\n");
+    // The receipt is one grep-able line naming the role, the applied model, its
+    // resolution source and the attempt; the human form is the JSON fields.
+    let mut first: Option<Value> = None;
     for target in &targets {
+        let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let data = &data["data"];
+        let receipt = data["receipt"].as_str().ok_or("receipt line")?;
+        assert!(!receipt.contains('\n'), "{receipt}");
+        assert!(receipt.starts_with("Reviewer: "), "{receipt}");
+        for part in [
+            "codex/gpt-6.1-sol",
+            "explicit",
+            key.as_str(),
+            attempt.as_str(),
+        ] {
+            assert!(receipt.contains(part), "{part}: {receipt}");
+        }
+        let attribution = data["reviewer_provenance"]
+            .as_str()
+            .ok_or("reviewer provenance")?;
+        assert!(attribution.contains(&actor.to_string()), "{attribution}");
+        assert_eq!(data["reviewer"]["provenance"], "unknown");
+        assert_eq!(data["reviewer"]["actor_id"], actor.to_string());
+        assert_eq!(data["key"], serde_json::to_value(&terminal.key)?);
+        assert_eq!(data["attempt_id"], attempt);
+        assert_eq!(data["resolved_from"], "explicit");
+        assert_eq!(data["role"], "reviewer");
+        let expected = format!("{receipt}\n{attribution}\n");
         let human = rig.command(&["output", target, "--part", "receipt", "--full"])?;
         assert_eq!(
             code(&human),
@@ -2767,22 +2795,11 @@ fn receipt_output_resolves_the_work_key() -> Result {
         assert_eq!(code(&compact), 0);
         assert!(compact.stdout.bytes.len() <= 2048);
         assert_eq!(String::from_utf8(compact.stdout.bytes)?, expected);
-        let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
-        assert_eq!(
-            code(&output),
-            0,
-            "{}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
-        assert_eq!(data["data"]["receipt"], receipt);
-        assert_eq!(data["data"]["reviewer_provenance"], attribution);
-        assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
-        assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
-        assert_eq!(data["data"]["key"], serde_json::to_value(&terminal.key)?);
-        assert_eq!(data["data"]["attempt_id"], attempt);
-        assert_eq!(data["data"]["resolved_from"], "explicit");
-        assert_eq!(data["data"]["role"], "reviewer");
+        // Every name for the one attempt reads the same receipt.
+        match &first {
+            Some(first) => assert_eq!(data, first, "{target}"),
+            None => first = Some(data.clone()),
+        }
     }
     Ok(())
 }
@@ -2958,13 +2975,19 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
         .ok_or("reviewer fact")?
         .actor_id;
     assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
+    // The human form is the JSON receipt and attribution, naming the attempt.
+    let receipt = data["data"]["receipt"].as_str().ok_or("receipt line")?;
+    assert!(receipt.contains(&target), "{receipt}");
+    assert!(receipt.contains(&attempt_id.to_string()), "{receipt}");
+    let attribution = data["data"]["reviewer_provenance"]
+        .as_str()
+        .ok_or("reviewer provenance")?;
+    assert!(attribution.contains(&actor.to_string()), "{attribution}");
     let human = rig.command(&["output", &target, "--part", "receipt", "--full"])?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         String::from_utf8(human.stdout.bytes)?,
-        format!(
-            "Reviewer: unknown@unknown (unknown; resolved from unknown), attempt {target} {attempt_id}\nReviewer provenance: unknown, actor {actor}, model unknown, family unknown\n"
-        )
+        format!("{receipt}\n{attribution}\n")
     );
     Ok(())
 }

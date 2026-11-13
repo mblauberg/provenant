@@ -804,8 +804,8 @@ fn wire_schema_has_no_dangling_or_single_use_defs() {
             assert!(!defs.is_empty(), "empty definitions in {}", tool["name"]);
             for name in defs.keys() {
                 assert!(
-                    counts.get(name).is_some_and(|count| *count >= 1),
-                    "unused definition {name} in {}",
+                    counts.get(name).is_some_and(|count| *count >= 2),
+                    "unused or single-use {name} in {}",
                     tool["name"]
                 );
             }

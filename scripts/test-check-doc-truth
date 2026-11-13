@@ -192,6 +192,15 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
 
+    def test_a_section_headed_as_removed_may_list_old_spellings(self):
+        (self.root / "README.md").write_text(
+            "## Removed spellings\n\n| `lanes`, `fabric graph` | `status` |\n\n"
+            "## Usage\n\nRun `provenant dispatch ID`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("README.md:3:", result.stdout)
+        self.assertIn("README.md:7: error: deleted command", result.stdout)
+
     def test_git_deleted_paths_do_not_become_command_errors(self):
         def git(*args):
             return subprocess.run(["git", *args], cwd=self.root, check=True,
