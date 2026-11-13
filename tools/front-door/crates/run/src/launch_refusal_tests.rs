@@ -89,7 +89,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             });
         }
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let started = store.start(
             run.attempt_id,
             &Refused {
@@ -161,7 +161,7 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     let run = input();
     store.create(&run, &call)?;
     store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
-    let record = store.record(run.attempts[0].attempt_id, &call)?;
+    let record = store.record(run.attempt_id, &call)?;
     let AttemptState::Terminal { extra, outcome, .. } = &record.state else {
         return Err("not terminal".into());
     };

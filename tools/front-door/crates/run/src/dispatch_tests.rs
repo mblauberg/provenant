@@ -26,10 +26,7 @@ fn rewrite_child_request(
         &crate::db::bytes(request)?,
         provenant_os::fs::PublishMode::Replace,
     )?;
-    let record = store.run(run, call)?;
-    let mut operation = store
-        .operation(&record.operation_id, call)?
-        .ok_or("operation")?;
+    let mut operation = store.attempt_operation(run, call)?;
     operation.request_digest = request.digest()?;
     store.db.execute(
         "UPDATE attempts SET operation_record=?1 WHERE id=?2",
@@ -75,14 +72,10 @@ impl Providers for Ready {
     }
 }
 
-struct FirstPriorityFailure(TaskId);
-impl Providers for FirstPriorityFailure {
-    fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
-        if task.task_id == self.0 {
-            Err("priority configuration unavailable".into())
-        } else {
-            Ok(5)
-        }
+struct PriorityFailure;
+impl Providers for PriorityFailure {
+    fn priority(&self, _: &TaskRequest) -> std::result::Result<u8, String> {
+        Err("priority configuration unavailable".into())
     }
     fn prepare(
         &self,
@@ -191,43 +184,11 @@ impl Providers for Confined {
     }
 }
 
-/// Gives the first task oversized tool grants and its sibling none.
-struct FirstOversized {
-    first: TaskId,
-    oversized: Confined,
-    ordinary: Confined,
-}
-impl Providers for FirstOversized {
-    fn prepare(
-        &self,
-        task: &TaskRequest,
-        prompt: &str,
-        paths: &LaunchPaths,
-        resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
-        let provider = if task.task_id == self.first {
-            &self.oversized
-        } else {
-            &self.ordinary
-        };
-        provider.prepare(task, prompt, paths, resume)
-    }
-    fn decode(
-        &self,
-        route: &RouteRecord,
-        output: &[u8],
-        exit: &ExitObservation,
-        path: &std::path::Path,
-    ) -> std::result::Result<Decoded, String> {
-        self.ordinary.decode(route, output, exit, path)
-    }
-}
-
 #[derive(Default)]
 pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
-    policy_task: Option<TaskId>,
+    refuse_policy: bool,
     policy_resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub(super) observed: Option<RouteRecord>,
     pub(super) codex_usage: Option<UsageRecord>,
@@ -265,8 +226,8 @@ impl Providers for Fake {
         self.failure_note.clone()
     }
 
-    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
-        if self.policy_task == Some(task.task_id) {
+    fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
+        if self.refuse_policy {
             let mut refusal = crate::PrepareRefusal::new(
                 TerminalCause::DiskFloor,
                 "insufficient disk space; run `provenant gc`",
@@ -392,7 +353,7 @@ fn settle_with_turns(
         });
     }
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -424,19 +385,6 @@ fn settle_with_turns(
 const DONE_ANSWER: &str = "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```";
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
-fn two_tasks(concurrency: u64) -> PreparedRun {
-    let mut run = input();
-    let mut task = run.request.task.clone();
-    task.task_id = TaskId::from_bytes([7; 16]);
-    run.request.tasks.push(task.clone());
-    run.request.concurrency = concurrency;
-    run.attempts.push(NewAttempt {
-        task_id: task.task_id,
-        attempt_id: AttemptId::from_bytes([8; 16]),
-        prompt: "exact prompt".into(),
-    });
-    run
-}
 pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult {
     let mut value = serde_json::to_value(exit)?;
     let object = value.as_object_mut().ok_or("exit fixture")?;
@@ -452,9 +400,12 @@ pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult 
     Ok(())
 }
 
-/// One-task run with its own IDs: a writer when `writer`, else read-only.
+/// One attempt with its own ids and work key: a writer when `writer`, else read-only.
 fn lane(seed: u8, writer: bool) -> PreparedRun {
-    let mut run = batch(seed, 1);
+    let mut run = input();
+    run.attempt_id = provenant_core::AttemptId::from_bytes([seed; 16]);
+    run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
+    crate::tests::rekey(&mut run);
     if writer {
         run.request.task.writer = Some(WriterRequest {
             extra: Default::default(),
@@ -467,7 +418,7 @@ fn lane(seed: u8, writer: bool) -> PreparedRun {
 /// Create and start `run`, returning its only attempt ready to claim.
 fn starting(store: &RunStore, run: &PreparedRun, call: &Request<'_>) -> Result<AttemptId> {
     store.create(run, call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, call)?,
         &route(),
@@ -761,31 +712,6 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     Ok(())
 }
 
-/// A run of `tasks` attempts at full concurrency, with IDs unique to `seed`.
-fn batch(seed: u8, tasks: u64) -> PreparedRun {
-    let mut run = input();
-    let template = run.request.task.clone();
-    run.attempt_id = provenant_core::AttemptId::from_bytes([seed; 16]);
-    run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
-    crate::tests::rekey(&mut run);
-    run.request.concurrency = tasks.min(8);
-    run.request.tasks.clear();
-    run.attempts.clear();
-    for index in 0..tasks as u8 {
-        let mut task = template.clone();
-        task.task_id = TaskId::from_bytes([seed, index, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
-        run.attempts.push(NewAttempt {
-            task_id: task.task_id,
-            attempt_id: AttemptId::from_bytes([
-                seed, index, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            ]),
-            prompt: "exact prompt".into(),
-        });
-        run.request.tasks.push(task);
-    }
-    run
-}
-
 /// Starts a one-task run after `damage` has altered its stored prompt, and
 /// asserts the attempt ends Rejected before preparation with its reason recorded.
 fn assert_unreadable_prompt_rejected(
@@ -799,7 +725,7 @@ fn assert_unreadable_prompt_rejected(
     let store = RunStore::open(&context, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     let prompt = context
         .state_root
         .as_path()
@@ -846,7 +772,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -984,7 +910,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         worktree: worktree.clone(),
     });
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -1221,7 +1147,7 @@ fn recover_rebooted_writer_inner(
         worktree: worktree.clone(),
     });
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -1433,7 +1359,6 @@ fn recover_rebooted_writer_inner(
     assert_eq!(after.applied_route, before.applied_route);
     assert_eq!(after.usage, before.usage);
     assert_eq!(after.session, before.session);
-    assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
     assert!(store.writer_fences()?.is_empty());
     assert!(!reservation.exists());
     assert!(

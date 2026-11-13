@@ -73,7 +73,7 @@ fn prepared_write_grants_hold_admission_on_the_disk_floor() -> TestResult {
         });
         let run = lane(97, false);
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let grants = admission::AppliedWriteGrants {
             grants: vec![WriteGrantRecord {
                 extra: Default::default(),
@@ -184,7 +184,7 @@ fn guardian_admission_resource_refusals_survive_durable_exit_and_retained_status
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &route(),

@@ -847,7 +847,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let record = store.record(request.attempts[0].attempt_id, &call)?;
+        let record = store.record(request.attempt_id, &call)?;
         let mut task = request.request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
             extra: Default::default(),
@@ -892,7 +892,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -950,7 +950,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -1138,13 +1138,13 @@ mod tests {
             )
         };
         assert!(
-            matches!(start()?.as_slice(), [Started::Unknown { attempt, error }] if *attempt == request.attempts[0].attempt_id && error.contains("lost acknowledgement"))
+            matches!(start()?.as_slice(), [Started::Unknown { attempt, error }] if *attempt == request.attempt_id && error.contains("lost acknowledgement"))
         );
         let operation = store
             .operation(&request.operation_id, &call)?
             .ok_or("operation")?;
         assert_eq!(operation.state, OperationState::LaunchUnknown);
-        let record = store.record(request.attempts[0].attempt_id, &call)?;
+        let record = store.record(request.attempt_id, &call)?;
         assert!(matches!(record.state, AttemptState::Starting { .. }));
         let recorded_route = record.resolved_route.as_ref().ok_or("resolved route")?;
         assert_eq!(recorded_route.provider, route().provider);
@@ -1218,7 +1218,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -1263,7 +1263,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let request = input();
         store.create(&request, &call)?;
-        let id = request.attempts[0].attempt_id;
+        let id = request.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -1389,7 +1389,7 @@ mod tests {
                 reopened.operation(&request.operation_id, &call)?,
                 Some(operation)
             );
-            let record = store.record(request.attempts[0].attempt_id, &call)?;
+            let record = store.record(request.attempt_id, &call)?;
             assert!(custody::reservation_present(
                 &store.attempt_dir(record.attempt_id, false)?,
                 RunStore::scope(&record)

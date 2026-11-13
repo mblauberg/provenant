@@ -12,7 +12,7 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let prepared = input();
     store.create(&prepared, &call)?;
-    let id = prepared.attempts[0].attempt_id;
+    let id = prepared.attempt_id;
     let grant = WriteGrantRecord {
         extra: Default::default(),
         source: WriteSource::LaneCache,
@@ -652,7 +652,7 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -698,7 +698,10 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         assert_eq!(argv[1..3], ["internal", "settle"]);
         assert_eq!(cwd, std::env::current_dir().unwrap());
         let request: serde_json::Value = serde_json::from_str(argv[3].to_str().unwrap()).unwrap();
-        assert_eq!(request["run"], serde_json::to_value(run.attempt_id).unwrap());
+        assert_eq!(
+            request["run"],
+            serde_json::to_value(run.attempt_id).unwrap()
+        );
         launched = true;
         Ok(())
     })?;

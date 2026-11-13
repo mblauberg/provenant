@@ -261,7 +261,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut record = store.record(input.attempt_id, &call)?;
         assert!(input.request.task.access.write_roots.is_empty());
         let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
@@ -377,13 +377,10 @@ mod tests {
             worktree.join("partial.txt"),
             "parser implementation survives",
         )?;
-        input.request.task
-            .access
-            .write_roots
-            .push(worktree.clone());
+        input.request.task.access.write_roots.push(worktree.clone());
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut old = store.record(id, &call)?;
         let attempt = store.attempt_dir(id, false)?;
         let root = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
@@ -469,7 +466,7 @@ mod tests {
                 let store = RunStore::open(&context(temp.path())?, &call)?;
                 let input = input();
                 store.create(&input, &call)?;
-                let record = store.record(input.attempts[0].attempt_id, &call)?;
+                let record = store.record(input.attempt_id, &call)?;
                 let attempt = store.attempt_dir(record.attempt_id, false)?;
                 let secret = format!("{prefix}sk-abcdefghijklmnopqrstuvwx");
                 let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
@@ -527,12 +524,12 @@ mod tests {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let mut input = input();
-        input.attempts[0].prompt = "x".repeat(RECORD_LIMIT as usize - 64);
+        input.prompt = "x".repeat(RECORD_LIMIT as usize - 64);
         input.request.task.prompt_digest =
-            provenant_records::CanonicalV1::file_digest(input.attempts[0].prompt.as_bytes());
+            provenant_records::CanonicalV1::file_digest(input.prompt.as_bytes());
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let old = store.record(id, &call)?;
         let attempt = store.attempt_dir(id, false)?;
         let mut result = decoded();
@@ -551,7 +548,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(store.pending_attempts(input.attempt_id, &call)?.is_empty());
         Ok(())
     }
 
@@ -564,7 +560,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut record = store.record(input.attempt_id, &call)?;
         let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
@@ -626,7 +622,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut record = store.record(input.attempt_id, &call)?;
         let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;

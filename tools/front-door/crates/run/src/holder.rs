@@ -2,7 +2,7 @@
 //! the same-binary guardian. It runs while the guardian still holds custody.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_confinement::permissions::PathGrant;
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, RootInputs, AttemptId};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
     custody::{self, CustodyError, ExitObservation},
@@ -229,7 +229,6 @@ pub struct HolderContext {
     pub roots: RootSeed,
     pub project_id: ProjectId,
     pub actor_id: ActorId,
-    pub run_id: AttemptId,
     pub attempt_id: AttemptId,
     /// Private handoff only, never copied to the attempt or provider environment.
     #[serde(default)]
@@ -567,10 +566,10 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         let record = store
             .record(context.attempt_id, &call)
             .map_err(custody_error)?;
-        let request = store.request(record.attempt_id, &call).map_err(custody_error)?;
-        let Some(writer) = request
-            .task.writer.as_ref()
-        else {
+        let request = store
+            .request(record.attempt_id, &call)
+            .map_err(custody_error)?;
+        let Some(writer) = request.task.writer.as_ref() else {
             return Ok(false);
         };
         let attempt = store
@@ -743,8 +742,7 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let record = self.record(id, call)?;
         let request = self.request(record.attempt_id, call)?;
-        let task = request
-            .task;
+        let task = request.task;
         let mut recovery = if let Some(writer) = &task.writer {
             let directory = self.writer_custody_directory(&record, writer)?;
             self.recover_writer_exit(directory, Self::scope(&record), call)?
@@ -823,7 +821,9 @@ impl RunStore {
         }
         let request = self.request(record.attempt_id, call)?;
         let writer = request
-            .task.writer.as_ref()
+            .task
+            .writer
+            .as_ref()
             .ok_or(RunError::Validation("land writer request missing"))?;
         let launch = crate::prepare_writer_with_facts(
             writer,
@@ -929,8 +929,7 @@ impl RunStore {
                 Err(error) => return Err(error),
             };
             let request = self.request(record.attempt_id, call)?;
-            let task = request
-                .task;
+            let task = request.task;
             let writer = task
                 .writer
                 .as_ref()
@@ -1031,8 +1030,7 @@ impl RunStore {
             return Ok(None);
         }
         let request = self.request(record.attempt_id, call)?;
-        let task = request
-            .task;
+        let task = request.task;
         if task.writer.is_none() || task.profile.extra.contains_key("budget_wrap_up") {
             return Ok(None);
         }
@@ -1205,7 +1203,9 @@ impl RunStore {
     ) -> Result<()> {
         let request = self.request(record.attempt_id, call)?;
         let writer = request
-            .task.writer.as_ref()
+            .task
+            .writer
+            .as_ref()
             .ok_or(RunError::Validation("pending import lacks writer"))?;
         let reason = match object_import_refused(attempt, Self::scope(record))? {
             Some(reason) => reason,
@@ -1321,8 +1321,7 @@ impl RunStore {
                 return Ok(());
             }
             let request = self.request(record.attempt_id, call)?;
-            let task = request
-                .task;
+            let task = request.task;
             if let (Some(writer), Some(delivery)) = (&task.writer, &task.deliver) {
                 if self
                     .delivered(record.attempt_id, call)?
@@ -1414,7 +1413,10 @@ impl RunStore {
                                 writer,
                                 delivery,
                                 attempt,
-                                &format!("Run {}\nAttempt {}", record.attempt_id, record.attempt_id),
+                                &format!(
+                                    "Run {}\nAttempt {}",
+                                    record.attempt_id, record.attempt_id
+                                ),
                             )
                         },
                     )
@@ -1757,8 +1759,7 @@ impl RunStore {
         {
             return Err(RunError::Validation("request changed after launch"));
         }
-        let task = request
-            .task;
+        let task = request.task;
         // A stop at the runtime deadline is a typed timeout, whatever partial
         // output the provider left, and the lane stays resumable.
         let typed_deadline = decoded.outcome == Outcome::TimedOut
@@ -3072,7 +3073,7 @@ mod disk_admission_tests {
             });
             let run = crate::tests::input();
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             store.mark_starting(
                 &store.record(id, &call)?,
                 &crate::tests::route(),
@@ -3091,7 +3092,6 @@ mod disk_admission_tests {
                 },
                 project_id: execution.project_id,
                 actor_id: execution.actor_id,
-                run_id: run.attempt_id,
                 attempt_id: id,
                 host_delivery: None,
                 launch: None,
@@ -3126,7 +3126,6 @@ mod disk_admission_tests {
             },
             project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: provenant_core::ActorId::from_bytes([2; 16]),
-            run_id: AttemptId::from_bytes([3; 16]),
             attempt_id: AttemptId::from_bytes([4; 16]),
             host_delivery: None,
             launch: Some(HostLaunchContext {
@@ -3248,7 +3247,7 @@ mod writer_recovery_tests {
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             let record = store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
@@ -3452,7 +3451,7 @@ mod writer_recovery_tests {
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -3548,7 +3547,7 @@ mod writer_recovery_tests {
             let store = RunStore::open(&execution, &call)?;
             let run = input();
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             let applied = RouteRecord {
                 provider: Some(provider.into()),
                 ..route()
@@ -3571,7 +3570,6 @@ mod writer_recovery_tests {
                 },
                 project_id: execution.project_id,
                 actor_id: execution.actor_id,
-                run_id: run.attempt_id,
                 attempt_id: id,
                 host_delivery: None,
                 launch: None,
@@ -3628,7 +3626,7 @@ mod writer_recovery_tests {
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             let limits = provenant_records::LaneLimits::default();
             store.mark_starting_with_priority(
                 &store.record(id, &call)?,
@@ -3778,12 +3776,9 @@ mod writer_recovery_tests {
                     serde_json::from_value(extra.get("stop").cloned().ok_or("stop")?)?;
                 assert_eq!(stop.cause(), provenant_records::StopCause::Blocked);
                 assert_eq!(stop.note(), Some(note));
-                assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
                 continue;
             }
-            assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
             assert_eq!(finished.superseded_by, None);
-            assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
             if dirty {
                 assert!(matches!(
                     finished.state,
@@ -3873,7 +3868,7 @@ mod writer_recovery_tests {
                 run.request.task.writer = Some(fixture.writer.clone());
             }
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
@@ -4068,7 +4063,7 @@ mod writer_recovery_tests {
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -4196,7 +4191,7 @@ mod writer_recovery_tests {
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -4291,7 +4286,6 @@ mod writer_recovery_tests {
         let handoff =
             provenant_records::handoff::Handoff::from_result(&result)?.ok_or("result handoff")?;
         assert_eq!(handoff.note, "Parser done; renderer next");
-        assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
         assert_eq!(
             std::fs::read_to_string(fixture.writer.worktree.join("token-work.txt"))?,
             "uncommitted work before the token was lost\n"
@@ -4356,7 +4350,7 @@ mod writer_recovery_tests {
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let limits = if matches!(
             case,
             BudgetStopCase::WrapUp
@@ -4953,7 +4947,7 @@ mod writer_recovery_tests {
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
@@ -5056,7 +5050,7 @@ mod writer_recovery_tests {
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
@@ -5198,7 +5192,7 @@ mod writer_recovery_tests {
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
@@ -5843,8 +5837,8 @@ mod writer_recovery_tests {
                 assert!(matches!(
                     refusal,
                     crate::writer::WriterCustodyError::Admission(
-                        custody::CustodyError::ImportRetained { run, attempt }
-                    ) if run == scope.attempt && attempt == scope.attempt
+                        custody::CustodyError::ImportRetained { attempt }
+                    ) if attempt == scope.attempt
                 ));
                 let found = store.reconcile_with_observer(
                     run.attempt_id,
@@ -5920,7 +5914,7 @@ mod writer_recovery_tests {
         let mut run = input();
         run.request.task.writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &route(),
@@ -6079,7 +6073,7 @@ mod writer_recovery_tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let starting = store.mark_starting(
             &store.record(id, &call)?,
             &route(),

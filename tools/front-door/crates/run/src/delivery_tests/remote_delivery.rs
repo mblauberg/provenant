@@ -855,7 +855,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     input.request.task.writer = Some(fixture.writer.clone());
     input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(id, false)?;

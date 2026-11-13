@@ -3102,7 +3102,7 @@ pub(crate) struct WriterOwnership {
 mod custody_admission_tests {
     use super::*;
     use crate::tests::{call, clock, context};
-    use provenant_core::{AttemptId};
+    use provenant_core::AttemptId;
     use provenant_supervisor::custody::{self, Scope};
 
     #[test]
@@ -3127,7 +3127,6 @@ mod custody_admission_tests {
             .join("shared");
         std::fs::create_dir_all(&slot)?;
         let predecessor = Scope {
-            run: AttemptId::from_bytes([81; 16]),
             attempt: AttemptId::from_bytes([82; 16]),
             generation: 1,
         };
@@ -3165,7 +3164,6 @@ mod custody_admission_tests {
                 .join("unrelated-invalid-project"),
         )?;
         let next = Scope {
-            run: AttemptId::from_bytes([83; 16]),
             attempt: AttemptId::from_bytes([84; 16]),
             generation: 1,
         };
@@ -3186,7 +3184,7 @@ mod custody_admission_tests {
             &call,
         );
         assert!(
-            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {run, attempt})) if run == predecessor.run && attempt == predecessor.attempt)
+            matches!(refused, Err(WriterCustodyError::Admission(custody::CustodyError::ImportRetained {attempt})) if attempt == predecessor.attempt)
         );
         assert!(custody::reservation_present(
             &Directory::open_anchor(&slot)?,
@@ -3221,7 +3219,6 @@ mod custody_admission_tests {
         let path = temp.path().join("slot");
         std::fs::create_dir(&path)?;
         let scope = Scope {
-            run: AttemptId::from_bytes([3; 16]),
             attempt: AttemptId::from_bytes([4; 16]),
             generation: 1,
         };

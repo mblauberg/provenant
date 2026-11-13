@@ -36,7 +36,7 @@ fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> Test
     let store = RunStore::open(&context, &call)?;
     let prepared = input();
     store.create(&prepared, &call)?;
-    let id = prepared.attempts[0].attempt_id;
+    let id = prepared.attempt_id;
     let provider = Raised(Confined {
         writer: false,
         tool_writes: (0..6000)

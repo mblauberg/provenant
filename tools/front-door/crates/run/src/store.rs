@@ -1184,9 +1184,7 @@ impl RunStore {
                             ..
                         }
                     )
-                    && self
-                        .request(record.attempt_id, call)?
-                        .task.writer.is_some()
+                    && self.request(record.attempt_id, call)?.task.writer.is_some()
                 {
                     return self.record(id, call).map(Some);
                 }
@@ -1229,10 +1227,10 @@ impl RunStore {
                 return;
             }
         }
-        if self.request(record.attempt_id, call).is_ok_and(|request| {
-            request
-                .task.writer.is_some()
-        }) {
+        if self
+            .request(record.attempt_id, call)
+            .is_ok_and(|request| request.task.writer.is_some())
+        {
             let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
         }
         // The terminal record retains tmp before cleanup; clear that hint only
@@ -1407,10 +1405,7 @@ impl RunStore {
                     next.head = receipt.head;
                     next.delivery = Some(receipt);
                 }
-            } else if let Some(deliver) = self
-                .request(old.attempt_id, call)?
-                .task.deliver
-            {
+            } else if let Some(deliver) = self.request(old.attempt_id, call)?.task.deliver {
                 // Requested delivery that never ran must not read as success
                 // with no trace.
                 next.delivery = Some(WriterDeliveryReceipt {
@@ -1648,7 +1643,9 @@ impl RunStore {
         }
         let request = self.request(record.attempt_id, call)?;
         let writer = request
-            .task.writer.as_ref()
+            .task
+            .writer
+            .as_ref()
             .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
         // A missing custody directory has no lock holder; keep the import pin.
         let slot = self.writer_custody_directory(record, writer).ok();
@@ -1734,10 +1731,7 @@ impl RunStore {
         };
         let id = old.attempt_id;
         let request = self.request(old.attempt_id, call)?;
-        let reaction = self.freeze_reaction(
-            next,
-            request.task.writer.is_some(),
-        )?;
+        let reaction = self.freeze_reaction(next, request.task.writer.is_some())?;
         let attempt = self.attempt_dir(id, false)?;
         let mut receipts = SettlementReceipts {
             cancellation: next.cancellation_disposition,
@@ -1997,7 +1991,7 @@ mod admission_key_tests {
             let mut prepared = input();
             prepared.attempt_id = AttemptId::from_bytes([number as u8; 16]);
             prepared.operation_id = OperationId::parse(&format!("number-{number}"))?;
-            prepared.attempts[0].attempt_id = AttemptId::from_bytes([number as u8 + 10; 16]);
+            prepared.attempt_id = AttemptId::from_bytes([number as u8 + 10; 16]);
             crate::tests::rekey(&mut prepared);
             prepared.request.task.context = Some(provenant_records::run::WorkContext {
                 graph_id: Some("numbered-graph".into()),
@@ -2006,14 +2000,20 @@ mod admission_key_tests {
                 ..Default::default()
             });
             let admitted = store.create(&prepared, &call)?;
-            let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+            let record = store.record(prepared.attempt_id, &call)?;
             assert_eq!(record.attempt_number, u64::from(number));
-            assert_eq!(record.key.as_ref().unwrap().attempt(), number);
-            assert_eq!(store.create(&prepared, &call)?.attempt_id, admitted.attempt_id);
+            assert_eq!(record.key.attempt(), number);
+            assert_eq!(
+                store.create(&prepared, &call)?.attempt_id,
+                admitted.attempt_id
+            );
             let mut conflict = prepared;
             conflict.attempt_id = AttemptId::from_bytes([number as u8 + 20; 16]);
             conflict.operation_id = OperationId::parse(&format!("other-{number}"))?;
-            assert_eq!(store.create(&conflict, &call)?.attempt_id, admitted.attempt_id);
+            assert_eq!(
+                store.create(&conflict, &call)?.attempt_id,
+                admitted.attempt_id
+            );
             conflict.request.task.title = Some("different request".into());
             assert!(matches!(
                 store.create(&conflict, &call),

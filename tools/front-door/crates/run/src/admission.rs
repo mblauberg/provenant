@@ -194,7 +194,6 @@ impl Resources for SystemResources {
     }
 }
 
-
 impl RunStore {
     /// Yield admission while waiting on children, or try to reclaim it before
     /// resuming. False means reclaim must be retried; the running attempt and
@@ -243,15 +242,15 @@ impl RunStore {
                 // The ledger may have committed a yield before a failed store
                 // commit. Always recheck it, even if this ticket says active.
                 let reclaimed = crate::ledger::lease(
-                        &ledger,
-                        self.context.state_root.as_path(),
-                        &ticket,
-                        self.lane_caps(),
-                        call.clock,
-                        call,
-                        owner.as_ref().ok_or(RunError::Conflict)?,
-                    )?
-                    .is_some();
+                    &ledger,
+                    self.context.state_root.as_path(),
+                    &ticket,
+                    self.lane_caps(),
+                    call.clock,
+                    call,
+                    owner.as_ref().ok_or(RunError::Conflict)?,
+                )?
+                .is_some();
                 ticket.active = reclaimed;
                 if reclaimed {
                     extra.remove("child_wait");
@@ -1405,7 +1404,7 @@ mod process_wait_tests {
         let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let lane = store.record(run.attempt_id, &call)?;
         let message = store.admission_observations(&lane, &call, &LowMemory)?;
         assert!(
             message.contains("memory=Ok(MemorySample { available_bytes: 1, total_bytes: 100 })"),
@@ -1450,7 +1449,7 @@ mod process_wait_tests {
         let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let lane = store.record(run.attempt_id, &call)?;
         let waits = store.lane_waits_with_resources(&[lane], &call, &Full);
         assert_eq!(
             waits[0].waiting_for,
@@ -1508,7 +1507,7 @@ mod process_wait_tests {
     ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
         let run = crate::tests::input();
         store.create(&run, call)?;
-        let queued = store.record(run.attempts[0].attempt_id, call)?;
+        let queued = store.record(run.attempt_id, call)?;
         Ok(store.mark_starting(
             &queued,
             &crate::tests::route(),
@@ -1563,10 +1562,10 @@ mod process_wait_tests {
             let mut run = crate::tests::input();
             run.attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
             run.operation_id = provenant_core::OperationId::parse(&format!("view-census-{n}"))?;
-            run.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
+            run.attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
             crate::tests::rekey(&mut run);
             store.create(&run, &call)?;
-            let queued = store.record(run.attempts[0].attempt_id, &call)?;
+            let queued = store.record(run.attempt_id, &call)?;
             lanes.push(if n % 2 == 0 {
                 store.mark_starting(
                     &queued,
@@ -1657,7 +1656,7 @@ mod process_wait_tests {
         let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let lane = store.record(run.attempt_id, &call)?;
         let waits = store.lane_waits_with_resources(
             &[lane],
             &call,

@@ -990,7 +990,7 @@ fn landed_writer_fence_fixture(
     let mut input = tests::input();
     input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),

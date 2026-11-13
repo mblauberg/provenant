@@ -74,24 +74,6 @@ fn read_only_lanes_are_spaced_2_seconds_apart() -> TestResult {
     Ok(())
 }
 #[test]
-fn the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut run = lane(90, false);
-    run.request.concurrency = 16;
-    store.create(&run, &call)?;
-    assert_eq!(store.request(run.attempt_id, &call)?.concurrency, 16);
-    let mut wider = lane(91, false);
-    wider.request.concurrency = 17;
-    assert!(matches!(
-        store.create(&wider, &call),
-        Err(RunError::Validation(_))
-    ));
-    Ok(())
-}
-#[test]
 fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_root() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -525,66 +507,23 @@ fn configured_project_cap_allows_up_to_32_active_lanes() -> TestResult {
         store.writer_registry.join("config.toml"),
         "schema_version=1\n[domains.fabric.lanes]\nmax_project_lanes = 32\n",
     )?;
-    // Four runs of eight keep each run under its own batch concurrency.
     let mut index = 0_i64;
-    for seed in 60..64 {
-        let run = batch(seed, 8);
-        store.create(&run, &call)?;
-        for attempt in &run.attempts {
-            let id = attempt.attempt_id;
-            store.mark_starting(
-                &store.record(id, &call)?,
-                &route(),
-                &[],
-                &Default::default(),
-                None,
-                &call,
-            )?;
-            // Spaced past both classes' windows so only the cap can refuse.
-            index += 1;
-            assert!(
-                store.claim(id, &at(index * 20_000), &call)?.is_some(),
-                "lane {index} is within the 32-lane project cap"
-            );
-        }
+    for seed in 60..92 {
+        let id = starting(&store, &lane(seed, false), &call)?;
+        // Spaced past both classes' windows so only the cap can refuse.
+        index += 1;
+        assert!(
+            store.claim(id, &at(index * 20_000), &call)?.is_some(),
+            "lane {index} is within the 32-lane project cap"
+        );
     }
-    let over = lane(70, false);
+    let over = lane(200, false);
     let id = starting(&store, &over, &call)?;
     assert!(
         store.claim(id, &at(40 * 20_000), &call)?.is_none(),
         "the 33rd lane waits for the project cap"
     );
     Ok(())
-}
-#[test]
-fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
-    let profile = |knobs: &[(&str, u64)]| HarnessProfile {
-        name: "test".into(),
-        knobs: knobs
-            .iter()
-            .map(|(k, v)| ((*k).into(), (*v).into()))
-            .collect(),
-        ..HarnessProfile::default()
-    };
-    let tuned = profile(&[
-        ("lanes.max_concurrency", 2),
-        ("lanes.max_concurrency_read_only", 5),
-    ]);
-    assert_eq!(concurrency(None, &tuned, false, None), 2);
-    assert_eq!(concurrency(None, &tuned, true, None), 5);
-    let bare = HarnessProfile::default();
-    let writer_default = concurrency(None, &bare, false, None);
-    let reader_default = concurrency(None, &bare, true, None);
-    assert!(reader_default >= writer_default);
-    assert_eq!(concurrency(Some(3), &bare, false, None), 3);
-    assert_eq!(concurrency(Some(3), &bare, true, None), 3);
-    assert_eq!(concurrency(None, &tuned, true, Some(3)), 3, "bounded");
-    assert_eq!(
-        concurrency(None, &tuned, true, Some(7)),
-        5,
-        "a cap, not a floor"
-    );
-    assert_eq!(concurrency(Some(12), &tuned, true, Some(3)), 12, "explicit");
 }
 #[test]
 fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestResult {
@@ -602,7 +541,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     let reader = starting(&store, &lane(102, false), &call)?;
     let queued = lane(103, false);
     store.create(&queued, &call)?;
-    let queued = queued.attempts[0].attempt_id;
+    let queued = queued.attempt_id;
     // The test clock reads 0 ms, so the writer start is happening now.
     assert!(store.claim(first, &at(0), &call)?.is_some());
     let records = [first, second, reader, queued]
@@ -629,34 +568,6 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     assert_eq!(queued.lane_class, LaneClass::ReadOnly);
     assert!(queued.waiting_for.starts_with("launch"));
 
-    // A serial run reports its own concurrency before any spacing.
-    let serial = {
-        let mut run = two_tasks(1);
-        run.attempt_id = AttemptId::from_bytes([110; 16]);
-        run.operation_id = provenant_core::OperationId::parse("serial-waits")?;
-        run.attempts[0].attempt_id = AttemptId::from_bytes([111; 16]);
-        run.attempts[1].attempt_id = AttemptId::from_bytes([112; 16]);
-        crate::tests::rekey(&mut run);
-        run
-    };
-    store.create(&serial, &call)?;
-    let [a, b] = [serial.attempts[0].attempt_id, serial.attempts[1].attempt_id];
-    for id in [a, b] {
-        store.mark_starting(
-            &store.record(id, &call)?,
-            &route(),
-            &[],
-            &Default::default(),
-            None,
-            &call,
-        )?;
-    }
-    assert!(store.claim(a, &at(0), &call)?.is_some());
-    let blocked = store.lane_waits(&[store.record(b, &call)?], &call);
-    assert_eq!(
-        blocked[0].waiting_for,
-        "run concurrency: 1 of 1 lanes of this run are active"
-    );
     Ok(())
 }
 #[test]

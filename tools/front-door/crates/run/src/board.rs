@@ -132,7 +132,7 @@ mod tests {
         let created = provenant_os::changes::read(state)?;
         assert!(created.board.is_some());
         let generation = store.board_generation(&call)?;
-        let queued = store.record(input.attempts[0].attempt_id, &call)?;
+        let queued = store.record(input.attempt_id, &call)?;
         let attempt = store.mark_starting(
             &queued,
             &crate::tests::route(),
@@ -159,7 +159,7 @@ mod tests {
         assert!(
             store
                 .withdraw(
-                    input.attempts[0].attempt_id,
+                    input.attempt_id,
                     AttemptState::Queued {
                         extra: Default::default()
                     },
@@ -186,7 +186,7 @@ mod tests {
             let mut input = input();
             input.attempt_id = AttemptId::from_bytes([n; 16]);
             input.operation_id = provenant_core::OperationId::parse(&format!("board-{n}"))?;
-            input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+            input.attempt_id = AttemptId::from_bytes([n; 16]);
             crate::tests::rekey(&mut input);
             input.request.task.title = Some(format!("Task {n}"));
             store.create(&input, &call)?;
@@ -202,7 +202,10 @@ mod tests {
         loop {
             for lane in &current.lanes {
                 assert!(seen.insert(lane.attempt.attempt_id), "duplicate attempt");
-                assert_eq!(lane.operation.operation_id.as_str(), format!("board-{}", lane.attempt.attempt_id.as_bytes()[0]));
+                assert_eq!(
+                    lane.operation.operation_id.as_str(),
+                    format!("board-{}", lane.attempt.attempt_id.as_bytes()[0])
+                );
                 assert_eq!(lane.attempt.usage, UsageRecord::default());
                 assert_eq!(
                     lane.attempt.title,
@@ -219,7 +222,7 @@ mod tests {
         let mut later = input();
         later.attempt_id = AttemptId::from_bytes([6; 16]);
         later.operation_id = provenant_core::OperationId::parse("board-6")?;
-        later.attempts[0].attempt_id = AttemptId::from_bytes([6; 16]);
+        later.attempt_id = AttemptId::from_bytes([6; 16]);
         crate::tests::rekey(&mut later);
         store.create(&later, &call)?;
         let snapshot = store.board_page(None, true, 100, 0, Some(high_water), &call)?;

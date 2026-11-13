@@ -769,7 +769,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let input = crate::tests::input();
         store.create(&input, &call)?;
-        let mut attempt = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut attempt = store.record(input.attempt_id, &call)?;
         let old = attempt.clone();
         let db = Contributions::open(context.state_root.as_path(), &call)?;
         let first = PullRequest {
@@ -856,7 +856,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let input = crate::tests::input();
         store.create(&input, &call)?;
-        let attempt = store.record(input.attempts[0].attempt_id, &call)?;
+        let attempt = store.record(input.attempt_id, &call)?;
         let db = Contributions::open(context.state_root.as_path(), &call)?;
         let mut pr = PullRequest {
             repository: "owner/repo".into(),
@@ -895,7 +895,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let input = crate::tests::input();
         store.create(&input, &call)?;
-        let mut attempt = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut attempt = store.record(input.attempt_id, &call)?;
         let db = Contributions::open(context.state_root.as_path(), &call)?;
         let old = PullRequest {
             repository: "owner/repo".into(),
@@ -949,7 +949,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let input = crate::tests::input();
         store.create(&input, &call)?;
-        let attempt = store.record(input.attempts[0].attempt_id, &call)?;
+        let attempt = store.record(input.attempt_id, &call)?;
         let old = PullRequest {
             repository: "owner/repo".into(),
             number: 10,
@@ -1034,7 +1034,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let input = crate::tests::input();
         store.create(&input, &call)?;
-        let mut attempt = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut attempt = store.record(input.attempt_id, &call)?;
         let db = Contributions::open(context.state_root.as_path(), &call)?;
         let pr = PullRequest {
             repository: "owner/repo".into(),
@@ -1071,7 +1071,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let input = crate::tests::input();
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let db = Contributions::open(context.state_root.as_path(), &call)?;
         let pr = PullRequest {
             repository: "owner/repo".into(),
@@ -1123,7 +1123,6 @@ mod tests {
         assert_eq!(rows[0].account.as_deref(), Some("work"));
         assert_eq!(rows[0].head, Some(head));
         assert_eq!(rows[0].weight_millionths, Some(WEIGHT_ONE));
-        assert_eq!(rows[0].run, Some(queued.attempt_id));
         assert_eq!(rows[0].queued_at, Some(queued.queued_at));
         assert_eq!(rows[0].outcome, Some(crate::Outcome::Cancelled));
         assert_eq!(rows[0].finished_at, Some(queued.queued_at));

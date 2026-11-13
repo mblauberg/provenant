@@ -42,7 +42,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         input.request.task.writer = Some(fixture.writer.clone());
         input.request.task.deliver = Some(fixture.request.clone());
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let attempt = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         let mut driver =
@@ -455,7 +455,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     let mut input = tests::input();
     input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -586,7 +586,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let mut input = tests::input();
     input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let temporary = store.temporary_path(id, &call)?;
     let launch = crate::prepare_writer(
         &fixture.writer,
@@ -827,7 +827,7 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         let mut input = tests::input();
         input.request.task.writer = Some(fixture.writer.clone());
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut exit = tests::exit();
         if outcome == Outcome::Cancelled {
             exit.cancel_delivered_before_exit = Some(true);

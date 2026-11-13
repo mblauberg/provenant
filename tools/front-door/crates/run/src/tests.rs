@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock as _, Digest, MonoTime, OperationId, ProjectId,
-    RootInputs, AttemptId, TaskId, TestClock, WallTime,
+    RootInputs, TestClock, WallTime,
 };
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
@@ -212,7 +212,7 @@ fn lane_listings_do_not_flush_a_settled_attempts_delivery_receipt() -> TestResul
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let _run = store.create(&input, &call)?;
     crate::dispatch_tests::seal_exit(&store, &exit())?;
     let settled = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
@@ -270,7 +270,7 @@ fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult 
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let _run = store.create(&input, &call)?;
     let record = store.record(id, &call)?;
     let attempt = store.attempt_dir(id, false)?;
@@ -358,16 +358,18 @@ pub(super) fn digest_prefix(digest: impl std::fmt::Display) -> ArtifactValue {
     let text = digest.to_string();
     ArtifactValue::Digest(text.trim_start_matches("sha256:")[..12].to_string())
 }
-/// Give every task of a fixture run its own key, derived from the run and
-/// task ids, so fixtures that mint ids also mint keys.
+/// Give the fixture attempt its own work key: a graph named for the attempt,
+/// a node and attempt number one, so fixtures that mint ids also mint keys.
 pub(crate) fn rekey(prepared: &mut PreparedRun) {
-    let run = prepared.attempt_id;
-    for task in &mut prepared.request.tasks {
-        let context = task.context.get_or_insert_with(Default::default);
-        context.graph_id = Some(format!("lane-{run}"));
-        context.node_id = Some(task.task_id.to_string());
-        context.attempt = Some(1);
-    }
+    let attempt = prepared.attempt_id;
+    let context = prepared
+        .request
+        .task
+        .context
+        .get_or_insert_with(Default::default);
+    context.graph_id = Some(format!("lane-{attempt}"));
+    context.node_id = Some("node".to_string());
+    context.attempt = Some(1);
 }
 pub(super) fn input() -> PreparedRun {
     let mut prepared = raw_input();
@@ -375,18 +377,17 @@ pub(super) fn input() -> PreparedRun {
     prepared
 }
 fn raw_input() -> PreparedRun {
-    let task = TaskId::from_bytes([3; 16]);
     PreparedRun {
-        run_id: AttemptId::from_bytes([4; 16]),
+        attempt_id: AttemptId::from_bytes([6; 16]),
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
+        prompt: "exact prompt".into(),
         request: CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![TaskRequest {
+            task: TaskRequest {
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -397,7 +398,6 @@ fn raw_input() -> PreparedRun {
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),
-                task_id: task,
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {
                     extra: Default::default(),
@@ -411,17 +411,11 @@ fn raw_input() -> PreparedRun {
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: None,
         },
-        attempts: vec![NewAttempt {
-            task_id: task,
-            attempt_id: AttemptId::from_bytes([6; 16]),
-            prompt: "exact prompt".into(),
-        }],
     }
 }
 
@@ -488,7 +482,7 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if *saved == diagnostic)
     );
     let mut changed = input;
-    changed.request.concurrency = 2;
+    changed.request.lane_depth = Some(2);
     assert!(matches!(
         store.create(&changed, &call),
         Err(RunError::OperationConflict)
@@ -549,7 +543,7 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     for n in 10_u8..91 {
         input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
         input.attempt_id = AttemptId::from_bytes([n; 16]);
-        input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
         crate::tests::rekey(&mut input);
         store.record_refusal(
             &input,
@@ -602,7 +596,7 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
     for n in 0_u8..164 {
         input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
         input.attempt_id = AttemptId::from_bytes([n; 16]);
-        input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
         crate::tests::rekey(&mut input);
         let record = store.record_refusal(
             &input,
@@ -669,7 +663,9 @@ fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.task
+    input
+        .request
+        .task
         .profile
         .knobs
         .insert("chair.refusal_notice".into(), serde_json::json!("off"));
@@ -719,8 +715,7 @@ pub(super) fn exit() -> ExitObservation {
         cancel_delivered_before_exit: None,
         publication: PublicationState::Durable,
         scope: Scope {
-            run: input().attempt_id,
-            attempt: input().attempts[0].attempt_id,
+            attempt: input().attempt_id,
             generation: 0,
         },
         termination: Some(Termination::Exit(0)),
@@ -798,9 +793,7 @@ fn overview_bounds_aggregate_record_bytes_before_decoding() -> TestResult {
         let mut value = input();
         value.attempt_id = AttemptId::from_bytes([n; 16]);
         value.operation_id = OperationId::parse(&format!("run-{n}"))?;
-        value.request.task.task_id = TaskId::from_bytes([n; 16]);
-        value.attempts[0].task_id = value.request.task.task_id;
-        value.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
+        value.attempt_id = AttemptId::from_bytes([n; 16]);
         crate::tests::rekey(&mut value);
         value.request.task.title = Some("x".repeat(200));
         writer.create(&value, &call)?;
@@ -871,7 +864,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
     let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
@@ -926,7 +919,7 @@ fn record_read_is_one_snapshot_across_a_concurrent_terminal_publication() -> Tes
     let reader = RunStore::open(&context, &call)?;
     let prepared = input();
     reader.create(&prepared, &call)?;
-    let id = prepared.attempts[0].attempt_id;
+    let id = prepared.attempt_id;
     // Another connection settles the attempt after the reader has taken the
     // pre-terminal attempt row but before it looks for the settlement receipt.
     let publisher = context.clone();
@@ -981,7 +974,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
     let receipt = record.delivery.ok_or("delivery state missing")?;
     assert_eq!(
@@ -1152,13 +1145,18 @@ fn historical_task_class_preserves_request_verification_and_lane_listing() -> Te
         let store = RunStore::open(&context, &call)?;
         let mut input = input();
         let mut sealed = serde_json::to_value(&input.request)?;
-        sealed["tasks"][0]["profile"] = serde_json::json!({
+        sealed["task"]["profile"] = serde_json::json!({
             "name": "", "knobs": {}, "overrides": [], "task_class": task_class
         });
         let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
         input.request = serde_json::from_value(sealed.clone())?;
         store.create(&input, &call)?;
-        assert_eq!(store.run(input.attempt_id, &call)?.request_digest, digest);
+        assert_eq!(
+            store
+                .attempt_operation(input.attempt_id, &call)?
+                .request_digest,
+            digest
+        );
         assert_eq!(
             serde_json::to_value(store.request(input.attempt_id, &call)?)?,
             sealed
@@ -1178,7 +1176,7 @@ fn historical_task_class_preserves_request_verification_and_lane_listing() -> Te
         assert_eq!(page.lanes.len(), 1);
         assert_eq!(
             serde_json::to_value(&page.lanes[0].profile)?,
-            sealed["tasks"][0]["profile"]
+            sealed["task"]["profile"]
         );
     }
     Ok(())
@@ -1193,7 +1191,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     for part in [ArtifactPart::Result, ArtifactPart::Stderr] {
         assert!(matches!(
@@ -1245,7 +1243,7 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let secret = format!("ghp_{}", "a".repeat(36));
@@ -1311,7 +1309,7 @@ fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let text = "sealed result";
@@ -1357,13 +1355,15 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let stored = store.run(input.attempt_id, &call)?.request_digest;
-    let path = context.state_root.as_path().join(format!(
-        "attempts/{}/request.json",
-        input.attempts[0].attempt_id
-    ));
+    let stored = store
+        .attempt_operation(input.attempt_id, &call)?
+        .request_digest;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}/request.json", input.attempt_id));
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    value["concurrency"] = 99.into();
+    value["lane_depth"] = 99.into();
     let raw = crate::db::bytes(&value)?;
     let recomputed = CanonicalV1::record_digest("run-request", 1, &value)?;
     std::fs::write(&path, raw)?;
@@ -1403,10 +1403,10 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     assert_eq!(task.len(), 9);
     let mut raw = crate::db::bytes(&value)?;
     let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
-    let path = context.state_root.as_path().join(format!(
-        "attempts/{}/request.json",
-        input.attempts[0].attempt_id
-    ));
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}/request.json", input.attempt_id));
     std::fs::write(&path, &raw)?;
     let mut operation = store
         .operation(&input.operation_id, &call)?
@@ -1443,7 +1443,7 @@ fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult 
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
         let text = format!(
@@ -1481,7 +1481,7 @@ fn transcript_part_reads_the_redacted_tail_of_the_provider_transcript() -> TestR
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let _run = store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let mut done = publication();
@@ -1525,7 +1525,7 @@ fn created_attempt_and_event_carry_the_host_and_submitting_parent() -> TestResul
     let mut input = input();
     input.request.parent_attempt = Some(parent);
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.record(id, &call)?;
     assert_eq!(record.trace.host, Some(host));
     assert_eq!(record.trace.parent, Some(parent));
@@ -1560,18 +1560,17 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         decoded.digest()?,
         CanonicalV1::record_digest("run-request", 1, &unstamped)?
     );
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let run = store.create(&input, &call)?;
     assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
-    assert_eq!(run.closure, Closure::Open);
     assert!(matches!(
         store.attempt(id, &call),
         Err(RunError::Nonterminal)
     ));
     assert_eq!(store.create(&input, &call)?.attempt_id, run.attempt_id);
     let mut changed = self::input();
-    changed.request.concurrency = 2;
+    changed.request.lane_depth = Some(2);
     assert!(matches!(
         store.create(&changed, &call),
         Err(RunError::OperationConflict)
@@ -1605,7 +1604,6 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         store.publish_terminal(id, 1, &publication(), &exit(), &call)?,
         record
     );
-    assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store.operation(&input.operation_id, &call)?.unwrap().state,
         OperationState::Terminal
@@ -1654,9 +1652,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert_ne!(reviewer.actor_id, context.actor_id);
     assert_eq!(fact.verified_owner, Some(context.actor_id));
     assert_eq!(
-        store
-            .attempts(AttemptFilter::default(), &call)?
-            .collect::<Result<Vec<_>>>()?,
+        store.attempts(&call)?.collect::<Result<Vec<_>>>()?,
         vec![fact]
     );
     let events = store.events(0, 64, None, &call)?;
@@ -1672,7 +1668,6 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         extra: record.trace.extra.clone(),
         host: None,
         project: Some(context.project_id),
-        run: Some(run.attempt_id),
         attempt: Some(id),
         operation: Some(input.operation_id.clone()),
         actor: Some(context.actor_id),
@@ -1706,12 +1701,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         Err(RunError::NotFound)
     ));
     drop(store);
-    assert_eq!(
-        RunStore::open(&context, &call)?
-            .attempts(AttemptFilter::default(), &call)?
-            .count(),
-        1
-    );
+    assert_eq!(RunStore::open(&context, &call)?.attempts(&call)?.count(), 1);
     Ok(())
 }
 
@@ -1726,13 +1716,13 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
     let input = input();
     store.create(&input, &call)?;
     let expected = WallTime::parse("2026-10-25T00:00:00.000000Z")?;
-    let directory = store.attempt_dir(input.attempts[0].attempt_id, true)?;
+    let directory = store.attempt_dir(input.attempt_id, true)?;
     artifacts::seal(
         &directory,
         "process.json",
         &serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": input.attempt_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
+            "scope": {"run": input.attempt_id, "attempt": input.attempt_id, "generation": 0},
             "last_output_at": expected,
             "priority": 15,
             "publication_pending": false
@@ -1740,15 +1730,10 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
         RECORD_LIMIT,
     )?;
     assert_eq!(
-        store
-            .record(input.attempts[0].attempt_id, &call)?
-            .last_output_at,
+        store.record(input.attempt_id, &call)?.last_output_at,
         Some(expected)
     );
-    assert_eq!(
-        store.record(input.attempts[0].attempt_id, &call)?.priority,
-        Some(15)
-    );
+    assert_eq!(store.record(input.attempt_id, &call)?.priority, Some(15));
     Ok(())
 }
 
@@ -1778,14 +1763,14 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let directory = store.attempt_dir(input.attempts[0].attempt_id, true)?;
+        let directory = store.attempt_dir(input.attempt_id, true)?;
         artifacts::seal(
             &directory,
             "process.json",
             &serde_json::to_vec(&checkpoint)?,
             RECORD_LIMIT,
         )?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         assert!(
             store
                 .record_observed(id, &call)?
@@ -1844,7 +1829,7 @@ fn read_only_open_works_without_directory_write_access_or_creating_files() -> Te
     std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o500))?;
 
     let store = RunStore::open_read_only(&context, &call)?.ok_or("initialised store missing")?;
-    assert_eq!(store.attempts(AttemptFilter::default(), &call)?.count(), 0);
+    assert_eq!(store.attempts(&call)?.count(), 0);
     drop(store);
 
     std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700))?;
@@ -1887,7 +1872,7 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     assert!(matches!(
@@ -1943,12 +1928,11 @@ fn oversized_prompt_retains_code_and_projects_field_limit() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut request = input();
-    request.attempts[0].prompt = format!(
+    request.prompt = format!(
         "TOKEN_SENTINEL{}",
         "é".repeat((RECORD_LIMIT / 2 + 1) as usize)
     );
-    request.request.task.prompt_digest =
-        CanonicalV1::file_digest(request.attempts[0].prompt.as_bytes());
+    request.request.task.prompt_digest = CanonicalV1::file_digest(request.prompt.as_bytes());
     let Err(error) = store.create(&request, &call) else {
         return Err("oversized prompt accepted".into());
     };
@@ -1993,7 +1977,7 @@ fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResul
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
@@ -2051,7 +2035,7 @@ fn publication_crash_worker() -> TestResult {
     let crash = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
     if crash.starts_with("withdraw-") {
         store.withdraw(
-            input.attempts[0].attempt_id,
+            input.attempt_id,
             AttemptState::Queued {
                 extra: Default::default(),
             },
@@ -2067,13 +2051,13 @@ fn publication_crash_worker() -> TestResult {
         return Err("crash phase was not reached".into());
     }
     seal_exit_fixture(&store, &input)?;
-    let attempt = store.attempt_dir(input.attempts[0].attempt_id, false)?;
+    let attempt = store.attempt_dir(input.attempt_id, false)?;
     crate::artifacts::seal(
         &attempt,
         "terminal-effects.json",
         &crate::db::bytes(&crate::store::TerminalEffects {
             schema_version: 1,
-            scope: RunStore::scope(&store.record(input.attempts[0].attempt_id, &call)?),
+            scope: RunStore::scope(&store.record(input.attempt_id, &call)?),
             effects: vec![(
                 SettlementEffect::ManifestConflict,
                 EffectDisposition::Failed {
@@ -2084,13 +2068,7 @@ fn publication_crash_worker() -> TestResult {
         })?,
         RECORD_LIMIT,
     )?;
-    store.publish_terminal(
-        input.attempts[0].attempt_id,
-        1,
-        &publication(),
-        &exit(),
-        &call,
-    )?;
+    store.publish_terminal(input.attempt_id, 1, &publication(), &exit(), &call)?;
     Err("crash phase was not reached".into())
 }
 #[test]
@@ -2156,7 +2134,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         assert_eq!(
             store.record(id, &call)?.prompt.digest,
             input.request.task.prompt_digest
@@ -2172,7 +2150,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         // A replay mints fresh IDs; it must land on the reserved ones.
         let mut replay = self::input();
         replay.attempt_id = AttemptId::from_bytes([9; 16]);
-        replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+        replay.attempt_id = AttemptId::from_bytes([10; 16]);
         assert_eq!(store.create(&replay, &call)?.attempt_id, input.attempt_id);
         if !phase.starts_with("withdraw-") {
             seal_exit_fixture(&store, &input)?;
@@ -2258,7 +2236,7 @@ fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
         let dir = store.attempt_dir(id, false)?;
@@ -2286,7 +2264,7 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     super::artifacts::seal(
@@ -2311,7 +2289,6 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
         }
     );
     store.recover_result_only(id, &recomputed, &exit(), &call)?;
-    assert_eq!(store.run(input.attempt_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store
             .read_output(
@@ -2336,7 +2313,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     assert_eq!(admission_count(&store)?, 1);
     seal_exit_fixture(&store, &input)?;
@@ -2357,12 +2334,10 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
         Err(RunError::Nonterminal)
     ));
     assert_eq!(store.events(0, 64, None, &call)?.len(), 1);
-    assert_eq!(store.run(input.attempt_id, &call)?.closure, Closure::Open);
     store.db.pragma_update(None, "max_page_count", 10000)?;
     store.recover_terminal(id, &exit(), &call)?;
     assert_eq!(admission_count(&store)?, 0);
     assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
-    assert_eq!(store.run(input.attempt_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store
             .read_output(
@@ -2392,7 +2367,7 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let mut observation = exit();
         observation.cancel_delivered_before_exit = delivered;
@@ -2426,7 +2401,7 @@ fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let attempt = store.attempt_dir(id, false)?;
@@ -2462,7 +2437,7 @@ fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
         let run = store.attempt_dir(input.attempt_id, false)?;
@@ -2514,7 +2489,7 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
         project: temp.path().into(),
         worktree: temp.path().into(),
     });
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let temporary = store.temporary_path(id, &call)?;
@@ -2537,7 +2512,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let attempt = store.attempt_dir(id, false)?;
@@ -2636,7 +2611,7 @@ fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult 
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let mut observation = exit();
         observation.never_spawned = prelaunch;
@@ -2698,7 +2673,7 @@ pub(super) fn seal_observation(
         .as_object_mut()
         .ok_or("exit fixture")?
         .insert("schema_version".into(), 1.into());
-    let dir = store.attempt_dir(input.attempts[0].attempt_id, false)?;
+    let dir = store.attempt_dir(input.attempt_id, false)?;
     super::artifacts::seal(
         &dir,
         "process-exit.json",
@@ -2723,7 +2698,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     let mut observation = exit();
     observation.never_spawned = true;
@@ -2849,7 +2824,7 @@ fn output_redacts_before_slicing_and_keeps_artifact_binding() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
@@ -2894,7 +2869,7 @@ fn lane_selection_is_owned_and_skips_seen_completions() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let query = |owner: Option<ActorId>, unseen_after: Option<u64>| LaneQuery {
         targets: vec![],
         all: unseen_after.is_some(),
@@ -2962,7 +2937,7 @@ fn settle_one(
     call: &Request<'_>,
 ) -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
     let input = input();
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.create(&input, call)?;
     let mut observation = exit();
     observation.never_spawned = true;
@@ -2985,7 +2960,7 @@ fn a_terminal_commit_owes_one_frozen_reaction_in_the_same_transaction() -> TestR
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     assert_eq!(store.pending_reactions(input.attempt_id, &call)?, [id]);
     let owed = store.reaction(id, &call)?.ok_or("row")?;
     assert!(
@@ -3012,7 +2987,10 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     // The guardian dies after the commit, before any reaction.
     drop(store);
     let recovery = RunStore::open(&context, &call)?;
-    assert_eq!(recovery.pending_reactions(input.attempt_id, &call)?.len(), 1);
+    assert_eq!(
+        recovery.pending_reactions(input.attempt_id, &call)?.len(),
+        1
+    );
     let calls = std::cell::RefCell::new((0, 0));
     let mut step = |reaction: &mut Reaction,
                     _save: &mut crate::reactions::Saver<'_>|
@@ -3037,9 +3015,16 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     let failed = recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step);
     assert_eq!(failed.unwrap_err().to_string(), "inbox busy");
     // Progress is kept and the row is still owed.
-    assert_eq!(recovery.pending_reactions(input.attempt_id, &call)?.len(), 1);
+    assert_eq!(
+        recovery.pending_reactions(input.attempt_id, &call)?.len(),
+        1
+    );
     recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
-    assert!(recovery.pending_reactions(input.attempt_id, &call)?.is_empty());
+    assert!(
+        recovery
+            .pending_reactions(input.attempt_id, &call)?
+            .is_empty()
+    );
     recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
     // The graph ran once, the failed notice ran twice, and nothing ran after.
     assert_eq!(*calls.borrow(), (1, 2));
@@ -3086,7 +3071,7 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.prune_reactions(i64::MAX, &call)?;
     assert!(store.reaction(id, &call)?.is_some());
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
@@ -3128,7 +3113,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
     let call = call(&base, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let skewed = SkewClock {
         inner: clock(),
         skew: Default::default(),
@@ -3158,7 +3143,7 @@ fn a_step_boundary_save_survives_a_failure_after_it() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let failed = store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, save| {
         reaction.resolved = true;
         save(reaction)?;
@@ -3199,7 +3184,7 @@ fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     // A lane rewrites the row to name its own executables and config root.
     let mut forged = serde_json::to_value(store.reaction(id, &call)?.ok_or("row")?)?;
     forged["graph"] = serde_json::json!({
@@ -3234,7 +3219,7 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
         blocker.execute_batch("BEGIN IMMEDIATE")?;
@@ -3289,7 +3274,7 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let input = input();
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.create(&input, &call)?;
         let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
         blocker.execute_batch("BEGIN IMMEDIATE")?;
@@ -3367,7 +3352,7 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
@@ -3387,13 +3372,11 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     Ok(())
 }
 
-/// A graph node's launch: its own run, task and attempt ids under `key`.
+/// A graph node's launch: its own attempt id under `key`.
 fn keyed_input(seed: u8, operation: &str, graph: &str, node: &str, attempt: u32) -> PreparedRun {
     let mut prepared = input();
-    let task = TaskId::from_bytes([seed; 16]);
-    prepared.attempt_id = AttemptId::from_bytes([seed + 1; 16]);
+    prepared.attempt_id = AttemptId::from_bytes([seed + 2; 16]);
     prepared.operation_id = OperationId::parse(operation).unwrap();
-    prepared.request.task.task_id = task;
     crate::tests::rekey(&mut prepared);
     prepared.request.task.context = Some(provenant_records::run::WorkContext {
         graph_id: Some(graph.into()),
@@ -3401,11 +3384,6 @@ fn keyed_input(seed: u8, operation: &str, graph: &str, node: &str, attempt: u32)
         attempt: Some(attempt),
         ..Default::default()
     });
-    prepared.attempts[0] = NewAttempt {
-        task_id: task,
-        attempt_id: AttemptId::from_bytes([seed + 2; 16]),
-        prompt: "exact prompt".into(),
-    };
     prepared
 }
 
@@ -3429,15 +3407,15 @@ fn admission_requires_a_key_and_records_it() -> TestResult {
     assert!(store.create(&raw_input(), &call).is_err());
     let keyed = input();
     store.create(&keyed, &call)?;
-    let record = store.record(keyed.attempts[0].attempt_id, &call)?;
-    let key = record.key.clone().ok_or("admitted attempt has no key")?;
+    let record = store.record(keyed.attempt_id, &call)?;
+    let key = record.key.clone();
     let raw: Vec<u8> = store.db.query_row(
         "SELECT record FROM attempts WHERE id=?1",
         [record.attempt_id.to_string()],
         |row| row.get(0),
     )?;
     let persisted = crate::db::decode_attempt(&raw)?;
-    assert_eq!(persisted.key.as_ref(), Some(&key));
+    assert_eq!(persisted.key, key);
     // A restarted host finds the same attempt by its key alone.
     drop(store);
     let restarted = RunStore::open(&context, &call)?;
@@ -3463,17 +3441,17 @@ fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
     let plain_key = provenant_records::WorkKey::new(
         context.project_id,
         format!("lane-{}", plain.attempt_id),
-        plain.attempts[0].task_id.to_string(),
+        "node",
         1,
     )?;
     let graph_key = provenant_records::WorkKey::new(context.project_id, "graph-one", "review", 1)?;
     for (prepared, key) in [(&plain, &plain_key), (&graph, &graph_key)] {
-        let id = prepared.attempts[0].attempt_id;
+        let id = prepared.attempt_id;
         assert_eq!(&store.work_key(id, &call)?, key);
         let record = store.attempt_by_key(key, &call)?;
         assert_eq!(record.attempt_id, id);
-        assert_eq!(record.key.as_ref(), Some(key));
-        assert_eq!(store.record(id, &call)?.key.as_ref(), Some(key));
+        assert_eq!(&record.key, key);
+        assert_eq!(&store.record(id, &call)?.key, key);
     }
     let database = run_database(&context)?;
     let shape = |id: AttemptId| {
@@ -3494,10 +3472,7 @@ fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
             },
         )
     };
-    assert_eq!(
-        shape(plain.attempts[0].attempt_id)?,
-        shape(graph.attempts[0].attempt_id)?
-    );
+    assert_eq!(shape(plain.attempt_id)?, shape(graph.attempt_id)?);
     Ok(())
 }
 
@@ -3512,7 +3487,7 @@ fn concurrent_creates_of_one_work_key_admit_one_attempt() -> TestResult {
     }
     let first = keyed_input(30, "graph-race-a", "graph-race", "build", 1);
     let second = keyed_input(40, "graph-race-b", "graph-race", "build", 1);
-    let results: Vec<Result<RunRecord>> = std::thread::scope(|scope| {
+    let results: Vec<Result<AttemptRecord>> = std::thread::scope(|scope| {
         let handles: Vec<_> = [&first, &second]
             .into_iter()
             .map(|prepared| {

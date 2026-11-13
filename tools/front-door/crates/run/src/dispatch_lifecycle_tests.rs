@@ -39,10 +39,9 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
     store.start(initial.attempt_id, &refusal, &|_, _| unreachable!(), &call)?;
     let resumed = Resume {
         extend: Vec::new(),
-        prior: initial.attempts[0].attempt_id,
+        prior: initial.attempt_id,
         expected_generation: 0,
         operation_id: "rejected-resume".parse()?,
-        run_id: AttemptId::from_bytes([20; 16]),
         attempt_id: AttemptId::from_bytes([21; 16]),
         prompt: "answer".into(),
         created_at: WallTime::from_micros(100)?,
@@ -112,7 +111,7 @@ fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResu
     let store = RunStore::open(&context, &call)?;
     let original = input();
     store.create(&original, &call)?;
-    let prior = original.attempts[0].attempt_id;
+    let prior = original.attempt_id;
     let fake = Fake {
         refuse: true,
         ..Fake::default()
@@ -123,7 +122,6 @@ fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResu
         prior,
         expected_generation: 0,
         operation_id: provenant_core::OperationId::parse("resume-private")?,
-        run_id: AttemptId::from_bytes([50; 16]),
         attempt_id: AttemptId::from_bytes([51; 16]),
         prompt: "answer".into(),
         created_at: WallTime::from_micros(100)?,
@@ -173,15 +171,14 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     run.request.parent_attempt = Some(outer_parent);
     run.request.task.account = Some("fixture-account".into());
     store.create(&run, &call)?;
-    let prior = run.attempts[0].attempt_id;
-    let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
+    let prior = run.attempt_id;
+    let resume = |operation: &str, expected_generation, byte: u8| -> Result<Resume> {
         Ok(Resume {
             extend: Vec::new(),
             prior,
             expected_generation,
             operation_id: provenant_core::OperationId::parse(operation)
                 .map_err(|_| RunError::Validation("operation"))?,
-            run_id: provenant_core::AttemptId::from_bytes([byte; 16]),
             attempt_id: AttemptId::from_bytes([byte + 1; 16]),
             prompt: "answer".into(),
             created_at: WallTime::from_micros(100).map_err(|_| RunError::Validation("time"))?,
@@ -199,13 +196,15 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     assert_eq!(fake.resumed.get(), None);
 
     let continued = store.resume(&resume("r1", 0, 20)?, &call)?;
-    assert_eq!(continued.parent, Some(prior));
+    assert_eq!(continued.retry_of, Some(prior));
     assert_eq!(
         store.request(continued.attempt_id, &call)?.chair,
         run.request.chair
     );
     assert_eq!(
-        store.request(continued.attempt_id, &call)?.task
+        store
+            .request(continued.attempt_id, &call)?
+            .task
             .account
             .as_deref(),
         Some("fixture-account")
@@ -227,7 +226,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         store.resume(&resume("r2", 1, 30)?, &call),
         Err(RunError::Conflict)
     ));
-    let next = store.pending_attempts(continued.attempt_id, &call)?[0].attempt_id;
+    let next = continued.attempt_id;
     let record = store.record(next, &call)?;
     assert_eq!(record.retry_of, Some(prior));
     assert_eq!(record.attempt_number, 2);
@@ -240,7 +239,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     Ok(())
 }
 #[test]
-fn nested_continuation_uses_host_derived_ids() -> TestResult {
+fn nested_continuation_keeps_the_host_attempt_id_and_replays() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -252,33 +251,17 @@ fn nested_continuation_uses_host_derived_ids() -> TestResult {
     store.refuse_queued(child.attempt_id, "completed", &call)?;
     let mut resume = Resume {
         extend: Vec::new(),
-        prior: child.attempts[0].attempt_id,
+        prior: child.attempt_id,
         expected_generation: 0,
         operation_id: provenant_core::OperationId::parse("nested-continuation")?,
-        run_id: AttemptId::from_bytes([30; 16]),
         attempt_id: AttemptId::from_bytes([31; 16]),
         prompt: "answer".into(),
         created_at: clock.wall_now()?,
     };
     let continued = store.resume_fresh(&resume, "fixture", &call)?;
-    let request = store.request(continued.attempt_id, &call)?;
-    assert_eq!(request.child_attempt_id_version, Some(1));
-    assert_eq!(
-        Some(continued.attempt_id),
-        correlation::child_run_id(store.context.project_id, &request, &resume.operation_id)?
-    );
-    assert_ne!(continued.attempt_id, resume.attempt_id);
-    let attempt = store.pending_attempts(continued.attempt_id, &call)?.remove(0);
-    assert_eq!(
-        Some(attempt.attempt_id),
-        correlation::child_attempt_id(
-            store.context.project_id,
-            continued.attempt_id,
-            &request,
-            attempt.task_id
-        )?
-    );
-    resume.attempt_id = AttemptId::from_bytes([40; 16]);
+    assert_eq!(continued.attempt_id, resume.attempt_id);
+    // The operation names the attempt: a replay under another proposed id
+    // answers with the original.
     resume.attempt_id = AttemptId::from_bytes([41; 16]);
     assert_eq!(
         store.resume_fresh(&resume, "fixture", &call)?.attempt_id,
@@ -299,42 +282,30 @@ fn nested_continuation_preflight_does_not_reuse_crashed_staging() -> TestResult 
     store.refuse_queued(child.attempt_id, "completed", &call)?;
     let resume = Resume {
         extend: Vec::new(),
-        prior: child.attempts[0].attempt_id,
+        prior: child.attempt_id,
         expected_generation: 0,
         operation_id: "crashed-continuation".parse()?,
-        run_id: AttemptId::from_bytes([30; 16]),
         attempt_id: AttemptId::from_bytes([31; 16]),
         prompt: "answer".into(),
         created_at: clock.wall_now()?,
     };
-    let mut canonical = child.request.clone();
-    canonical.child_attempt_id_version = Some(1);
-    canonical.parent = Some(resume.prior);
-    canonical.fresh_continuation = Some("fixture".into());
-    canonical.task.prompt_digest = CanonicalV1::file_digest(resume.prompt.as_bytes());
-    let expected =
-        correlation::child_run_id(store.context.project_id, &canonical, &resume.operation_id)?
-            .unwrap();
-    let derived = correlation::child_attempt_id(
-        store.context.project_id,
-        expected,
-        &canonical,
-        child.attempts[0].task_id,
-    )?
-    .unwrap();
     let stale = store
         .context
         .state_root
         .as_path()
-        .join(format!("attempts/{derived}"));
+        .join(format!("attempts/{}", resume.attempt_id));
     std::fs::DirBuilder::new().mode(0o700).create(&stale)?;
     std::fs::write(stale.join("retained"), "stale staging")?;
-    let (continued, _) = store.resume_fresh_prepared(&resume, "fixture", None, &Ready, &call)?;
-    assert_eq!(continued.attempt_id, expected);
+    assert!(
+        store
+            .resume_fresh_prepared(&resume, "fixture", None, &Ready, &call)
+            .is_err()
+    );
     assert_eq!(
         std::fs::read_to_string(stale.join("retained"))?,
         "stale staging"
     );
+    assert!(store.operation(&resume.operation_id, &call)?.is_none());
     Ok(())
 }
 #[test]
@@ -345,20 +316,19 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let prior = run.attempts[0].attempt_id;
+    let prior = run.attempt_id;
     let fake = Fake {
         refuse: true,
         ..Fake::default()
     };
     store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
-    let resume = |operation: &str, expected_generation, byte| -> Result<Resume> {
+    let resume = |operation: &str, expected_generation, byte: u8| -> Result<Resume> {
         Ok(Resume {
             extend: Vec::new(),
             prior,
             expected_generation,
             operation_id: provenant_core::OperationId::parse(operation)
                 .map_err(|_| RunError::Validation("operation"))?,
-            run_id: provenant_core::AttemptId::from_bytes([byte; 16]),
             attempt_id: AttemptId::from_bytes([byte + 1; 16]),
             prompt: "answer".into(),
             created_at: WallTime::from_micros(100).map_err(|_| RunError::Validation("time"))?,
@@ -381,7 +351,10 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
     )?;
 
     let replayed = store.resume(&resume("r1", 0, 40)?, &call)?;
-    assert_eq!(replayed.attempt_id, provenant_core::AttemptId::from_bytes([20; 16]));
+    assert_eq!(
+        replayed.attempt_id,
+        provenant_core::AttemptId::from_bytes([21; 16])
+    );
     assert_eq!(replayed, continued);
     assert_eq!(
         store

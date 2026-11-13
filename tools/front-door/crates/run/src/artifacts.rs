@@ -572,7 +572,7 @@ mod tests {
         let call = crate::tests::call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let run = crate::tests::input();
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.create(&run, &call)?;
         seal(&store.attempt_dir(id, false)?, "result.md", b"hello", 1024)?;
         let path = artifact_path(id, "result.md")?;
@@ -626,7 +626,7 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let attempt = run.attempts[0].attempt_id;
+        let attempt = run.attempt_id;
         let relative = Path::new("attempts").join(attempt.to_string());
         std::fs::set_permissions(
             context.state_root.as_path().join(&relative),

@@ -7,7 +7,7 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.create(&run, &call)?;
     let started = store.start(
         run.attempt_id,
@@ -49,7 +49,7 @@ fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -100,7 +100,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
@@ -175,7 +175,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
         worktree: worktree.clone(),
     });
     store.create(&input, &call)?;
-    let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+    let mut record = store.record(input.attempt_id, &call)?;
     record.generation = 1;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
@@ -297,9 +297,9 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
         let mut proposal = input();
         proposal.attempt_id = AttemptId::from_bytes([35; 16]);
         proposal.operation_id = "lane-continuation".parse()?;
-        proposal.attempts[0].attempt_id = AttemptId::from_bytes([36; 16]);
+        proposal.attempt_id = AttemptId::from_bytes([36; 16]);
         crate::tests::rekey(&mut proposal);
-        proposal.request.parent = Some(prior.attempts[0].attempt_id);
+        proposal.request.parent = Some(prior.attempt_id);
         proposal.request.task.access.network = Some(NetworkAccess::Provider);
         let mut narrower = proposal.request.task.clone();
         narrower.access.network = Some(NetworkAccess::Provider);
@@ -347,60 +347,47 @@ fn lane_continuation_respects_sealed_parent_or_open_fallback() -> TestResult {
     Ok(())
 }
 #[test]
-fn priority_selection_failure_uses_compiled_default_and_starts_siblings() -> TestResult {
+fn priority_selection_failure_uses_compiled_default() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut prepared = two_tasks(2);
+    let mut prepared = input();
     prepared.request.task.build_heavy = true;
     store.create(&prepared, &call)?;
-    let first = prepared.attempts[0].attempt_id;
-    let sibling = prepared.attempts[1].attempt_id;
+    let id = prepared.attempt_id;
     let held = RefCell::new(Vec::new());
     let holder = |record: &AttemptRecord, _| {
         held.borrow_mut()
             .push((record.attempt_id, record.requested_priority));
         Err(RunError::Validation("fixture holder"))
     };
-    let started = store.start(
-        prepared.attempt_id,
-        &FirstPriorityFailure(prepared.attempts[0].task_id),
-        &holder,
-        &call,
-    )?;
+    let started = store.start(prepared.attempt_id, &PriorityFailure, &holder, &call)?;
     assert!(matches!(started.as_slice(), [
         Started::Refused { attempt, kind: RefusalKind::Handoff, .. },
-        Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
-    ] if *attempt == first && *second == sibling));
+    ] if *attempt == id));
     assert_eq!(
         *held.borrow(),
-        [
-            (
-                first,
-                Some(provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY)
-            ),
-            (sibling, Some(5))
-        ]
+        [(
+            id,
+            Some(provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY)
+        )]
     );
-    let selector = |attempt| WorkSelector {
+    let key = store.record(id, &call)?.key;
+    let selector = WorkSelector {
         project: store.context.project_id,
-        run: prepared.attempt_id,
-        task: None,
-        attempt: Some(attempt),
+        graph: key.graph().to_owned(),
+        node: Some(key.node().to_owned()),
+        attempt: Some(id),
         repository: None,
         head: None,
     };
     let host = store.context.state_root.clone();
     assert_eq!(
-        validate_work(&host, &selector(first), &call)?,
+        validate_work(&host, &selector, &call)?,
         WorkCoverage::Verified
     );
-    assert_eq!(
-        validate_work(&host, &selector(sibling), &call)?,
-        WorkCoverage::Verified
-    );
-    assert_eq!(terminal(&store, first, &call)?, Outcome::Rejected);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
     Ok(())
 }
 #[test]
@@ -414,7 +401,7 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
         let store = RunStore::open(&context, &call)?;
         let prepared = input();
         store.create(&prepared, &call)?;
-        let id = prepared.attempts[0].attempt_id;
+        let id = prepared.attempt_id;
         assert!(matches!(
             store.start(
                 prepared.attempt_id,
@@ -469,31 +456,23 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
     Ok(())
 }
 #[test]
-fn oversized_write_grants_reach_handoff_without_stalling_sibling() -> TestResult {
+fn oversized_write_grants_reach_handoff() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
-    let prepared = two_tasks(2);
+    let prepared = input();
     store.create(&prepared, &call)?;
-    let id = prepared.attempts[0].attempt_id;
-    let sibling = prepared.attempts[1].attempt_id;
-    let provider = FirstOversized {
-        first: prepared.attempts[0].task_id,
-        oversized: Confined {
-            writer: false,
-            tool_writes: (0..128)
-                .map(|i| PathGrant {
-                    path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
-                    scope: PathScope::Subtree,
-                })
-                .collect(),
-        },
-        ordinary: Confined {
-            writer: false,
-            tool_writes: vec![],
-        },
+    let id = prepared.attempt_id;
+    let provider = Confined {
+        writer: false,
+        tool_writes: (0..128)
+            .map(|i| PathGrant {
+                path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
+                scope: PathScope::Subtree,
+            })
+            .collect(),
     };
     let held = RefCell::new(Vec::new());
     let holder = |record: &AttemptRecord, _| {
@@ -503,13 +482,10 @@ fn oversized_write_grants_reach_handoff_without_stalling_sibling() -> TestResult
     let started = store.start(prepared.attempt_id, &provider, &holder, &call)?;
     assert!(matches!(
         started.as_slice(),
-        [
-            Started::Refused { attempt: first, kind: RefusalKind::Handoff, .. },
-            Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
-        ] if *first == id && *second == sibling
+        [Started::Refused { attempt: first, kind: RefusalKind::Handoff, .. }] if *first == id
     ));
-    // Both attempts reached the fixture handoff.
-    assert_eq!(*held.borrow(), [id, sibling]);
+    // The attempt reached the fixture handoff.
+    assert_eq!(*held.borrow(), [id]);
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let record = store.record(id, &call)?;
@@ -528,7 +504,12 @@ fn oversized_write_grants_reach_handoff_without_stalling_sibling() -> TestResult
     );
     assert!(
         store
-            .start(prepared.attempt_id, &provider, &|_, _| unreachable!(), &call)?
+            .start(
+                prepared.attempt_id,
+                &provider,
+                &|_, _| unreachable!(),
+                &call
+            )?
             .is_empty()
     );
     Ok(())
@@ -541,7 +522,7 @@ fn host_launch_uses_the_recorded_requester() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let prepared = input();
     let record = store.create(&prepared, &call)?;
-    let requester = store.run(record.attempt_id, &call)?.actor_id;
+    let requester = store.attempt_operation(record.attempt_id, &call)?.actor_id;
     let seen = Cell::new(None);
     let started = store.start(
         record.attempt_id,
@@ -998,30 +979,31 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
     Ok(())
 }
 #[test]
-fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() -> TestResult {
+fn policy_refusal_skips_provider_preparation() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let batch = two_tasks(2);
-    store.create(&batch, &call)?;
+    let prepared = input();
+    store.create(&prepared, &call)?;
     let providers = Fake {
-        refuse: true,
-        policy_task: Some(batch.request.task.task_id),
+        refuse_policy: true,
         ..Default::default()
     };
-    let started = store.start(batch.attempt_id, &providers, &|_, _| unreachable!(), &call)?;
-    assert_eq!(providers.prepared.get(), 1);
+    let started = store.start(
+        prepared.attempt_id,
+        &providers,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert_eq!(providers.prepared.get(), 0);
     assert!(matches!(started.as_slice(), [
-        Started::Refused { attempt: first, kind: RefusalKind::Policy, .. },
-        Started::Refused { attempt: second, kind: RefusalKind::Preparation, .. },
-    ] if *first == batch.attempts[0].attempt_id && *second == batch.attempts[1].attempt_id));
-    for attempt in &batch.attempts {
-        assert_eq!(
-            terminal(&store, attempt.attempt_id, &call)?,
-            Outcome::Rejected
-        );
-    }
+        Started::Refused { attempt, kind: RefusalKind::Policy, .. },
+    ] if *attempt == prepared.attempt_id));
+    assert_eq!(
+        terminal(&store, prepared.attempt_id, &call)?,
+        Outcome::Rejected
+    );
     Ok(())
 }
 #[test]
@@ -1039,7 +1021,7 @@ fn policy_resource_refusal_retains_fact_and_skips_preparation() -> TestResult {
         origin: SettingSource::Configuration,
     };
     let provider = Fake {
-        policy_task: Some(request.request.task.task_id),
+        refuse_policy: true,
         policy_resource: Some(fact),
         ..Default::default()
     };
@@ -1081,7 +1063,7 @@ fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    let id = run.attempts[0].attempt_id;
+    let id = run.attempt_id;
     store.mark_starting(
         &store.record(id, &call)?,
         &route(),
@@ -1277,7 +1259,7 @@ fn listing_scans_are_bounded_by_the_page_not_by_retained_history() -> TestResult
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let mut record = store.record(input.attempt_id, &call)?;
         record.state = AttemptState::Terminal {
             extra: Default::default(),
             outcome: Outcome::Succeeded,

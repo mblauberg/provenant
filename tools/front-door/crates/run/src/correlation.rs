@@ -204,11 +204,12 @@ mod tests {
         store.create(&input, &call)?;
         let repository = AbsolutePath::new(Path::new("/repo/.git"))?;
         let head = GitOid::parse(&"a".repeat(40))?;
+        let key = store.record(input.attempt_id, &call)?.key;
         let mut selection = WorkSelector {
             project: context.project_id,
-            run: input.attempt_id,
-            task: Some(input.attempts[0].task_id),
-            attempt: Some(input.attempts[0].attempt_id),
+            graph: key.graph().to_owned(),
+            node: Some(key.node().to_owned()),
+            attempt: Some(input.attempt_id),
             repository: Some(repository.clone()),
             head: Some(head),
         };
@@ -218,13 +219,13 @@ mod tests {
             WorkCoverage::Unindexed
         );
         let mut run_only = selection.clone();
-        run_only.task = None;
+        run_only.node = None;
         run_only.attempt = None;
         assert_eq!(
             validate_work(host, &run_only, &call)?,
             WorkCoverage::Unindexed
         );
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.seal_membership(id, Some(&repository), Some(head), &call)?;
         store.seal_membership(id, Some(&repository), Some(head), &call)?;
         assert!(matches!(
@@ -255,8 +256,8 @@ mod tests {
             let mut foreign = selection.clone();
             match field {
                 0 => foreign.project = ProjectId::from_bytes([99; 16]),
-                1 => foreign.run = AttemptId::from_bytes([99; 16]),
-                2 => foreign.task = Some(TaskId::from_bytes([99; 16])),
+                1 => foreign.graph = "other-graph".into(),
+                2 => foreign.node = Some("other-node".into()),
                 _ => foreign.attempt = Some(AttemptId::from_bytes([99; 16])),
             }
             assert_eq!(
@@ -279,12 +280,13 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         store.seal_membership(id, None, None, &call)?;
+        let key = store.record(id, &call)?.key;
         let mut selection = WorkSelector {
             project: context.project_id,
-            run: input.attempt_id,
-            task: Some(input.attempts[0].task_id),
+            graph: key.graph().to_owned(),
+            node: Some(key.node().to_owned()),
             attempt: None,
             repository: Some(AbsolutePath::new(Path::new("/repo/.git"))?),
             head: None,
@@ -309,45 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn request_correlation_child_id_contract() -> TestResult {
-        let (_temp, host, _clock, _cancel) = fixture()?;
-        let mut proposal = input();
-        proposal.request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
-        proposal.request.lane_depth = Some(2);
-        proposal.request.child_attempt_id_version = Some(1);
-        let task = proposal.attempts[0].task_id;
-        let id = child_attempt_id(host.project_id, proposal.attempt_id, &proposal.request, task)?
-            .ok_or("missing ID")?;
-        for field in 0..5 {
-            let mut request = proposal.request.clone();
-            let mut project = host.project_id;
-            let mut run = proposal.attempt_id;
-            let mut task = task;
-            match field {
-                0 => project = ProjectId::from_bytes([99; 16]),
-                1 => request.parent_attempt = Some(AttemptId::from_bytes([99; 16])),
-                2 => run = AttemptId::from_bytes([99; 16]),
-                3 => task = TaskId::from_bytes([99; 16]),
-                _ => request.concurrency += 1,
-            }
-            assert_ne!(child_attempt_id(project, run, &request, task)?, Some(id));
-        }
-        proposal.request.child_attempt_id_version = Some(2);
-        assert!(matches!(
-            child_attempt_id(host.project_id, proposal.attempt_id, &proposal.request, task),
-            Err(RunError::Validation("unsupported child attempt ID version"))
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn request_correlation_host_resumes_seal_through_start() -> TestResult {
         let (_temp, context, clock, cancel) = fixture()?;
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
         let original = input();
         store.create(&original, &call)?;
-        let mut prior = original.attempts[0].attempt_id;
+        let mut prior = original.attempt_id;
         store.start(
             original.attempt_id,
             &crate::dispatch_tests::Ready,
@@ -360,7 +330,6 @@ mod tests {
                 prior,
                 expected_generation: 0,
                 operation_id: provenant_core::OperationId::parse(&format!("resume-{n}"))?,
-                run_id: AttemptId::from_bytes([n; 16]),
                 attempt_id: AttemptId::from_bytes([n + 1; 16]),
                 prompt: "continue".into(),
                 created_at: original.created_at,
@@ -370,10 +339,11 @@ mod tests {
             } else {
                 store.resume(&next, &call)?
             };
+            let key = &run.key;
             let selector = WorkSelector {
                 project: context.project_id,
-                run: run.attempt_id,
-                task: Some(original.attempts[0].task_id),
+                graph: key.graph().to_owned(),
+                node: Some(key.node().to_owned()),
                 attempt: Some(next.attempt_id),
                 repository: None,
                 head: None,
