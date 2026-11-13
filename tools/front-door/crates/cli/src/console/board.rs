@@ -164,9 +164,10 @@ pub(super) fn read(
         }
         for lane in page.lanes {
             let attempt = &lane.attempt;
+            let work_key = attempt.key.as_ref().ok_or(Error::Encode)?;
             let chair = match &chairs {
                 Ok(Some(index)) => {
-                    match index.read(attempt.project_id, attempt.run_id, &chair_call) {
+                    match index.read(attempt.project_id, work_key.graph(), &chair_call) {
                         Ok(Some(found)) if found.request_digest == lane.run.request_digest => {
                             found.chair
                         }
@@ -205,8 +206,8 @@ pub(super) fn read(
                 clock.wall_now().ok(),
                 false,
             );
-            lanes.push(json!({"lane_id":{"host":host,"run_id":projected.run_id,
-                "task_id":projected.task_id,"attempt_id":projected.attempt_id},
+            lanes.push(json!({"lane_id":{"host":host,"key":work_key,
+                "attempt_id":projected.attempt_id},
                 "chair":chair,"metadata":{"run":lane.run, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
                 "attention":attention,"usage_coverage":{"known":known,"missing":missing},
                 "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
@@ -325,6 +326,9 @@ mod tests {
         super::super::write_fixture("changes-after-run-write", "console changes", changes, &base)?;
         let first = read(&roots, None, false, 50, None)?;
         assert_eq!(first["schema_version"], 3);
+        assert!(first["lanes"][0]["lane_id"]["key"].is_object());
+        assert!(first["lanes"][0]["lane_id"].get("run_id").is_none());
+        assert!(first["lanes"][0]["lane_id"].get("task_id").is_none());
         assert!(first["lanes"][0].get("estimated_cost").is_none());
         assert!(first["lanes"][0].get("verified_links").is_none());
         super::super::write_fixture(
@@ -333,12 +337,12 @@ mod tests {
             read(&roots, None, false, 1, None)?,
             &base,
         )?;
-        super::super::write_fixture(
-            "detail",
-            "console detail",
-            super::super::detail::read(&roots, &AttemptId::from_bytes([101; 16]).to_string())?,
-            &base,
-        )?;
+        let detail =
+            super::super::detail::read(&roots, &AttemptId::from_bytes([101; 16]).to_string())?;
+        assert!(detail["lane_id"]["key"].is_object());
+        assert!(detail["lane_id"].get("run_id").is_none());
+        assert!(detail["lane_id"].get("task_id").is_none());
+        super::super::write_fixture("detail", "console detail", detail, &base)?;
         assert_eq!(first["coverage"]["chairs"], "unavailable");
         assert_eq!(first["lanes"].as_array().unwrap().len(), 50);
         assert_eq!(
@@ -441,7 +445,9 @@ mod tests {
         };
         ChairIndex::open(&roots.state, &chair_call)?.submit(
             project,
-            RunId::from_bytes([101; 16]),
+            first["lanes"][0]["lane_id"]["key"]["graph"]
+                .as_str()
+                .ok_or("missing graph")?,
             &request,
             &chair_call,
         )?;
@@ -457,7 +463,9 @@ mod tests {
         forged.chair = None;
         ChairIndex::open(&roots.state, &chair_call)?.submit(
             other_project,
-            RunId::from_bytes([100; 16]),
+            first["lanes"][1]["lane_id"]["key"]["graph"]
+                .as_str()
+                .ok_or("missing graph")?,
             &forged,
             &chair_call,
         )?;

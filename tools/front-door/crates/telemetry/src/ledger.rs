@@ -1,18 +1,17 @@
 //! The usage ledger: one append-only row per terminal attempt, kept in dated
 //! segments under the state root with no age limit.
 //!
-//! Settlement appends a row once per attempt, and the format-1 backfill copies
-//! the run store's terminal attempts here, so lane usage outlives the run
+//! Settlement appends a row once per attempt, so lane usage outlives the run
 //! store. Rows are keyed by project and attempt: appending a row already
-//! present adds nothing. A row holds identifiers, route, times, token counts
-//! and the priced cost: never a prompt, a reply or a path.
+//! present adds nothing. A row holds graph and node identity, route, times,
+//! token counts and the priced cost: never a prompt, a reply or a path.
 //!
 //! Every reader reports a line it does not recognise, by segment and line
 //! number. None is skipped silently.
 use crate::{CostTotal, PriceTable, TelemetryError, reducer::Money, segments};
-use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, RunId, WaitBudget, WallTime};
+use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, WaitBudget, WallTime};
 use provenant_os::fs::{Directory, FsError, LockMode};
-use provenant_records::AttemptFact;
+use provenant_records::{AttemptFact, WorkKey};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -57,7 +56,7 @@ impl LedgerError {
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Settlement,
-    /// Copied from the format-1 run store.
+    /// Read-only historical value retained so already-kept 1.x rows decode.
     Backfill,
 }
 
@@ -148,14 +147,16 @@ impl std::fmt::Display for Unrecognised {
     }
 }
 
-/// Build the row for a terminal attempt. `run` is the format-1 run, kept as a
-/// label. Without a price table the cost stays absent.
+/// Build the row for a terminal attempt using the store's authoritative work
+/// identity. Without a price table the cost stays absent.
 pub fn row(
     fact: &AttemptFact,
-    run: Option<RunId>,
-    source: Source,
+    key: &WorkKey,
     prices: Option<&PriceTable>,
 ) -> Result<Row, TelemetryError> {
+    if key.project() != fact.project_id {
+        return Err(TelemetryError::InvalidFact("work key project mismatch"));
+    }
     let route = fact.resolved_route.as_ref();
     let field = |pick: fn(&provenant_records::RouteFact) -> &Option<String>| {
         route.and_then(|route| pick(route).clone())
@@ -174,7 +175,6 @@ pub fn row(
             })
         })
         .transpose()?;
-    let context = fact.context.as_ref();
     let outcome = serde_json::to_value(fact.terminal_state)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -182,15 +182,14 @@ pub fn row(
     let usage = &fact.usage;
     Ok(Row {
         format: FORMAT.into(),
-        source,
+        source: Source::Settlement,
         project: fact.project_id,
-        graph: context.and_then(|c| c.graph_id.clone()),
-        node: context.and_then(|c| c.node_id.clone()),
+        graph: Some(key.graph().to_owned()),
+        node: Some(key.node().to_owned()),
         attempt: fact.attempt_id.to_string(),
-        labels: Labels {
-            run: run.map(|run| run.to_string()),
-            task: Some(fact.task_id.to_string()),
-        },
+        // Old identifiers remain opaque strings when reading existing rows.
+        // New rows use graph/node above and never republish legacy IDs.
+        labels: Labels::default(),
         provider,
         model,
         effort: field(|r| &r.effort),

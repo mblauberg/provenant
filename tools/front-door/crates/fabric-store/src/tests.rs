@@ -858,19 +858,19 @@ fn host_store_ignores_lane_writable_locks_and_shared_rows() {
     let f = Fixture::new();
     let shared = f.open();
     let host = HostStore::open(&f.root, &f.request()).unwrap();
-    let run = provenant_core::RunId::from_bytes([1; 16]);
-    let value = RunChair {
+    let graph = "graph";
+    let value = GraphChair {
         extra: Default::default(),
         request_digest: provenant_core::Digest::from_bytes([2; 32]),
         chair: None,
     };
-    host.seal_run_chair(project(), run, &value, &f.request())
+    host.seal_graph_chair(project(), graph, &value, &f.request())
         .unwrap();
     shared
         .db
         .execute(
-            "INSERT INTO run_chairs VALUES(?1,?2,?3)",
-            params![project().to_string(), run.to_string(), b"forged".as_slice()],
+            "INSERT INTO graph_chairs VALUES(?1,?2,?3)",
+            params![project().to_string(), graph, b"forged".as_slice()],
         )
         .unwrap();
     std::fs::set_permissions(
@@ -889,7 +889,7 @@ fn host_store_ignores_lane_writable_locks_and_shared_rows() {
     assert_eq!(
         HostStore::open(&f.root, &f.request())
             .unwrap()
-            .run_chair(project(), run, &f.request())
+            .graph_chair(project(), graph, &f.request())
             .unwrap(),
         Some(value)
     );

@@ -59,6 +59,18 @@ an unreachable peer is `Unknown`, never complete.
 - Why: a stale holder must never act, and a reader must never skip events.
 - Test: `crates/fabric-store/src/tests/f2.rs::canonical_overlap_expiry_release_and_generation`
 
+### Chair bindings follow graph names
+
+The host chair index is keyed by project and graph name. A named child graph
+inherits a sealed binding when its parent's proposal digest matches; a missing
+parent can only produce an unbound association, and a stale digest or an
+explicitly different chair binding conflicts. The graph name is the index key,
+so run and task identifiers do not participate in lookup.
+- Why: every node in a graph resolves the same dispatching chair without a
+  second identity mapping.
+- Test: `crates/fabric-runtime/src/chairs.rs::tests::associations_are_keyed_by_project_and_graph_and_inherit_by_name`
+- Owner: `crates/fabric-store/src/chairs.rs`, `crates/fabric-runtime/src/chairs.rs`
+
 ## Human requests
 
 One service for CLI and MCP owns requests and immutable answers, binding
@@ -225,7 +237,9 @@ Each host owns its records and liveness, so an unreachable peer is `Unknown`,
 never dead. Peers use system SSH and the fixed `provenant fabric peer` command,
 which refuses another protocol before decoding. An uncertain remote mutation is
 resolved only by the home host's receipt, never resent, and code crosses hosts
-only as committed objects Git verifies. Credentials, keys and keychains never cross hosts (no test:
+only as committed objects Git verifies. Remote placements and fetched artifacts
+carry the project, graph, node and attempt `WorkKey`; the peer uses its
+`AttemptId` internally to resolve active work. Credentials, keys and keychains never cross hosts (no test:
 peer request types carry no credential fields), and peer changes need a
 chair-run smoke between two real hosts (review gate).
 - Why: remote guesses or a resent mutation could free a live lane or apply twice.

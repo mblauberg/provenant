@@ -1,5 +1,6 @@
 //! Composition of bounded, host-owned tree observations.
 use provenant_core::{AttemptId, HostId, ProjectId};
+use provenant_records::WorkKey;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -61,10 +62,16 @@ pub fn compose_tree(mut local: Value, peers: Vec<PeerTree>) -> Result<Value, &'s
             };
             if key.0 != Some(host) {
                 invalid += 1;
-            } else if !seen.insert(key) {
+            } else if !seen.insert(key.clone()) {
                 duplicates += 1;
             } else {
-                accepted.insert((key.1, key.2));
+                let attempt = AttemptId::parse(
+                    node["lane_id"]["attempt_id"]
+                        .as_str()
+                        .ok_or("invalid peer node")?,
+                )
+                .map_err(|_| "invalid peer node")?;
+                accepted.insert((key.1, attempt));
                 nodes.push(node.clone());
                 included += 1;
             }
@@ -122,17 +129,16 @@ pub fn compose_tree(mut local: Value, peers: Vec<PeerTree>) -> Result<Value, &'s
     Ok(local)
 }
 
-fn identity(node: &Value) -> Option<(Option<HostId>, ProjectId, AttemptId)> {
+fn identity(node: &Value) -> Option<(Option<HostId>, ProjectId, WorkKey)> {
     let host = match &node["lane_id"]["host"] {
         Value::Null => None,
         Value::String(host) => Some(HostId::parse(host).ok()?),
         _ => return None,
     };
-    Some((
-        host,
-        ProjectId::parse(node["lane_id"]["project_id"].as_str()?).ok()?,
-        AttemptId::parse(node["lane_id"]["attempt_id"].as_str()?).ok()?,
-    ))
+    let project = ProjectId::parse(node["lane_id"]["project_id"].as_str()?).ok()?;
+    let key: WorkKey = serde_json::from_value(node["lane_id"]["key"].clone()).ok()?;
+    AttemptId::parse(node["lane_id"]["attempt_id"].as_str()?).ok()?;
+    (key.project() == project).then_some((host, project, key))
 }
 
 #[cfg(test)]
@@ -148,8 +154,14 @@ mod tests {
         let old = HostId::from_bytes([5; 16]);
         let project = ProjectId::from_bytes([6; 16]);
         let attempt = AttemptId::from_bytes([7; 16]);
-        let node =
-            |host| json!({"lane_id":{"host":host,"project_id":project,"attempt_id":attempt}});
+        let key = WorkKey::new(project, "graph", "node", 1).unwrap();
+        let node = |host| json!({"lane_id":{"host":host,"project_id":project,"key":key,"attempt_id":attempt}});
+        let mut legacy_node = node(remote);
+        legacy_node["lane_id"]
+            .as_object_mut()
+            .unwrap()
+            .remove("key");
+        assert!(identity(&legacy_node).is_none());
         let tree = |host, truncated| {
             json!({"nodes":[node(host)],"edges":[],"truncated":truncated,
             "coverage":{"host":host,"runs":"complete","nested_runs":"complete"},"totals":{"attempts":1}})

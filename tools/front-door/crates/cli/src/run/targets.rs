@@ -7,7 +7,7 @@ pub(super) fn placement(
     target: &Target,
     allow_run: bool,
 ) -> Result<Option<remote::Placement>, Fail> {
-    remote::find_target(edge.roots, target, allow_run)
+    remote::find_target(edge, target, allow_run)
 }
 
 pub(super) fn local(
@@ -324,7 +324,7 @@ pub(super) fn resolve(
     }
     let context = super::execution_context(edge)?;
     let exact = selection.len() == 32 && !selection.contains('/');
-    let peers = remote::target_candidates(edge.roots)?;
+    let peers = remote::target_candidates(edge)?;
     let mut candidates = index(&context, &selection, allow_run)?;
     if exact
         && candidates

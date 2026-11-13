@@ -3,9 +3,9 @@
 //! Paths are relative UTF-8 file names. Contents are verified before any
 //! filesystem mutation, then written into a private same-filesystem staging
 //! directory and published as one directory rename.
-use provenant_core::{Digest, HostId, RelativePath, RunId};
+use provenant_core::{Digest, HostId, RelativePath};
 use provenant_os::fs::{self, Directory, FileKind, FsError, PublishMode};
-use provenant_records::{CanonicalV1, ExtraFields, FileDigest};
+use provenant_records::{CanonicalV1, ExtraFields, FileDigest, WorkKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::ffi::OsStr;
@@ -54,10 +54,10 @@ pub struct FetchChunk {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishedFetch {
     pub host: HostId,
-    pub run: RunId,
+    pub key: WorkKey,
     pub digest: Digest,
 }
 
@@ -75,12 +75,12 @@ pub enum FetchError {
     UnsafeDirectory,
     #[error("fetch file digest did not match: {path}")]
     FileDigest { path: String },
-    #[error("fetch destination already exists for host {host} and run {run}")]
-    DestinationExists { host: HostId, run: RunId },
-    #[error("fetch directory is visible but directory sync failed for host {host} and run {run}")]
+    #[error("fetch destination already exists for host {host} and work {key}")]
+    DestinationExists { host: HostId, key: WorkKey },
+    #[error("fetch directory is visible but directory sync failed for host {host} and work {key}")]
     VisibleDurabilityUnconfirmed {
         host: HostId,
-        run: RunId,
+        key: WorkKey,
         #[source]
         source: FsError,
     },
@@ -210,12 +210,12 @@ fn validate_relative_file(path: &str) -> Result<()> {
 }
 
 /// Verify the complete bounded transfer, then publish it beneath `fetch_root`
-/// as `fetch_root/<host>/<run>`. `fetch_root` must be a private directory
+/// as `fetch_root/<host>/<project>/<graph>/<node>/<attempt>`. `fetch_root` must be a private directory
 /// opened through OS crate's safe filesystem API.
 pub fn publish_fetch(
     fetch_root: &Directory,
     host: HostId,
-    run: RunId,
+    key: WorkKey,
     manifest: &FetchManifest,
     chunks: Vec<FetchChunk>,
 ) -> Result<PublishedFetch> {
@@ -224,9 +224,15 @@ pub fn publish_fetch(
     require_private(fetch_root)?;
 
     let host_name = host.to_string();
-    let run_name = run.to_string();
+    let project_name = key.project().to_string();
+    let graph_name = key.graph();
+    let node_name = key.node();
+    let attempt_name = key.attempt().to_string();
     let host_dir = open_or_create_directory(fetch_root, &host_name)?;
-    let (stage_name, stage) = create_stage(&host_dir)?;
+    let project_dir = open_or_create_directory(&host_dir, &project_name)?;
+    let graph_dir = open_or_create_directory(&project_dir, graph_name)?;
+    let node_dir = open_or_create_directory(&graph_dir, node_name)?;
+    let (stage_name, stage) = create_stage(&node_dir)?;
     let write_result = (|| {
         for (file, bytes) in manifest.files.iter().zip(contents.iter()) {
             let components: Vec<&str> = file.path.split('/').collect();
@@ -236,28 +242,32 @@ pub fn publish_fetch(
         Ok(())
     })();
     if let Err(error) = write_result {
-        let _ = remove_tree(&host_dir, OsStr::new(&stage_name));
+        let _ = remove_tree(&node_dir, OsStr::new(&stage_name));
         return Err(error);
     }
 
-    match host_dir.rename_noreplace(OsStr::new(&stage_name), &host_dir, OsStr::new(&run_name)) {
+    match node_dir.rename_noreplace(
+        OsStr::new(&stage_name),
+        &node_dir,
+        OsStr::new(&attempt_name),
+    ) {
         Ok(()) => {}
         Err(error) if error.is_exists() => {
-            let _ = remove_tree(&host_dir, OsStr::new(&stage_name));
-            return Err(FetchError::DestinationExists { host, run });
+            let _ = remove_tree(&node_dir, OsStr::new(&stage_name));
+            return Err(FetchError::DestinationExists { host, key });
         }
         Err(error) => {
-            let _ = remove_tree(&host_dir, OsStr::new(&stage_name));
+            let _ = remove_tree(&node_dir, OsStr::new(&stage_name));
             return Err(error.into());
         }
     }
-    match host_dir.sync() {
+    match node_dir.sync() {
         Ok(()) => Ok(PublishedFetch {
             host,
-            run,
+            key,
             digest: manifest.digest,
         }),
-        Err(source) => Err(FetchError::VisibleDurabilityUnconfirmed { host, run, source }),
+        Err(source) => Err(FetchError::VisibleDurabilityUnconfirmed { host, key, source }),
     }
 }
 
@@ -396,6 +406,7 @@ fn remove_tree_at(parent: &Directory, name: &OsStr, depth: usize) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_core::ProjectId;
     use std::{fs as host_fs, os::unix::fs::PermissionsExt, path::Path};
 
     struct Fixture {
@@ -534,7 +545,7 @@ mod tests {
     fn verifies_chunks_then_publishes_complete_tree_atomically() {
         let fixture = Fixture::new();
         let host = HostId::from_bytes([1; 16]);
-        let run = RunId::from_bytes([2; 16]);
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "node", 1).unwrap();
         let manifest = FetchManifest::new(vec![
             file("logs/out.txt", b"hello"),
             file("result.json", b"{}"),
@@ -545,7 +556,7 @@ mod tests {
         let published = publish_fetch(
             &fixture.directory,
             host,
-            run,
+            key.clone(),
             &manifest,
             vec![
                 chunk("result.json", 0, b"{}"),
@@ -554,12 +565,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(published.digest, manifest.digest);
+        assert_eq!(published.key, key);
+        assert_eq!(
+            serde_json::from_slice::<PublishedFetch>(&serde_json::to_vec(&published).unwrap())
+                .unwrap(),
+            published
+        );
+        let other_project_key =
+            WorkKey::new(ProjectId::from_bytes([8; 16]), "graph", "node", 1).unwrap();
+        let other_project = publish_fetch(
+            &fixture.directory,
+            host,
+            other_project_key.clone(),
+            &manifest,
+            vec![
+                chunk("result.json", 0, b"{}"),
+                chunk("logs/out.txt", 0, b"hello"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(other_project.key, other_project_key);
         let host_dir = fixture
             .directory
             .open_verified_directory(OsStr::new(&host.to_string()))
             .unwrap();
-        let run_dir = host_dir
-            .open_verified_directory(OsStr::new(&run.to_string()))
+        let project_dir = host_dir
+            .open_verified_directory(OsStr::new(&key.project().to_string()))
+            .unwrap();
+        let graph_dir = project_dir
+            .open_verified_directory(OsStr::new(key.graph()))
+            .unwrap();
+        let node_dir = graph_dir
+            .open_verified_directory(OsStr::new(key.node()))
+            .unwrap();
+        let run_dir = node_dir
+            .open_verified_directory(OsStr::new(&key.attempt().to_string()))
             .unwrap();
         let logs = run_dir.open_verified_directory(OsStr::new("logs")).unwrap();
         assert_eq!(
@@ -571,7 +611,7 @@ mod tests {
             b"{}"
         );
         assert!(matches!(
-            publish_fetch(&fixture.directory, host, run, &manifest, vec![]),
+            publish_fetch(&fixture.directory, host, key, &manifest, vec![]),
             Err(FetchError::Invalid(_))
         ));
     }
@@ -602,13 +642,13 @@ mod tests {
             assert!(manifest.validate().is_err(), "{path}");
         }
         let host = HostId::from_bytes([3; 16]);
-        let run = RunId::from_bytes([4; 16]);
+        let key = WorkKey::new(ProjectId::from_bytes([9; 16]), "graph", "node", 2).unwrap();
         let manifest = FetchManifest::new(vec![file("out", b"hello")]).unwrap();
         assert!(matches!(
             publish_fetch(
                 &fixture.directory,
                 host,
-                run,
+                key.clone(),
                 &manifest,
                 vec![chunk("out", 0, b"jello")]
             ),
@@ -618,7 +658,7 @@ mod tests {
             publish_fetch(
                 &fixture.directory,
                 host,
-                run,
+                key.clone(),
                 &manifest,
                 vec![chunk("out", 1, b"hello")]
             ),
@@ -630,7 +670,10 @@ mod tests {
                     .root
                     .path()
                     .join(host.to_string())
-                    .join(run.to_string())
+                    .join(key.project().to_string())
+                    .join(key.graph())
+                    .join(key.node())
+                    .join(key.attempt().to_string())
             )
             .exists()
         );
@@ -652,7 +695,7 @@ mod tests {
             publish_fetch(
                 &fixture.directory,
                 host,
-                RunId::from_bytes([6; 16]),
+                WorkKey::new(ProjectId::from_bytes([8; 16]), "graph", "node", 3).unwrap(),
                 &manifest,
                 vec![chunk("out", 0, b"ok")],
             )

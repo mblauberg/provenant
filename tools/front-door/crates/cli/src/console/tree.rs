@@ -44,7 +44,7 @@ pub(super) fn read_inner(
     let mut seen: BTreeMap<
         (ProjectId, AttemptId),
         (
-            (provenant_core::RunId, provenant_core::TaskId),
+            provenant_records::WorkKey,
             (Option<AttemptId>, Option<AttemptId>, Option<AttemptId>),
             String,
         ),
@@ -133,19 +133,19 @@ pub(super) fn read_inner(
                 examined += 1;
                 let attempt = &lane.attempt;
                 let key = (attempt.project_id, attempt.attempt_id);
-                let identity = (attempt.run_id, attempt.task_id);
+                let work_key = attempt.key.clone().ok_or(Error::Encode)?;
                 let parents = (lane.run.parent_attempt, lane.run.parent, attempt.retry_of);
                 if let Some((existing, existing_parents, existing_store)) = seen.get(&key) {
                     duplicate_count += 1;
-                    if *existing != identity {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_identity","values":{"stored":{"run_id":existing.0,"task_id":existing.1},"observed":{"run_id":identity.0,"task_id":identity.1}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
+                    if *existing != work_key {
+                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_work_key","values":{"stored":existing,"observed":work_key},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     if *existing_parents != parents {
                         conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1,"retry":existing_parents.2},"observed":{"dispatch":parents.0,"continuation":parents.1,"retry":parents.2}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     continue;
                 }
-                seen.insert(key, (identity, parents, store_path.clone()));
+                seen.insert(key, (work_key.clone(), parents, store_path.clone()));
                 let usage =
                     serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
                 for (name, (sum, missing)) in &mut totals {
@@ -162,7 +162,7 @@ pub(super) fn read_inner(
                     clock.wall_now().ok(),
                     false,
                 );
-                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"run_id":projected.run_id,"task_id":projected.task_id,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"metadata":{"run":lane.run,"attempt":projected}}));
+                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"metadata":{"run":lane.run,"attempt":projected}}));
             }
             match page.next {
                 Some(next) => after = next,
@@ -334,6 +334,9 @@ mod tests {
             rusqlite::params![serde_json::to_vec(&legacy)?, legacy.attempt_id.to_string()],
         )?;
         let tree = read(&roots, None, 3, 100, false)?;
+        assert!(tree["nodes"][0]["lane_id"]["key"].is_object());
+        assert!(tree["nodes"][0]["lane_id"].get("run_id").is_none());
+        assert!(tree["nodes"][0]["lane_id"].get("task_id").is_none());
         assert_eq!(tree["totals"]["usage"]["uncached_input"]["missing"], 4);
         assert_eq!(tree["totals"]["attempts"], 4);
         assert_eq!(tree["totals"]["usage"]["reasoning"]["missing"], 4);

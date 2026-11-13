@@ -137,7 +137,8 @@ pub(super) fn read(
                 let match_position = original_positions[folded_position];
                 let start = match_position.saturating_sub(SNIPPET_CHARS / 3);
                 let snippet: String = chars.iter().skip(start).take(SNIPPET_CHARS).collect();
-                matches.push(json!({"lane_id":{"host":null,"project_id":attempt.project_id,"run_id":attempt.run_id,"task_id":attempt.task_id,"attempt_id":attempt.attempt_id},"part":part,"snippet":snippet,"artifact_bytes":expected_bytes}));
+                let key = attempt.key.as_ref().ok_or(Error::Encode)?;
+                matches.push(json!({"lane_id":{"host":null,"project_id":attempt.project_id,"key":key,"attempt_id":attempt.attempt_id},"part":part,"snippet":snippet,"artifact_bytes":expected_bytes}));
             }
             if page.next.is_none() {
                 break;
@@ -289,6 +290,9 @@ mod tests {
         );
         let result = read(&roots, "searchable", "prompt", None, 100, None)?;
         assert_eq!(result["coverage"]["files_scanned"], 1000);
+        assert!(result["matches"][0]["lane_id"]["key"].is_object());
+        assert!(result["matches"][0]["lane_id"].get("run_id").is_none());
+        assert!(result["matches"][0]["lane_id"].get("task_id").is_none());
         let credential = base.join("credential");
         std::fs::write(&credential, "searchable fixture")?;
         let prompt = state

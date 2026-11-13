@@ -826,8 +826,9 @@ fn submit_with_launcher(
         )?;
     if parent_attempt.is_none() {
         let canonical = session.store.request(record.run_id, call)?;
+        let graph = super::launch::graph_for_run(session, record.run_id, call)?;
         with_chair_index(edge.roots, call, |index, call| {
-            index.submit(session.context.project_id, record.run_id, &canonical, call)
+            index.submit(session.context.project_id, &graph, &canonical, call)
         })?;
         let pending = session.store.pending_attempts(record.run_id, call)?;
         for task in &canonical.tasks {

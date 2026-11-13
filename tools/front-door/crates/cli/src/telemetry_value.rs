@@ -95,7 +95,7 @@ fn coverage(totals: &report::Totals) -> String {
 // ---- cost ----
 
 /// Whether `row` is the target's attempt, task or run, or a graph or node of
-/// that name. Backfilled rows are selected by their opaque labels.
+/// that name. Historical ledger rows retain their prior labels as opaque text.
 fn selects(target: &Target, row: &Row) -> bool {
     let prefix = |held: Option<&str>, part: &str| held.is_some_and(|held| held.starts_with(part));
     let (run, task) = (row.labels.run.as_deref(), row.labels.task.as_deref());

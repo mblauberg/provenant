@@ -10,7 +10,7 @@ use crate::{
     fabric::{Context, PeerFailure},
 };
 use provenant_core::{
-    AttemptId, CancelToken, Clock, HostId, OperationId, Roots, RunId, TaskId, WaitBudget, WallTime,
+    AttemptId, CancelToken, Clock, HostId, OperationId, Roots, RunId, WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::{
     coordination::facade::{
@@ -21,6 +21,7 @@ use provenant_fabric_runtime::{
     runs::RunResult,
 };
 use provenant_os::{clock::SystemClock, fs::Directory};
+use provenant_records::WorkKey;
 use provenant_run as run;
 use run::ErrorKind;
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,7 @@ const PLACEMENT_LIMIT: u64 = 64 * 1024;
 /// Each poll is one SSH round trip, so waits poll less often than local ones.
 const POLL: Duration = Duration::from_secs(2);
 
-/// Where a run lives. The peer owns everything else about it.
+/// Where a graph lives. The peer owns everything else about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Placement {
     #[serde(flatten)]
@@ -46,53 +47,46 @@ pub(super) struct Placement {
     host: HostId,
     project: CrossHostProjectKey,
     operation_id: OperationId,
-    run_id: RunId,
+    graph: String,
     attempts: Vec<Placed>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Placed {
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
-    task_id: TaskId,
+    key: WorkKey,
     attempt_id: AttemptId,
 }
 impl Placement {
     fn select_target(&self, target: &crate::Target) -> Result<Vec<(HostId, AttemptId)>, Fail> {
-        let (mut task, mut attempt) = (target.task, target.attempt);
-        // `RUN/ATTEMPT`: the second part names a placed attempt, not a task.
-        if let (Some(second), None) = (task, attempt) {
-            let candidate = AttemptId::from_bytes(*second.as_bytes());
-            if self
-                .attempts
-                .iter()
-                .any(|placed| placed.attempt_id == candidate)
-            {
-                (task, attempt) = (None, Some(candidate));
-            }
-        }
-        let attempt = attempt.filter(|id| {
-            target.run.is_some() || self.attempts.iter().any(|placed| placed.attempt_id == *id)
-        });
-        self.select(task, attempt)
+        let selection = target.selection.as_deref().ok_or_else(corrupt)?;
+        let target = crate::target::Target::parse(selection).map_err(|_| corrupt())?;
+        self.select(
+            &target.name,
+            target.node.as_deref(),
+            target.attempt.map(std::num::NonZeroU32::get),
+        )
     }
     /// Attempts the target names, in dispatch order.
     fn select(
         &self,
-        task: Option<TaskId>,
-        attempt: Option<AttemptId>,
+        graph: &str,
+        node: Option<&str>,
+        attempt: Option<u32>,
     ) -> Result<Vec<(HostId, AttemptId)>, Fail> {
         let selected: Vec<_> = self
             .attempts
             .iter()
-            .filter(|p| task.is_none_or(|t| t == p.task_id))
-            .filter(|p| attempt.is_none_or(|a| a == p.attempt_id))
+            .filter(|p| p.key.graph() == graph)
+            .filter(|p| node.is_none_or(|node| node == p.key.node()))
+            .filter(|p| attempt.is_none_or(|number| number == p.key.attempt()))
             .map(|p| (self.host, p.attempt_id))
             .collect();
-        if attempt.is_some() && selected.is_empty() {
+        if (node.is_some() || attempt.is_some()) && selected.is_empty() {
             return Err(Fail::new(
                 Status::Invalid,
                 ErrorKind::NotFound,
-                "attempt is not in that run/task",
+                "attempt is not in that graph/node",
             ));
         }
         Ok(selected)
@@ -149,32 +143,65 @@ fn directory(roots: &Roots) -> Result<Directory, Fail> {
     let root = roots.state.as_path();
     crate::fabric::private_dir(root, &root.join(PLACEMENTS)).map_err(io_fail)
 }
-fn read(directory: &Directory, name: &str, run: RunId) -> Result<Placement, Fail> {
+fn read(
+    directory: &Directory,
+    name: &str,
+    project: &CrossHostProjectKey,
+    graph: &str,
+) -> Result<Placement, Fail> {
     let bytes = directory
         .read_bounded(OsStr::new(name), PLACEMENT_LIMIT)
         .map_err(io_fail)?;
-    let placement: Placement = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
-    if placement.schema_version != 1 || placement.run_id != run {
+    let placement = decode_placement(&bytes)?;
+    if placement.project != *project || placement.graph != graph {
         return Err(corrupt());
     }
     Ok(placement)
+}
+fn decode_placement(bytes: &[u8]) -> Result<Placement, Fail> {
+    let placement: Placement = serde_json::from_slice(bytes).map_err(|_| corrupt())?;
+    if placement.schema_version != 2
+        || placement.attempts.is_empty()
+        || placement
+            .attempts
+            .iter()
+            .any(|placed| placed.key.graph() != placement.graph)
+        || placement
+            .attempts
+            .iter()
+            .any(|placed| placed.key.project() != placement.attempts[0].key.project())
+    {
+        return Err(corrupt());
+    }
+    Ok(placement)
+}
+fn placement_name(project: &CrossHostProjectKey, graph: &str) -> String {
+    format!("{}-{graph}.json", project.as_str())
 }
 /// Record a placement. Replaying the operation refreshes its attempts; any
 /// other existing record for the run is a conflict.
 #[cfg(test)]
 fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
     let directory = directory(roots)?;
-    let name = format!("{}.json", placement.run_id);
+    let name = placement_name(&placement.project, &placement.graph);
     let mut placement = placement.clone();
     if directory.metadata_at(OsStr::new(&name), false).is_ok() {
-        let existing = read(&directory, &name, placement.run_id)?;
-        if (existing.host, &existing.project, &existing.operation_id)
-            != (placement.host, &placement.project, &placement.operation_id)
-        {
+        let existing = read(&directory, &name, &placement.project, &placement.graph)?;
+        if (
+            existing.host,
+            &existing.project,
+            &existing.graph,
+            &existing.operation_id,
+        ) != (
+            placement.host,
+            &placement.project,
+            &placement.graph,
+            &placement.operation_id,
+        ) {
             return Err(Fail::new(
                 Status::Refused,
                 ErrorKind::Conflict,
-                "another placement already names this run",
+                "another placement already names this graph",
             ));
         }
         for (key, value) in existing.extra {
@@ -182,7 +209,7 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
         }
         for placed in &mut placement.attempts {
             if let Some(previous) = existing.attempts.iter().find(|previous| {
-                previous.task_id == placed.task_id && previous.attempt_id == placed.attempt_id
+                previous.key == placed.key && previous.attempt_id == placed.attempt_id
             }) {
                 for (key, value) in &previous.extra {
                     placed
@@ -205,60 +232,57 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
         .require_durable()
         .map_err(io_fail)
 }
-/// The placement of a run dispatched to a peer from this host, if any.
-pub(super) fn find(roots: &Roots, run: RunId) -> Result<Option<Placement>, Fail> {
-    let name = format!("{run}.json");
+/// The placement of a graph dispatched to a peer from this host, if any.
+pub(super) fn find(
+    roots: &Roots,
+    project: &CrossHostProjectKey,
+    graph: &str,
+) -> Result<Option<Placement>, Fail> {
+    let name = placement_name(project, graph);
     let path = roots.state.as_path().join(PLACEMENTS).join(&name);
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(None);
     }
-    read(&directory(roots)?, &name, run).map(Some)
+    read(&directory(roots)?, &name, project, graph).map(Some)
 }
-
-/// Bare attempt IDs are resolved from the host's durable peer placements.
+/// Graph targets are resolved from the host's durable peer placements.
 pub(super) fn find_target(
-    roots: &Roots,
+    edge: &Edge<'_>,
     target: &crate::Target,
     allow_run: bool,
 ) -> Result<Option<Placement>, Fail> {
-    if let Some(run) = target.run {
-        return find(roots, run);
+    if !edge.roots.state.as_path().join(PLACEMENTS).exists() || target.selection.is_none() {
+        return Ok(None);
     }
-    let Some(id) = target.attempt else {
+    let peer = Peer::open(edge)?;
+    let Some(project) = peer
+        .context
+        .identity
+        .federation
+        .as_ref()
+        .map(|project| project.key.clone())
+    else {
         return Ok(None);
     };
-    if !roots.state.as_path().join(PLACEMENTS).exists() {
+    find_target_in_project(edge.roots, &project, target, allow_run)
+}
+
+fn find_target_in_project(
+    roots: &Roots,
+    project: &CrossHostProjectKey,
+    target: &crate::Target,
+    allow_run: bool,
+) -> Result<Option<Placement>, Fail> {
+    let Some(selection) = target.selection.as_deref() else {
+        return Ok(None);
+    };
+    let Ok(target) = crate::target::Target::parse(selection) else {
+        return Ok(None);
+    };
+    if target.node.is_none() && target.attempt.is_none() && !allow_run {
         return Ok(None);
     }
-    let directory = directory(roots)?;
-    let mut selected = None;
-    for name in directory.entries().map_err(io_fail)? {
-        let name = name.map_err(io_fail)?;
-        let Some(run) = name
-            .to_str()
-            .and_then(|name| name.strip_suffix(".json"))
-            .and_then(|id| RunId::parse(id).ok())
-        else {
-            continue;
-        };
-        let placement = read(&directory, &name.to_string_lossy(), run)?;
-        let attempt = placement
-            .attempts
-            .iter()
-            .any(|placed| placed.attempt_id == id);
-        let run = allow_run && placement.run_id.as_bytes() == id.as_bytes();
-        if attempt && run || (attempt || run) && selected.is_some() {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Conflict,
-                "bare ID is ambiguous; use RUN/TASK/ATTEMPT",
-            ));
-        }
-        if attempt || run {
-            selected = Some(placement);
-        }
-    }
-    Ok(selected)
+    find(roots, project, &target.name)
 }
 
 /// One Fabric identity and a bounded call budget per peer request.
@@ -1047,17 +1071,20 @@ pub(super) fn resolve_prefix(
     }
     let candidates = records
         .into_iter()
-        .map(|record| super::targets::Candidate {
-            target: crate::Target {
-                selection: None,
-                run: Some(record.run_id),
-                task: Some(record.task_id),
-                attempt: Some(record.attempt_id),
-            },
-            project: None,
-            host: Some(host),
+        .map(|record| {
+            let key = record.key.ok_or_else(corrupt)?;
+            Ok(super::targets::Candidate {
+                target: crate::Target {
+                    selection: Some(key.to_string()),
+                    run: None,
+                    task: None,
+                    attempt: None,
+                },
+                project: None,
+                host: Some(host),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, Fail>>()?;
     Ok(super::targets::choose(selection, candidates, false)?.target)
 }
 
@@ -1413,11 +1440,13 @@ pub(super) struct PeerFacts {
     pub(super) hosts: Vec<Value>,
 }
 
-/// The terminal attempts of every configured peer, however the run got there,
-/// read as `lanes --host` reads them: the peer's newest lanes over the peer
-/// channel. `None` when this is not a federated project or no peer is
-/// configured.
-pub(super) fn peer_facts(edge: &Edge<'_>, run: Option<RunId>) -> Result<Option<PeerFacts>, Fail> {
+/// The terminal attempts of every configured peer, optionally narrowed to a
+/// graph, read as `lanes --host` reads them. `None` when this is not a
+/// federated project or no peer is configured.
+pub(super) fn peer_facts(
+    edge: &Edge<'_>,
+    target: Option<&crate::target::Target>,
+) -> Result<Option<PeerFacts>, Fail> {
     let peer = Peer::open(edge)?;
     // Another project's lanes are not this export's to read.
     if peer.project().is_err() || peer.context.config.peers.is_empty() {
@@ -1430,7 +1459,7 @@ pub(super) fn peer_facts(edge: &Edge<'_>, run: Option<RunId>) -> Result<Option<P
         .iter()
         .map(|(name, p)| (p.host, name.clone()))
         .collect();
-    let (facts, hosts) = collect(&names, run, |host, action| peer.call(host, action));
+    let (facts, hosts) = collect(&names, target, |host, action| peer.call(host, action));
     Ok(Some(PeerFacts {
         local: peer.context.identity.host,
         names,
@@ -1442,11 +1471,11 @@ pub(super) fn peer_facts(edge: &Edge<'_>, run: Option<RunId>) -> Result<Option<P
 /// The most lanes one peer returns; the peer rejects a larger page.
 const PEER_LANES: u16 = 100;
 
-/// Ask each host for its lanes and keep the terminal ones of `run`, or of any
-/// run. A host that fails is listed with its error and the rest still count.
+/// Ask each host for its lanes and keep the terminal ones of `graph`, or of
+/// any graph. A host that fails is listed with its error and the rest still count.
 fn collect(
     names: &BTreeMap<HostId, String>,
-    run: Option<RunId>,
+    target: Option<&crate::target::Target>,
     mut call: impl FnMut(HostId, PeerAction) -> Result<PeerResult, Fail>,
 ) -> (Vec<provenant_records::AttemptFact>, Vec<Value>) {
     let (mut facts, mut hosts) = (Vec::new(), Vec::new());
@@ -1466,7 +1495,13 @@ fn collect(
                 facts.extend(
                     records
                         .into_iter()
-                        .filter(|r| run.is_none_or(|run| r.run_id == run))
+                        .filter(|r| {
+                            target.is_none_or(|target| {
+                                r.key
+                                    .as_ref()
+                                    .is_some_and(|key| super::work_key_matches(key, target))
+                            })
+                        })
                         .filter_map(|r| run::fact(r).ok()),
                 );
                 row["attempts"] = json!(facts.len() - before);
@@ -1479,41 +1514,48 @@ fn collect(
     (facts, hosts)
 }
 
-/// Full identities from peer receipts, used to check prefix uniqueness against
+/// Work keys from peer receipts, used to check graph target uniqueness against
 /// local identities before routing a command.
-pub(super) fn target_candidates(roots: &Roots) -> Result<Vec<super::targets::Candidate>, Fail> {
+pub(super) fn target_candidates(edge: &Edge<'_>) -> Result<Vec<super::targets::Candidate>, Fail> {
+    let roots = edge.roots;
     if !roots.state.as_path().join(PLACEMENTS).exists() {
         return Ok(Vec::new());
     }
+    let peer = Peer::open(edge)?;
+    let Some(project) = peer
+        .context
+        .identity
+        .federation
+        .as_ref()
+        .map(|project| project.key.clone())
+    else {
+        return Ok(Vec::new());
+    };
     let directory = directory(roots)?;
     let mut candidates = Vec::new();
     for name in directory.entries().map_err(io_fail)? {
         let name = name.map_err(io_fail)?;
-        let Some(run) = name
+        let prefix = format!("{}-", project.as_str());
+        let Some(file_name) = name
             .to_str()
-            .and_then(|name| name.strip_suffix(".json"))
-            .and_then(|id| RunId::parse(id).ok())
+            .filter(|name| name.starts_with(&prefix) && name.ends_with(".json"))
         else {
             continue;
         };
-        let placement = read(&directory, &name.to_string_lossy(), run)?;
-        candidates.push(super::targets::Candidate {
-            target: crate::Target {
-                selection: None,
-                run: Some(run),
-                task: None,
-                attempt: None,
-            },
-            project: None,
-            host: Some(placement.host),
-        });
+        let bytes = directory
+            .read_bounded(OsStr::new(file_name), PLACEMENT_LIMIT)
+            .map_err(io_fail)?;
+        let placement = decode_placement(&bytes)?;
+        if placement.project != project {
+            return Err(corrupt());
+        }
         for attempt in placement.attempts {
             candidates.push(super::targets::Candidate {
                 target: crate::Target {
-                    selection: None,
-                    run: Some(run),
-                    task: Some(attempt.task_id),
-                    attempt: Some(attempt.attempt_id),
+                    selection: Some(attempt.key.to_string()),
+                    run: None,
+                    task: None,
+                    attempt: None,
                 },
                 project: None,
                 host: Some(placement.host),
@@ -1579,20 +1621,30 @@ mod tests {
     fn placement(operation: &str) -> Result<Placement> {
         Ok(Placement {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: 2,
             host: HostId::from_bytes([7; 16]),
             project: serde_json::from_value(json!("project-key"))?,
             operation_id: OperationId::parse(operation)?,
-            run_id: RunId::from_bytes([1; 16]),
+            graph: "graph-one".into(),
             attempts: vec![
                 Placed {
                     extra: Default::default(),
-                    task_id: TaskId::from_bytes([2; 16]),
+                    key: WorkKey::new(
+                        provenant_core::ProjectId::from_bytes([3; 16]),
+                        "graph-one",
+                        "plan",
+                        1,
+                    )?,
                     attempt_id: AttemptId::from_bytes([3; 16]),
                 },
                 Placed {
                     extra: Default::default(),
-                    task_id: TaskId::from_bytes([4; 16]),
+                    key: WorkKey::new(
+                        provenant_core::ProjectId::from_bytes([3; 16]),
+                        "graph-one",
+                        "implement",
+                        2,
+                    )?,
                     attempt_id: AttemptId::from_bytes([5; 16]),
                 },
             ],
@@ -1600,14 +1652,40 @@ mod tests {
     }
 
     #[test]
+    fn peer_placement_round_trip_preserves_work_keys() -> Result {
+        let original = placement("place")?;
+        let bytes = serde_json::to_vec(&original)?;
+        let decoded = decode_placement(&bytes).map_err(|fail| fail.message)?;
+        assert_eq!(decoded, original);
+        assert_eq!(
+            decoded
+                .attempts
+                .iter()
+                .map(|placed| placed.key.clone())
+                .collect::<Vec<_>>(),
+            original
+                .attempts
+                .iter()
+                .map(|placed| placed.key.clone())
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn placement_replays_its_operation_and_refuses_another() -> Result {
         let (_scratch, roots) = roots()?;
-        let run = RunId::from_bytes([1; 16]);
-        assert_eq!(find(&roots, run).map_err(|f| f.message)?, None);
         let first = placement("place")?;
+        assert_eq!(
+            find(&roots, &first.project, &first.graph).map_err(|f| f.message)?,
+            None
+        );
         save(&roots, &first).map_err(|f| f.message)?;
         save(&roots, &first).map_err(|f| f.message)?;
-        assert_eq!(find(&roots, run).map_err(|f| f.message)?, Some(first));
+        assert_eq!(
+            find(&roots, &first.project, &first.graph).map_err(|f| f.message)?,
+            Some(first)
+        );
         let other = save(&roots, &placement("other")?).err().ok_or("conflict")?;
         assert_eq!(other.kind.code(), "CONFLICT");
         Ok(())
@@ -1623,7 +1701,7 @@ mod tests {
         let decoded: Placement = serde_json::from_value(newer.clone())?;
         save(&roots, &decoded).map_err(|f| f.message)?;
         save(&roots, &original).map_err(|f| f.message)?;
-        let refreshed = find(&roots, original.run_id)
+        let refreshed = find(&roots, &original.project, &original.graph)
             .map_err(|f| f.message)?
             .ok_or("missing placement")?;
         assert_eq!(serde_json::to_value(refreshed)?, newer);
@@ -1631,55 +1709,50 @@ mod tests {
     }
 
     #[test]
-    fn bare_ids_resolve_peer_attempts_and_runs() -> Result {
+    fn graph_targets_resolve_peer_nodes_and_attempts() -> Result {
         let (_scratch, roots) = roots()?;
         let placed = placement("place")?;
         save(&roots, &placed).map_err(|f| f.message)?;
-        let attempt: crate::Target = placed.attempts[0].attempt_id.to_string().parse()?;
-        let found = find_target(&roots, &attempt, false)
-            .map_err(|f| f.message)?
-            .ok_or("missing attempt")?;
+        let graph: crate::Target = "graph-one".parse()?;
         assert_eq!(
-            found.select_target(&attempt).map_err(|f| f.message)?,
-            vec![(placed.host, placed.attempts[0].attempt_id)]
-        );
-        let run: crate::Target = placed.run_id.to_string().parse()?;
-        assert_eq!(
-            find_target(&roots, &run, false).map_err(|f| f.message)?,
+            find_target_in_project(&roots, &placed.project, &graph, false).map_err(|f| f.message)?,
             None
         );
-        let found = find_target(&roots, &run, true)
+        let found = find_target_in_project(&roots, &placed.project, &graph, true)
             .map_err(|f| f.message)?
-            .ok_or("missing run")?;
-        assert_eq!(found.select_target(&run).map_err(|f| f.message)?.len(), 2);
-        let mut colliding = placement("colliding")?;
-        colliding.run_id = RunId::from_bytes(*placed.attempts[0].attempt_id.as_bytes());
-        colliding.attempts[0].attempt_id = AttemptId::from_bytes([8; 16]);
-        colliding.attempts[1].attempt_id = AttemptId::from_bytes([9; 16]);
-        save(&roots, &colliding).map_err(|f| f.message)?;
-        let failure = find_target(&roots, &attempt, true)
-            .err()
-            .ok_or("expected ambiguity")?;
-        assert_eq!(failure.kind, ErrorKind::Conflict);
+            .ok_or("missing graph")?;
+        assert_eq!(found.select_target(&graph).map_err(|f| f.message)?.len(), 2);
+        let attempt: crate::Target = "graph-one/plan#1".parse()?;
+        assert_eq!(
+            find_target_in_project(&roots, &placed.project, &attempt, false)
+                .map_err(|f| f.message)?
+                .ok_or("missing attempt")?
+                .select_target(&attempt)
+                .map_err(|f| f.message)?,
+            vec![(placed.host, placed.attempts[0].attempt_id)]
+        );
         Ok(())
     }
 
     #[test]
-    fn selection_narrows_by_task_and_attempt() -> Result {
+    fn work_key_selection_narrows_by_node_and_attempt() -> Result {
         let placed = placement("place")?;
         let host = HostId::from_bytes([7; 16]);
-        assert_eq!(placed.select(None, None).map_err(|f| f.message)?.len(), 2);
         assert_eq!(
             placed
-                .select(Some(TaskId::from_bytes([4; 16])), None)
+                .select("graph-one", None, None)
+                .map_err(|f| f.message)?
+                .len(),
+            2
+        );
+        assert_eq!(
+            placed
+                .select("graph-one", Some("implement"), None)
                 .map_err(|f| f.message)?,
             vec![(host, AttemptId::from_bytes([5; 16]))]
         );
         let missing = placed
-            .select(
-                Some(TaskId::from_bytes([2; 16])),
-                Some(AttemptId::from_bytes([5; 16])),
-            )
+            .select("graph-one", Some("plan"), Some(2))
             .err()
             .ok_or("mismatch")?;
         assert_eq!(missing.kind.code(), "NOT_FOUND");
@@ -1914,9 +1987,10 @@ mod tests {
         serde_json::from_value(json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([id; 16]),
-            "run_id": RunId::from_bytes([9; 16]),
+            "run_id": "09090909090909090909090909090909",
             "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-            "task_id": TaskId::from_bytes([4; 16]),
+            "task_id": "04040404040404040404040404040404",
+            "key": {"project": provenant_core::ProjectId::from_bytes([3; 16]), "graph": "graph-one", "node": "implement", "attempt": 1},
             "operation_id": "remote-fixture",
             "attempt_number": u64::from(id),
             "revision": 1,

@@ -88,11 +88,11 @@ CREATE TABLE human_answer_outbox (
  PRIMARY KEY(project,answer),
  FOREIGN KEY(project,answer) REFERENCES human_answers(project,id)
 ) STRICT;
-CREATE TABLE run_chairs (
+CREATE TABLE graph_chairs (
     project TEXT NOT NULL,
-    run TEXT NOT NULL,
+    graph TEXT NOT NULL,
     record BLOB NOT NULL,
-    PRIMARY KEY(project, run)
+    PRIMARY KEY(project, graph)
 ) STRICT;
 CREATE INDEX human_local_delivery ON human_answer_outbox(project,
  json_extract(CAST(record AS TEXT),'$.target_host'),
@@ -116,4 +116,4 @@ CREATE INDEX human_hook_pending ON human_answer_outbox(project,
  json_extract(CAST(record AS TEXT),'$.target_actor'), answer
 ) WHERE json_extract(CAST(record AS TEXT),'$.state') IN ('queued','offered')
  AND coalesce(json_extract(CAST(record AS TEXT),'$.error'),'') != 'hook_envelope_too_large';
-PRAGMA user_version=15;
+PRAGMA user_version=16;

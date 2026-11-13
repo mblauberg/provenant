@@ -2,8 +2,10 @@
 
 use super::coordination::facade::{AttemptTarget, WaitCondition};
 use provenant_core::OperationId;
+use provenant_records::WorkKey;
 use provenant_records::run::{AttemptRecord, RunEvent};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// A successful submission acknowledgement. The operation id is the
 /// idempotency key; targets identify the attempts accepted by the owner.
@@ -32,9 +34,8 @@ pub struct PeerWorktree {
 pub struct AttemptSummary {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    pub key: WorkKey,
     pub attempt_id: provenant_core::AttemptId,
-    pub run_id: provenant_core::RunId,
-    pub task_id: provenant_core::TaskId,
     pub operation_id: OperationId,
     pub state: String,
     pub reason: Option<String>,
@@ -50,20 +51,31 @@ pub struct AttemptSummary {
     pub last_output_at: Option<provenant_core::WallTime>,
 }
 
-impl From<AttemptRecord> for AttemptSummary {
-    fn from(record: AttemptRecord) -> Self {
+#[derive(Debug, Error)]
+pub enum AttemptSummaryError {
+    #[error("attempt record is missing its WorkKey")]
+    MissingWorkKey,
+}
+
+impl TryFrom<AttemptRecord> for AttemptSummary {
+    type Error = AttemptSummaryError;
+
+    fn try_from(record: AttemptRecord) -> Result<Self, Self::Error> {
         let projected = provenant_records::wire::LaneRow::project(&record, Default::default());
+        let key = record
+            .key
+            .clone()
+            .ok_or(AttemptSummaryError::MissingWorkKey)?;
         let finished_at = match &record.state {
             provenant_records::run::AttemptState::Terminal { finished_at, .. } => {
                 Some(*finished_at)
             }
             _ => None,
         };
-        Self {
+        Ok(Self {
             extra: record.extra,
+            key,
             attempt_id: record.attempt_id,
-            run_id: record.run_id,
-            task_id: record.task_id,
             operation_id: record.operation_id,
             state: projected.state,
             reason: projected.reason,
@@ -82,7 +94,7 @@ impl From<AttemptRecord> for AttemptSummary {
             queued_at: record.queued_at,
             started_at: record.started_at,
             last_output_at: record.last_output_at,
-        }
+        })
     }
 }
 
@@ -287,7 +299,8 @@ pub fn wait_satisfied<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, Digest, ProjectId, RunId, TaskId, WallTime};
+    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+    use provenant_records::WorkKey;
     use provenant_records::{
         CanonicalV1,
         run::{AttemptState, Outcome},
@@ -297,9 +310,10 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
-            "run_id": RunId::from_bytes([2; 16]),
+            "run_id": "02020202020202020202020202020202",
+            "task_id": "04040404040404040404040404040404",
             "project_id": ProjectId::from_bytes([3; 16]),
-            "task_id": TaskId::from_bytes([4; 16]),
+            "key": WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1).unwrap(),
             "operation_id": "wire-silence",
             "attempt_number": 1,
             "revision": 1,
@@ -312,6 +326,16 @@ mod tests {
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn compact_summary_refuses_an_attempt_without_work_identity() {
+        let mut record = attempt();
+        record.key = None;
+        assert!(matches!(
+            AttemptSummary::try_from(record),
+            Err(AttemptSummaryError::MissingWorkKey)
+        ));
     }
 
     #[test]

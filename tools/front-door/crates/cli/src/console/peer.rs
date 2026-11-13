@@ -1,5 +1,6 @@
 //! Composition of bounded, host-owned board observations.
-use provenant_core::{AttemptId, HostId, ProjectId};
+use provenant_core::{HostId, ProjectId};
+use provenant_records::WorkKey;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -88,17 +89,18 @@ pub fn compose_board(mut local: Value, peers: Vec<PeerBoard>) -> Result<Value, &
     Ok(local)
 }
 
-fn identity(row: &Value) -> Option<(Option<HostId>, ProjectId, AttemptId)> {
+fn identity(row: &Value) -> Option<(Option<HostId>, ProjectId, WorkKey)> {
     let host = match &row["lane_id"]["host"] {
         Value::Null => None,
         Value::String(host) => Some(HostId::parse(host).ok()?),
         _ => return None,
     };
-    Some((
-        host,
-        ProjectId::parse(row["metadata"]["attempt"]["project_id"].as_str()?).ok()?,
-        AttemptId::parse(row["lane_id"]["attempt_id"].as_str()?).ok()?,
-    ))
+    let key: WorkKey = serde_json::from_value(row["lane_id"]["key"].clone()).ok()?;
+    if let Some(project) = row["metadata"]["attempt"]["project_id"].as_str() {
+        (ProjectId::parse(project).ok()? == key.project()).then_some((host, key.project(), key))
+    } else {
+        Some((host, key.project(), key))
+    }
 }
 
 #[cfg(test)]
@@ -113,11 +115,15 @@ mod tests {
         let offline = HostId::from_bytes([4; 16]);
         let old = HostId::from_bytes([5; 16]);
         let project = ProjectId::from_bytes([6; 16]);
-        let attempt = AttemptId::from_bytes([7; 16]);
+        let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
+        let work_key = WorkKey::new(project, "graph", "node", 1).unwrap();
         let row = |host: HostId| {
-            json!({"lane_id":{"host":host,"attempt_id":attempt},
+            json!({"lane_id":{"host":host,"key":work_key,"attempt_id":attempt},
             "metadata":{"attempt":{"project_id":project}}})
         };
+        let mut legacy_row = row(remote);
+        legacy_row["lane_id"].as_object_mut().unwrap().remove("key");
+        assert!(identity(&legacy_row).is_none());
         let page_coverage = |host| json!({"host":host,"runs":"complete","chairs":"complete","observations":"complete"});
         let local = json!({"lanes":[row(local_host)],"next_cursor":"local-cursor",
             "coverage":{"scope":"local"}});

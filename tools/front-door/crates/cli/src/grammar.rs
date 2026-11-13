@@ -1066,8 +1066,6 @@ pub enum Telemetry {
     Value(crate::telemetry_args::TelemetryValue),
     /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
     Cost(crate::telemetry_args::TelemetryCost),
-    /// Copy every terminal attempt in the run store into the usage ledger; run once after installing 1.8.0
-    Backfill,
     /// Compare experiment arms using offline pipeline outcomes
     #[command(subcommand)]
     Experiments(Experiments),

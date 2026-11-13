@@ -1,10 +1,10 @@
-//! Immutable host-owned chair associations, including explicitly unbound runs.
+//! Immutable host-owned chair associations, including explicitly unbound graphs.
 use crate::*;
-use provenant_core::{Digest, RunId};
+use provenant_core::{Digest, ProjectId};
 use provenant_records::run::ChairBinding;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunChair {
+pub struct GraphChair {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub request_digest: Digest,
@@ -27,19 +27,20 @@ impl HostStore {
         Store::open_host(root, request).map(Self)
     }
 
-    pub fn run_chair(
+    pub fn graph_chair(
         &self,
         project: ProjectId,
-        run: RunId,
+        graph: &str,
         request: &Request<'_>,
-    ) -> Result<Option<RunChair>> {
+    ) -> Result<Option<GraphChair>> {
         request.check()?;
+        validate_graph_name(graph)?;
         let raw: Option<Vec<u8>> = self
             .0
             .db
             .query_row(
-                "SELECT substr(record,1,?3) FROM run_chairs WHERE project=?1 AND run=?2",
-                params![project.to_string(), run.to_string(), MAX_RECORD_READ_BYTES],
+                "SELECT substr(record,1,?3) FROM graph_chairs WHERE project=?1 AND graph=?2",
+                params![project.to_string(), graph, MAX_RECORD_READ_BYTES],
                 |row| row.get(0),
             )
             .optional()?;
@@ -47,34 +48,47 @@ impl HostStore {
     }
 
     /// Insert once; a replay must agree with both the request and binding.
-    pub fn seal_run_chair(
+    pub fn seal_graph_chair(
         &self,
         project: ProjectId,
-        run: RunId,
-        value: &RunChair,
+        graph: &str,
+        value: &GraphChair,
         request: &Request<'_>,
     ) -> Result<()> {
+        validate_graph_name(graph)?;
         let bytes = encode(value)?;
         self.0.write(request, |tx| {
             let previous: Option<Vec<u8>> = tx
                 .query_row(
-                    "SELECT substr(record,1,?3) FROM run_chairs WHERE project=?1 AND run=?2",
-                    params![project.to_string(), run.to_string(), MAX_RECORD_READ_BYTES],
+                    "SELECT substr(record,1,?3) FROM graph_chairs WHERE project=?1 AND graph=?2",
+                    params![project.to_string(), graph, MAX_RECORD_READ_BYTES],
                     |row| row.get(0),
                 )
                 .optional()?;
             if let Some(previous) = previous {
-                return if decode::<RunChair>(&previous)? == *value {
+                return if decode::<GraphChair>(&previous)? == *value {
                     Ok(())
                 } else {
                     Err(Error::Conflict)
                 };
             }
             tx.execute(
-                "INSERT INTO run_chairs(project,run,record) VALUES(?1,?2,?3)",
-                params![project.to_string(), run.to_string(), bytes],
+                "INSERT INTO graph_chairs(project,graph,record) VALUES(?1,?2,?3)",
+                params![project.to_string(), graph, bytes],
             )?;
             Ok(())
         })
     }
+}
+
+fn validate_graph_name(graph: &str) -> Result<()> {
+    if graph.is_empty()
+        || graph.len() > 48
+        || !graph.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+    {
+        return Err(Error::Invalid("graph name"));
+    }
+    Ok(())
 }

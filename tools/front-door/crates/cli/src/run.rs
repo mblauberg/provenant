@@ -38,7 +38,6 @@ mod submit;
 mod targets;
 mod telemetry;
 mod telemetry_context;
-mod usage_ledger;
 mod wait;
 mod watch;
 mod worktree;
@@ -55,9 +54,30 @@ pub use resume::*;
 pub use status::*;
 pub use submit::*;
 pub use telemetry::*;
-pub use usage_ledger::backfill;
 pub use wait::*;
 pub use worktree::*;
+
+/// Decode the graph-shaped spelling selected by a CLI boundary. The lower run
+/// reader still has explicit ID adapters while callers move to work keys.
+fn graph_selector(target: &Target) -> Result<crate::target::Target, Fail> {
+    let selection = target.selection.as_deref().ok_or_else(|| {
+        Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "a graph name is required",
+        )
+    })?;
+    crate::target::Target::parse(selection)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
+}
+
+fn work_key_matches(key: &provenant_records::WorkKey, target: &crate::target::Target) -> bool {
+    key.graph() == target.name
+        && target.node.as_deref().is_none_or(|node| key.node() == node)
+        && target
+            .attempt
+            .is_none_or(|attempt| key.attempt() == attempt.get())
+}
 
 /// The first typed refusal is sealed beside the attempt before quota publication.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1771,30 +1791,31 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let selected_run = command
-        .run
-        .as_ref()
-        .map(|target| targets::run_id(edge, target))
-        .transpose()?;
+    let selected_graph = command.run.as_ref().map(graph_selector).transpose()?;
     let (_, store) = open_read_only(edge, &call)?;
     let mut facts = store
         .map(|store| {
-            store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: selected_run,
-                        task_id: None,
-                    },
-                    &call,
-                )?
-                .collect::<Result<Vec<_>, _>>()
+            let mut facts = store
+                .attempts(run::AttemptFilter::default(), &call)?
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(target) = selected_graph.as_ref() {
+                let mut matched = Vec::with_capacity(facts.len());
+                for fact in facts {
+                    let key = store.work_key(fact.attempt_id, &call)?;
+                    if work_key_matches(&key, target) {
+                        matched.push(fact);
+                    }
+                }
+                facts = matched;
+            }
+            Ok::<_, run::RunError>(facts)
         })
         .transpose()?
         .unwrap_or_default();
     let mut hosts = provenant_telemetry::Hosts::default();
     let mut peers = Vec::new();
     if command.peers
-        && let Some(found) = remote::peer_facts(edge, selected_run)?
+        && let Some(found) = remote::peer_facts(edge, selected_graph.as_ref())?
     {
         facts.extend(found.facts);
         hosts.local = Some(found.local);

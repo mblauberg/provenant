@@ -8,6 +8,8 @@ Telemetry reports outcomes, usage and API-equivalent cost (the same tokens at
 published API prices) from terminal attempts and native sessions. Cost is an
 estimate, never a bill. The [telemetry runbook](../runbooks/telemetry.md) owns
 use. Paths are relative to `tools/front-door/`.
+Trace exports identify attempts by graph and node when the fact has that
+context; missing labels stay unknown instead of exposing legacy IDs.
 
 ## A report cannot touch a lane
 
@@ -25,13 +27,16 @@ with no age limit. The settlement reaction appends it, so a retried settlement
 adds nothing; an unreadable price table leaves the reaction pending rather than
 writing an unpriced row. Unrecognised lines are reported, never skipped.
 `telemetry cost` and `telemetry value` are the only producers of cost and read
-only this ledger.
+only this ledger. New rows identify work by graph and node. Historical 1.x
+`run` and `task` labels remain opaque text when read; no current command
+reconstructs them from run history.
 - Why: lane usage cannot be regenerated once run history is dropped, and one
   reader of one ledger cannot disagree with itself.
 - Test: `crates/telemetry/src/ledger/tests.rs::a_settled_attempt_appends_one_row_even_when_settlement_is_retried`;
-  `::the_ledger_survives_deleting_the_run_store`;
+  `::a_kept_1x_ledger_row_decodes_old_ids_as_opaque_labels`;
   `::an_unrecognised_line_is_reported_by_segment_and_line`;
   `src/settlement.rs::tests::settlement_writes_one_priced_ledger_row_and_a_failed_append_stays_pending`;
+  `::settled_cost_for_a_past_window_equals_the_telemetry_report`;
   `tests/telemetry_value_cost.rs::cost_reports_unpriced_and_unattributed_attempts_without_zero_filling`
 - Owner: `crates/telemetry/src/ledger.rs`, `src/settlement.rs`
 

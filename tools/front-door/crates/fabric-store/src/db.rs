@@ -16,7 +16,7 @@ use std::{
 /// The only schema this release opens, for `fabric.sqlite3` and `host.sqlite3`.
 pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
     sql: include_str!("schema.sql"),
-    version: 15,
+    version: 16,
 };
 
 /// The database schema version this release opens.

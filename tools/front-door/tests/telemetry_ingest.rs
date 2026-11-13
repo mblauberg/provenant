@@ -424,7 +424,7 @@ fn stats_json_is_bounded_by_default_and_detail_carries_the_rows() -> Result {
     let attempts = 6usize;
     let contexts: Vec<Value> = (0..attempts)
         .map(|index| {
-            json!({"graph_id": format!("graph-{}", "g".repeat(100)),
+            json!({"graph_id": "bounded-stats-graph",
                 "node_id": format!("node-{index}-{}", "n".repeat(100))})
         })
         .collect();

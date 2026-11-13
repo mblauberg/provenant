@@ -1678,11 +1678,19 @@ impl BinaryRunOwner<'_> {
                 } else {
                     None
                 };
+                let items = page
+                    .lanes
+                    .into_iter()
+                    .map(|lane| {
+                        provenant_fabric_runtime::runs::AttemptSummary::try_from(lane)
+                            .map_err(|_| FacadeError::StateCorrupt)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(RunResult::List {
                     extra: Default::default(),
                     page: AttemptPage {
                         extra: Default::default(),
-                        items: page.lanes.into_iter().map(Into::into).collect(),
+                        items,
                         next_after,
                         truncated,
                     },

@@ -99,6 +99,7 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"missing","coverage":{"nested":"bounded_tree_search","peer":"not_searched"}}),
         );
     };
+    let key = record.key.as_ref().ok_or(Error::Encode)?;
     let usage = serde_json::to_value(record.effective_usage()).map_err(|_| Error::Encode)?;
     let names = [
         "uncached_input",
@@ -118,8 +119,13 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     let artifact = |name: &str, item: Option<&provenant_run::ArtifactRecord>| {
         item.map(|item| {
             let present = item.path.to_relative_path().ok().is_some_and(|path| {
-                std::fs::symlink_metadata(state_path.join("runs").join(record.run_id.to_string()).join(path.as_path()))
-                    .is_ok_and(|metadata| metadata.is_file())
+                std::fs::symlink_metadata(
+                    state_path
+                        .join("runs")
+                        .join(record.run_id.to_string())
+                        .join(path.as_path()),
+                )
+                .is_ok_and(|metadata| metadata.is_file())
             });
             json!({"name":name,"bytes":item.bytes,"digest":item.digest,"complete":item.complete,"redacted":item.redacted,"present":present})
         })
@@ -138,6 +144,6 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     let (linked_inbox_requests, inbox_coverage) = super::detail_inbox::read(roots, &record);
     let timing = json!({"queued_at":record.queued_at,"started_at":record.started_at,"provider_ms":record.provider_ms,"finished_at":match &record.state { provenant_run::AttemptState::Terminal { finished_at, .. } => Some(finished_at), _ => None }});
     Ok(
-        json!({"schema_version":1,"lane_id":{"host":local_host,"project_id":record.project_id,"run_id":record.run_id,"task_id":record.task_id,"attempt_id":record.attempt_id},"status":"found","requested_route":record.requested_route,"resolved_route":record.resolved_route,"applied_route":record.applied_route,"observed_route":record.observed_route,"usage":usage,"usage_coverage":{"known":known,"missing":missing},"trace":record.trace,"timings":timing,"artifacts":artifacts,"delivery":record.delivery,"linked_inbox_requests":linked_inbox_requests,"coverage":{"nested":nested_coverage,"peer":"not_searched","linked_inbox_requests":inbox_coverage}}),
+        json!({"schema_version":1,"lane_id":{"host":local_host,"project_id":record.project_id,"key":key,"attempt_id":record.attempt_id},"status":"found","requested_route":record.requested_route,"resolved_route":record.resolved_route,"applied_route":record.applied_route,"observed_route":record.observed_route,"usage":usage,"usage_coverage":{"known":known,"missing":missing},"trace":record.trace,"timings":timing,"artifacts":artifacts,"delivery":record.delivery,"linked_inbox_requests":linked_inbox_requests,"coverage":{"nested":nested_coverage,"peer":"not_searched","linked_inbox_requests":inbox_coverage}}),
     )
 }

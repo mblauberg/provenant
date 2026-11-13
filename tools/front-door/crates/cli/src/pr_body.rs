@@ -391,10 +391,8 @@ fn detail(body: &Body<'_>) -> String {
         format!(" It delivered {}.", code(branch))
     });
     format!(
-        "Attempt {} (run {}, task {}) ended {}.{delivered} The receipt and result are under {}.",
+        "Attempt {} ended {}.{delivered} The receipt and result are under {}.",
         author.attempt_id,
-        author.run_id,
-        author.task_id,
         exit_text(author),
         code(&author.receipt_path),
     )
@@ -446,6 +444,11 @@ mod tests {
         let reviews = [facts(2, "claude/opus@high", HEAD)];
         let text = fill(TEMPLATE, &body(&author, &reviews)).unwrap();
         assert!(!text.contains("<!--"), "{text}");
+        assert!(!text.contains(&format!("run {}", author.run_id)), "{text}");
+        assert!(
+            !text.contains(&format!("task {}", author.task_id)),
+            "{text}"
+        );
         for needle in [
             "## Summary\n\nAdd the thing.\n\nIt does it.\n\nCloses #12\nCloses #13\n",
             &format!("Approve merge of `{HEAD}` to `main`."),
