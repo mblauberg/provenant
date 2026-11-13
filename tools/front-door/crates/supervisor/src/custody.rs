@@ -445,7 +445,7 @@ pub fn acquire_reader(
 }
 /// The supplied directory is a stable exclusion slot, not a registry.
 /// Only the private guardian handoff inherits the flock. Recovery evidence
-/// belongs to its attempt; unresolved predecessor reservations exclude new writers.
+/// belongs to its attempt; unresolved predecessor launches exclude new writers.
 pub fn acquire_writer(
     directory: Directory,
     scope: Scope,
@@ -726,7 +726,7 @@ pub fn cutover_writer_reservations(
     }
 }
 
-/// Unresolved and carried fences exclude new attempts until recovery clears them.
+/// Unresolved launches and carried fences exclude new attempts until recovery.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
@@ -754,9 +754,15 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             return Err(CustodyError::Fenced);
         }
         // Providers no longer inherit writer.lock. After guardian loss the
-        // durable unresolved reservation must exclude every new attempt, not
-        // just readmission of its original attempt, even with a free flock.
-        if reservation.unresolved_cleanup {
+        // durable unresolved launch must exclude every new attempt, not just
+        // readmission of its original attempt, even with a free flock. Prepared
+        // reservations have no child: HandingOff is durable before any spawn.
+        if reservation.unresolved_cleanup
+            && matches!(
+                reservation.launch_state,
+                LaunchState::HandingOff | LaunchState::Spawned
+            )
+        {
             return Err(CustodyError::Fenced);
         }
         match value.get("slot_exclusive") {
