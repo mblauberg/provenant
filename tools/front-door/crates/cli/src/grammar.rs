@@ -566,11 +566,24 @@ impl Access {
 }
 #[derive(Debug, Args)]
 pub struct GraphRunArgs {
+    /// Template to run (see `provenant templates`)
+    #[arg(required_unless_present = "file", conflicts_with = "file")]
+    pub template: Option<String>,
+    /// Brief for the template
+    #[arg(conflicts_with_all = ["file", "brief_file"])]
+    pub brief: Option<String>,
+    /// Handle for the graph: `status`, `wait` and `output` take it. The same
+    /// input under the same name finds its graph; changed input starts NAME-2.
+    #[arg(long, value_parser = graph_name)]
+    pub name: Option<String>,
+    /// Read the brief from a file, or from standard input given `-`
+    #[arg(long, conflicts_with = "file")]
+    pub brief_file: Option<PathBuf>,
     /// Place attempts on this peer name or host ID
     #[arg(long)]
     pub host: Option<String>,
-    /// Use this exact adapter/model instead of a route tier; a bare model name works when one provider offers it
-    #[arg(long, conflicts_with = "tier")]
+    /// Use this exact adapter/model instead of a route; a bare model name works when one provider offers it
+    #[arg(long, conflicts_with = "route")]
     pub model: Option<String>,
     /// Override model reasoning effort
     #[arg(long)]
@@ -578,17 +591,10 @@ pub struct GraphRunArgs {
     /// Account label for routing and quota accounting
     #[arg(long)]
     pub account: Option<String>,
-    /// Stable operation identity for replay
-    #[arg(long, hide = true, value_parser = explicit_operation_id)]
-    pub operation_id: Option<OperationId>,
-    /// Brief for the selected template
-    pub brief: Option<String>,
-    /// Select a layered template [default: task]
-    #[arg(long = "use")]
-    pub template: Option<String>,
-    /// Override the template's route tier
-    #[arg(long, visible_alias = "route")]
-    pub tier: Option<String>,
+    /// Route tier for every node (junior, senior, principal), or a role map such
+    /// as writer=junior,review=senior; a role not named keeps the template's tier
+    #[arg(long)]
+    pub route: Option<String>,
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
@@ -607,10 +613,12 @@ pub struct GraphRunArgs {
     /// Copy the node over comma-separated items, or a resolver such as @review-panel
     #[arg(long, value_delimiter = ',')]
     pub over: Vec<String>,
-    /// Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable
+    /// Bind a template parameter or attempt.FIELD (NAME=VALUE), typed by its
+    /// declaration: a string as written, a number or boolean as that type, a
+    /// list or table as TOML; repeatable
     #[arg(long = "set")]
     pub set: Vec<String>,
-    /// Read a graph document (JSON or TOML), or a plain text brief
+    /// Read a graph document (JSON or TOML)
     #[arg(long)]
     pub file: Option<PathBuf>,
     /// Let this child outlive parent and graph cancellation (inside a lane only)
@@ -626,14 +634,14 @@ pub struct GraphRunArgs {
     /// Explain the compiled graph without starting work
     #[arg(long)]
     pub explain: bool,
-    /// Wait for settlement (default 1 hour; use --wait=30m for a duration).
-    /// Writer binding can block beyond this wait: each binding gets at least
-    /// domains.fabric.graph.writer_launch_seconds (default 55s). Expiry leaves work running.
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
-    pub wait: Option<u64>,
-    /// Raw CLI evidence that a duration after bare `--wait` became the brief.
-    #[arg(skip)]
-    pub bare_wait_value: Option<String>,
+}
+
+/// A graph name, checked where it is typed so a bad one is a usage error.
+fn graph_name(text: &str) -> Result<String, String> {
+    match provenant_fabric_runtime::graph::template::graph_name_fault(text) {
+        None => Ok(text.to_owned()),
+        Some(fault) => Err(fault.to_owned()),
+    }
 }
 
 impl GraphRunArgs {
@@ -646,11 +654,6 @@ impl GraphRunArgs {
         } else {
             None
         }
-    }
-
-    /// A duration consumed as the positional brief after a bare `--wait`.
-    pub fn ambiguous_wait_brief(&self) -> Option<&str> {
-        self.bare_wait_value.as_deref()
     }
 }
 

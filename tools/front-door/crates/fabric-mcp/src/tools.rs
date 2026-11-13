@@ -1299,7 +1299,7 @@ pub fn lane_run_request(
     let invalid = || {
         ServiceError::Cli {
         code: "invalid_input".into(),
-        message: "child runs accept a template, brief, tier, access mode and write scope; use a graph patch for other controls".into(),
+        message: "child runs accept a name, template, brief, route, access mode and write scope; use a graph patch for other controls".into(),
         data: Value::Null,
     }
     };
@@ -1324,6 +1324,9 @@ pub fn lane_run_request(
                 "op" | "document"
                     | "id"
                     | "brief"
+                    | "name"
+                    | "template"
+                    | "route"
                     | "use"
                     | "tier"
                     | "access"
@@ -1345,8 +1348,29 @@ pub fn lane_run_request(
             .transpose()
     };
     let brief = text("brief")?.unwrap_or_default();
-    let template = text("use")?.unwrap_or_else(|| "task".into());
-    let tier = text("tier")?;
+    let template = match input.get("template") {
+        Some(value) => value.as_str().map(str::to_owned).ok_or_else(invalid)?,
+        None => input
+            .get("document")
+            .and_then(|document| document.get("use"))
+            .map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid))
+            .transpose()?
+            .unwrap_or_else(|| "task".into()),
+    };
+    let tier = match input.get("route") {
+        Some(value) => Some(value.as_str().map(str::to_owned).ok_or_else(invalid)?),
+        None => input
+            .get("document")
+            .and_then(|document| document.get("tier"))
+            .map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid))
+            .transpose()?,
+    };
+    let name = text("name")?;
+    if let Some(name) = &name
+        && provenant_fabric_runtime::graph::template::graph_name_fault(name).is_some()
+    {
+        return Err(invalid());
+    }
     let writer = match field("access") {
         None => false,
         Some(value) if value == "read_only" => false,
@@ -1357,18 +1381,31 @@ pub fn lane_run_request(
         .map(|value| serde_json::from_value(value.clone()).map_err(|_| invalid()))
         .transpose()?
         .unwrap_or_default();
-    let idempotency_key = text("idempotency_key")?.unwrap_or(
-        provenant_os::fs::entropy_128()
+    let idempotency_key = match (text("idempotency_key")?, &name) {
+        (Some(key), _) => key,
+        // A named child replays by its name and the input that named it.
+        (None, Some(name)) => {
+            let mut launch = input.clone();
+            if let Some(fields) = launch.as_object_mut() {
+                for field in ["explain", "wait_seconds"] {
+                    fields.remove(field);
+                }
+            }
+            provenant_records::CanonicalV1::record_digest("graph-replay", 1, &launch)
+                .map(|digest| format!("{name}:{digest}"))
+                .map_err(|_| invalid())?
+        }
+        (None, None) => provenant_os::fs::entropy_128()
             .map(|bytes| provenant_core::hex(&bytes))
             .map_err(|_| invalid())?,
-    );
+    };
     if idempotency_key.is_empty() || idempotency_key.len() > 200 {
         return Err(invalid());
     }
     let digest =
         provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
     Ok(RelayOp::Add(ChildRequest {
-        id: format!("child-{}", &digest[7..39]),
+        id: name.unwrap_or_else(|| format!("child-{}", &digest[7..39])),
         template,
         brief,
         tier,

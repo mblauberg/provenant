@@ -314,7 +314,7 @@ fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Erro
     );
     let status = json!({"op":"status","id":"g-test","wait_seconds":1});
     assert_eq!(call(&mut service, "fabric_run", status.clone())?, status);
-    let child_request = json!({"op":"run","brief":"inspect parser","use":"explore","tier":"junior","wait_seconds":1});
+    let child_request = json!({"op":"run","brief":"inspect parser","template":"explore","route":"junior","wait_seconds":1});
     let child = call(&mut service, "fabric_run", child_request)?;
     assert_eq!(child["receipt"]["op"], "add");
     assert_eq!(child["receipt"]["use"], "explore");
@@ -461,7 +461,7 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     )?;
     let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
     let input = json!({
-        "op":"run", "idempotency_key":"child-run", "wait_seconds":1, "brief":"implement the child", "tier":"senior",
+        "op":"run", "idempotency_key":"child-run", "wait_seconds":1, "brief":"implement the child", "route":"senior",
         "document":{"id":"task", "use":"task", "access":"worktree_write"}
     });
     let invoke = |service: &mut Service<'_, FakeFacade>| -> Result<Value, Box<dyn Error>> {

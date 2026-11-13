@@ -161,7 +161,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     if let Some(error) = duplicate {
         return ParseOutcome::Invalid { error, globals };
     }
-    let mut invocation = match RawInvocation::from_arg_matches(&matches) {
+    let invocation = match RawInvocation::from_arg_matches(&matches) {
         Ok(value) => Invocation {
             globals,
             command: value.command,
@@ -177,17 +177,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             };
         }
     };
-    if let Command::Run(request) = &mut invocation.command
-        && argv
-            .iter()
-            .skip(1)
-            .take_while(|arg| *arg != "--")
-            .any(|arg| arg == "--wait")
-        && let Some(brief) = request.brief.as_deref()
-        && duration_seconds(brief).is_ok()
-    {
-        request.bare_wait_value = Some(brief.to_owned());
-    }
     if let Command::Help { command, all } = &invocation.command {
         let scope = format!("provenant {}", command.join(" "));
         let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
@@ -1173,6 +1162,7 @@ mod tests {
     fn run_accepts_writer_branch_base_and_named_route() {
         let invocation = valid(&[
             "run",
+            "implement",
             "Fix parser",
             "--mode",
             "worktree-write",
@@ -1191,13 +1181,21 @@ mod tests {
         assert_eq!(request.brief.as_deref(), Some("Fix parser"));
         assert_eq!(request.branch.as_deref(), Some("fix/parser"));
         assert_eq!(request.base.as_deref(), Some("origin/main"));
-        assert_eq!(request.tier.as_deref(), Some("senior"));
+        assert_eq!(request.template.as_deref(), Some("implement"));
+        assert_eq!(request.route.as_deref(), Some("senior"));
         assert_eq!(request.write_scope, vec!["src"]);
-        valid(&["run", "Fix parser", "--worktree", ".worktrees/fix-parser"]);
-        invalid(&["run", "Fix parser", "--branch", "fix/parser"]);
-        invalid(&["run", "Fix parser", "--base", "HEAD"]);
+        valid(&[
+            "run",
+            "implement",
+            "Fix parser",
+            "--worktree",
+            ".worktrees/fix-parser",
+        ]);
+        invalid(&["run", "implement", "Fix parser", "--branch", "fix/parser"]);
+        invalid(&["run", "implement", "Fix parser", "--base", "HEAD"]);
         invalid(&[
             "run",
+            "implement",
             "Fix parser",
             "--branch",
             "fix/parser",
@@ -1568,7 +1566,7 @@ mod tests {
             .iter()
             .find(|command| command.command == "provenant run")
             .unwrap();
-        for flag in ["tier", "over", "file"] {
+        for flag in ["route", "over", "file"] {
             assert!(
                 run.arguments
                     .iter()
@@ -1638,9 +1636,10 @@ mod tests {
     fn graph_run_and_template_controls_parse() {
         let Command::Run(request) = valid(&[
             "run",
-            "Inspect the code",
-            "--use",
             "explore",
+            "Inspect the code",
+            "--name",
+            "inspect",
             "--route",
             "junior",
             "--over",
@@ -1651,21 +1650,31 @@ mod tests {
             "limit=3",
             "--explain",
             "--detached",
-            "--wait=30m",
         ])
         .command
         else {
             panic!("run")
         };
-        assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
         assert_eq!(request.template.as_deref(), Some("explore"));
-        assert_eq!(request.tier.as_deref(), Some("junior"));
+        assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
+        assert_eq!(request.name.as_deref(), Some("inspect"));
+        assert_eq!(request.route.as_deref(), Some("junior"));
         assert_eq!(request.over, ["cli", "runtime"]);
         assert_eq!(request.set, ["limit=3"]);
         assert!(request.explain);
         assert!(request.detached);
-        assert_eq!(request.wait, Some(1800));
         valid(&["run", "--file", "work.toml", "--explain"]);
+        // A template is the first positional; a document and a brief file each
+        // replace the template and brief they stand for, never add to them.
+        invalid(&["run"]);
+        invalid(&["run", "explore", "--file", "work.toml"]);
+        invalid(&["run", "explore", "brief", "--brief-file", "brief.md"]);
+        valid(&["run", "explore", "--brief-file", "-"]);
+        invalid(&["run", "explore", "--name", "Not_A_Name"]);
+        valid(&["run", "explore", "--route", "writer=junior,review=senior"]);
+        for removed in ["--use", "--tier", "--operation-id", "--wait"] {
+            invalid(&["run", "explore", removed, "x"]);
+        }
         invalid(&["run", "--preset", "task"]);
         valid(&["stats", "--by", "tier"]);
         valid(&["stats", "--by", "node"]);
@@ -1674,9 +1683,9 @@ mod tests {
         invalid(&["status", "--by", "tier"]);
         valid(&["status", "--stats", "--by", "node"]);
         valid(&["config", "schema", "--all"]);
-        valid(&["run", "--tier", "junior"]);
         valid(&[
             "run",
+            "task",
             "--model",
             "codex/gpt-6-luna",
             "--effort",
@@ -1685,25 +1694,29 @@ mod tests {
             "work",
             "--host",
             "workshop",
-            "--operation-id",
-            "planned-run",
         ]);
-        invalid(&["run", "--model", "codex/gpt-6-luna", "--tier", "junior"]);
+        invalid(&[
+            "run",
+            "task",
+            "--model",
+            "codex/gpt-6-luna",
+            "--route",
+            "junior",
+        ]);
         for flag in [
             "--deliver",
             "--build-heavy",
             "--confidential",
             "--provider-timeout",
         ] {
-            invalid(&["run", flag, "example"]);
+            invalid(&["run", "task", flag, "example"]);
         }
-        invalid(&["run", "--tier", "senior", "--route", "junior"]);
         valid(&["templates"]);
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
         for flag in ["--preset", "--prompt-file", "--manifest", "--plan"] {
-            invalid(&["run", flag, "example"]);
+            invalid(&["run", "task", flag, "example"]);
         }
     }
     #[test]
@@ -1723,8 +1736,19 @@ mod tests {
                 .is_some_and(|text| !text.is_empty())
         );
         for name in [
-            "brief", "template", "tier", "model", "effort", "account", "host", "over", "set",
-            "file", "explain", "wait",
+            "template",
+            "brief",
+            "name",
+            "brief_file",
+            "route",
+            "model",
+            "effort",
+            "account",
+            "host",
+            "over",
+            "set",
+            "file",
+            "explain",
         ] {
             assert!(
                 run.arguments.iter().any(|argument| argument.name == name),

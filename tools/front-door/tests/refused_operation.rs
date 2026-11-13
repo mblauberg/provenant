@@ -76,7 +76,6 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
             "run",
             "--file",
             graph.to_str().ok_or("graph path")?,
-            "--wait=10s",
             "--json",
         ])?;
         let value: Value = serde_json::from_slice(&run.stdout.bytes)?;
@@ -158,10 +157,13 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
             "run",
             "--file",
             graph.to_str().ok_or("graph path")?,
-            "--wait=10s",
             "--json",
         ])?;
-        assert_ne!(code(&repeated), 0, "{repeated:?}");
+        // The same input is the same launch: it finds its graph, exits 0 and
+        // starts nothing, so the refusal and its notice stay singular.
+        assert_eq!(code(&repeated), 0, "{repeated:?}");
+        let repeated: Value = serde_json::from_slice(&repeated.stdout.bytes)?;
+        assert_eq!(repeated["data"]["named"]["replayed"], true, "{repeated}");
         for _ in 0..2 {
             let reconciled = rig.command(&["reconcile", "--json"])?;
             assert_eq!(code(&reconciled), 0, "{reconciled:?}");
