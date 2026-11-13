@@ -2489,10 +2489,10 @@ mod tests {
     }
 
     #[test]
-    fn pending_attempt_status_and_stop_by_attempt_id_keep_one_launch()
+    fn pending_attempt_status_and_numbered_stop_keep_one_launch()
     -> Result<(), Box<dyn std::error::Error>> {
         if super::super::peer_tests::host_test(
-            "fabric::unified::tests::pending_attempt_status_and_stop_by_attempt_id_keep_one_launch",
+            "fabric::unified::tests::pending_attempt_status_and_numbered_stop_keep_one_launch",
         )? {
             return Ok(());
         }
@@ -2531,7 +2531,7 @@ mod tests {
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
             let input = json!({
-                "op":"run", "brief":"Inspect the parser", "operation_id":"stop-by-attempt",
+                "op":"run", "brief":"Inspect the parser", "name":"stop-by-attempt",
                 "document":{"use":"task", "routes":[
                     {"adapter":"fixture", "model":"fixture/first"},
                     {"adapter":"fixture", "model":"fixture/fallback"}
@@ -2600,8 +2600,9 @@ mod tests {
                     ..
                 }
             ));
-            // Replaying the original operation advances the stopped graph. Its
-            // unused second route must remain unused after the slot is freed.
+            // Replaying the named launch returns the stopped graph and starts
+            // nothing: its unused second route stays unused after the slot is
+            // freed.
             let replayed = provenant_cli::run::with_deferred_provider_launch(|| {
                 factory.graph_document(input, budget, &cancel)
             })?;

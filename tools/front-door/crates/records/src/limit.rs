@@ -93,7 +93,7 @@ impl BudgetAction {
 }
 
 /// A bounded fractional grace above a token budget, stored in millionths so
-/// policy records retain equality. It serializes as decimal text ("0.1"),
+/// policy records retain equality. It serialises as decimal text ("0.1"),
 /// because sealed records carry no floats; input also accepts a JSON number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BudgetGrace(u64);

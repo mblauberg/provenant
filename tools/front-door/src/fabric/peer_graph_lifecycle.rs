@@ -442,7 +442,8 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let project = factory.context.identity.project;
-    for (id, contents) in [("broken", b"invalid json".as_slice())] {
+    {
+        let (id, contents) = ("broken", b"invalid json".as_slice());
         drop(FileJournal::open(
             &roots.state,
             project,
@@ -663,7 +664,7 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
         let mut input = serde_json::json!({
             "op":"run", "brief":"Inspect the parser", "model":"fixture/model",
             "effort":"high", "account":"fixture-account", "host":"local",
-            "operation_id":"graph-run-controls",
+            "name":"graph-run-controls",
             "document":{"use":"task", "limits":{"concurrency":3}},
             "set":{
                 "attempt.build_heavy":true,
@@ -702,9 +703,9 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
             preview["explain"] = serde_json::json!(true);
             preview
         }, budget, &cancel).map_err(|error| format!("preview controls (writer={writer}, new={new_worktree}, delivery={delivery_mode:?}): {error:?}"))?;
-        // An unnamed launch takes TEMPLATE-K (cli.md "Names and replay").
-        let generated = preview["document"]["graph_id"].as_str().ok_or("graph ID missing")?;
-        assert!(generated.strip_prefix("task-").and_then(|k| k.parse::<u32>().ok()).is_some_and(|k| k > 0), "{generated}");
+        // A name is the graph id, and only a named launch replays (cli.md
+        // "Names and replay"); the replay below relies on it.
+        assert_eq!(preview["document"]["graph_id"], "graph-run-controls");
         assert_eq!(preview["document"]["limits"]["concurrency"], 3);
         let node = &preview["document"]["nodes"][0];
         assert_eq!(node["attempt"]["host"], "local");
@@ -801,7 +802,6 @@ fn new_writer_delivery_refusals_precede_worktree_provisioning()
         let input = serde_json::json!({
             "op":"run", "brief":"Inspect the parser", "model":"fixture/model",
             "branch":branch, "base":"HEAD", "write_scope":["src"],
-            "operation_id":"refused-writer-delivery",
             "document":{"use":"task", "templates":{"task":{
                 "brief":"Do the work", "tier":"senior", "access":"worktree_write",
                 "node":{"delivery":delivery}

@@ -2968,8 +2968,10 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let input =
-            json!({"op":"run", "template":"review", "brief":"Review the parser", "route":"senior"});
+        // Only a named launch replays (run.md: without a name the host
+        // assigns the next TEMPLATE-K and never replays).
+        let input = json!({"op":"run", "template":"review", "brief":"Review the parser",
+            "route":"senior", "name":"parser-review"});
         let mut preview = input.clone();
         preview["explain"] = json!(true);
         let document: GraphDocument = serde_json::from_value(
@@ -3002,9 +3004,9 @@ mod tests {
         };
         assert_eq!(first.status, GraphStatus::Complete);
         assert_eq!(reviewer.0, 1);
-        // Submit through the real front door, without an operation ID. A
-        // content-identical review must reuse the terminal journal rather than
-        // entering the host's provider-launch path again.
+        // Submit through the real front door, with and without a wait. A
+        // content-identical named review must reuse the terminal journal
+        // rather than entering the host's provider-launch path again.
         for wait in [None, Some(1)] {
             let mut repeated = input.clone();
             if let Some(seconds) = wait {
@@ -3796,13 +3798,22 @@ mod tests {
         let controlled = factory.child_request(&json!({"op":"run", "template":"implement",
             "brief":"Bound controls", "branch":"fix/child", "base":"HEAD",
             "write_scope":["src"], "detached":true}))?;
-        let node = &controlled.launch.as_ref().unwrap().node;
+        // An unbounded implement gains a planner; the launch controls belong
+        // to its writer leaf wherever the plan boundary places it.
+        fn writer_leaf(node: &Value) -> Option<&Value> {
+            match node.pointer("/composite/nodes").and_then(Value::as_array) {
+                Some(children) => children.iter().find_map(writer_leaf),
+                None => (node["access"] == "worktree_write").then_some(node),
+            }
+        }
+        let node = writer_leaf(&controlled.launch.as_ref().unwrap().node).ok_or("writer leaf")?;
         assert_eq!(node["worktree"], ".worktrees/fix-child");
         assert_eq!(
             node["attempt"]["new_worktree"],
             json!({"branch":"fix/child", "base":"HEAD"})
         );
-        assert_eq!(controlled.write_scope, ["src"]);
+        assert_eq!(node["write_scope"], json!(["src"]));
+        assert!(controlled.has_writers());
         assert!(controlled.detached);
         let nested = json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "brief":"Nested replay",
             "idempotency_key":"nested-child", "detached":true}});

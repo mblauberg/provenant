@@ -265,9 +265,9 @@ fn launch_projection_omits_untrusted_error_sources() {
 fn launch_invalid_field_matrix_persists_only_approved_facts() {
     use crate::coordination::facade::{FacadeError, InvalidInputDetail};
     for (field, expected) in [
-        ("tasks[0].title".to_owned(), Some("tasks[0].title")),
-        ("tasks[0].TOKEN_SENTINEL\u{1b}".to_owned(), None),
-        (format!("tasks[0].TOKEN_SENTINEL{}", "é".repeat(2048)), None),
+        ("task.title".to_owned(), Some("task.title")),
+        ("task.TOKEN_SENTINEL\u{1b}".to_owned(), None),
+        (format!("task.TOKEN_SENTINEL{}", "é".repeat(2048)), None),
     ] {
         let mut owner = ErrorLauncher {
             now: Some(at(0)),

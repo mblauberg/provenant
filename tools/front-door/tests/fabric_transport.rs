@@ -1985,28 +1985,32 @@ fn launch_named_and_wait(
     ))
 }
 
-/// Run the host tick until `settled` holds for NAME's checkpoint or `limit`
-/// passes. A wait only observes (retry-owner.md); the tick advances due
-/// launch retries and observes peer settlement for the origin graph.
-#[allow(clippy::disallowed_methods)] // A real tick cadence against real processes.
+/// Run the host tick until `settled` holds for NAME's checkpoint, failing
+/// with the last observation once `limit` passes. A wait only observes
+/// (retry-owner.md); the tick advances due launch retries and observes peer
+/// settlement for the origin graph.
 fn tick_until(
     rig: &TestRig,
     name: &str,
     limit: std::time::Duration,
     settled: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
-    let deadline = std::time::Instant::now() + limit;
-    loop {
-        let ticked = rig.command(&["tick", "--json"])?;
-        let checkpoint = rig.checkpoint(name)?;
-        if settled(&checkpoint) || std::time::Instant::now() > deadline {
-            return Ok(json!({
-                "data": {"checkpoint": checkpoint},
-                "tick": String::from_utf8_lossy(&ticked.stdout.bytes),
-            }));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    let observe = || -> std::result::Result<(Value, String), String> {
+        let ticked = rig
+            .command(&["tick", "--json"])
+            .map_err(|error| error.to_string())?;
+        let checkpoint = rig.checkpoint(name).map_err(|error| error.to_string())?;
+        Ok((
+            checkpoint,
+            String::from_utf8_lossy(&ticked.stdout.bytes).into_owned(),
+        ))
+    };
+    let (checkpoint, tick) = provenant_test_support::wait_for(name, limit, observe, |observed| {
+        observed
+            .as_ref()
+            .map_or(true, |(checkpoint, _)| settled(checkpoint))
+    })??;
+    Ok(json!({"data": {"checkpoint": checkpoint}, "tick": tick}))
 }
 
 fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {

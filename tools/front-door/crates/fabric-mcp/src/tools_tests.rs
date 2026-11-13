@@ -2,7 +2,7 @@
 fn structured_errors_use_the_same_owner_projection_for_all_envelopes() {
     use provenant_fabric_runtime::coordination::InputError;
     let errors = [
-        ServiceError::Invalid(InputError::new("tasks[1].title")),
+        ServiceError::Invalid(InputError::new("task.title")),
         ServiceError::Facade(FacadeError::invalid(
             provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema,
         )),
@@ -96,7 +96,7 @@ fn invalid_input_paths_omit_untrusted_data() {
     use provenant_fabric_runtime::coordination::{CoordinationError, InputError};
     for path in [
         "/private/TOKEN_SENTINEL\u{1b}".to_owned(),
-        format!("tasks[{}].title", "1".repeat(200)),
+        format!("task[{}].title", "1".repeat(200)),
         format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
     ] {
         for error in [
@@ -114,8 +114,8 @@ fn invalid_input_paths_omit_untrusted_data() {
             assert!(detail["hint"].is_string());
         }
     }
-    let detail = ServiceError::Invalid(InputError::new("tasks[1].title")).structured_error();
-    assert_eq!(detail["path"], "tasks[1].title");
+    let detail = ServiceError::Invalid(InputError::new("task.title")).structured_error();
+    assert_eq!(detail["path"], "task.title");
 }
 
 #[test]
@@ -872,7 +872,7 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
     assert!(!encoded.contains("/private/host"));
     for raw_detail in [
         format!("schema version TOKEN_SENTINEL\u{1b}{}", "é".repeat(2000)),
-        "invalid input field `tasks[0].title` TOKEN_SENTINEL".to_owned(),
+        "invalid input field `task.title` TOKEN_SENTINEL".to_owned(),
         "graph document schema_version is invalid".to_owned(),
     ] {
         let received: FacadeError = serde_json::from_value(json!({
@@ -892,9 +892,9 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
 fn mcp_invalid_field_matrix_exposes_only_approved_facts() {
     use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
     for (field, expected) in [
-        ("tasks[0].title".to_owned(), Some("tasks[0].title")),
-        ("tasks[0].TOKEN_SENTINEL\u{1b}".to_owned(), None),
-        (format!("tasks[0].TOKEN_SENTINEL{}", "é".repeat(2048)), None),
+        ("task.title".to_owned(), Some("task.title")),
+        ("task.TOKEN_SENTINEL\u{1b}".to_owned(), None),
+        (format!("task.TOKEN_SENTINEL{}", "é".repeat(2048)), None),
     ] {
         let wire = ServiceError::Facade(FacadeError::invalid(InvalidInputDetail::FieldTooLarge {
             field,
