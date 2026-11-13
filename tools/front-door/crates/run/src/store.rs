@@ -2158,6 +2158,8 @@ mod admission_key_tests {
             let mut conflict = prepared;
             conflict.run_id = RunId::from_bytes([number as u8 + 20; 16]);
             conflict.operation_id = OperationId::parse(&format!("other-{number}"))?;
+            assert_eq!(store.create(&conflict, &call)?.run_id, admitted.run_id);
+            conflict.request.tasks[0].title = Some("different request".into());
             assert!(matches!(
                 store.create(&conflict, &call),
                 Err(RunError::OperationConflict)
