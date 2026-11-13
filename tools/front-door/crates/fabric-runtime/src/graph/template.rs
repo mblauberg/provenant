@@ -19,6 +19,7 @@ const ITEM: &str = "item";
 /// Host compilation context for a patch emitted by a planner. Every nested
 /// implementation in that patch has already been sized by its producer.
 pub(super) const BOUNDED_IMPLEMENTATION: &str = "implementation-brief-bounded";
+const PLAN_SOURCES: &str = "implementation-plan-sources";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
@@ -1402,25 +1403,55 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_all(&self, nodes: &[Value]) -> Result<Vec<GraphNode>, CompileError> {
-        self.bounded_plan_consumers(nodes)
+        let resolvers = self.scoped_plan_sources(nodes);
+        let compiler = Compiler {
+            library: self.library,
+            resolvers: &resolvers,
+        };
+        compiler
+            .bounded_plan_consumers(nodes)
             .iter()
-            .map(|node| self.compile(node))
+            .map(|node| compiler.compile(node))
             .collect()
+    }
+
+    /// Keep visible plan producers while descending into raw or template
+    /// composites. A local node shadows an outer producer of the same name.
+    pub(super) fn scoped_plan_sources(&self, nodes: &[Value]) -> BTreeMap<String, Vec<String>> {
+        let mut resolvers = self.resolvers.clone();
+        let locals: BTreeSet<&str> = nodes
+            .iter()
+            .filter_map(|node| node.get("id").and_then(Value::as_str))
+            .collect();
+        let mut sources = resolvers.remove(PLAN_SOURCES).unwrap_or_default();
+        sources.retain(|source| !locals.contains(source.as_str()));
+        sources.extend(
+            nodes
+                .iter()
+                .filter(|node| {
+                    node.get("plan").is_some_and(|plan| !plan.is_null())
+                        || node
+                            .get("use")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+                })
+                .filter_map(|node| node.get("id").and_then(Value::as_str).map(str::to_owned)),
+        );
+        sources.sort();
+        sources.dedup();
+        resolvers.insert(PLAN_SOURCES.into(), sources);
+        resolvers
     }
 
     /// A writer consuming a plan has already been sized. Other task outputs
     /// do not imply a bounded brief, nor does a tier override.
     pub(super) fn bounded_plan_consumers(&self, nodes: &[Value]) -> Vec<Value> {
-        let planners: BTreeSet<&str> = nodes
-            .iter()
-            .filter(|node| {
-                node.get("plan").is_some_and(|plan| !plan.is_null())
-                    || node
-                        .get("use")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| name == "plan" || name.starts_with("plan."))
-            })
-            .filter_map(|node| node.get("id").and_then(Value::as_str))
+        let planners: BTreeSet<&str> = self
+            .resolvers
+            .get(PLAN_SOURCES)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
             .collect();
         nodes
             .iter()
@@ -1996,8 +2027,13 @@ impl<'a> Compiler<'a> {
                 ).into());
             }
             let mut children = Vec::with_capacity(template.nodes.len());
-            for member in &self.bounded_plan_consumers(&template.nodes) {
-                children.push(self.lower_in(member, parameters, stack)?);
+            let resolvers = self.scoped_plan_sources(&template.nodes);
+            let compiler = Compiler {
+                library: self.library,
+                resolvers: &resolvers,
+            };
+            for member in &compiler.bounded_plan_consumers(&template.nodes) {
+                children.push(compiler.lower_in(member, parameters, stack)?);
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel)
                 && overrides.get("repair_panel") == Some(&Value::Bool(true))
@@ -2302,10 +2338,15 @@ impl<'a> Compiler<'a> {
                 .and_then(|spec| spec.get_mut(key))
                 .and_then(Value::as_array_mut)
             {
-                let authored = self.bounded_plan_consumers(members);
+                let resolvers = self.scoped_plan_sources(members);
+                let compiler = Compiler {
+                    library: self.library,
+                    resolvers: &resolvers,
+                };
+                let authored = compiler.bounded_plan_consumers(members);
                 for (member, authored) in members.iter_mut().zip(authored) {
                     if needs_lowering(&authored) {
-                        *member = self.lower_in(&authored, &Map::new(), stack)?;
+                        *member = compiler.lower_in(&authored, &Map::new(), stack)?;
                     }
                 }
             }

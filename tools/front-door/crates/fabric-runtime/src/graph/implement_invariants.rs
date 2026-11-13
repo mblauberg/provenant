@@ -91,7 +91,70 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
             nested.composite.unwrap().nodes[1].composite.is_some(),
             source != "plan"
         );
+        // The consumer may sit below several composites while its producer
+        // stays visible in the enclosing scope.
+        for depth in 1..=3 {
+            let mut group = raw[1].clone();
+            for level in 0..depth {
+                let child = group["id"].clone();
+                group = json!({"id":format!("group-{level}"), "kind":"composite", "access":"read_only",
+                    "composite":{"nodes":[group],"exports":[{"node":child,"outputs":["result"]}]}});
+            }
+            let outer = compiler
+                .compile(
+                    &json!({"id":"outer", "kind":"composite", "access":"read_only",
+                "composite":{"nodes":[raw[0],group],"exports":[]}}),
+                )
+                .unwrap();
+            let mut member = outer.composite.unwrap().nodes.remove(1);
+            for _ in 0..depth {
+                member = member.composite.unwrap().nodes.remove(0);
+            }
+            assert_eq!(member.composite.is_some(), source != "plan");
+        }
+        let mut scoped_library = library.clone();
+        scoped_library
+            .insert(
+                Layer::Inline,
+                "group",
+                Template {
+                    nodes: vec![raw[1].clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let outer = Compiler::new(&scoped_library)
+            .compile(
+                &json!({"id":"outer", "kind":"composite", "access":"read_only",
+            "composite":{"nodes":[raw[0],{"id":"group","use":"group"}],"exports":[]}}),
+            )
+            .unwrap();
+        assert_eq!(
+            outer.composite.unwrap().nodes[1]
+                .composite
+                .as_ref()
+                .unwrap()
+                .nodes[0]
+                .composite
+                .is_some(),
+            source != "plan"
+        );
     }
+    let shadow = compiler.compile(&json!({"id":"outer", "kind":"composite", "access":"read_only",
+        "composite":{"nodes":[{"id":"source","use":"plan"},
+            {"id":"group","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"source","use":"task"},
+                    {"id":"work","use":"implement","worktree":"/fixture/writer","write_scope":["src"],
+                        "inputs":[{"node":"source","outputs":["result"]}]}],"exports":[]}}],"exports":[]}})).unwrap();
+    assert!(
+        shadow.composite.unwrap().nodes[1]
+            .composite
+            .as_ref()
+            .unwrap()
+            .nodes[1]
+            .composite
+            .is_some()
+    );
     let over = compiler
         .compile(
             &json!({"id":"slices", "use":"implement", "over":["one", "two"],

@@ -1194,6 +1194,11 @@ pub(super) fn prepare(
         library: &library,
         resolvers: &resolvers,
     };
+    let scoped = compiler.scoped_plan_sources(&patch.nodes);
+    let compiler = Compiler {
+        resolvers: &scoped,
+        ..compiler
+    };
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
     let authored = compiler.bounded_plan_consumers(&patch.nodes);
