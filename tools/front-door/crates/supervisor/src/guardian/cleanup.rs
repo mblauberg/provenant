@@ -693,8 +693,8 @@ impl Driver<'_> {
                 self.persist_tracking(warnings, omitted);
                 return Ok(true);
             }
-            // Root exit does not authorise an arbitrary PID. Only the pinned
-            // provider and attempt-sandbox escapees are targets.
+            // Root exit does not authorise an arbitrary PID. Descendants need
+            // retained provider-ancestry proof or an attempt-sandbox mark.
             let escalation = began.elapsed() >= Duration::from_millis(plan.descendant_grace_ms);
             let reason = machine::StopReason::PostTerminalCleanup;
             let signal = if escalation {
@@ -712,11 +712,16 @@ impl Driver<'_> {
                 }
             }
             #[cfg(target_os = "macos")]
-            if self.escapee_stop_allowed
-                && !marked.is_empty()
-                && self.holder_reports_no_live_children()
-            {
-                for delivery in child.stop_marked(escalation, &marked) {
+            if self.holder_reports_no_live_children() {
+                let mut targets = std::collections::BTreeSet::new();
+                if self.descendant_stop_allowed {
+                    targets.extend(child.owned_cleanup_targets(&census, &spared));
+                }
+                if self.escapee_stop_allowed {
+                    targets.extend(marked);
+                }
+                let targets: Vec<_> = targets.into_iter().collect();
+                for delivery in child.stop_owned_targets(escalation, &targets) {
                     self.record_delivery(Some(delivery.identity), reason, signal, delivery.outcome);
                 }
             }

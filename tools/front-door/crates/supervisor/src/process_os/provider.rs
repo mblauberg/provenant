@@ -2,8 +2,8 @@
 //!
 //! This module owns only the provider child, its pipes, and census-proven
 //! descendants. Utility execution remains in `exec`. Provider signals use
-//! `ProviderGroup::stop`; escapee signals require exact observed identity and
-//! proof of the attempt's inherited sandbox.
+//! `ProviderGroup::stop`; descendant signals require exact observed identity
+//! and retained provider-ancestry proof or the attempt's inherited sandbox.
 use crate::census::{
     Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup, ProcessObservation,
 };
@@ -679,6 +679,28 @@ fn priority_with_ops(
         Err(read_error) => (None, error.or(Some(read_error))),
     }
 }
+fn owned_cleanup_targets(
+    owned: &BTreeSet<ProcessIdentity>,
+    previously_spared: &BTreeSet<ProcessIdentity>,
+    census: &Census,
+    spared: &BTreeSet<ProcessIdentity>,
+) -> Vec<ProcessIdentity> {
+    owned
+        .iter()
+        .filter(|identity| {
+            !previously_spared.contains(*identity)
+                && matches!(
+                    census.process(identity.pid),
+                    ProcessLookup::Present(fact) if fact.identity == **identity && !fact.zombie
+                )
+                && !spared.iter().any(|owner| {
+                    *owner == **identity || census.ancestry(identity, owner) != Ancestry::No
+                })
+        })
+        .cloned()
+        .collect()
+}
+
 impl ProviderGroup {
     pub(crate) fn spawn(
         spec: provenant_os::sys::raw_exec::SpawnSpec<'_>,
@@ -1078,13 +1100,29 @@ impl ProviderGroup {
         Ok(result)
     }
 
-    /// Signal exact identities the guardian found still inside the attempt's
-    /// sandbox after they left the provider tree. Each identity is re-observed
-    /// immediately before the signal, so a recycled PID is never targeted.
-    pub(crate) fn stop_marked(
+    /// Retained provider-ancestry proof survives setsid and reparenting. A
+    /// current exact identity is still required; protected owners and their
+    /// possibly related descendants remain excluded.
+    pub(crate) fn owned_cleanup_targets(
+        &self,
+        census: &Census,
+        spared: &BTreeSet<ProcessIdentity>,
+    ) -> Vec<ProcessIdentity> {
+        owned_cleanup_targets(
+            &self.owned_descendants,
+            &self.spared_descendants,
+            census,
+            spared,
+        )
+    }
+
+    /// Signal identities the guardian authorized by retained provider ancestry
+    /// or the attempt sandbox. Re-observe each immediately before signalling
+    /// so a recycled PID is never targeted.
+    pub(crate) fn stop_owned_targets(
         &mut self,
         escalation: bool,
-        marked: &[ProcessIdentity],
+        targets: &[ProcessIdentity],
     ) -> Vec<AdoptedDelivery> {
         let signal = if escalation {
             libc::SIGKILL
@@ -1092,7 +1130,7 @@ impl ProviderGroup {
             libc::SIGTERM
         };
         let mut deliveries = Vec::new();
-        for identity in marked {
+        for identity in targets {
             if self.last_adopted_signal.get(identity) == Some(&signal) {
                 continue;
             }
@@ -1105,8 +1143,8 @@ impl ProviderGroup {
                 _ => continue,
             }
             // SAFETY: the identity (boot, PID, start stamp) was re-read just
-            // above and is inside the attempt's own sandbox. This
-            // targets that one process only, never a group or caller PID.
+            // above; the guardian supplied ancestry or sandbox scope proof.
+            // This targets only that process, never a group or caller PID.
             let outcome = if unsafe { libc::kill(pid, signal) } == 0 {
                 self.last_adopted_signal.insert(identity.clone(), signal);
                 DeliveryOutcome::Delivered
@@ -1325,6 +1363,54 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn native_cleanup_targets_require_owned_identity_and_preserve_exclusions() {
+        let identity = |pid: i64| ProcessIdentity {
+            boot: "fixture".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        };
+        let fact = |pid, parent_pid| crate::census::ProcessFact {
+            identity: identity(pid),
+            parent_pid,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let mut reused = fact(50, 1);
+        reused.identity.native_start += 100;
+        let mut zombie = fact(90, 1);
+        zombie.zombie = true;
+        let census = Census::from_observations(
+            [
+                fact(1, 0),
+                fact(20, 1), // Owned descendant after reparenting and setsid.
+                fact(30, 1), // Protected owner.
+                fact(40, 30),
+                reused,
+                fact(70, 1), // Unrelated live process.
+                fact(80, 1), // Previously spared descendant.
+                zombie,
+            ],
+            [(60, crate::census::ObservationIssue::Io)],
+            [],
+            true,
+            false,
+            16,
+        )
+        .expect("valid census");
+        let owned = [20, 40, 50, 60, 80, 90].map(identity).into();
+        let targets = owned_cleanup_targets(
+            &owned,
+            &[identity(80)].into(),
+            &census,
+            &[identity(30)].into(),
+        );
+        assert_eq!(targets, [identity(20)]);
+    }
 
     #[test]
     fn reactor_rounds_positive_waits_up_without_turning_nonblocking_polls_into_waits() {

@@ -279,3 +279,19 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.lane.overrides]]
 filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# This native timeout/replay fixture prepares a backend and Git repository,
+# submits twice, permits a 30-second status wait, then checks descendant
+# cleanup. Its outer deadline must include those phases around the inner wait.
+# Keep the provider's five-second deadline and status wait unchanged.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.lane.overrides]]
+filter = 'package(=provenant) & binary(=command_adapter) & test(=command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt)'
+slow-timeout = { period = "30s", terminate-after = 3 }
