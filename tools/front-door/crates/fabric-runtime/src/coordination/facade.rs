@@ -514,6 +514,8 @@ pub enum FacadeError {
     OutputTooLarge,
     #[error("stored state is corrupt")]
     StateCorrupt,
+    #[error("stored state is corrupt: {detail}")]
+    StateCorruptDetail { detail: String },
     #[error(
         "upgrade required: reader release {reader_release}, writer release {writer_release}, {record} version {version}"
     )]
@@ -920,7 +922,7 @@ impl FacadeError {
             Self::BaseUnreachable => "base_unreachable",
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
-            Self::StateCorrupt => "state_corrupt",
+            Self::StateCorrupt | Self::StateCorruptDetail { .. } => "state_corrupt",
             Self::UpgradeRequired { .. } => "upgrade_required",
             Self::UpgradeRefused => "upgrade_refused",
             Self::PublicationFailed => "publication_failed",
@@ -1279,7 +1281,9 @@ impl From<&crate::hosts::PeerError> for FacadeError {
             },
             PeerError::Deadline => Self::Timeout,
             PeerError::Cancelled => Self::Cancelled,
-            PeerError::Frame => Self::StateCorrupt,
+            PeerError::Frame => Self::StateCorruptDetail {
+                detail: "peer frame: invalid frame".into(),
+            },
             PeerError::Refused { error } => error.clone(),
         }
     }
@@ -1295,9 +1299,12 @@ impl From<&super::CoordinationError> for FacadeError {
             CoordinationError::Input(error) => Self::InvalidInput {
                 detail: error.diagnostic_detail(),
             },
-            CoordinationError::Time(_) | CoordinationError::ResponseEncoding(_) => {
-                Self::StateCorrupt
-            }
+            CoordinationError::Time(_) => Self::StateCorruptDetail {
+                detail: "coordination: time error".into(),
+            },
+            CoordinationError::ResponseEncoding(_) => Self::StateCorruptDetail {
+                detail: "coordination response: encoding error".into(),
+            },
             CoordinationError::Cancelled => Self::Cancelled,
             CoordinationError::Timeout => Self::Timeout,
             CoordinationError::Busy => Self::Busy,
@@ -1340,12 +1347,24 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                     version: *version as u64,
                 }
             }
-            Error::Decode(_)
-            | Error::Encode(_)
-            | Error::SchemaVersion(_)
-            | Error::UnversionedDatabase
-            | Error::JournalMode(_)
-            | Error::Time(_) => Self::StateCorrupt,
+            Error::Decode(error) => Self::StateCorruptDetail {
+                detail: format!("fabric store record: decode error: {error}"),
+            },
+            Error::Encode(_) => Self::StateCorruptDetail {
+                detail: "fabric store record: encoding error".into(),
+            },
+            Error::SchemaVersion(version) => Self::StateCorruptDetail {
+                detail: format!("fabric store: unsupported database schema version {version}"),
+            },
+            Error::UnversionedDatabase => Self::StateCorruptDetail {
+                detail: "fabric store: unversioned database".into(),
+            },
+            Error::JournalMode(_) => Self::StateCorruptDetail {
+                detail: "fabric store: journal mode error".into(),
+            },
+            Error::Time(_) => Self::StateCorruptDetail {
+                detail: "fabric store: time error".into(),
+            },
             // checked_directory's device refusal names only the child component.
             Error::Filesystem(provenant_os::fs::FsError::CrossDevice { .. }) => {
                 Self::io("verify Fabric filesystem device")
@@ -1477,6 +1496,23 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn corrupt_store_diagnostic_exposes_safe_decode_kind() {
+        let error = provenant_fabric_store::Error::Decode(provenant_records::DecodeError::Typed {
+            line: 2,
+            column: 3,
+        });
+        let facade = FacadeError::from(&error);
+        assert_eq!(facade.code(), "state_corrupt");
+        assert!(
+            facade
+                .to_string()
+                .contains("fabric store record: decode error")
+        );
+        let wire = serde_json::to_value(&facade).unwrap();
+        assert!(wire["detail"].as_str().unwrap().contains("record type"));
+    }
+
+    #[test]
     fn future_schema_requires_upgrade_with_version_diagnostics() {
         use provenant_fabric_store::Error;
         let errors = [
@@ -1496,7 +1532,9 @@ mod diagnostic_tests {
         }
         assert_eq!(
             FacadeError::from(&Error::SchemaVersion(1)),
-            FacadeError::StateCorrupt
+            FacadeError::StateCorruptDetail {
+                detail: "fabric store: unsupported database schema version 1".into()
+            }
         );
     }
 
