@@ -444,8 +444,8 @@ pub fn acquire_reader(
     )
 }
 /// The supplied directory is a stable exclusion slot, not a registry.
-/// The flock is inherited by the provider and its descendants. Recovery evidence
-/// belongs to the requested attempt; predecessor reservations do not exclude writers.
+/// Only the private guardian handoff inherits the flock. Recovery evidence
+/// belongs to its attempt; unresolved predecessor reservations exclude new writers.
 pub fn acquire_writer(
     directory: Directory,
     scope: Scope,
