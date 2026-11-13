@@ -96,13 +96,36 @@ tombstones, never follows links and writes nothing on a dry run
 
 ### A format break needs acknowledgement
 
-An install never opens an older-format store. A format-1 receipt or legacy run
-stores trigger `STATE_FORMAT_BREAK`; without `--reset-state` the install changes
-nothing, even with `--yes`. A held lane custody lock blocks an acknowledged
-reset. Reset removes the run database, attempt tree, both Fabric databases
-(project store and host index) and graph journals, work index and PR
-contributions; usage and quota ledgers, provider history, session checkpoints,
-chair logs, worktrees and branches stay.
+An install never opens an older-format store with SQLite. A format-1 receipt
+or dropped stores in a root marked by `install/` trigger `STATE_FORMAT_BREAK`
+(exit 6). Without `--reset-state` the install changes nothing, even with `--yes`.
+A dry run describes the reset. Receipt errors and newer formats refuse rather
+than guessing. Header-only `user_version` inspection also detects foreign stores
+recreated after a format-2 receipt, so an acknowledged reset can recover.
+
+Reset follows source verification, every account preview and release smoke
+checks. The plan is rechecked before removal. Old peer and tick agents are
+stopped before deletion and restarted after a successful install; on failure
+rerun the acknowledged install with agents stopped. No other chair/harness
+session may be active during cut-over. Held custody locks in base, run-keyed and
+nested child stores block reset. Fleet upgrade preflights every host before
+installing any host; hosts remain quiescent until the operation completes.
+
+Reset removes the run database, base and run-keyed attempt trees, nested
+`children/` stores, both Fabric databases and graph journals, work index, PR
+contributions and `admission.sqlite3` (leases reference dropped runs), including
+SQLite companions. Owned macOS `pv-*` links to those attempts' tmp directories
+are unlinked. All removals use a held state-root directory capability, restore
+owner access to read-only directories and treat absent entries as removed.
+Symlinked `fabric` refuses; dropped symlinks are unlinked without following them.
+
+Before removing any dropped tree, provider archives from its actual
+`attempts/<id>/provider-history` layout (including run-keyed and child stores)
+are moved to `provider-history/format-1/<relative-attempt-path>/provider-history`
+with identity checks and no replacement. Interrupted resets are rerunnable;
+archive collisions refuse without overwriting either archive. Usage and quota
+ledgers, these provider archives, session checkpoints, chair logs, worktrees
+and branches stay.
 - Why: deleting state is irreversible and a lane may be running.
 - Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`
 - Owner: `src/state_reset.rs`, `src/install.rs`, `install.sh`

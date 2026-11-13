@@ -43,20 +43,36 @@ Drain first: no lane should run across a binary swap. Check
 `provenant status`, collect `provenant output TARGET`, and only then `retry`
 unfinished work.
 
-A state-format break stops the install with `STATE_FORMAT_BREAK`, listing what is
-dropped and kept and any worktrees holding commits the main checkout lacks.
-`--yes` does not acknowledge it. Pass `--reset-state` (or type `reset` at the
-`install.sh` prompt). A lane holding its custody lock blocks the reset; let it
-finish or stop it. The reset is not an archive: copy the state directory first
-if you want one.
+A state-format break stops the install with `STATE_FORMAT_BREAK` (exit 6),
+listing dropped and kept classes and worktrees holding unlanded commits.
+`--yes` does not acknowledge it. Pass `--reset-state` or type `reset` at the
+interactive `install.sh` prompt. Other refusals do not offer that prompt.
+`install --dry-run` prints the reset plan without deleting anything.
 
-To cut over to 2.0.0 with no session or lane active:
+To cut over from 1.x to 2.0.0, on **each host, peers included**:
 
 1. Land or park work in every lane worktree. Commits survive; run records do not.
-2. Copy the state directory if you want an archive.
-3. Run `provenant upgrade --reset-state` (or `install.sh --upgrade --reset-state`)
-   and read the dropped and kept lists.
-4. Run `provenant check install`.
+2. Finish or stop every lane and close every other chair/harness session on that
+   host. No old session or hook may run during cut-over. A custody lock,
+   including a detached child's lock, blocks reset even with acknowledgement.
+3. Copy the state directory if you want a complete archive.
+4. Use the **2.0 installer**: `install.sh --upgrade --reset-state`. A 1.x
+   `provenant upgrade` does not understand `--reset-state`; it cannot perform
+   this cut-over. Read the dropped and kept lists before proceeding.
+5. Run `provenant check install` using the new binary.
+
+The installer validates all account previews and release smoke checks before
+resetting, boots out the old tick and peer agents, then restarts them after
+successful installation. If installation fails, the agents stay stopped; rerun
+the same acknowledged install before opening sessions. Provider archives move
+out of the dropped tree to `provider-history/format-1/`, retaining their relative
+attempt paths. Admission leases are dropped with the run stores. Read-only tmp
+directories and partial removal can be retried safely.
+
+From a format-2 binary, `provenant upgrade` preflights every configured host
+before installing any host and never prompts while capturing installer output.
+Each host rechecks its reset plan before deletion. Keep the fleet quiescent for
+the entire operation; preflight cannot make a multi-host install atomic.
 
 ### Test a candidate binary
 
