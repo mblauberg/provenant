@@ -83,7 +83,6 @@ pub(crate) fn tick_graphs(
                 let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
                 let cancel = CancelToken::new();
-                let budget = WaitBudget::cli(clock.mono_now(), 55)?;
                 let mut journal = match FileJournal::open(
                     &resolved.roots.state,
                     project,
@@ -139,6 +138,10 @@ pub(crate) fn tick_graphs(
                 if context.identity.project != project || context.in_lane {
                     return Err(EdgeError::Invalid.into());
                 }
+                // A tick has no caller wait: its launches, including writer
+                // binding, have the configured launch allowance.
+                let budget =
+                    WaitBudget::cli(clock.mono_now(), context.config.graph.writer_launch_seconds)?;
                 let factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,

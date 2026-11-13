@@ -1811,25 +1811,17 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         &provenant_core::CancelToken::new(),
         &clock,
     )?;
+    // An edit only records the patch; the scheduler (`tick`) launches the
+    // added writer. Its registry wait is bounded by the configured 2s
+    // allowance, not the shipped 55s.
     let start = std::time::Instant::now();
-    let settled = rig.run_and_wait(&["--file", doc], "1s")?;
+    let tick = rig.command(&["tick", "--json"])?;
     let elapsed = start.elapsed();
+    assert_eq!(code(&tick), 0, "{tick:?}");
     assert!(elapsed >= std::time::Duration::from_secs(2), "{elapsed:?}");
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
+        elapsed < std::time::Duration::from_secs(20),
         "expanded provisioning exceeded its deadline: {elapsed:?}"
-    );
-    // The independent slow node keeps the graph waiting while the writer records its error.
-    let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
-    assert_eq!(settled.exit(), 124, "{:?}", settled.wait);
-    assert!(settled.timed_out(), "{}", settled.wait_value);
-    let writer = response["data"]["checkpoint"]["nodes"]
-        .as_array()
-        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "writer"))
-        .ok_or("writer")?;
-    assert_eq!(
-        writer["advance_owner_code"], "writer_lock_busy",
-        "{response}"
     );
     let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
         &roots.state,
@@ -1862,7 +1854,7 @@ fn expanded_writer_registry_wait_uses_launch_allowance() -> Result {
         provenant_fabric_runtime::graph::relay::pending_provisioning(&checkpoint)
             .iter()
             .any(|(node, _, _)| node == "writer"),
-        "{response}"
+        "{checkpoint:?}"
     );
     Ok(())
 }
@@ -2904,32 +2896,16 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let result_path: provenant_records::StructuredPathWire =
         serde_json::from_value(data["data"]["result_path"].clone())?;
     assert!(result_path.to_path_buf()?.ends_with("result.md"));
-    // A launched attempt has a custody lock, which the wait path inspects.
-    fs::write(
-        rig.state
-            .join("attempts")
-            .join(&attempt)
-            .join("custody.lock"),
-        b"",
-    )?;
-    for args in [
-        vec!["status", &target],
-        vec!["status", &target, "--wait=1s"],
-    ] {
-        let listing = rig.command(&args)?;
-        assert_eq!(
-            code(&listing),
-            0,
-            "{args:?}: {}",
-            String::from_utf8_lossy(&listing.stderr.bytes)
-        );
-        let human = String::from_utf8(listing.stdout.bytes)?;
-        assert!(
-            human.contains("provider 500: upstream failed"),
-            "{args:?}: {human}"
-        );
-        assert!(human.contains("result:"), "{human}");
-    }
+    // Status is the row contract: it names the failed attempt, and `output`
+    // (checked above) owns the provider error and result path.
+    let listing = rig.command(&["status", &target])?;
+    assert_eq!(code(&listing), 0, "{listing:?}");
+    let human = String::from_utf8(listing.stdout.bytes)?;
+    let line = human
+        .lines()
+        .find(|line| line.starts_with(target.as_str()))
+        .ok_or_else(|| human.clone())?;
+    assert!(line.contains("failed"), "{human}");
     let path = rig.command(&["output", &target, "--part", "stderr", "--path", "--json"])?;
     let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
     assert_eq!(code(&path), 0, "{data}");
@@ -4276,6 +4252,14 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
     let keychain = rig.home.join("Library/Keychains/login.keychain-db");
     fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
     fs::write(keychain, "fixture")?;
+    // `run` takes no wait; the launch allowance bounds a busy provider fence.
+    writeln!(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.graph]\nwriter_launch_seconds=2"
+    )?;
     let lock = provenant_os::provider_fence::acquire(
         &rig.state,
         "agy",

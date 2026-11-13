@@ -235,7 +235,11 @@ fn invoke(
         } else {
             fabric::factory(globals, workers)?
         };
-        let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55);
+        // `run` takes no wait: its launch, including binding a writer, has the
+        // configured launch allowance.
+        let wait_seconds = input["wait_seconds"]
+            .as_u64()
+            .unwrap_or(factory.context.config.graph.writer_launch_seconds);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let local_branch = (command == "run" && input["host"].is_null())
             .then(|| input["branch"].as_str().map(str::to_owned))
