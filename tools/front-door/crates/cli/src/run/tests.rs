@@ -186,50 +186,6 @@ fn trace_store(
     Ok(run::RunStore::open(&context, call)?)
 }
 
-fn render_lanes_without_cooldowns(
-    lanes: &[run::AttemptRecord],
-    waits: &[run::LaneWait],
-    next: Option<u64>,
-    root: &Path,
-) -> (Value, String) {
-    render_lanes(lanes, waits, next, root, None)
-}
-
-/// A lane for the lane-view tests: queued until a test sets its state.
-fn lane_fixture(
-    attempt: u8,
-    task: u8,
-    state: run::AttemptState,
-) -> Result<run::AttemptRecord, Box<dyn std::error::Error>> {
-    let now = WallTime::from_micros(100)?;
-    let mut lane: run::AttemptRecord = serde_json::from_value(json!({
-        "schema_version": 1,
-        "attempt_id": AttemptId::from_bytes([attempt; 16]),
-        "run_id": RunId::from_bytes([9; 16]),
-        "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-        "task_id": TaskId::from_bytes([task; 16]),
-        "operation_id": format!("lane-{attempt}"),
-        "attempt_number": attempt,
-        "revision": 1,
-        "generation": 0,
-        "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
-        "applied_route": null,
-        "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
-        "queued_at": now,
-        "state": {"state":"queued"},
-        "usage": {},
-        "prompt": {
-            "path": {"encoding":"utf8","path":"prompt.txt"},
-            "digest": CanonicalV1::file_digest(b""),
-            "bytes": 0,
-            "complete": true,
-            "redacted": false
-        }
-    }))?;
-    lane.state = state;
-    Ok(lane)
-}
-
 pub(super) fn clean_exit() -> ExitObservation {
     ExitObservation {
         publication: PublicationState::Durable,
@@ -727,132 +683,6 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     Ok(())
 }
 #[test]
-fn reconcile_lists_reservation_issues_from_a_selected_project()
--> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane(
-        "run::tests::reconcile_lists_reservation_issues_from_a_selected_project",
-    )? {
-        return Ok(());
-    }
-    let fixture = linked_fixture()?;
-    let other = fixture.root.join("other-project");
-    std::fs::create_dir(&other)?;
-    provenant_os::fixture::run_git(&other, &["init", "-q", "-b", "fixture-base"])?;
-    provenant_os::fixture::run_git(&other, &["commit", "--allow-empty", "-qm", "base"])?;
-    with_edge(
-        &fixture.root,
-        &fixture.project,
-        |edge| -> Result<(), Box<dyn std::error::Error>> {
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = run::Request {
-                clock: &clock,
-                cancel: &cancel,
-            };
-            let current = open(edge, &call).map_err(|fail| fail.message)?;
-            let other_edge = Edge {
-                cwd: &other,
-                ..*edge
-            };
-            let selected = open(&other_edge, &call).map_err(|fail| fail.message)?;
-            assert_ne!(current.context.project_id, selected.context.project_id);
-            let mut input = trace_run(61, AttemptId::from_bytes([60; 16]), clock.wall_now()?)?;
-            input.request.parent_attempt = None;
-            input.request.lane_depth = None;
-            selected.store.create(&input, &call)?;
-            let id = input.attempts[0].attempt_id;
-            selected.store.cancel(id, "fixture settled", &call)?;
-            // This read-only task never launched a provider. Seed completed
-            // no-effect receipts so only the unrelated orphan needs recovery.
-            let generation = selected.store.record(id, &call)?.generation;
-            for effect in [
-                run::SettlementEffect::GitImport,
-                run::SettlementEffect::ManifestConflict,
-                run::SettlementEffect::CleanupCustodyRelease,
-                run::SettlementEffect::Delivery,
-            ] {
-                selected.store.record_effect(
-                    id,
-                    generation,
-                    effect,
-                    run::EffectDisposition::Done,
-                    &call,
-                )?;
-            }
-            selected
-                .store
-                .drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
-                    reaction.graph_done = true;
-                    reaction.notice_done = true;
-                    reaction.log_done = true;
-                    reaction.ledger_done = true;
-                    Ok(())
-                })?;
-            let baseline = selected
-                .store
-                .reconcile(input.run_id, &Registry::default(), &call);
-            assert!(baseline.is_ok(), "{baseline:?}");
-            let slot = selected
-                .context
-                .state_root
-                .as_path()
-                .join("worktrees")
-                .join(selected.context.project_id.to_string())
-                .join("orphan");
-            std::fs::create_dir_all(&slot)?;
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700))?;
-            let path = slot.join("reservation.json");
-            std::fs::write(&path, b"malformed other-project reservation")?;
-            let target = || Target {
-                selection: None,
-                run: Some(input.run_id),
-                task: None,
-                attempt: None,
-            };
-            let reply = reconcile(
-                Reconcile {
-                    id: vec![target(), target()],
-                    abandon: None,
-                    reason: None,
-                },
-                edge,
-            );
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert_eq!(
-                reply.result.error.as_ref().ok_or("missing error")?.code,
-                "RECONCILE_INCOMPLETE"
-            );
-            let rows = reply.result.data["runs"].as_array().ok_or("runs")?;
-            assert!(!rows.is_empty());
-            assert!(
-                rows.iter()
-                    .all(|row| row["run_id"] == json!(input.run_id) && row.get("error").is_none()),
-                "{}",
-                reply.result.data
-            );
-            let issues = reply.result.data["writer_reservation_errors"]
-                .as_array()
-                .ok_or("issues")?;
-            assert_eq!(issues.len(), 1);
-            assert_eq!(issues[0]["reservation"], json!(path));
-            assert_eq!(
-                std::fs::read(&path)?,
-                b"malformed other-project reservation"
-            );
-            assert!(matches!(
-                selected.store.record(id, &call)?.state,
-                run::AttemptState::Terminal {
-                    outcome: run::Outcome::Cancelled,
-                    ..
-                }
-            ));
-            Ok(())
-        },
-    )??;
-    Ok(())
-}
-#[test]
 fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::error::Error>> {
     if reexec_test_in_lane("run::tests::reconcile_reports_orphan_reservation_issues")? {
         return Ok(());
@@ -881,7 +711,7 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
             std::fs::write(&path, b"malformed retained reservation")?;
             let reply = reconcile(
                 Reconcile {
-                    id: Vec::new(),
+                    targets: Vec::new(),
                     abandon: None,
                     reason: None,
                 },
@@ -927,7 +757,7 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
             std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
             let reply = reconcile(
                 Reconcile {
-                    id: Vec::new(),
+                    targets: Vec::new(),
                     abandon: None,
                     reason: None,
                 },
@@ -952,6 +782,56 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
             Ok(())
         },
     )??;
+    Ok(())
+}
+/// Give the fixture's one task the work key `graph/node#1` and save the
+/// graph's checkpoint with that attempt, so `NAME[/NODE[#N]]` targets resolve.
+#[cfg(feature = "fixture")]
+fn keyed(
+    edge: &Edge<'_>,
+    project: provenant_core::ProjectId,
+    prepared: &mut run::PreparedRun,
+    (graph, node): (&str, &str),
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
+    prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+        graph_id: Some(graph.into()),
+        node_id: Some(node.into()),
+        attempt: Some(1),
+        ..Default::default()
+    });
+    let reference = format!(
+        "{}/{}",
+        provenant_core::HostId::from_bytes([1; 16]),
+        prepared.attempts[0].attempt_id
+    );
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
+    let mut journal =
+        FileJournal::open(&edge.roots.state, project, graph, budget, &cancel, &clock)?;
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":2, "graph_id":graph, "integration_branch":"main",
+        "nodes":[{"id":node, "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
+    }))?;
+    journal.bind(GraphExecution {
+        review_base: None,
+        extra: Default::default(),
+        integration_base: None,
+        directory: edge.cwd.to_path_buf(),
+        document,
+    })?;
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":graph, "plan_digest":"fixture",
+        "nodes":[{"id":node, "state":"running", "attempts":[{
+            "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0},
+            "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference,
+            "outcome":null, "launch_actor":"fixture"
+        }]}]
+    }))?;
+    journal.save(&checkpoint)?;
     Ok(())
 }
 #[cfg(feature = "fixture")]
@@ -995,6 +875,12 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     project: fixture.project.clone(),
                     worktree: fixture.tree.clone(),
                 });
+                keyed(
+                    edge,
+                    session.context.project_id,
+                    &mut input,
+                    ("fence", "writer"),
+                )?;
                 session.store.create(&input, &call)?;
                 let id = input.attempts[0].attempt_id;
                 let record = session.store.mark_starting_for_fixture(
@@ -1178,25 +1064,20 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             }
                             None => panic!("unexpected git_import disposition: {record:?}"),
                         };
-                    for command in ["status", "output"] {
+                    {
                         let crate::ParseOutcome::Invocation(inv) = crate::parse(
-                            [command.to_owned(), id.to_string(), "--full".into()]
+                            ["output", "fence/writer", "--full"]
                                 .into_iter()
                                 .map(std::ffi::OsString::from),
                         ) else {
-                            return Err("parse lane read".into());
+                            return Err("parse output".into());
                         };
-                        let reply = match inv.command {
-                            crate::Command::Status(command) => status(command, true, edge),
-                            crate::Command::Output(command) => output(command, edge),
-                            _ => return Err("lane read command".into()),
+                        let crate::Command::Output(command) = inv.command else {
+                            return Err("output command".into());
                         };
+                        let reply = output_from_session(command, edge, &session, id, &call);
                         assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
-                        let row = if command == "status" {
-                            &reply.result.data["rows"][0]
-                        } else {
-                            &reply.result.data
-                        };
+                        let row = &reply.result.data;
                         assert_eq!(row["state"], "failed");
                         assert_eq!(row["git_import_failure"]["reason"], expected_reason);
                         assert_eq!(row["git_import_failure"]["head"], "a".repeat(40));
@@ -1222,19 +1103,17 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             &mut rendered,
                         )?;
                         let rendered = String::from_utf8(rendered)?;
-                        if command == "output" {
-                            assert_eq!(
-                                reply.result.data["bytes"]["data"],
-                                "retained provider evidence"
-                            );
-                        }
+                        assert_eq!(
+                            reply.result.data["bytes"]["data"],
+                            "retained provider evidence"
+                        );
                         for text in [&reply.human, &summary, &rendered] {
                             assert!(
                                 text.contains("commits may not have reached its branch"),
-                                "{command}: {text}"
+                                "{text}"
                             );
-                            assert!(text.contains(&"a".repeat(40)), "{command}: {text}");
-                            assert!(text.contains("git-objects"), "{command}: {text}");
+                            assert!(text.contains(&"a".repeat(40)), "{text}");
+                            assert!(text.contains("git-objects"), "{text}");
                         }
                     }
                     assert_eq!(
@@ -1257,10 +1136,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             Ok(())
                         },
                     )?;
-                    let reported = reconcile(
-                        parse(&["reconcile", "--id", &input.run_id.to_string(), "--json"])?,
-                        edge,
-                    );
+                    let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                     assert_eq!(reported.result.status, Status::Ok, "{}", reported.human);
                     assert!(
                         reported.result.data["runs"][0]["attempts"]
@@ -1271,8 +1147,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 }
                 let driver =
                     attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
-                let run_id = input.run_id.to_string();
-                let reported = reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                 let json = serde_json::to_value(&reported.result)?;
                 if !import_done {
                     assert_eq!(
@@ -1285,16 +1160,15 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     );
                     assert!(reported.human.contains("lane Git import failed"));
                 }
-                let selection = format!("{run_id}/{id}");
-                assert!(parse(&["reconcile", "--abandon", &selection]).is_err());
+                let selection = "fence/writer#1";
+                assert!(parse(&["reconcile", "--abandon", selection]).is_err());
                 assert!(parse(&["reconcile", "--reason", "missing attempt"]).is_err());
                 assert!(
                     parse(&[
                         "reconcile",
-                        "--id",
-                        &run_id,
+                        "fence",
                         "--abandon",
-                        &selection,
+                        selection,
                         "--reason",
                         "ambiguous action"
                     ])
@@ -1303,7 +1177,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let args = [
                     "reconcile",
                     "--abandon",
-                    &selection,
+                    selection,
                     "--reason",
                     reason.as_str(),
                     "--json",
@@ -1356,7 +1230,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     Status::Ok,
                     "same reason is idempotent"
                 );
-                reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
                 assert!(
                     attempt_path
                         .join("tmp/candidate-0/git-common/evidence")
@@ -1365,7 +1239,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let different = [
                     "reconcile",
                     "--abandon",
-                    &selection,
+                    selection,
                     "--reason",
                     "different explanation",
                     "--json",
@@ -1395,134 +1269,6 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
             },
         )??;
     }
-    Ok(())
-}
-#[test]
-#[allow(clippy::disallowed_methods)] // The wait command has a real-time deadline.
-fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane("run::tests::wait_handles_a_stale_default_cursor")? {
-        return Ok(());
-    }
-    let temp = tempfile::tempdir()?;
-    let root = temp.path().canonicalize()?;
-    let home = root.join("home");
-    let project = root.join("checkout");
-    std::fs::create_dir_all(&home)?;
-    std::fs::create_dir_all(&project)?;
-    std::fs::create_dir_all(root.join("state"))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(root.join("state"), std::fs::Permissions::from_mode(0o700))?;
-    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-    inputs.state_dir = Some(root.join("state"));
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let edge = Edge {
-        roots: &roots,
-        home: &home,
-        assets: &project,
-        cwd: &project,
-    };
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel).map_err(|e| e.message)?;
-    let session = open(&edge, &call).map_err(|e| e.message)?;
-    let make = |n: u64| -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
-        let mut prepared = trace_run(1, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
-        let mut bytes = [0; 16];
-        bytes[8..].copy_from_slice(&n.to_be_bytes());
-        prepared.run_id = RunId::from_bytes(bytes);
-        bytes[0] = 1;
-        let task = TaskId::from_bytes(bytes);
-        bytes[0] = 2;
-        prepared.operation_id = OperationId::parse(&format!("backlog-{n}"))?;
-        prepared.request.tasks[0].task_id = task;
-        prepared.attempts[0].task_id = task;
-        prepared.attempts[0].attempt_id = AttemptId::from_bytes(bytes);
-        Ok(prepared)
-    };
-    let seed = make(1)?;
-    session.store.create(&seed, &call)?;
-    session.store.withdraw(
-        seed.attempts[0].attempt_id,
-        run::AttemptState::Queued {
-            extra: Default::default(),
-        },
-        run::Outcome::Cancelled,
-        "fixture",
-        clock.wall_now()?,
-        &call,
-    )?;
-    let cursor = session
-        .store
-        .last_event_sequence(seed.attempts[0].attempt_id, &call)?;
-    session.store.ack_seen("default", cursor, &call)?;
-    let active = make(2)?;
-    session.store.create(&active, &call)?;
-    let id = active.attempts[0].attempt_id;
-    struct FetchHookGuard;
-    impl Drop for FetchHookGuard {
-        fn drop(&mut self) {
-            wait::AFTER_FIRST_FETCH.with(|hook| *hook.borrow_mut() = None);
-        }
-    }
-    let _hook_guard = FetchHookGuard;
-    let context = session.context.clone();
-    wait::AFTER_FIRST_FETCH.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = run::Request {
-                clock: &clock,
-                cancel: &cancel,
-            };
-            let store = run::RunStore::open(&context, &call).unwrap();
-            store
-                .withdraw(
-                    id,
-                    run::AttemptState::Queued {
-                        extra: Default::default(),
-                    },
-                    run::Outcome::Cancelled,
-                    "fixture",
-                    clock.wall_now().unwrap(),
-                    &call,
-                )
-                .unwrap();
-        }));
-    });
-    let picks = Picks {
-        targets: &[],
-        owner: session.context.actor_id,
-        label: None,
-        since: None,
-    };
-    let (data, _, timed_out) = wait_command(
-        &session,
-        &picks,
-        Condition::Any,
-        Instant::now() + Duration::from_secs(5),
-        clock.wall_now()?,
-        &edge,
-    )
-    .map_err(|e| e.message)?;
-    assert!(!timed_out);
-    assert!(
-        data["lanes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|lane| lane["attempt_id"] == json!(id))
-    );
-    let (next, _, _) = wait_command(
-        &session,
-        &picks,
-        Condition::Any,
-        Instant::now() + Duration::from_secs(5),
-        clock.wall_now()?,
-        &edge,
-    )
-    .map_err(|e| e.message)?;
-    assert!(next["lanes"].as_array().unwrap().is_empty());
-    assert!(next.get("settled_backlog").is_none());
     Ok(())
 }
 

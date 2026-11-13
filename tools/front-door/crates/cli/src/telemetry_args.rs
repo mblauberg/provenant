@@ -27,7 +27,8 @@ pub enum CostBy {
 
 #[derive(Debug, Args)]
 pub struct TelemetryCost {
-    /// Count only this attempt, task or run; default every attempt in the ledger
+    /// Count only this graph, node or attempt (NAME[/NODE[#N]]); default every attempt in the ledger
+    #[arg(value_name = "TARGET")]
     pub target: Option<Target>,
     /// Break the cost down; attempts with no value form an `unattributed` group
     #[arg(long, value_enum)]

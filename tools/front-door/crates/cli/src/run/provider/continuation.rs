@@ -298,50 +298,6 @@ pub(super) fn open_local_directory(
         .flatten()
 }
 
-/// The `candidate-N` directory of `provider_state` holding a file or directory
-/// named for `session`, searched within the configured retained-state budgets. The prior lane
-/// wrote this tree, so the path must already be canonical and every directory
-/// is opened from its parent's handle, never through a link or a mount.
-pub(crate) fn continuation_available(
-    prior: &run::AttemptRecord,
-    state_root: &Path,
-    config_root: &Path,
-) -> Result<(), ContinuationError> {
-    let provider = prior
-        .applied_route
-        .as_ref()
-        .and_then(|route| route.provider.as_deref())
-        .ok_or("the attempt never launched a provider")?;
-    let session = prior
-        .session
-        .as_deref()
-        .ok_or("the attempt recorded no provider session")?;
-    if AdapterSpec::get(provider).is_some_and(|spec| spec.user_sessions) {
-        return Ok(());
-    }
-    let state = state_root
-        .join("runs")
-        .join(prior.run_id.to_string())
-        .join("attempts")
-        .join(prior.attempt_id.to_string())
-        .join("provider-state");
-    let policy = StateCopyPolicy::read(config_root);
-    if AdapterSpec::get(provider)
-        .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
-    {
-        return super::observation::find_opencode_session(&state, session)
-            .map(|_| ())
-            .map_err(|_| missing_continuation(provider));
-    }
-    match find_session_state_within(&state, session, policy.limits) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(missing_continuation(provider)),
-        Err(exhausted) => {
-            Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into())
-        }
-    }
-}
-
 #[cfg(test)]
 pub(super) fn find_session_state(
     provider_state: &Path,

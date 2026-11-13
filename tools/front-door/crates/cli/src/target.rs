@@ -192,6 +192,152 @@ fn parse_attempt(digits: &str) -> Result<NonZeroU32, TargetError> {
         .map_err(|_| TargetError::AttemptNotNumber)
 }
 
+/// What a verb needs its target to name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Want {
+    /// A graph, a node or an attempt: a bare `NAME` is the whole graph.
+    Work,
+    /// One attempt. A bare `NAME` is its only node, and a node without `#N`
+    /// is its newest attempt, or with `settled` its newest settled one.
+    Attempt { settled: bool },
+}
+
+/// A target checked against its graph's one checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    pub graph: String,
+    pub node: Option<String>,
+    /// The attempt number, set when the target selects one attempt.
+    pub number: Option<NonZeroU32>,
+    /// `HOST/ATTEMPT` of the selected attempt, once it has launched.
+    pub attempt_ref: Option<String>,
+}
+
+impl Resolved {
+    /// The canonical spelling, `NAME[/NODE[#N]]`.
+    pub fn target(&self) -> Target {
+        Target {
+            name: self.graph.clone(),
+            node: self.node.clone(),
+            attempt: self.number,
+        }
+    }
+
+    /// The run store key of the selected attempt.
+    pub fn work_key(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Option<provenant_records::WorkKey> {
+        provenant_records::WorkKey::new(
+            project,
+            self.graph.clone(),
+            self.node.clone()?,
+            self.number?.get(),
+        )
+        .ok()
+    }
+}
+
+/// Resolution faults. Each names the target as the caller spelled it.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError<E> {
+    #[error("NOT_FOUND: {0}")]
+    NotFound(String),
+    #[error("AMBIGUOUS_TARGET: {target} has several nodes; use one of {}", .candidates.join(", "))]
+    Ambiguous {
+        target: String,
+        candidates: Vec<String>,
+    },
+    #[error(transparent)]
+    Read(E),
+}
+
+/// Most candidates an ambiguity lists.
+const CANDIDATES: usize = 20;
+
+/// Resolve `target` by reading only its own graph's checkpoint: `read` is
+/// called once, with the target's name, so no other graph is ever opened.
+pub fn resolve<E>(
+    target: &Target,
+    want: Want,
+    read: impl FnOnce(&str) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, E>,
+) -> Result<Resolved, ResolveError<E>> {
+    use provenant_fabric_runtime::graph::AttemptState;
+    let checkpoint = read(&target.name)
+        .map_err(ResolveError::Read)?
+        .ok_or_else(|| ResolveError::NotFound(target.name.clone()))?;
+    let node = match (&target.node, want) {
+        (Some(node), _) => Some(node.clone()),
+        (None, Want::Work) => None,
+        (None, Want::Attempt { .. }) => match checkpoint.nodes.as_slice() {
+            [only] => Some(only.id.clone()),
+            nodes => {
+                return Err(ResolveError::Ambiguous {
+                    target: target.to_string(),
+                    candidates: nodes
+                        .iter()
+                        .take(CANDIDATES)
+                        .map(|node| format!("{}/{}", target.name, node.id))
+                        .collect(),
+                });
+            }
+        },
+    };
+    let Some(node) = node else {
+        return Ok(Resolved {
+            graph: target.name.clone(),
+            node: None,
+            number: None,
+            attempt_ref: None,
+        });
+    };
+    let progress = checkpoint
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == node)
+        .ok_or_else(|| ResolveError::NotFound(format!("{}/{node}", target.name)))?;
+    let numbered: Vec<_> = progress
+        .recorded_attempts()
+        .zip(1..)
+        .filter_map(|(attempt, number)| Some((attempt, NonZeroU32::new(number)?)))
+        .collect();
+    let selected = match (target.attempt, want) {
+        (Some(number), _) => Some(
+            numbered
+                .iter()
+                .find(|(_, n)| *n == number)
+                .copied()
+                .ok_or_else(|| ResolveError::NotFound(target.to_string()))?,
+        ),
+        (None, Want::Work) => None,
+        (None, Want::Attempt { settled }) => {
+            let newest = numbered.last().copied();
+            let newest_settled = numbered
+                .iter()
+                .rfind(|(attempt, _)| attempt.state == AttemptState::Terminal)
+                .copied();
+            // A node that has never settled still has a newest attempt to read.
+            if settled {
+                newest_settled.or(newest)
+            } else {
+                newest
+            }
+        }
+    };
+    if target.attempt.is_none() && want != Want::Work && selected.is_none() {
+        return Err(ResolveError::NotFound(format!(
+            "{}/{node} has no attempt",
+            target.name
+        )));
+    }
+    Ok(Resolved {
+        graph: target.name.clone(),
+        node: Some(node),
+        number: selected.map(|(_, number)| number),
+        attempt_ref: selected.and_then(|(attempt, _)| attempt.attempt_ref.clone()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +482,133 @@ mod tests {
     #[test]
     fn display_leaves_out_an_attempt_without_a_node() {
         assert_eq!(target("fix", None, Some(2)).to_string(), "fix");
+    }
+
+    fn checkpoint(
+        name: &str,
+        nodes: &[(&str, &[&str])],
+    ) -> provenant_fabric_runtime::graph::GraphCheckpoint {
+        let nodes: Vec<_> = nodes
+            .iter()
+            .map(|(id, attempts)| {
+                let attempts: Vec<_> = attempts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, state)| serde_json::json!({"launched":true,"key":{"graph_id":name,"node_id":id,"route_index":0},"route":{"alias":"senior"},"state":state,"attempt_ref":format!("host/{id}-{}", index + 1),"launch_actor":"actor"}))
+                    .collect();
+                serde_json::json!({"id":id,"state":"running","worktree":null,"attempts":attempts})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":name,"plan_digest":"digest","nodes":nodes})).unwrap()
+    }
+
+    #[test]
+    fn resolution_reads_only_the_named_graph() {
+        let graph = checkpoint("fix", &[("review", &["terminal", "running"])]);
+        // Every other graph is unreadable; the resolver must never ask for one.
+        let read = |name: &str| {
+            if name == "fix" {
+                Ok(Some(graph.clone()))
+            } else {
+                Err(format!("unreadable {name}"))
+            }
+        };
+        for (spelling, want) in [
+            ("fix", Want::Work),
+            ("fix/review", Want::Work),
+            ("fix/review#1", Want::Attempt { settled: true }),
+            ("fix", Want::Attempt { settled: false }),
+        ] {
+            let target = Target::parse(spelling).unwrap();
+            let resolved = resolve(&target, want, read).unwrap();
+            assert_eq!(resolved.graph, "fix", "{spelling}");
+        }
+    }
+
+    #[test]
+    fn steer_and_output_reach_the_same_numbered_attempt() {
+        let graph = checkpoint(
+            "fix",
+            &[
+                ("review", &["terminal", "running", "terminal"]),
+                ("plan", &["terminal"]),
+            ],
+        );
+        for number in 1..=3u32 {
+            let target = Target::parse(&format!("fix/review#{number}")).unwrap();
+            let steer = resolve(&target, Want::Attempt { settled: false }, |_| {
+                Ok::<_, ()>(Some(graph.clone()))
+            })
+            .unwrap();
+            let output = resolve(&target, Want::Attempt { settled: true }, |_| {
+                Ok::<_, ()>(Some(graph.clone()))
+            })
+            .unwrap();
+            assert_eq!(steer, output);
+            assert_eq!(
+                steer.attempt_ref.as_deref(),
+                Some(format!("host/review-{number}").as_str())
+            );
+            assert_eq!(steer.target(), target);
+        }
+    }
+
+    #[test]
+    fn a_node_reads_its_newest_attempt_and_output_its_newest_settled_one() {
+        let graph = checkpoint("fix", &[("review", &["terminal", "running"])]);
+        let node = Target::parse("fix/review").unwrap();
+        let newest = resolve(&node, Want::Attempt { settled: false }, |_| {
+            Ok::<_, ()>(Some(graph.clone()))
+        })
+        .unwrap();
+        assert_eq!(newest.number, NonZeroU32::new(2));
+        let settled = resolve(&node, Want::Attempt { settled: true }, |_| {
+            Ok::<_, ()>(Some(graph.clone()))
+        })
+        .unwrap();
+        assert_eq!(settled.number, NonZeroU32::new(1));
+        let work = resolve(&node, Want::Work, |_| Ok::<_, ()>(Some(graph.clone()))).unwrap();
+        assert_eq!(work.number, None);
+    }
+
+    #[test]
+    fn a_bare_name_is_one_attempt_only_in_a_one_node_graph() {
+        let one = checkpoint("fix", &[("task", &["terminal"])]);
+        let bare = Target::parse("fix").unwrap();
+        let resolved = resolve(&bare, Want::Attempt { settled: true }, |_| {
+            Ok::<_, ()>(Some(one))
+        })
+        .unwrap();
+        assert_eq!(resolved.node.as_deref(), Some("task"));
+        let two = checkpoint("fix", &[("plan", &["terminal"]), ("build", &[])]);
+        match resolve(&bare, Want::Attempt { settled: true }, |_| {
+            Ok::<_, ()>(Some(two.clone()))
+        }) {
+            Err(ResolveError::Ambiguous { candidates, .. }) => {
+                assert_eq!(candidates, ["fix/plan", "fix/build"]);
+            }
+            other => panic!("expected ambiguity, got {other:?}"),
+        }
+        assert_eq!(
+            resolve(&bare, Want::Work, |_| Ok::<_, ()>(Some(two)))
+                .unwrap()
+                .node,
+            None
+        );
+    }
+
+    #[test]
+    fn missing_graphs_nodes_and_attempts_are_not_found() {
+        let graph = checkpoint("fix", &[("review", &["terminal"])]);
+        for spelling in ["gone", "fix/absent", "fix/review#2"] {
+            let target = Target::parse(spelling).unwrap();
+            let result = resolve(&target, Want::Work, |name| {
+                Ok::<_, ()>((name == "fix").then(|| graph.clone()))
+            });
+            assert!(
+                matches!(result, Err(ResolveError::NotFound(_))),
+                "{spelling}"
+            );
+        }
     }
 }

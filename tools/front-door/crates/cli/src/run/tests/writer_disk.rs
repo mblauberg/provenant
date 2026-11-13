@@ -55,57 +55,6 @@ fn disk_policy_refusal_uses_resource_projection() {
 }
 
 #[test]
-fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::error::Error>> {
-    let run = provenant_core::RunId::from_bytes([3; 16]);
-    let first = AttemptId::from_bytes([1; 16]);
-    let second = AttemptId::from_bytes([2; 16]);
-    let started = [
-        run::Started::Refused {
-            attempt: first,
-            kind: run::RefusalKind::Policy,
-            reason: "disk refused".into(),
-        },
-        run::Started::Refused {
-            attempt: second,
-            kind: run::RefusalKind::Preparation,
-            reason: "preparation refused".into(),
-        },
-    ];
-    let data = json!({"run_id":run, "operation_id":"fixture", "started":started, "lanes":[
-        {"attempt_id":first,"state":"rejected"},
-        {"attempt_id":second,"state":"rejected"}
-    ]});
-    let mut rendered = reply("run", Ok((data.clone(), String::new())));
-    apply_launch_policy(&mut rendered);
-    assert_eq!(rendered.result.status, Status::Refused);
-    assert!(rendered.result.error.is_some());
-    assert_eq!(rendered.result.data, data);
-    assert_eq!(
-        rendered.result.data["started"][0]["Refused"]["attempt"],
-        first.to_string()
-    );
-    assert_eq!(
-        rendered.result.data["started"][1]["Refused"]["kind"],
-        "Preparation"
-    );
-    for state in ["starting", "running", "succeeded"] {
-        let mixed = json!({"run_id":run, "started":[
-            run::Started::Refused { attempt:first, kind:run::RefusalKind::Policy, reason:"disk refused".into() },
-            run::Started::Launched(second)
-        ], "lanes":[
-            {"attempt_id":first,"state":"rejected"},
-            {"attempt_id":second,"state":state}
-        ]});
-        let mut rendered = reply("run", Ok((mixed.clone(), String::new())));
-        apply_launch_policy(&mut rendered);
-        assert_eq!(rendered.result.status, Status::Ok);
-        assert!(rendered.result.error.is_none());
-        assert_eq!(rendered.result.data["started"], mixed["started"]);
-    }
-    Ok(())
-}
-
-#[test]
 fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     let run_id = provenant_core::RunId::from_bytes([3; 16]);
     let attempt = AttemptId::from_bytes([4; 16]);

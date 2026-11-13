@@ -1,9 +1,9 @@
 //! CLI-owned grammar with mounted owner subtrees.
 use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
-use provenant_core::{GitOid, OperationId, RunId, TaskId};
+use provenant_core::{GitOid, OperationId, RunId};
 pub use provenant_records::Harness;
-use std::{ffi::OsString, path::PathBuf, str::FromStr};
+use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "provenant", disable_help_subcommand = true)]
@@ -95,9 +95,9 @@ pub enum Command {
     /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
-    /// Report graph attempt efficiency
-    #[command(hide = true)]
-    Stats(GraphStats),
+    /// Wait for graph work or pull requests to settle
+    #[command(add = crate::metadata::CoreCommand(10, "provenant wait fix-login"))]
+    Wait(Wait),
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
@@ -129,25 +129,22 @@ pub enum Command {
         #[arg(long, value_name = "REASON")]
         accept_delta: Option<String>,
     },
-    /// Read graph, node or attempt output
-    #[command(add = crate::metadata::CoreCommand(2, "provenant output ID"))]
+    /// Read an attempt's output
+    #[command(add = crate::metadata::CoreCommand(2, "provenant output fix-login/review"))]
     Output(Output),
     /// Show a graph's recorded revisions and attempt timeline
-    Trace {
-        /// Graph identifier
-        graph: String,
-    },
+    Trace(GraphTrace),
     /// Stop a graph, node or attempt subtree
-    #[command(name = "stop", add = crate::metadata::CoreCommand(4, "provenant stop ID"))]
+    #[command(name = "stop", add = crate::metadata::CoreCommand(4, "provenant stop fix-login"))]
     Stop(Cancel),
     /// Retry a graph, node or attempt
-    #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry ID"))]
+    #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
     /// Queue a steering message for a lane when its provider supports control
-    #[command(add = crate::metadata::CoreCommand(3, "provenant steer ID --text-stdin < message.md"))]
+    #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --text-stdin < message.md"))]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes
-    #[command(add = crate::metadata::CoreCommand(6, "provenant edit ID --file patch.json"))]
+    #[command(add = crate::metadata::CoreCommand(6, "provenant edit fix-login --file patch.json"))]
     Edit(Edit),
     /// List or show templates from all layers
     #[command(add = crate::metadata::CoreCommand(7, "provenant templates"))]
@@ -155,7 +152,7 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
-    /// Settle open runs and report uncertain custody
+    /// Settle open attempts and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
     #[command(subcommand)]
@@ -306,10 +303,10 @@ pub enum Pr {
         #[arg(long)]
         bind: bool,
     },
-    /// Wait for CI and report pass or fail with the pull request head
+    /// Wait for CI and report pass or fail with each pull request head
     Watch {
-        #[arg(catalog_u64_range = 1..)]
-        number: u64,
+        #[arg(required = true, catalog_u64_range = 1..)]
+        numbers: Vec<u64>,
     },
     /// Open a pull request with the repository template filled from receipts
     Open(Box<PrOpen>),
@@ -318,20 +315,17 @@ pub enum Pr {
         /// Pull requests to report; this account's open ones when omitted
         #[arg(catalog_u64_range = 1..)]
         numbers: Vec<u64>,
-        /// Block until the snapshot changes (default 5 minutes; maximum 4 hours)
-        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "5m", catalog_duration())]
-        wait: Option<u64>,
     },
 }
 #[derive(Debug, Args)]
 pub struct PrOpen {
-    /// The writer attempt that made the change
-    #[arg(long)]
-    pub from_attempt: Attempt,
+    /// The writer attempt that made the change, as NAME[/NODE[#N]]
+    #[arg(long, value_name = "TARGET")]
+    pub from_attempt: Target,
     /// An independent review attempt (repeatable); the attempt's delivery
     /// receipt supplies them when omitted
-    #[arg(long)]
-    pub review: Vec<Attempt>,
+    #[arg(long, value_name = "TARGET")]
+    pub review: Vec<Target>,
     /// Markdown for the summary section; its first line titles the pull request
     #[arg(long)]
     pub summary_file: PathBuf,
@@ -654,249 +648,7 @@ impl GraphRunArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target {
-    /// Deferred selection when at least one ID is a unique hexadecimal prefix.
-    pub selection: Option<String>,
-    pub run: Option<RunId>,
-    pub task: Option<TaskId>,
-    pub attempt: Option<provenant_core::AttemptId>,
-}
-impl FromStr for Target {
-    type Err = &'static str;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<_> = text.split('/').collect();
-        // Graph and node names are resolved by the graph owner before lane IDs.
-        if parts.len() <= 3
-            && parts.iter().all(|part| {
-                !part.is_empty()
-                    && part.len() <= 200
-                    && part.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                    })
-            })
-            && parts.iter().any(|part| {
-                part.len() < 8
-                    || part.len() > 32
-                    || part.bytes().any(|byte| byte.is_ascii_uppercase())
-                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        {
-            return Ok(Self {
-                selection: Some(text.to_owned()),
-                run: None,
-                task: None,
-                attempt: None,
-            });
-        }
-        if parts.len() > 3
-            || parts.iter().any(|part| {
-                !(8..=32).contains(&part.len())
-                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        {
-            return Err(
-                "expected 8+ hexadecimal ID characters; run `provenant status --all` to find IDs",
-            );
-        }
-        if parts.iter().any(|part| part.len() < 32) {
-            return Ok(Self {
-                selection: Some(text.to_owned()),
-                run: None,
-                task: None,
-                attempt: None,
-            });
-        }
-        if !text.contains('/') {
-            return Ok(Self {
-                selection: None,
-                run: None,
-                task: None,
-                attempt: Some(text.parse().map_err(|_| "invalid attempt or run ID")?),
-            });
-        }
-        let mut parts = text.split('/');
-        let run = Some(
-            parts
-                .next()
-                .ok_or("expected RUN[/TASK[/ATTEMPT]]")?
-                .parse()
-                .map_err(|_| "invalid run ID")?,
-        );
-        let task = parts
-            .next()
-            .map(str::parse)
-            .transpose()
-            .map_err(|_| "invalid task ID")?;
-        let attempt = parts
-            .next()
-            .map(str::parse)
-            .transpose()
-            .map_err(|_| "invalid attempt ID")?;
-        if parts.next().is_some() {
-            return Err("expected RUN[/TASK[/ATTEMPT]]");
-        }
-        Ok(Self {
-            selection: None,
-            run,
-            task,
-            attempt,
-        })
-    }
-}
-/// One attempt: a bare ID, `RUN/ATTEMPT`, `HOST/ATTEMPT` (a graph
-/// `attempt_ref`) or `RUN/TASK/ATTEMPT`. In the two-part form the qualifier
-/// is parsed into `Target::run` and resolved against stored runs and known
-/// hosts later; `task` is `None` only there.
-#[derive(Debug, Clone)]
-pub struct Attempt(pub Target);
-impl Attempt {
-    /// Whether the target is the two-part `QUALIFIER/ATTEMPT` form.
-    pub fn is_qualified_pair(&self) -> bool {
-        self.0
-            .selection
-            .as_ref()
-            .is_some_and(|selection| selection.split('/').count() == 2)
-            || self.0.run.is_some() && self.0.task.is_none() && self.0.attempt.is_some()
-    }
-}
-impl FromStr for Attempt {
-    type Err = &'static str;
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        const EXPECTED: &str = "expected ATTEMPT, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT";
-        let target: Target = text.parse().map_err(|_| EXPECTED)?;
-        if target.selection.is_some() {
-            return Ok(Self(target));
-        }
-        let mut parts = text.split('/');
-        if let (Some(qualifier), Some(attempt), None) = (parts.next(), parts.next(), parts.next()) {
-            return Ok(Self(Target {
-                selection: None,
-                run: Some(qualifier.parse().map_err(|_| "invalid run or host ID")?),
-                task: None,
-                attempt: Some(attempt.parse().map_err(|_| "invalid attempt ID")?),
-            }));
-        }
-        let target: Target = text.parse().map_err(|_| EXPECTED)?;
-        if target.attempt.is_none() {
-            return Err(EXPECTED);
-        }
-        Ok(Self(target))
-    }
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Condition {
-    Any,
-    All,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub enum LaneState {
-    Queued,
-    Starting,
-    Running,
-    Settling,
-    Succeeded,
-    ReviewRequired,
-    Failed,
-    Rejected,
-    TimedOut,
-    RateLimited,
-    QuotaLimited,
-    AuthRequired,
-    ModelUnavailable,
-    PermissionDenied,
-    Quarantined,
-    Lost,
-    Uncommitted,
-    Cancelled,
-    InputRequired,
-}
-impl LaneState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::Settling => "settling",
-            Self::Succeeded => "succeeded",
-            Self::ReviewRequired => "review_required",
-            Self::Failed => "failed",
-            Self::Rejected => "rejected",
-            Self::TimedOut => "timed_out",
-            Self::RateLimited => "rate_limited",
-            Self::QuotaLimited => "quota_limited",
-            Self::AuthRequired => "auth_required",
-            Self::ModelUnavailable => "model_unavailable",
-            Self::PermissionDenied => "permission_denied",
-            Self::Quarantined => "quarantined",
-            Self::Lost => "lost",
-            Self::Uncommitted => "uncommitted",
-            Self::Cancelled => "cancelled",
-            Self::InputRequired => "input_required",
-        }
-    }
-}
-#[derive(Debug, Clone, Args)]
-pub struct Lanes {
-    /// Stream a bounded page for the SessionStart collector.
-    #[arg(long, hide = true)]
-    pub session_stream: bool,
-    /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
-    #[arg(long)]
-    pub id: Vec<Target>,
-    /// List, wait on or watch a configured peer's own lanes, by label or host ID
-    #[arg(long, conflicts_with_all = ["id", "cursor"])]
-    pub host: Option<String>,
-    /// Keep lanes submitted by this session (its agent label)
-    #[arg(long, value_parser = session_label, conflicts_with = "all")]
-    pub session: Option<String>,
-    /// Show every lane, newest first
-    #[arg(long)]
-    pub all: bool,
-    /// Maximum lanes per page (1 to 100)
-    #[arg(long, default_value = "50", catalog_u64_range = 1..=100)]
-    pub limit: u64,
-    /// Continue from a previous page's cursor
-    #[arg(long, conflicts_with_all = ["wait", "watch"])]
-    pub cursor: Option<String>,
-    /// Wait for settlement (seconds, or a duration such as 30m). An oversized
-    /// unseen default backlog is summarised with its count and newest 100 lanes.
-    #[arg(long, conflicts_with = "watch", catalog_duration())]
-    pub wait: Option<u64>,
-    /// Wait for any or all lanes to settle
-    #[arg(
-        long,
-        default_value = "any",
-        catalog_requires = "wait",
-        conflicts_with = "watch",
-        value_enum
-    )]
-    pub condition: Condition,
-    /// Print one line per lane state change until every selected lane has
-    /// settled or this many seconds pass (default 14400)
-    #[arg(
-        long,
-        num_args = 0..=1,
-        default_missing_value = "14400",
-        value_name = "SECONDS",
-        conflicts_with_all = ["all", "states", "cursor"],
-        catalog_duration()
-    )]
-    pub watch: Option<u64>,
-    /// Keep lanes in any of these states.
-    #[arg(long = "state", conflicts_with_all = ["wait", "watch"])]
-    pub states: Vec<LaneState>,
-    /// Keep lanes queued within this many seconds, or since an RFC3339 time.
-    /// With --wait or --watch, count lanes that settled since then.
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-}
-fn session_label(value: &str) -> Result<String, &'static str> {
-    provenant_fabric_runtime::identity::validate_label(value)
-        .map(|()| value.to_owned())
-        .map_err(|_| "session must be an agent label of 1 to 128 letters, digits, dots, underscores or hyphens")
-}
+pub use crate::target::{Resolved, Target, Want};
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Part {
     Result,
@@ -908,21 +660,19 @@ pub enum Part {
     /// The provider's own transcript, tailed in place
     Transcript,
 }
-#[derive(Debug, Clone, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Output {
-    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; a RUN or RUN/TASK reads its newest settled attempt, and receipt needs exactly one
-    pub attempt: Attempt,
-    /// Read a configured peer's own attempt, by label or host ID
-    #[arg(long)]
-    pub host: Option<String>,
+    /// Attempt to read, as NAME[/NODE[#N]]; a node reads its newest settled attempt
+    #[arg(value_name = "TARGET")]
+    pub target: Target,
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
     /// Write the selected range to FILE, replacing it, instead of printing it
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["path", "trace"])]
+    #[arg(long, value_name = "FILE", conflicts_with = "path")]
     pub to: Option<PathBuf>,
     /// Print the attempt's artifact path for this part instead of its content
-    #[arg(long, conflicts_with_all = ["to", "trace", "offset", "tail", "max_bytes"])]
+    #[arg(long, conflicts_with_all = ["to", "offset", "tail", "max_bytes"])]
     pub path: bool,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
@@ -933,68 +683,36 @@ pub struct Output {
     /// Maximum bytes to return
     #[arg(long, default_value = "65536", catalog_u64_range = 1..=65536)]
     pub max_bytes: u64,
-    /// Print the attempt's trace and its parent chain instead of a part
-    #[arg(long, conflicts_with_all = ["part", "offset", "tail", "max_bytes"])]
-    pub trace: bool,
 }
 #[derive(Debug, Args)]
 pub struct Cancel {
-    /// Attempt ID or RUN[/TASK[/ATTEMPT]]
+    /// Graph, node or attempt to stop, as NAME[/NODE[#N]]
+    #[arg(value_name = "TARGET")]
     pub target: Target,
-    /// Caller-chosen ID that makes retries idempotent
-    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
-    pub operation_id: OperationId,
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
-    /// Wait up to this many seconds for cancellation to settle
-    #[arg(long, catalog_duration())]
-    pub wait: Option<u64>,
-}
-#[derive(Debug, Args)]
-#[group(id = "resume_prompt", multiple = false)]
-pub struct Prompt {
-    /// Read the prompt from this file
-    #[arg(long)]
-    pub prompt_file: Option<PathBuf>,
-    /// Read the prompt from standard input
-    #[arg(long)]
-    pub prompt_stdin: bool,
 }
 #[derive(Debug, Args)]
 pub struct Resume {
-    /// Retry only the named node rather than recovering its graph
-    #[arg(long, conflicts_with = "no_fallback")]
-    pub node: Option<String>,
-    /// Replace the target brief
-    #[arg(long, conflicts_with_all = ["prompt_file", "prompt_stdin"])]
+    /// Graph, node or attempt to retry, as NAME[/NODE[#N]]
+    #[arg(value_name = "TARGET")]
+    pub target: Target,
+    /// Replace the node's brief; a graph target needs exactly one node
+    #[arg(long, conflicts_with = "extend")]
     pub brief: Option<String>,
-    /// Raise a graph limit or budget (KEY=VALUE); may be repeated
+    /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
-    /// Graph ID, node ID, GRAPH/NODE, attempt ID, HOST/ATTEMPT, RUN/ATTEMPT or RUN/TASK/ATTEMPT
-    #[arg(value_name = "TARGET")]
-    pub attempt: Attempt,
-    /// Caller-chosen ID that makes retries idempotent
-    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
-    pub operation_id: OperationId,
-    /// Refuse instead of starting fresh when provider continuation is unavailable
-    #[arg(long)]
-    pub no_fallback: bool,
-    #[command(flatten)]
-    pub prompt: Prompt,
-    /// Wait up to this many seconds for the attempt to settle
-    #[arg(long, catalog_duration())]
-    pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
 pub struct Reconcile {
-    /// Reconcile only this run (repeatable)
-    #[arg(long)]
-    pub id: Vec<Target>,
+    /// Reconcile only these graphs, nodes or attempts (NAME[/NODE[#N]])
+    #[arg(value_name = "TARGET", conflicts_with = "abandon")]
+    pub targets: Vec<Target>,
     /// Abandon settlement of this writer attempt, preserving its evidence
-    #[arg(long, catalog_requires = "reason", conflicts_with = "id")]
-    pub abandon: Option<Attempt>,
+    #[arg(long, value_name = "TARGET", catalog_requires = "reason")]
+    pub abandon: Option<Target>,
     /// Why the chair is abandoning settlement
     #[arg(long, catalog_requires = "abandon", catalog_bounds = (0, 256))]
     pub reason: Option<String>,
@@ -1003,7 +721,9 @@ pub struct Reconcile {
 pub enum Lane {
     /// Re-run host delivery, requiring the settled receipt's clean, exact head
     Deliver {
-        attempt: Attempt,
+        /// Settled writer attempt, as NAME[/NODE[#N]]
+        #[arg(value_name = "TARGET")]
+        target: Target,
         /// Override the recorded delivery mode (default push when none recorded)
         #[arg(long)]
         deliver: Option<provenant_records::run::DeliveryMode>,
@@ -1150,31 +870,20 @@ pub struct Trace {
     /// Include attempts finished from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
-    /// Restrict the trace to one run.
-    #[arg(long)]
-    pub run: Option<Target>,
+    /// Restrict the trace to one graph, node or attempt (NAME[/NODE[#N]])
+    #[arg(value_name = "TARGET")]
+    pub target: Option<Target>,
     /// Also read the attempts of runs placed on peers, one SSH status read per peer
     #[arg(long)]
     pub peers: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum StatsBy {
-    Route,
-    Pr,
-    Issue,
-    Graph,
-    Node,
-    Pattern,
-    Preset,
-    Role,
-}
 #[derive(Debug, Args)]
 pub struct Stats {
     /// Include offline post-merge outcomes and stratified ranking
-    #[arg(long, conflicts_with_all = ["usage", "by"])]
+    #[arg(long, conflicts_with = "usage")]
     pub outcomes: bool,
     /// Include advisory expiring suggestions from offline pipeline evidence
-    #[arg(long, conflicts_with_all = ["usage", "by"])]
+    #[arg(long, conflicts_with = "usage")]
     pub suggest: bool,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
@@ -1187,15 +896,6 @@ pub struct Stats {
     /// Count up to this date or timestamp
     #[arg(long, value_parser = timestamp)]
     pub until: Option<jiff::Timestamp>,
-    /// Restrict usage and cost to one run.
-    #[arg(long)]
-    pub run_id: Option<Target>,
-    /// Group supervised attempts by route, work context or merged pull request; attempts with no value form an `unattributed` group
-    #[arg(long, value_enum, conflicts_with = "usage")]
-    pub by: Option<StatsBy>,
-    /// Include per-attempt detail
-    #[arg(long, conflicts_with = "usage")]
-    pub detail: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1449,8 +1149,7 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
 
 #[cfg(test)]
 mod target_tests {
-    use super::{Attempt, Target, since};
-    use provenant_core::{AttemptId, RunId, TaskId};
+    use super::since;
 
     #[test]
     fn since_accepts_spans() {
@@ -1490,69 +1189,12 @@ mod target_tests {
             fixed.parse::<jiff::Timestamp>().unwrap()
         );
     }
-
-    #[test]
-    fn attempt_accepts_bare_and_qualified_ids() {
-        let run = RunId::from_bytes([1; 16]);
-        let task = TaskId::from_bytes([2; 16]);
-        let attempt = AttemptId::from_bytes([3; 16]);
-        let bare: Attempt = attempt.to_string().parse().unwrap();
-        assert_eq!(bare.0.run, None);
-        assert_eq!(bare.0.attempt, Some(attempt));
-        let qualified: Attempt = format!("{run}/{task}/{attempt}").parse().unwrap();
-        assert_eq!(qualified.0.run, Some(run));
-        assert_eq!(qualified.0.task, Some(task));
-        assert_eq!(qualified.0.attempt, Some(attempt));
-        // A graph `attempt_ref` is `HOST/ATTEMPT`; `RUN/ATTEMPT` has the same shape.
-        let pair: Attempt = format!("{run}/{attempt}").parse().unwrap();
-        assert!(pair.is_qualified_pair());
-        assert_eq!(pair.0.run, Some(run));
-        assert_eq!(pair.0.task, None);
-        assert_eq!(pair.0.attempt, Some(attempt));
-        assert!(!qualified.is_qualified_pair());
-        assert!(!bare.is_qualified_pair());
-        assert!(format!("{run}/").parse::<Attempt>().is_err());
-        assert!(format!("/{attempt}").parse::<Attempt>().is_err());
-        // A graph lane ID names its graph and node, which need not be hexadecimal.
-        let lane: Attempt = format!("g/parent--child/{attempt}").parse().unwrap();
-        assert_eq!(
-            lane.0.selection.as_deref(),
-            Some(format!("g/parent--child/{attempt}").as_str())
-        );
-        for invalid in [
-            "",
-            &format!("{run}//{attempt}"),
-            &format!("{run}/{task}/{attempt}/extra"),
-        ] {
-            assert!(invalid.parse::<Target>().is_err(), "{invalid}");
-        }
-    }
 }
 
 fn explicit_operation_id(value: &str) -> Result<OperationId, String> {
     OperationId::parse(value).map_err(|error| error.to_string())
 }
 
-/// Generate at parse time so help remains deterministic.
-fn operation_id(value: &str) -> Result<OperationId, String> {
-    if !value.is_empty() {
-        return OperationId::parse(value).map_err(|error| error.to_string());
-    }
-    let bytes = provenant_os::fs::entropy_128().map_err(|error| error.to_string())?;
-    OperationId::parse(&format!(
-        "cli-{}",
-        provenant_core::AttemptId::from_bytes(bytes)
-    ))
-    .map_err(|error| error.to_string())
-}
-pub(crate) fn status_wait_seconds(value: &str) -> Result<u64, &'static str> {
-    // Zero is the parser's sentinel for the configured default, never a duration.
-    if value == "configured" {
-        Ok(0)
-    } else {
-        duration_seconds(value)
-    }
-}
 fn span_seconds(value: &str) -> Option<u64> {
     let (digits, multiplier) = match value.as_bytes().last() {
         Some(b's') => (&value[..value.len() - 1], 1),
@@ -1571,49 +1213,50 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
         .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
 }
-#[derive(Debug, Args)]
-pub struct GraphStats {
-    /// Graph ID, node or attempt selector
-    pub id: Option<String>,
-    /// Group efficiency by node, requested tier or template
-    #[arg(long, value_parser = ["node", "tier", "template"], default_value = "template")]
-    pub by: String,
-}
-
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Stream a bounded attempt inventory page for the session collector.
-    #[arg(long, hide = true, conflicts_with_all = ["stats", "wait", "id", "target", "follow"])]
+    #[arg(long, hide = true, conflicts_with_all = ["targets", "all", "cursor"])]
     pub session_stream: bool,
-    /// Report attempt efficiency without counting composite aggregates
-    #[arg(long, conflicts_with = "wait")]
-    pub stats: bool,
-    /// Group efficiency by node, requested tier or template
-    #[arg(long, requires = "stats", value_parser = ["node", "tier", "template"], default_value = "template")]
-    pub by: String,
-    /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
-    pub wait: Option<u64>,
-    /// Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)
-    #[arg(long)]
-    pub target: Vec<String>,
-    /// Return when all targets are terminal (use `any` for the first transition)
-    #[arg(long, catalog_requires = "wait", value_enum, default_value = "all")]
-    pub until: Condition,
-    /// Stream transitions until all targets are terminal or the wait expires
-    #[arg(long, catalog_requires = "wait")]
-    pub follow: bool,
-    /// Show a run, task, attempt or graph ID, or operation:ID for a refusal
-    pub id: Option<String>,
-    /// Maximum full records per page
-    #[arg(long, hide = true, default_value = "50", catalog_u64_range = 1..=100)]
-    pub limit: u64,
-    /// Continue a full-record page from its cursor
-    #[arg(long, hide = true)]
-    pub cursor: Option<u64>,
-    /// Include full records and older lanes
+    /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
+    #[arg(value_name = "TARGET")]
+    pub targets: Vec<Target>,
+    /// Include every settled graph, paged with --limit and --cursor
     #[arg(long)]
     pub all: bool,
+    /// Most rows per page; unsettled graphs are always shown
+    #[arg(long, default_value = "20", catalog_u64_range = 1..)]
+    pub limit: u64,
+    /// Continue from a previous page's cursor
+    #[arg(long)]
+    pub cursor: Option<u64>,
+}
+/// `wait`: block until graph work or pull requests settle.
+#[derive(Clone, Debug, Args)]
+pub struct Wait {
+    /// Graphs, nodes or attempts (NAME[/NODE[#N]]); this project's running
+    /// graphs when neither a target nor --pr is given
+    #[arg(value_name = "TARGET")]
+    pub targets: Vec<Target>,
+    /// Pull request whose required checks, merge or close ends the wait (repeatable)
+    #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
+    pub prs: Vec<u64>,
+    /// Return at the first target to settle or need input
+    #[arg(long)]
+    pub any: bool,
+    /// Print one line per transition until the wait ends
+    #[arg(long)]
+    pub follow: bool,
+    /// Wait budget (default domains.wait.timeout_seconds; at most 4 hours)
+    #[arg(long, value_name = "SPAN", catalog_duration())]
+    pub timeout: Option<u64>,
+}
+/// `trace`: a graph's revisions and attempt timeline.
+#[derive(Debug, Args)]
+pub struct GraphTrace {
+    /// Graph, node or attempt, as NAME[/NODE[#N]]
+    #[arg(value_name = "TARGET")]
+    pub target: Target,
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {
@@ -1626,8 +1269,9 @@ fn parse_landing_tier(value: &str) -> Result<String, String> {
 
 #[derive(Debug, Args)]
 pub struct Edit {
-    /// Graph ID
-    pub id: String,
+    /// Graph name
+    #[arg(value_name = "NAME", value_parser = graph_name)]
+    pub name: String,
     /// Patch document (JSON or TOML)
     #[arg(long)]
     pub file: PathBuf,
@@ -1639,4 +1283,14 @@ pub struct Templates {
     /// Document containing inline templates (JSON or TOML)
     #[arg(long)]
     pub file: Option<PathBuf>,
+}
+/// A bare graph name: a target with no node.
+fn graph_name(value: &str) -> Result<String, String> {
+    let target = Target::parse(value).map_err(|error| error.to_string())?;
+    if target.node.is_some() {
+        return Err(
+            "edit takes a graph NAME, not a node; patch nodes inside the --file document".into(),
+        );
+    }
+    Ok(target.name)
 }

@@ -94,44 +94,15 @@ fn coverage(totals: &report::Totals) -> String {
 
 // ---- cost ----
 
-/// Whether `row` is the target's attempt, task or run, or a graph or node of
-/// that name. Backfilled rows are selected by their opaque labels.
-fn selects(target: &Target, row: &Row) -> bool {
-    let prefix = |held: Option<&str>, part: &str| held.is_some_and(|held| held.starts_with(part));
-    let (run, task) = (row.labels.run.as_deref(), row.labels.task.as_deref());
-    if target.run.is_some() || target.task.is_some() || target.attempt.is_some() {
-        return target
-            .run
-            .is_none_or(|id| run == Some(id.to_string().as_str()))
-            && target
-                .task
-                .is_none_or(|id| task == Some(id.to_string().as_str()))
-            && target
-                .attempt
-                .is_none_or(|id| row.attempt == id.to_string());
-    }
-    let Some(selection) = target.selection.as_deref() else {
-        return true;
-    };
-    let parts: Vec<&str> = selection.split('/').collect();
-    let attempt = Some(row.attempt.as_str());
-    match parts[..] {
-        [one] => {
-            prefix(attempt, one)
-                || prefix(run, one)
-                || prefix(task, one)
-                || row.graph.as_deref() == Some(one)
-                || row.node.as_deref() == Some(one)
-        }
-        [first, second] => {
-            (row.graph.as_deref() == Some(first) && row.node.as_deref() == Some(second))
-                || (prefix(run, first) && (prefix(task, second) || prefix(attempt, second)))
-        }
-        [first, second, third] => {
-            prefix(run, first) && prefix(task, second) && prefix(attempt, third)
-        }
-        _ => false,
-    }
+/// Whether `row` lies under the target: a graph, a node, or the one attempt
+/// whose id `attempt` names.
+fn selects(target: &Target, attempt: Option<&str>, row: &Row) -> bool {
+    row.graph.as_deref() == Some(target.name.as_str())
+        && target
+            .node
+            .as_deref()
+            .is_none_or(|node| row.node.as_deref() == Some(node))
+        && attempt.is_none_or(|attempt| row.attempt == attempt)
 }
 
 pub fn cost(command: TelemetryCost, edge: &Edge<'_>) -> Reply {
@@ -139,23 +110,44 @@ pub fn cost(command: TelemetryCost, edge: &Edge<'_>) -> Reply {
 }
 
 fn cost_inner(command: &TelemetryCost, edge: &Edge<'_>) -> Output {
+    // Only `#N` needs the checkpoint: a graph or node matches the ledger's
+    // own labels, so its cost stays readable after the graph is collected.
+    let attempt = match &command.target {
+        Some(target) if target.attempt.is_some() => {
+            let resolved = crate::run::resolve_target(edge, target, crate::target::Want::Work)
+                .map_err(|fail| (fail.kind, fail.message))?;
+            let reference = resolved.attempt_ref.ok_or_else(|| {
+                (
+                    ErrorKind::NotFound,
+                    format!("NOT_FOUND: {target} has not launched"),
+                )
+            })?;
+            reference.rsplit('/').next().map(str::to_owned)
+        }
+        _ => None,
+    };
     let ledger = read(edge)?;
     let since = command.since.map(|time| time.as_second());
     let rows: Vec<&Row> = ledger
         .rows
         .iter()
         .filter(|row| since.is_none_or(|since| seconds(row) >= since))
-        .filter(|row| command.target.as_ref().is_none_or(|t| selects(t, row)))
+        .filter(|row| {
+            command
+                .target
+                .as_ref()
+                .is_none_or(|target| selects(target, attempt.as_deref(), row))
+        })
         .collect();
     if rows.is_empty()
         && let Some(target) = &command.target
     {
-        let shown = target.selection.as_deref().unwrap_or("the given IDs");
+        let shown = target.to_string();
         return Err((
             ErrorKind::Invalid,
             format!(
                 "no usage ledger row matches {}; a lane's row is written when it settles",
-                plain_text(shown, 80)
+                plain_text(&shown, 80)
             ),
         ));
     }

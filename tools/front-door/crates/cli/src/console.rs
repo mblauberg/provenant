@@ -59,7 +59,11 @@ pub enum Console {
         hosts: Option<String>,
     },
     /// Read one attempt's bounded metadata and artifact inventory
-    Detail { id: String },
+    Detail {
+        /// Attempt, as NAME[/NODE[#N]]
+        #[arg(value_name = "TARGET")]
+        target: crate::Target,
+    },
     /// Search local prompt or result content; returns the first match per artifact.
     /// Each cursor page rescans the bounded local content; peers are not searched.
     Search {
@@ -118,6 +122,39 @@ pub enum Error {
     InvalidGenerations,
     #[error(transparent)]
     Changes(#[from] std::io::Error),
+    #[error("{0}")]
+    Target(String),
+}
+
+/// The `HOST/ATTEMPT` reference of a target's attempt, read from its graph's
+/// one checkpoint in the selected project, or else the first project that
+/// holds a graph of that name.
+fn detail_reference(
+    roots: &Roots,
+    selected: Option<ProjectId>,
+    target: &crate::Target,
+) -> Result<String, Error> {
+    use crate::target::{ResolveError, Want, resolve};
+    for project in projects(roots, selected)? {
+        let resolved = resolve(target, Want::Attempt { settled: false }, |name| {
+            provenant_fabric_runtime::graph::FileJournal::read_status_checkpoint(
+                &roots.state,
+                project.project_id,
+                name,
+            )
+        });
+        match resolved {
+            Err(ResolveError::NotFound(_)) => continue,
+            Err(ResolveError::Read(error)) => return Err(Error::Target(error.to_string())),
+            Err(error) => return Err(Error::Target(error.to_string())),
+            Ok(resolved) => {
+                return resolved
+                    .attempt_ref
+                    .ok_or_else(|| Error::Target(format!("NOT_FOUND: {target} has not launched")));
+            }
+        }
+    }
+    Err(Error::Target(format!("NOT_FOUND: {target}")))
 }
 
 #[derive(Serialize)]
@@ -157,6 +194,12 @@ fn projects(roots: &Roots, selected: Option<ProjectId>) -> Result<Vec<Project>, 
 }
 
 /// Compose existing owners without creating or repairing state.
+/// One attempt's detail by its `[HOST/]ATTEMPT` reference: what a peer serves
+/// once the caller's host resolved the target.
+pub fn read_detail(roots: &Roots, reference: &str) -> Result<Value, Error> {
+    detail::read(roots, reference)
+}
+
 pub fn read(roots: &Roots, selected: Option<ProjectId>, command: &Console) -> Result<Value, Error> {
     read_with_budget(roots, selected, command, 16_384)
 }
@@ -245,8 +288,8 @@ fn read_with_budget(
     {
         return tree::read(roots, selected, *max_depth, *max_nodes, *detail);
     }
-    if let Console::Detail { id } = command {
-        return detail::read(roots, id);
+    if let Console::Detail { target } = command {
+        return detail::read(roots, &detail_reference(roots, selected, target)?);
     }
     if let Console::Search {
         query,

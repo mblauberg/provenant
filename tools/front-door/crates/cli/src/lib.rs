@@ -241,16 +241,142 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         },
     }
 }
-fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static str, String)> {
+/// One spelling a released version accepted and this one removes, with what
+/// replaces it. `words` is the command path; `flag`, when set, is the removed
+/// option on that path.
+#[derive(Clone, Copy, Debug)]
+pub struct Removed {
+    pub words: &'static [&'static str],
+    pub flag: Option<&'static str>,
+    pub replacement: &'static str,
+}
+
+const fn verb(words: &'static [&'static str], replacement: &'static str) -> Removed {
+    Removed {
+        words,
+        flag: None,
+        replacement,
+    }
+}
+
+const fn flag(
+    words: &'static [&'static str],
+    flag: &'static str,
+    replacement: &'static str,
+) -> Removed {
+    Removed {
+        words,
+        flag: Some(flag),
+        replacement,
+    }
+}
+
+/// Every removed spelling. A removed spelling exits 2 with one line naming its
+/// replacement; there are no aliases. Target spellings (IDs and the `lane:`,
+/// `graph:`, `operation:` and `land:` prefixes) are refused by the target
+/// parser instead.
+pub const REMOVED: &[Removed] = &[
+    verb(&["dispatch"], "provenant run TEMPLATE BRIEF"),
+    verb(&["lanes"], "provenant status"),
+    verb(&["resume"], "provenant retry NAME/NODE"),
+    verb(&["cancel"], "provenant stop NAME"),
+    verb(&["continue"], "provenant retry NAME/NODE#N"),
+    verb(&["redo"], "provenant retry NAME/NODE"),
+    verb(&["preset"], "provenant templates"),
+    verb(&["review"], "provenant run review BRIEF"),
+    verb(&["stats"], "provenant telemetry cost --by node"),
+    verb(&["pr", "land"], "provenant land NUMBER --wait"),
+    verb(&["fabric", "graph"], "provenant status NAME"),
+    verb(&["fabric_graph"], "provenant run TEMPLATE BRIEF"),
+    verb(&["quota", "usage"], "provenant telemetry cost --by account"),
+    verb(&["config", "migrate"], "provenant config check"),
+    verb(
+        &["telemetry", "backfill"],
+        "nothing; this binary reads no format-1 store",
+    ),
+    flag(&["run"], "use", "provenant run TEMPLATE BRIEF"),
+    flag(
+        &["run"],
+        "tier",
+        "provenant run TEMPLATE BRIEF --route ROUTE",
+    ),
+    flag(
+        &["run"],
+        "operation-id",
+        "provenant run TEMPLATE BRIEF --name NAME",
+    ),
+    flag(&["run"], "wait", "provenant wait NAME"),
+    flag(&["status"], "wait", "provenant wait NAME"),
+    flag(
+        &["status"],
+        "target",
+        "provenant status NAME or provenant wait --pr NUMBER",
+    ),
+    flag(&["status"], "until", "provenant wait NAME --any"),
+    flag(&["status"], "follow", "provenant wait NAME --follow"),
+    flag(
+        &["status"],
+        "stats",
+        "provenant telemetry cost NAME --by node",
+    ),
+    flag(&["status"], "by", "provenant telemetry cost NAME --by node"),
+    flag(&["status"], "id", "provenant status NAME"),
+    flag(&["stop"], "operation-id", "provenant stop NAME"),
+    flag(&["stop"], "wait", "provenant wait NAME"),
+    flag(&["retry"], "node", "provenant retry NAME/NODE"),
+    flag(&["retry"], "wait", "provenant wait NAME"),
+    flag(&["output"], "trace", "provenant trace NAME"),
+    flag(&["reconcile"], "id", "provenant reconcile NAME"),
+    flag(
+        &["telemetry", "stats"],
+        "run-id",
+        "provenant telemetry cost NAME",
+    ),
+    flag(
+        &["telemetry", "stats"],
+        "by",
+        "provenant telemetry cost --by route",
+    ),
+    flag(
+        &["telemetry", "stats"],
+        "detail",
+        "provenant telemetry cost NAME",
+    ),
+    flag(
+        &["telemetry", "trace"],
+        "run",
+        "provenant telemetry trace NAME",
+    ),
+    flag(&["pr", "status"], "wait", "provenant pr watch NUMBER"),
+];
+
+impl Removed {
+    /// The one line a removed spelling prints.
+    pub fn message(&self) -> String {
+        let path = self.words.join(" ");
+        match self.flag {
+            Some(flag) => format!("`{path} --{flag}` is removed; use `{}`", self.replacement),
+            None => format!("`{path}` is removed; use `{}`", self.replacement),
+        }
+    }
+}
+
+/// The removed spelling `argv` uses, read from its command words and options.
+fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
     let model = expanded_model();
     let mut words = Vec::new();
+    let mut flags = Vec::new();
     let mut args = argv.iter().skip(1);
     while let Some(arg) = args.next() {
         let word = arg.to_str()?;
+        if word == "--" {
+            break;
+        }
         if let Some(option) = word.strip_prefix("--") {
             let (name, joined) = option
                 .split_once('=')
                 .map_or((option, false), |(name, _)| (name, true));
+            // Skip the value of a global option, which is never a command word.
             if !joined
                 && model.get_arguments().any(|arg| {
                     arg.get_long() == Some(name)
@@ -262,68 +388,19 @@ fn retired_verb_replacement(argv: &[OsString]) -> Option<(&'static str, &'static
             {
                 args.next();
             }
+            flags.push(name);
         } else if !word.starts_with('-') {
             words.push(word);
         }
     }
-    if words.is_empty() {
-        return None;
-    }
-    match words[0] {
-        "dispatch" => Some((
-            "dispatch",
-            "run",
-            "provenant run 'Meet the acceptance criteria' --use task".into(),
-        )),
-        "lanes" => Some(("lanes", "status", "provenant status".into())),
-        "resume" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("resume", "retry", format!("provenant retry {target}")))
-        }
-        "cancel" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("cancel", "stop", format!("provenant stop {target}")))
-        }
-        "preset" => Some(("preset", "templates", "provenant templates".into())),
-        "review" => Some((
-            "review",
-            "run --use review",
-            "provenant run --use review".into(),
-        )),
-        "continue" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("continue", "retry", format!("provenant retry {target}")))
-        }
-        "redo" => {
-            let target = words.get(1).copied().unwrap_or("ID");
-            Some(("redo", "retry", format!("provenant retry {target}")))
-        }
-        "pr" if words.get(1) == Some(&"land") => {
-            let pr = words.get(2).copied().unwrap_or("2199");
-            Some(("pr land", "land", format!("provenant land {pr} --wait")))
-        }
-        "fabric" if words.get(1) == Some(&"graph") => {
-            if words.get(2) == Some(&"status") {
-                let target = words.get(3).map(|id| format!(" {id}")).unwrap_or_default();
-                Some((
-                    "fabric graph status",
-                    "status",
-                    format!("provenant status{target}"),
-                ))
-            } else if words.get(2) == Some(&"cancel") {
-                let target = words.get(3).copied().unwrap_or("ID");
-                Some((
-                    "fabric graph cancel",
-                    "stop",
-                    format!("provenant stop {target}"),
-                ))
-            } else {
-                Some(("fabric graph", "status", "provenant status".into()))
-            }
-        }
-        "fabric_graph" => Some(("fabric_graph", "run", "provenant run".into())),
-        _ => None,
-    }
+    REMOVED.iter().find(|removed| {
+        words.len() >= removed.words.len()
+            && words
+                .iter()
+                .zip(removed.words)
+                .all(|(word, path)| word == path)
+            && removed.flag.is_none_or(|flag| flags.contains(&flag))
+    })
 }
 
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
@@ -357,12 +434,11 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         }
     }
 
-    if let Some((verb, replacement, runnable)) = retired_verb_replacement(argv) {
+    if let Some(removed) = removed_spelling(argv) {
         return CliError::Invalid {
-            message: format!(
-                "retired verb '{verb}' was replaced by '{replacement}'\nexample: {runnable}"
-            ),
-            repair: Some(runnable),
+            // The message names the replacement, so the error stays one line.
+            message: removed.message(),
+            repair: None,
         };
     }
 
@@ -515,7 +591,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
         path = "provenant land".into();
     }
     let lands = matches!(path.as_str(), "provenant land" | "provenant pr land");
-    if lands || path == "provenant pr status" {
+    if lands {
         // `--wait` takes its duration only as `--wait=5m`; a spaced one is
         // read as a positional, so name the joined spelling.
         let spaced = argv
@@ -529,9 +605,8 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
                     && value.bytes().next().is_some_and(|b| b.is_ascii_digit())
             });
         if let Some(value) = spaced {
-            let target = if lands { "land 2199" } else { "pr status 2199" };
             let proposed = format!("--wait={value}");
-            let command = format!("provenant {target} {proposed}");
+            let command = format!("provenant land 2199 {proposed}");
             let words = command
                 .split_whitespace()
                 .map(OsString::from)
@@ -539,7 +614,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
             return Some(if command_model().try_get_matches_from(words).is_ok() {
                 command
             } else {
-                format!("provenant {target} --wait=30m")
+                "provenant land 2199 --wait=30m".into()
             });
         }
     }
@@ -589,8 +664,8 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
     match path.as_str() {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some("provenant route resolve senior".into()),
-        "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
-        "provenant steer" => Some("provenant steer ID --text-stdin".into()),
+        "provenant output" => Some("provenant output fix-login/review".into()),
+        "provenant steer" => Some("provenant steer fix-login/implement --text-stdin".into()),
         "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
         _ => {
             if let Some(core) = selected.get::<metadata::CoreCommand>() {
@@ -605,7 +680,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
                     let name = arg.get_id().as_str();
                     let token = match name {
                         "number" | "numbers" => "2199",
-                        "id" | "graph" | "task" | "attempt" => "ID",
+                        "target" | "targets" => "NAME",
                         "brief" | "prompt" => "'Task'",
                         "branch" => "BRANCH",
                         "host" => "HOST",
@@ -878,8 +953,8 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             }
             route_valid(&resolve.request)?
         }
-        Command::Reconcile(reconcile) if reconcile.id.len() > 100 => {
-            return invalid("at most 100 IDs are allowed");
+        Command::Reconcile(reconcile) if reconcile.targets.len() > 100 => {
+            return invalid("at most 100 targets are allowed");
         }
         Command::Worktree(Worktree::Remove(remove)) if remove.branch.len() > 100 => {
             return invalid("at most 100 branches are allowed");
@@ -1110,7 +1185,7 @@ pub fn usage_verbs() -> Vec<String> {
 fn constraints(path: &str) -> Vec<String> {
     if path == "provenant output" {
         return vec![
-            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT".into(),
+            "target is NAME[/NODE[#N]]; a node reads its newest settled attempt".into(),
             format!("tail above {0} lines is clamped to {0}", limits::TAIL_LINES),
             format!(
                 "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
@@ -1137,7 +1212,7 @@ fn constraints(path: &str) -> Vec<String> {
             "since must precede until",
         ],
         "provenant retry" => &[
-            "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
+            "target is NAME[/NODE[#N]]: a graph recovers, a node starts its next attempt, an attempt continues",
             "prompt is at most 1 MiB; expected generation is 0",
             "operation-id is generated when omitted; supply it for planned retries",
         ],
@@ -1150,14 +1225,13 @@ fn constraints(path: &str) -> Vec<String> {
             "already-merged PRs retry safe cleanup without CI or another merge",
         ],
         "provenant status" => &[
-            "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
-            "--target without --wait reports each target's current status once",
-            "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
-            "follow waits for all targets to be terminal; land targets only observe their PR",
+            "every unsettled graph is shown; settled graphs from the last 24 hours fill up to 20 rows, with an omission count",
+            "--all pages every graph with --limit and --cursor",
         ],
-        "provenant pr status" => &[
-            "one head-and-checks snapshot per PR; unavailable PRs preserve other rows",
-            "wait without a value means five minutes; unchanged snapshots exit 124",
+        "provenant wait" => &[
+            "every target resolves before the wait starts; no target waits for this session's unsettled graphs",
+            "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
+            "with --json, --follow emits newline-delimited snapshot and transition events and a final end event",
         ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
@@ -1474,59 +1548,6 @@ mod tests {
         );
     }
     #[test]
-    fn unified_lifecycle_commands_accept_graph_node_and_attempt_ids() {
-        for id in [
-            "graph-build",
-            "graph-build/verify",
-            "verify",
-            "a",
-            "face",
-            "DEADBEEF",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            "11111111111111111111111111111111",
-        ] {
-            valid(&["status", id, "--wait", "--json"]);
-            valid(&["output", id]);
-            valid(&["steer", id, "--text-stdin"]);
-            valid(&["stop", id]);
-            valid(&["retry", id]);
-            let Command::Retry(retry) = valid(&[
-                "retry",
-                id,
-                "--node",
-                "verify",
-                "--brief",
-                "Repair the failure",
-                "--extend",
-                "budget=20",
-            ])
-            .command
-            else {
-                panic!("retry command");
-            };
-            assert_eq!(retry.node.as_deref(), Some("verify"));
-            assert_eq!(retry.brief.as_deref(), Some("Repair the failure"));
-            assert_eq!(retry.extend, ["budget=20"]);
-        }
-        let long_node = "n".repeat(200);
-        valid(&["output", &long_node]);
-        let Command::Stop(stop) = valid(&["stop", "DEADBEEF"]).command else {
-            panic!("stop");
-        };
-        assert_eq!(stop.target.selection.as_deref(), Some("DEADBEEF"));
-        for words in [
-            &["lanes"][..],
-            &["resume", "graph-build"],
-            &["continue", "graph-build"],
-            &["cancel", "graph-build"],
-            &["redo", "graph-build"],
-            &["fabric", "graph", "status", "graph-build"],
-        ] {
-            invalid(words);
-        }
-    }
-
-    #[test]
     fn core_path_help_and_defaults() {
         for words in [&[][..], &["help"][..]] {
             let ParseOutcome::Help { text, catalog, .. } = parsed(words) else {
@@ -1667,12 +1688,6 @@ mod tests {
         assert_eq!(request.wait, Some(1800));
         valid(&["run", "--file", "work.toml", "--explain"]);
         invalid(&["run", "--preset", "task"]);
-        valid(&["stats", "--by", "tier"]);
-        valid(&["stats", "--by", "node"]);
-        valid(&["status", "--stats", "--by", "tier"]);
-        valid(&["status", "--stats", "--by", "template"]);
-        invalid(&["status", "--by", "tier"]);
-        valid(&["status", "--stats", "--by", "node"]);
         valid(&["config", "schema", "--all"]);
         valid(&["run", "--tier", "junior"]);
         valid(&[
@@ -1731,39 +1746,16 @@ mod tests {
                 "{name}"
             );
         }
-        let status = catalog
+        let wait = catalog
             .commands
             .iter()
-            .find(|c| c.command == "provenant status")
+            .find(|c| c.command == "provenant wait")
             .unwrap();
-        let requires = |name: &str| {
-            status
-                .arguments
-                .iter()
-                .find(|a| a.name == name)
-                .unwrap()
-                .requires
-                .clone()
-        };
-        // `--target` alone reports each target's status once (#3124).
-        assert!(requires("target").is_empty());
-        for name in ["until", "follow"] {
-            assert_eq!(requires(name), ["wait"]);
-        }
         assert!(
-            status
-                .constraints
+            wait.constraints
                 .iter()
                 .any(|c| c.contains("newline-delimited"))
         );
-    }
-    #[test]
-    fn retry_help_shows_graph_node_selector() {
-        let ParseOutcome::Help { text, .. } = parsed(&["help", "retry"]) else {
-            panic!("retry help");
-        };
-        assert!(text.contains("--node"), "{text}");
-        assert!(text.contains("GRAPH/NODE"), "{text}");
     }
     #[test]
     fn chair_log_help_explains_generated_retry_keys() {
@@ -1900,16 +1892,15 @@ mod tests {
         valid(&["land", "--wait=30m", "2199"]);
         invalid(&["land", "2199", "--wait=0"]);
         invalid(&["land", "2199", "--wait=5h"]);
-        let attempt = "11".repeat(16);
-        valid(&["output", "--host", "workshop", &attempt, "--json"]);
-        invalid(&["output", &attempt, "--summary"]);
+        valid(&["output", "fix-login", "--json"]);
+        invalid(&["output", "fix-login", "--summary"]);
     }
     #[test]
     fn common_usage_errors_name_the_correct_invocation() {
-        let ParseOutcome::Invalid { error, .. } = parsed(&["status", "--wait=5h"]) else {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["wait", "--timeout", "5h"]) else {
             panic!("expected duration error");
         };
-        assert!(error.to_string().contains("--wait"), "{error}");
+        assert!(error.to_string().contains("--timeout"), "{error}");
         let ParseOutcome::Invalid { error, .. } = parsed(&["quota", "history", "--until", "0d"])
         else {
             panic!("expected span error");
@@ -1920,15 +1911,11 @@ mod tests {
                 vec!["route", "resolve", "one", "two"],
                 "provenant route resolve senior",
             ),
-            (
-                vec!["output", "--host"],
-                "provenant output ATTEMPT --host HOST",
-            ),
+            (vec!["output"], "provenant output fix-login/review"),
             (
                 vec!["land", "2199", "--wait", "5m"],
                 "provenant land 2199 --wait=5m",
             ),
-            (vec!["pr", "land", "2199"], "provenant land 2199 --wait"),
         ] {
             let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
                 panic!("expected usage error");
@@ -1969,26 +1956,27 @@ mod tests {
     fn invalid_invocations_across_command_groups_name_field_and_correction() {
         for (words, expected_field, expected_repair) in [
             (
-                vec!["status", "--wait=5h"],
+                vec!["land", "2199", "--wait=5h"],
                 "--wait",
-                "provenant status --wait=30m",
+                "provenant land 2199 --wait=30m",
             ),
             (
-                vec!["--project", "/path with spaces", "status", "--wait=5h"],
+                vec![
+                    "--project",
+                    "/path with spaces",
+                    "land",
+                    "2199",
+                    "--wait=5h",
+                ],
                 "--wait",
-                "provenant --project '/path with spaces' status --wait=30m",
-            ),
-            (
-                vec!["status", "--wait=5h", "--bogus"],
-                "--wait",
-                "provenant status",
+                "provenant --project '/path with spaces' land 2199 --wait=30m",
             ),
             (vec!["land", "--head"], "--head", "provenant land"),
-            (vec!["output"], "attempt", "provenant output"),
-            (vec!["stop"], "target", "provenant stop ID"),
-            (vec!["retry"], "target", "provenant retry ID"),
-            (vec!["steer"], "target", "provenant steer ID"),
-            (vec!["edit"], "id", "provenant edit ID"),
+            (vec!["output"], "target", "provenant output"),
+            (vec!["stop"], "target", "provenant stop NAME"),
+            (vec!["retry"], "target", "provenant retry NAME"),
+            (vec!["steer"], "target", "provenant steer"),
+            (vec!["edit"], "name", "provenant edit NAME"),
             (vec!["route", "resolve"], "route", "provenant route resolve"),
             (vec!["pr", "watch"], "number", "provenant pr watch"),
             (vec!["config"], "subcommand", "provenant config show"),
@@ -2062,7 +2050,7 @@ mod tests {
     }
 
     #[test]
-    fn config_without_subcommand_prints_usage_and_retired_verbs_name_replacement() {
+    fn config_without_subcommand_prints_usage() {
         let ParseOutcome::Invalid { error, .. } = parsed(&["config"]) else {
             panic!("expected invalid for config without subcommand");
         };
@@ -2071,79 +2059,147 @@ mod tests {
             text.contains("Usage: provenant config [OPTIONS] <COMMAND>"),
             "{text}"
         );
-        assert!(text.contains("Commands:"), "{text}");
         assert_eq!(error.repair(), Some("provenant config show"));
+    }
 
-        for (verb, replacement, expected_repair) in [
-            (vec!["dispatch", "Meet acceptance"], "run", "provenant run"),
-            (
-                vec!["--project", "/path with spaces", "dispatch"],
-                "run",
-                "provenant run",
-            ),
-            (vec!["lanes"], "status", "provenant status"),
-            (
-                vec!["resume", "attempt-1"],
-                "retry",
-                "provenant retry attempt-1",
-            ),
-            (
-                vec!["cancel", "attempt-1"],
-                "stop",
-                "provenant stop attempt-1",
-            ),
-            (vec!["preset"], "templates", "provenant templates"),
-            (
-                vec!["review"],
-                "run --use review",
-                "provenant run --use review",
-            ),
-            (
-                vec!["continue", "attempt-1"],
-                "retry",
-                "provenant retry attempt-1",
-            ),
-            (
-                vec!["redo", "attempt-1"],
-                "retry",
-                "provenant retry attempt-1",
-            ),
-            (
-                vec!["pr", "land", "2199"],
-                "land",
-                "provenant land 2199 --wait",
-            ),
-            (
-                vec!["fabric", "graph", "status"],
-                "status",
-                "provenant status",
-            ),
-            (
-                vec!["fabric", "graph", "cancel", "attempt-1"],
-                "stop",
-                "provenant stop attempt-1",
-            ),
-            (vec!["fabric_graph"], "run", "provenant run"),
-        ] {
-            let ParseOutcome::Invalid { error, .. } = parsed(&verb) else {
-                panic!("expected invalid for retired verb {verb:?}");
+    /// The words that spell `removed`, with a value after a removed flag so
+    /// that a flag which took a value is still refused.
+    fn removed_words(removed: &Removed) -> Vec<String> {
+        let mut words: Vec<String> = removed.words.iter().map(|w| (*w).into()).collect();
+        if let Some(flag) = removed.flag {
+            words.push(format!("--{flag}"));
+            words.push("fix-login".into());
+        }
+        words
+    }
+
+    #[test]
+    fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
+        for removed in REMOVED {
+            let words = removed_words(removed);
+            let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
+            else {
+                panic!("{words:?} still parses");
             };
+            // Invalid input exits 2, and with no repair the error is one line.
+            assert!(matches!(error, CliError::Invalid { .. }), "{words:?}");
             let text = error.to_string();
-            assert!(
-                text.contains("retired verb"),
-                "{verb:?}: expected retired verb message, got: {text}"
-            );
-            assert!(
-                text.contains(replacement),
-                "{verb:?}: expected replacement '{replacement}', got: {text}"
-            );
-            let repair = error
-                .repair()
-                .unwrap_or_else(|| panic!("{verb:?}: missing repair"));
-            assert!(
-                repair.starts_with(expected_repair),
-                "{verb:?}: expected repair starting with '{expected_repair}', got '{repair}'"
-            );
+            assert_eq!(text.lines().count(), 1, "{words:?}: {text}");
+            assert!(text.contains(removed.replacement), "{words:?}: {text}");
+            assert_eq!(error.repair(), None, "{words:?}");
+        }
+    }
+
+    /// Every public command, from the model the help catalogue renders, with
+    /// the option that takes a TARGET (empty for a positional).
+    fn target_commands() -> Vec<(Vec<String>, String)> {
+        fn walk(command: &clap::Command, words: &[String], found: &mut Vec<(Vec<String>, String)>) {
+            for argument in command.get_arguments() {
+                // `edit` takes a graph NAME; every other verb a TARGET.
+                let target = if words == ["edit"] { "NAME" } else { "TARGET" };
+                if argument.is_hide_set()
+                    || !argument
+                        .get_value_names()
+                        .is_some_and(|names| names.iter().any(|name| name == target))
+                {
+                    continue;
+                }
+                let flag = argument
+                    .get_long()
+                    .map(|long| format!("--{long}"))
+                    .unwrap_or_default();
+                found.push((words.to_vec(), flag));
+            }
+            for child in command
+                .get_subcommands()
+                .filter(|child| !child.is_hide_set())
+            {
+                let mut path = words.to_vec();
+                path.push(child.get_name().into());
+                walk(child, &path, found);
+            }
+        }
+        let mut found = Vec::new();
+        walk(&expanded_model(), &[], &mut found);
+        found
+    }
+
+    /// Argument words that satisfy a command's other required arguments.
+    fn required_extras(words: &[String], flag: &str) -> Vec<&'static str> {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        match (words.as_slice(), flag) {
+            (["steer"], _) => vec!["--text-stdin"],
+            (["pr", "open"], "--review") => {
+                vec!["--from-attempt", "fix-login", "--summary-file", "s.md"]
+            }
+            (["pr", "open"], _) => vec!["--summary-file", "s.md"],
+            (["reconcile"], "--abandon") => vec!["--reason", "superseded"],
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_target_verb_parses_the_generated_target_table_alike() {
+        let names = ["a", "fix-login", "g-0123abcd", &"n".repeat(48)];
+        let nodes = ["review", "build.v2", "x_y-z", &"N".repeat(200)];
+        let mut table = Vec::new();
+        for name in names {
+            table.push(name.to_string());
+            for node in nodes {
+                table.push(format!("{name}/{node}"));
+                for number in [1, 2, 10, u32::MAX] {
+                    table.push(format!("{name}/{node}#{number}"));
+                }
+            }
+        }
+        let refused = [
+            "",
+            "Fix",
+            "1fix",
+            "fix-",
+            "fix--login",
+            "lane:fix",
+            "graph:fix",
+            "operation:op",
+            "land:12",
+            "fix/",
+            "fix/node#0",
+            "fix/node#01",
+            "fix/node#",
+            "fix#1",
+            "fix/a/b",
+        ];
+        for text in &table {
+            let target: Target = text.parse().unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(target.to_string(), *text);
+            assert_eq!(target.to_string().parse::<Target>().ok(), Some(target));
+        }
+        for text in refused {
+            assert!(text.parse::<Target>().is_err(), "{text}");
+        }
+        let commands = target_commands();
+        assert!(commands.len() >= 12, "{commands:?}");
+        for (words, flag) in &commands {
+            let extras = required_extras(words, flag);
+            let mut accepted = Vec::new();
+            for text in table.iter().map(String::as_str).chain(refused) {
+                let mut argv: Vec<&str> = words.iter().map(String::as_str).collect();
+                if !flag.is_empty() {
+                    argv.push(flag);
+                }
+                argv.push(text);
+                argv.extend(&extras);
+                accepted.push(matches!(parsed(&argv), ParseOutcome::Invocation(_)));
+            }
+            let reference = table
+                .iter()
+                .map(|text| {
+                    // `edit` takes a graph name only.
+                    words.first().map(String::as_str) != Some("edit") || !text.contains('/')
+                })
+                .chain(refused.iter().map(|_| false))
+                .collect::<Vec<_>>();
+            assert_eq!(accepted, reference, "{words:?} {flag}");
         }
     }
 
@@ -2173,54 +2229,33 @@ mod tests {
         invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
     }
     #[test]
-    fn bounded_waits_counts_and_byte_windows() {
-        let Command::Status(default_wait) =
-            valid(&["status", "--wait", "--target", "pr:2721"]).command
-        else {
-            panic!("expected status")
-        };
-        assert!(matches!(default_wait.until, Condition::All));
+    fn wait_and_output_bounds() {
+        valid(&["wait"]);
         valid(&[
-            "status", "--wait", "--target", "pr:2721", "--until", "all", "--follow",
+            "wait",
+            "fix-login",
+            "fix-login/review#2",
+            "--pr",
+            "2721",
+            "--any",
         ]);
-        valid(&[
-            "status",
-            "--wait=2m",
-            "--target",
-            "graph:build",
-            "--target",
-            "pr:2721",
-        ]);
-        invalid(&["status", "--wait=0"]);
-        invalid(&["status", "--wait=5h"]);
-        invalid(&["status", "--follow"]);
-        valid(&["status", "--target", "pr:2721"]);
-        for wait in ["1", "14400"] {
-            valid(&["status", &format!("--wait={wait}")]);
+        valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        for timeout in ["1", "4h", "14400"] {
+            valid(&["wait", "fix-login", "--timeout", timeout]);
         }
-        for wait in ["0", "14401", "-1", "1.5", "18446744073709551616"] {
-            invalid(&["status", &format!("--wait={wait}")]);
+        for timeout in ["0", "14401", "5h", "-1", "1.5"] {
+            invalid(&["wait", "fix-login", "--timeout", timeout]);
         }
-        valid(&["status", "--limit", "100"]);
-        invalid(&["status", "--limit", "101"]);
-        let attempt = "11".repeat(16) + &format!("/{}/{}", "22".repeat(16), "33".repeat(16));
-        valid(&["output", &attempt, "--tail", "500", "--max-bytes", "65536"]);
-        valid(&["output", &attempt, "--tail", "501"]);
-        invalid(&["output", &attempt, "--tail", "0"]);
-        invalid(&["output", &attempt, "--max-bytes", "65537"]);
-        invalid(&["output", &attempt, "--offset", "0", "--tail", "1"]);
-        valid(&["output", &attempt, "--trace"]);
-        valid(&["telemetry", "trace", "--peers", "--run", &"11".repeat(16)]);
-        invalid(&["output", &attempt, "--trace", "--part", "prompt"]);
-        invalid(&["output", &attempt, "--trace", "--part", "receipt"]);
-        invalid(&["output", &attempt, "--trace", "--tail", "1"]);
-        valid(&["output", &"11".repeat(16)]);
-        valid(&["output", &"11".repeat(16), "--host", "workshop"]);
-        valid(&[
-            "output",
-            &format!("{}/{}", "11".repeat(16), "33".repeat(16)),
-        ]);
-        invalid(&["output", &format!("{}/", "11".repeat(16))]);
+        invalid(&["wait", "--pr", "0"]);
+        valid(&["status", "--limit", "100000"]);
+        invalid(&["status", "--limit", "0"]);
+        let attempt = "fix-login/review#2";
+        valid(&["output", attempt, "--tail", "500", "--max-bytes", "65536"]);
+        valid(&["output", attempt, "--tail", "501"]);
+        invalid(&["output", attempt, "--tail", "0"]);
+        invalid(&["output", attempt, "--max-bytes", "65537"]);
+        invalid(&["output", attempt, "--offset", "0", "--tail", "1"]);
+        valid(&["telemetry", "trace", "--peers", "fix-login"]);
     }
     #[test]
     fn session_handoff_names_a_peer_and_an_account() {
@@ -2346,18 +2381,6 @@ mod tests {
         );
     }
     #[test]
-    fn telemetry_stats_parses_every_grouping_dimension() {
-        for dimension in [
-            "route", "pr", "issue", "graph", "node", "pattern", "preset", "role",
-        ] {
-            let invocation = valid(&["telemetry", "stats", "--by", dimension]);
-            let Command::Telemetry(Telemetry::Stats(stats)) = invocation.command else {
-                panic!("telemetry stats");
-            };
-            assert!(stats.by.is_some(), "{dimension}");
-        }
-    }
-    #[test]
     fn experiment_show_parses_the_experiment_id_and_comparison_options() {
         let invocation = valid(&[
             "telemetry",
@@ -2378,7 +2401,6 @@ mod tests {
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
         invalid(&["status", "--until", "all"]);
-        invalid(&["status", "--wait=1", "--cursor", "1"]);
         invalid(&["worktree", "remove", "--merged", "--integration", "main"]);
         valid(&[
             "worktree",
@@ -2414,14 +2436,18 @@ mod tests {
     }
     #[test]
     fn collection_caps_are_not_per_occurrence_caps() {
-        for (prefix, flag, max) in [
-            (vec!["reconcile"], "--id", 100),
-            (
-                vec!["worktree", "remove", "--merged", "--integration", "main"],
-                "--branch",
-                100,
-            ),
-        ] {
+        let mut words = vec!["reconcile".to_string()];
+        words.extend((0..100).map(|i| format!("graph-{i}")));
+        let argv: Vec<&str> = words.iter().map(String::as_str).collect();
+        valid(&argv);
+        let mut over = argv.clone();
+        over.push("graph-100");
+        invalid(&over);
+        for (prefix, flag, max) in [(
+            vec!["worktree", "remove", "--merged", "--integration", "main"],
+            "--branch",
+            100,
+        )] {
             let id = "a".repeat(32);
             let mut words = prefix;
             for _ in 0..max {
@@ -2431,9 +2457,8 @@ mod tests {
             words.extend([flag, &id]);
             invalid(&words);
         }
-        let target = "a".repeat(32);
         let reason = "é".repeat(129);
-        invalid(&["stop", &target, "--operation-id", "op", "--reason", &reason]);
+        invalid(&["stop", "fix-login", "--reason", &reason]);
     }
     #[test]
     fn parsed_globals_survive_help_version_and_failures() {

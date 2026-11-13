@@ -1,27 +1,11 @@
 use super::*;
 
-pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
-    output_with(command, edge, None)
-}
-
-/// `output` for a local attempt whose store the caller already opened, so a
-/// run that tails many lanes resolves the project and opens the store once
-/// instead of once per lane.
-pub(super) fn output_with(
-    command: Output,
-    edge: &Edge<'_>,
-    local: Option<(&Session, &Target)>,
-) -> Reply {
-    let read = output_inner(command.clone(), edge, local);
-    render_output(command, read)
-}
-
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
         .then_some(command.tail)
         .flatten();
-    let headed = matches!(command.part, Part::Result) && !command.trace;
+    let headed = matches!(command.part, Part::Result);
     let warn_human = headed && !command.path && command.to.is_none();
     let to = command.to.clone();
     let mut out = reply(
@@ -75,10 +59,10 @@ pub fn output_from_session(
     command: Output,
     edge: &Edge<'_>,
     session: &Session,
-    target: Target,
+    attempt: AttemptId,
     call: &run::Request<'_>,
 ) -> Reply {
-    let read = output_read(command.clone(), edge, session, target, call);
+    let read = output_read(command.clone(), edge, session, attempt, call);
     render_output(command, read)
 }
 
@@ -100,14 +84,6 @@ pub fn output_from_host(
 /// Missing changed-file evidence stays null; it must never read as an empty diff.
 pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
     let mut lines = Vec::new();
-    if let Some(selected) = data.get("selected") {
-        lines.push(format!(
-            "attempt {} chosen: {} of {} attempts",
-            data["attempt_id"].as_str().unwrap_or_default(),
-            selected["rule"].as_str().unwrap_or("newest"),
-            selected["attempts"]
-        ));
-    }
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
         lines.push(match reason {
@@ -331,79 +307,15 @@ pub(super) fn reviewer_receipt(
 /// The most lines `output --tail` returns; a larger request is clamped.
 pub(super) const TAIL_MAX: u64 = limits::TAIL_LINES;
 
-pub(super) fn output_inner(
-    mut command: Output,
-    edge: &Edge<'_>,
-    local: Option<(&Session, &Target)>,
-) -> Result<(Value, String), Fail> {
-    if let Some((session, target)) = local {
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let call = request(&clock, &cancel)?;
-        return output_read(command, edge, session, target.clone(), &call);
-    }
-    let site = match command.host.as_deref() {
-        Some(host) => Some(remote::site(edge, host)?),
-        None => command
-            .attempt
-            .0
-            .run
-            .or_else(|| {
-                command
-                    .attempt
-                    .0
-                    .selection
-                    .as_deref()?
-                    .split_once('/')?
-                    .0
-                    .parse()
-                    .ok()
-            })
-            .and_then(|host| remote::qualifier_site(edge, host)),
-    };
-    if let Some(remote::Site::Peer(host)) = site {
-        if command.attempt.0.selection.is_some() {
-            command.attempt.0 = remote::resolve_prefix(edge, host, &command.attempt.0)?;
-        }
-        return remote::output_on_peer(&command, host, edge);
-    }
-    // `HOST/ATTEMPT` is the form a graph `attempt_ref` has; a host qualifier
-    // is not a run, so it never has to match the record.
-    if command.attempt.is_qualified_pair()
-        && let Some(qualifier) = command.attempt.0.run
-    {
-        match remote::qualifier_site(edge, qualifier) {
-            Some(remote::Site::Peer(host)) if site.is_none() => {
-                return remote::output_on_peer(&command, host, edge);
-            }
-            Some(remote::Site::Local) => command.attempt.0.run = None,
-            _ => {}
-        }
-    }
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel)?;
-    // A RUN or RUN/TASK names attempts, so every part resolves runs as receipts do.
-    let candidate = targets::resolve(edge, &command.attempt.0, true)?;
-    command.attempt.0 = candidate.target.clone();
-    if site.is_none()
-        && let Some(placement) = targets::placement(edge, &candidate.target, false)?
-    {
-        return remote::output(&command, &placement, edge);
-    }
-    let (session, target) = targets::read_resolved(edge, candidate, &call)?;
-    output_read(command, edge, &session, target, &call)
-}
-
 /// Read the selected part and attach the shared lane projection.
 fn output_read(
     command: Output,
     edge: &Edge<'_>,
     session: &Session,
-    target: Target,
+    attempt: AttemptId,
     call: &run::Request<'_>,
 ) -> Result<(Value, String), Fail> {
-    let (mut data, human) = output_read_part(command, edge, session, target, call)?;
+    let (mut data, human) = output_read_part(command, edge, session, attempt, call)?;
     let id = data["attempt_id"]
         .as_str()
         .and_then(|id| id.parse().ok())
@@ -451,62 +363,10 @@ fn output_read_part(
     command: Output,
     edge: &Edge<'_>,
     session: &Session,
-    target: Target,
+    id: AttemptId,
     call: &run::Request<'_>,
 ) -> Result<(Value, String), Fail> {
-    let receipt = matches!(command.part, Part::Receipt);
-    let mut selected = None;
-    let id = match target.attempt {
-        Some(id) => id,
-        None if receipt => {
-            let page = session.service().lanes(
-                &lane_query(session, std::slice::from_ref(&target), true, 2, 0, call)?,
-                call,
-            )?;
-            if page.lanes.len() != 1 || page.next.is_some() {
-                return Err(Fail::new(
-                    Status::Invalid,
-                    ErrorKind::Conflict,
-                    "receipt target must identify exactly one attempt; specify RUN/TASK/ATTEMPT",
-                ));
-            }
-            page.lanes[0].attempt_id
-        }
-        None => {
-            let (id, attempts, rule) = newest_attempt(session, &target, call)?;
-            selected = Some(json!({ "attempts": attempts, "rule": rule }));
-            id
-        }
-    };
     let record = session.service().status(id, call)?;
-    if target.run.is_some_and(|run| record.run_id != run)
-        || target.task.is_some_and(|task| task != record.task_id)
-    {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::NotFound,
-            "attempt is not in that run/task",
-        ));
-    }
-    if command.trace {
-        let grants = json!({
-            "read_only_writable": record.read_only_writable,
-            "write_grants": record.write_grants,
-            "git_grants_digest": record.git_grants_digest,
-            "user_skills": record.user_skills(),
-        });
-        let grant_lines = grants_lines(&record);
-        let trace = trace_chain(&session.store, record, call)?;
-        let human = trace
-            .iter()
-            .map(trace_line)
-            .chain([grant_lines])
-            .collect::<String>();
-        return Ok((
-            json!({ "attempt_id": id, "trace": trace, "grants": grants }),
-            human,
-        ));
-    }
     if command.path {
         let file = match command.part {
             Part::Result if record.result.is_none() => {
@@ -615,7 +475,6 @@ fn output_read_part(
                 "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
                 "length": null, "eof": true, "clipped": null, "complete": null,
                 "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-                "selected": selected,
             }),
             format!("{reason}\n"),
         ));
@@ -633,7 +492,6 @@ fn output_read_part(
                 "payload": "evicted", "part": "transcript", "offset": 0, "next_offset": 0,
                 "length": null, "eof": true, "clipped": null, "complete": null,
                 "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-                "selected": selected,
             }),
             "payload evicted by retention; the transcript is no longer retained\n".into(),
         ));
@@ -736,9 +594,6 @@ fn output_read_part(
     {
         data["provider_error"] = json!(provider_error_line(session, id, call));
     }
-    if let Some(selected) = selected {
-        data["selected"] = selected;
-    }
     Ok((data, text))
 }
 
@@ -783,52 +638,6 @@ fn fallback_reason_for_graph(
             .as_ref()
             .and_then(|outputs| outputs.plan.as_ref())
             .map(|plan| plan.fallback_reason.clone())
-    })
-}
-
-/// The attempt `output` reads for a RUN or RUN/TASK: the newest settled one,
-/// else the newest. Several tasks in one run are ambiguous, so they are refused.
-pub(super) fn newest_attempt(
-    session: &Session,
-    target: &Target,
-    call: &run::Request<'_>,
-) -> Result<(AttemptId, usize, &'static str), Fail> {
-    let mut query = lane_query(session, std::slice::from_ref(target), true, 100, 0, call)?;
-    query.newest_first = true;
-    let page = session.service().lanes(&query, call)?;
-    newest_settled_of(&page.lanes)
-}
-
-/// Choose from a page of attempts, newest first. Several tasks are ambiguous.
-pub(super) fn newest_settled_of(
-    lanes: &[run::AttemptRecord],
-) -> Result<(AttemptId, usize, &'static str), Fail> {
-    let mut tasks: Vec<_> = lanes.iter().map(|lane| lane.task_id).collect();
-    tasks.sort();
-    tasks.dedup();
-    match tasks.len() {
-        0 => {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::NotFound,
-                "no attempt in that run",
-            ));
-        }
-        1 => {}
-        count => {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Conflict,
-                format!("run has {count} tasks; name one as RUN/TASK"),
-            ));
-        }
-    }
-    let settled = lanes
-        .iter()
-        .find(|lane| matches!(lane.state, run::AttemptState::Terminal { .. }));
-    Ok(match settled {
-        Some(lane) => (lane.attempt_id, lanes.len(), "newest settled"),
-        None => (lanes[0].attempt_id, lanes.len(), "newest"),
     })
 }
 
@@ -1088,142 +897,6 @@ pub(super) fn tail_start(bytes: &[u8], lines: u64) -> usize {
         .map_or(0, |(i, _)| i + 1)
 }
 
-/// The attempt's trace, then each parent's, nearest first. The chain ends at an
-/// attempt with no parent, or at a parent this store does not hold (a nested
-/// run's submitter lives in its parent's store), which appears as a hop that
-/// knows only its attempt ID. A parent that repeats is a corrupt store and
-/// fails.
-#[derive(Debug, thiserror::Error)]
-pub(super) enum TraceError {
-    #[error("trace parents loop back to attempt {0}")]
-    Loop(AttemptId),
-    #[error(transparent)]
-    Run(#[from] run::RunError),
-}
-
-impl From<TraceError> for Fail {
-    fn from(error: TraceError) -> Self {
-        match error {
-            TraceError::Loop(_) => Fail::new(Status::Error, ErrorKind::Io, error.to_string()),
-            TraceError::Run(error) => error.into(),
-        }
-    }
-}
-
-pub(super) fn trace_chain(
-    store: &run::RunStore,
-    record: run::AttemptRecord,
-    call: &run::Request<'_>,
-) -> Result<Vec<provenant_records::Trace>, TraceError> {
-    let mut seen = std::collections::HashSet::from([record.attempt_id]);
-    let mut chain = vec![record.trace];
-    while let Some(parent) = chain.last().and_then(|t| t.parent) {
-        if !seen.insert(parent) {
-            return Err(TraceError::Loop(parent));
-        }
-        match run::Service::new(store).status(parent, call) {
-            Ok(record) => chain.push(record.trace),
-            Err(run::RunError::NotFound) => {
-                chain.push(provenant_records::Trace {
-                    attempt: Some(parent),
-                    ..Default::default()
-                });
-                break;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(chain)
-}
-
-/// The grants the launch applied, one line each. Older attempts show none.
-pub(super) fn grants_lines(record: &run::AttemptRecord) -> String {
-    let mut text = String::new();
-    for grant in &record.write_grants {
-        let path = grant
-            .path
-            .to_path_buf()
-            .map_or_else(|_| "-".to_owned(), |p| p.display().to_string());
-        let [source, scope] = [
-            serde_json::to_value(grant.source),
-            serde_json::to_value(grant.scope),
-        ]
-        .map(|v| {
-            v.ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_default()
-        });
-        text.push_str(&format!(
-            "grant write source={source} scope={scope} path={}\n",
-            plain_text(&path, usize::MAX)
-        ));
-    }
-    for path in &record.read_only_writable {
-        text.push_str(&format!(
-            "grant read_only_writable path={}\n",
-            plain_text(path, usize::MAX)
-        ));
-    }
-    if let Some(digest) = record.git_grants_digest {
-        text.push_str(&format!("grant git digest={digest}\n"));
-    }
-    if let Some(warnings) = record
-        .applied_route
-        .as_ref()
-        .and_then(|route| route.extra.get("discovery_warnings"))
-        .and_then(serde_json::Value::as_array)
-    {
-        for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
-            text.push_str(&format!("warning: {}\n", plain_text(warning, usize::MAX)));
-        }
-    }
-    if let Some(tools) = record
-        .applied_route
-        .as_ref()
-        .and_then(|route| route.extra.get("tool_closure"))
-        .and_then(serde_json::Value::as_array)
-    {
-        for tool in tools.iter().filter(|tool| tool["outcome"] == "incomplete") {
-            let name = tool["tool"].as_str().unwrap_or("unknown");
-            if let Some(reasons) = tool["reasons"].as_array() {
-                for reason in reasons.iter().filter_map(serde_json::Value::as_str) {
-                    text.push_str(&format!(
-                        "warning tool_closure_incomplete tool={} reason={}\n",
-                        plain_text(name, 128),
-                        plain_text(reason, 64)
-                    ));
-                }
-            }
-        }
-    }
-    if let Some(skills) = record.user_skills() {
-        text.push_str(&format!(
-            "grant user_skills {}\n",
-            plain_text(&skills.to_string(), usize::MAX)
-        ));
-    }
-    text
-}
-
-pub(super) fn trace_line(trace: &provenant_records::Trace) -> String {
-    fn field(name: &str, value: Option<impl std::fmt::Display>) -> String {
-        format!(
-            "{name}={}",
-            value.map_or_else(|| "-".to_owned(), |v| v.to_string())
-        )
-    }
-    format!(
-        "{} {} {} {} {} {} {}\n",
-        field("host", trace.host),
-        field("project", trace.project),
-        field("run", trace.run),
-        field("attempt", trace.attempt),
-        field("operation", trace.operation.as_ref().map(|o| o.as_str())),
-        field("actor", trace.actor),
-        field("parent", trace.parent),
-    )
-}
-
 /// A clipped page that ends inside a UTF-8 character stops before it, so the
 /// next offset starts the character whole and paged text concatenates exactly.
 pub fn align_utf8_tail(chunk: &mut run::OutputChunk) {
@@ -1250,16 +923,10 @@ pub fn attempt_provider(
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let target = Target {
-        selection: None,
-        run: None,
-        task: None,
-        attempt: Some(attempt),
-    };
-    let (session, selected) = targets::open(edge, &target, false, &call)?;
-    let record = session
-        .store
-        .record(selected.attempt.unwrap_or(attempt), &call)?;
+    let (_, store) = open_read_only(edge, &call)?;
+    let record = store
+        .ok_or(run::RunError::NotFound)?
+        .record(attempt, &call)?;
     Ok([&record.applied_route, &record.resolved_route]
         .into_iter()
         .flatten()
