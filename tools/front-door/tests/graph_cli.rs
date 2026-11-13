@@ -1012,7 +1012,7 @@ fn deterministic_graph_wait_status_trace_and_replay_share_one_journal() -> Resul
     assert_eq!(node["state"], first["checkpoint"]["nodes"][0]["state"]);
     let second = run()?;
     assert_eq!(second["checkpoint"]["nodes"], first["checkpoint"]["nodes"]);
-    let (output, trace) = rig.run(&["output", "gate-replay", "--trace"])?;
+    let (output, trace) = rig.run(&["trace", "gate-replay"])?;
     assert!(output.status.success(), "{trace}");
     assert!(
         !trace["data"]["events"]
@@ -1692,15 +1692,17 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         let text = String::from_utf8(human.stdout)?;
         assert!(text.contains(expected) && text.contains("check"), "{text}");
         if id == "schema-refusal" {
-            let (_, invalid) = rig.run(&["retry", id, "--node", "missing"])?;
+            let (refused, invalid) = rig.run(&["retry", &format!("{id}/missing")])?;
+            assert_eq!(refused.status.code(), Some(2), "{invalid}");
+            assert_eq!(invalid["error"]["code"], "NOT_FOUND", "{invalid}");
             assert!(
                 invalid["error"]["message"]
                     .as_str()
                     .unwrap()
-                    .contains("node does not exist"),
+                    .contains(&format!("{id}/missing")),
                 "{invalid}"
             );
-            let (output, retried) = rig.run(&["retry", id, "--node", "one"])?;
+            let (output, retried) = rig.run(&["retry", &format!("{id}/one")])?;
             assert!(
                 output.status.success(),
                 "retry: {retried}, stderr: {}",
@@ -1761,7 +1763,10 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
     let id = started["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or_else(|| format!("graph id: {started}"))?;
-    let (_, settled) = rig.run(&["status", id, "--wait=10s"])?;
+    // The fixture provider cannot run, so the graph settles unsuccessfully
+    // (or asks for input); either ends the wait.
+    rig.run(&["wait", id, "--timeout", "10s"])?;
+    let (_, settled) = rig.run(&["status", id])?;
     assert!(
         settled["data"]["rows"].as_array().is_some_and(|rows| rows
             .iter()
@@ -1806,7 +1811,7 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
     assert!(
         refusal["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("--node")),
+            .is_some_and(|message| message.contains("several nodes")),
         "{refusal}"
     );
     Ok(())

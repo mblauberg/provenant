@@ -564,7 +564,11 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             caller.to_string().into(),
         ),
     ]);
-    let result = lane_command(&rig, &["output", "parent--success", "--json"], 0)?;
+    let result = lane_command(
+        &rig,
+        &["output", "lane-read-children/parent--success", "--json"],
+        0,
+    )?;
     assert_eq!(
         result["data"]["bytes"]["data"],
         "child result reached parent"
@@ -574,7 +578,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         &rig,
         &[
             "output",
-            "parent--success",
+            "lane-read-children/parent--success",
             "--to",
             destination.to_str().ok_or("output destination")?,
             "--json",
@@ -589,7 +593,11 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     let path: provenant_records::StructuredPathWire =
         serde_json::from_value(written["data"]["to"].clone())?;
     assert_eq!(path.to_path_buf()?, std::fs::canonicalize(&destination)?);
-    let failure = lane_command(&rig, &["output", "parent--failure", "--json"], 0)?;
+    let failure = lane_command(
+        &rig,
+        &["output", "lane-read-children/parent--failure", "--json"],
+        0,
+    )?;
     assert_eq!(
         failure["data"]["bytes"]["data"],
         "child provider failure details"
@@ -611,27 +619,18 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     );
     let waited = lane_command(
         &rig,
-        &[
-            "status",
-            "--target",
-            "graph:lane-read-children",
-            "--wait=1s",
-            "--follow",
-            "--json",
-        ],
+        &["wait", "lane-read-children", "--timeout", "1s", "--json"],
         124,
     )?;
-    assert_eq!(waited["event"], "snapshot");
-    assert_eq!(waited["target"], "graph:lane-read-children");
-    assert_eq!(waited["terminal"], false);
+    assert_eq!(waited["data"]["timed_out"], true);
     assert!(
-        waited["data"]["rows"]
+        waited["data"]["targets"][0]["data"]["rows"]
             .as_array()
             .ok_or("wait status rows")?
             .iter()
             .any(|row| row["node_id"] == "parent--failure" && row["state"] == "failed")
     );
-    let trace = lane_command(&rig, &["output", graph, "--trace", "--json"], 0)?;
+    let trace = lane_command(&rig, &["trace", graph, "--json"], 0)?;
     assert!(
         !trace["data"]["events"]
             .as_array()
@@ -648,7 +647,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     if let Some(launch) = native_lane(&rig, caller)? {
         let result = lane_command_with_launch(
             &rig,
-            &["output", "parent--success", "--json"],
+            &["output", "lane-read-children/parent--success", "--json"],
             0,
             Some(&launch),
         )?;
@@ -658,7 +657,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         );
         let failure = lane_command_with_launch(
             &rig,
-            &["output", "parent--failure", "--json"],
+            &["output", "lane-read-children/parent--failure", "--json"],
             0,
             Some(&launch),
         )?;
@@ -667,12 +666,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             "command_unavailable"
         );
         lane_command_with_launch(&rig, &["status", graph, "--json"], 0, Some(&launch))?;
-        lane_command_with_launch(
-            &rig,
-            &["output", graph, "--trace", "--json"],
-            0,
-            Some(&launch),
-        )?;
+        lane_command_with_launch(&rig, &["trace", graph, "--json"], 0, Some(&launch))?;
     }
     drop(relay);
     Ok(())

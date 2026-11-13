@@ -124,26 +124,21 @@ fn dispatch_with(
         graph["network"] = json!(network);
     }
     fs::write(&document, serde_json::to_vec(&graph)?)?;
-    let mut args = vec![
-        "run",
-        "--file",
-        document.to_str().ok_or("document")?,
-        "--operation-id",
-        name,
-        "--json",
-    ];
-    if wait {
-        args.push("--wait=30s");
+    let args = ["--file", document.to_str().ok_or("document")?];
+    if !wait {
+        let (out, value) = rig.launch(&args)?;
+        assert_eq!(code(&out), 0, "{value}");
+        return Ok(value);
     }
-    let out = rig.command(&args)?;
-    let value: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let expected = if wait && matches!(name, "fail" | "missing" | "m-off") {
+    let settled = rig.run_and_wait(&args, "30s")?;
+    let expected = if matches!(name, "fail" | "missing" | "m-off") {
         1
     } else {
         0
     };
-    assert_eq!(code(&out), expected, "{value}");
-    Ok(value)
+    assert_eq!(settled.exit(), expected, "{}", settled.checkpoint);
+    // The settled checkpoint, in the shape a launch reports it.
+    Ok(json!({"data":{"checkpoint":settled.checkpoint}}))
 }
 
 fn attempt_id(submitted: &Value) -> Result<&str> {
@@ -219,9 +214,9 @@ fn command_task_feeds_an_attemptless_verdict_gate() -> Result {
             ]
         }))?,
     )?;
-    let out = rig.command(&["run", "--file", "graph.json", "--wait=30s", "--json"])?;
-    let status: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(code(&out), 0, "{status}");
+    let settled = rig.run_and_wait(&["--file", "graph.json"], "30s")?;
+    let status = json!({"data":{"checkpoint":settled.checkpoint}});
+    assert_eq!(settled.exit(), 0, "{status}");
     let nodes = status["data"]["checkpoint"]["nodes"]
         .as_array()
         .ok_or("nodes")?;
@@ -699,8 +694,9 @@ fn explain_for_tier_previews_without_creating_attempts() -> Result {
         let rig = TestRig::new()?;
         let output = rig.command(&[
             "run",
+            "task",
             "Preview this task",
-            "--tier",
+            "--route",
             tier,
             "--explain",
             "--json",

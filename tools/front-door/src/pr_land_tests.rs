@@ -348,57 +348,8 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         assert_eq!(lane["state"], state);
         assert_eq!(lane["retry_of"], serde_json::json!(record.retry_of));
     }
-    let fixture_id = &ids[0];
-    let land_lane = projected
-        .iter()
-        .find(|lane| lane["attempt_id"] == fixture_id.as_str())
-        .ok_or("land fixture lane")?;
-    let status_view = json(&command(&landing.rig, &["status", fixture_id, "--json"])?)?;
-    let output_view = json(&command(
-        &landing.rig,
-        &["output", fixture_id, "--part", "prompt", "--json"],
-    )?)?;
-    // This fixture imports retained non-graph attempts directly. They remain
-    // readable after the one-engine cutover, but cannot launch or mutate work.
-    let stop_output = command(
-        &landing.rig,
-        &[
-            "stop",
-            fixture_id,
-            "--operation-id",
-            "land-fixture-cancel",
-            "--json",
-        ],
-    )?;
-    assert_eq!(code(&stop_output), 1);
-    let stop_view = json(&stop_output)?;
-    assert_eq!(stop_view["status"], "refused");
-    assert_eq!(stop_view["error"]["code"], "GRAPH_REQUIRED");
-    assert!(
-        stop_view["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("reconcile --id"))
-    );
-    for field in [
-        "run_id",
-        "task_id",
-        "attempt_id",
-        "state",
-        "cause",
-        "retry_of",
-        "superseded_by",
-    ] {
-        assert_eq!(
-            output_view["data"][field], land_lane[field],
-            "output {field}"
-        );
-    }
-    let row = &status_view["data"]["rows"][0];
-    assert_eq!(row["kind"], "attempt");
-    assert_eq!(row["id"], land_lane["attempt_id"]);
-    assert_eq!(row["attempt_id"], land_lane["attempt_id"]);
-    assert_eq!(row["node_id"], land_lane["task_id"]);
-    assert_eq!(row["state"], land_lane["state"]);
+    // The retained non-graph attempts have no graph name, so no target names
+    // them; the land report is their only projection.
     db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());

@@ -289,7 +289,7 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     )?
     .ok_or("checkpoint")?;
     if checkpoint.nodes[0].state == graph::NodeState::Failed {
-        let lanes = rig.command(&["status", "--all", "--json"])?;
+        let lanes = rig.command(&["status", "waiter", "--json"])?;
         panic!(
             "fake provider failed: {}",
             String::from_utf8_lossy(&lanes.stdout.bytes)
@@ -311,7 +311,7 @@ fn steward_is_listed_compiles_and_stays_idle_without_config() -> Result {
             .iter()
             .any(|template| template["name"] == "steward")
     );
-    let compiled = rig.command(&["run", "--use", "steward", "--explain", "--json"])?;
+    let compiled = rig.command(&["run", "steward", "--explain", "--json"])?;
     assert_eq!(code(&compiled), 0, "{compiled:?}");
     let compiled: Value = serde_json::from_slice(&compiled.stdout.bytes)?;
     let brief = compiled["data"]["document"]["nodes"][0]["prompt"]

@@ -188,11 +188,10 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
                     "run",
                     "--file",
                     file.to_str().ok_or("graph file")?,
-                    "--wait=1s",
                     "--json",
                 ],
             )?;
-            assert!(matches!(code(&output), 0 | 124), "{phase}: {output:?}");
+            assert_eq!(code(&output), 0, "{phase}: {output:?}");
             json(&output)
         };
         let first = submit(
@@ -211,7 +210,12 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             "{phase}: {first}"
         );
         let before = std::time::Instant::now();
-        let stopped = ok(&rig, &["stop", "preparation-first", "--wait=3s", "--json"])?;
+        ok(&rig, &["stop", "preparation-first", "--json"])?;
+        ok(
+            &rig,
+            &["wait", "preparation-first", "--timeout", "3s", "--json"],
+        )?;
+        let stopped = ok(&rig, &["status", "preparation-first", "--json"])?;
         assert!(
             before.elapsed() < Duration::from_secs(4),
             "{phase}: {stopped}"
@@ -242,7 +246,12 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> R
             next["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
             "{phase}: {next}"
         );
-        let stopped = ok(&rig, &["stop", "preparation-next", "--wait=3s", "--json"])?;
+        ok(&rig, &["stop", "preparation-next", "--json"])?;
+        ok(
+            &rig,
+            &["wait", "preparation-next", "--timeout", "3s", "--json"],
+        )?;
+        let stopped = ok(&rig, &["status", "preparation-next", "--json"])?;
         assert_eq!(
             stopped["data"]["rows"][0]["state"], "cancelled",
             "{phase}: {stopped}"

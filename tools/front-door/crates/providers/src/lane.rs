@@ -2687,10 +2687,7 @@ mod tests {
                 .state_writes
                 .contains(&subtree(&host_state))
         );
-        for args in [
-            vec!["run", "--use", "task", "two words"],
-            vec!["output", "child-id"],
-        ] {
+        for args in [vec!["run", "task", "two words"], vec!["output", "child-id"]] {
             let output = std::process::Command::new("/bin/sh")
                 .args(["-c", "exec provenant \"$@\"", "lane"])
                 .args(&args)
