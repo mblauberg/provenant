@@ -300,6 +300,8 @@ impl GraphRelayCause {
 pub enum InvalidInputDetail {
     /// `attempt.cloud` or `attempt.placement`: cloud placement was removed.
     CloudPlacementRemoved,
+    /// `operation_id` on a graph operation: `run` replays by `name` instead.
+    OperationIdRetired,
     GraphReason(String),
     OperationFailed,
     GraphRelayCause(GraphRelayCause),
@@ -353,6 +355,9 @@ impl InvalidInputDetail {
     fn safe_text(&self) -> Option<String> {
         match self {
             Self::CloudPlacementRemoved => Some(crate::graph::CLOUD_PLACEMENT_REMOVED.into()),
+            Self::OperationIdRetired => Some(
+                "invalid input field `operation_id`: graph operations take no operation ID; use `name` to make a run replay-safe".into(),
+            ),
             // Parser and transport errors may contain input, prompts or source
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.

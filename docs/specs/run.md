@@ -114,7 +114,8 @@ controls. Reader waits are excluded from the digest. The same ID and digest
 return the recorded outcome without repeating effects. The same ID with a
 different digest fails with `operation_conflict` (exit 2). `--operation-id`
 exists on `retry`, `steer`, inbox, chair and Fabric writes; `run` and `stop`
-do not take it.
+do not take it, and a graph operation that carries `operation_id` is refused
+in one line naming `name`, never silently ignored.
 
 A graph launch replays by name and digest instead. `--name` is only a handle: a
 graph name is its graph id, a lowercase letter then lowercase letters, digits

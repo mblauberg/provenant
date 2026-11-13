@@ -978,6 +978,11 @@ impl Factory {
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
+        // MCP refuses the retired field at its schema; this shared path must
+        // not silently drop it either.
+        if input.get("operation_id").is_some() {
+            return Err(FacadeError::invalid(InvalidInputDetail::OperationIdRetired));
+        }
         if let Some(wait) = input.get("wait_seconds") {
             let seconds = wait.as_u64().ok_or_else(|| {
                 FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
@@ -3729,6 +3734,22 @@ mod tests {
         factory.context.in_lane = true;
         let preview = factory.graph_document(input, budget, &cancel)?;
         assert_eq!(preview["detached"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_operations_refuse_operation_ids_and_name_the_replacement() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input = json!({"op":"run","brief":"Inspect","explain":true,"operation_id":"retired"});
+        let error = factory.graph_document(input, budget, &cancel).unwrap_err();
+        assert_eq!(
+            error,
+            FacadeError::invalid(InvalidInputDetail::OperationIdRetired)
+        );
+        assert!(error.to_string().contains("use `name`"), "{error}");
         Ok(())
     }
 
