@@ -112,8 +112,8 @@ jobs:
           cat "$RUNNER_TEMP/doc-truth.txt"
           cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
-  # Lint and test run as separate jobs so they overlap; the tests are further
-  # split into three hash partitions. `ci-status` gates on both jobs, and a
+  # Lint and test builds overlap; tests are built once and split into three
+  # hash partitions. `ci-status` gates on all jobs, and a
   # matrix job reports success only when every partition succeeds.
   rust-lint:
     name: Rust lint
@@ -165,9 +165,66 @@ jobs:
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  rust-test-archive:
+    name: Build Linux test archive
+    needs: macos-scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      # Keep this job successful when Rust is unselected: ci-status requires it.
+      - name: Check out repository
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+      - name: Install nextest
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        uses: ./.github/actions/install-nextest
+        timeout-minutes: 10
+      - name: Check literal nextest test filters
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        working-directory: tools/front-door
+        run: python3 ../../scripts/check-nextest-filters
+      - name: Build Linux test archive
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        working-directory: tools/front-door
+        run: >-
+          cargo nextest archive --profile ci --workspace --locked --features provenant-providers/recording
+          --archive-file "$RUNNER_TEMP/linux-tests.tar.zst"
+      - name: Upload Linux test archive
+        if: needs.macos-scope.outputs.run_rust == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-tests
+          path: ${{ runner.temp }}/linux-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   rust:
     name: Rust front door (${{ matrix.partition }}/3)
-    needs: macos-scope
+    needs: [macos-scope, rust-test-archive]
     if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -206,13 +263,15 @@ jobs:
           workspaces: tools/front-door
           shared-key: ${{ inputs.cold_cache && format('front-door-ci-cold-{0}-{1}', github.run_id, github.run_attempt) || 'front-door-ci' }}
           add-job-id-key: false
-          save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
+          save-if: false
       - name: Install nextest
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
-      - name: Check literal nextest test filters
-        working-directory: tools/front-door
-        run: python3 ../../scripts/check-nextest-filters
+      - name: Download Linux test archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-tests
+          path: ${{ runner.temp }}
       - name: Validate flaky-test quarantine
         id: quarantine
         working-directory: tools/front-door
@@ -224,6 +283,7 @@ jobs:
           else
             echo 'No quarantined tests.' >> "$GITHUB_STEP_SUMMARY"
           fi
+      # Extract into the original target layout for tests with compiled-in binary paths.
       # Hash partitioning is stable per test, and each runner keeps its own
       # serial-process group, so the serial worktree suites split across both.
       - name: Run workspace tests
@@ -242,9 +302,9 @@ jobs:
             fi
           fi
           if [ -n "$filter" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/3 -E "$filter"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition hash:${{ matrix.partition }}/3 -E "$filter"
           else
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/3
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --partition hash:${{ matrix.partition }}/3
           fi
       - name: Report slowest tests
         if: always()
@@ -266,7 +326,7 @@ jobs:
         run: |
           QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
           if [ -n "$QUARANTINE_FILTER" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
           else
             echo 'No quarantined tests to run.'
           fi
@@ -631,6 +691,7 @@ jobs:
       - macos-scope
       - generated-reference
       - rust-lint
+      - rust-test-archive
       - rust
       - rust-macos-tests
       - rust-macos-release
