@@ -178,8 +178,22 @@ impl<D> crate::ResolvedConfig<D> {
             name: profile_name(self.profile).into(),
             knobs: knobs
                 .into_iter()
-                .map(|(name, knob)| (name, knob.value))
-                .collect(),
+                .map(|(name, knob)| {
+                    // Authored knobs use fractions; immutable launch snapshots
+                    // use their exact fixed-point form for canonical hashing.
+                    let value = if spec(registry, &name)?.kind == Kind::Fraction {
+                        let grace = knob
+                            .value
+                            .as_f64()
+                            .and_then(provenant_records::BudgetGrace::from_fraction)
+                            .ok_or_else(|| invalid(&name, "outside_allowed_range"))?;
+                        serde_json::to_value(grace).map_err(|_| invalid(&name, "type"))?
+                    } else {
+                        knob.value
+                    };
+                    Ok((name, value))
+                })
+                .collect::<Result<_, ConfigError>>()?,
             overrides: overrides.to_vec(),
             extra,
             ..Default::default()
