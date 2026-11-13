@@ -4288,8 +4288,16 @@ mod writer_recovery_tests {
                 )?,
                 RECORD_LIMIT,
             )?;
+            // Exercise the host's uncertain-cancellation transition: an
+            // unsolicited provider cancellation becomes Unsettled with its
+            // required custody diagnostic, rather than an invalid bare outcome.
+            let provider_outcome = if host_outcome == Outcome::Unsettled {
+                Outcome::Cancelled
+            } else {
+                host_outcome
+            };
             let mut fake =
-                crate::dispatch_tests::Fake::with_observed(Some(route()), Some(host_outcome));
+                crate::dispatch_tests::Fake::with_observed(Some(route()), Some(provider_outcome));
             fake.terminal_cause = Some(TerminalCause::LaneTokenLost);
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             let AttemptState::Terminal {
