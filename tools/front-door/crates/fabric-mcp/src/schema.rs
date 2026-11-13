@@ -1190,18 +1190,7 @@ mod wire_parity {
                 digest: Digest::from_bytes([0; 32]),
                 bytes,
             };
-            let mut value = serde_json::to_value(&chunk).unwrap();
-            let mut lane = serde_json::to_value(provenant_records::wire::LaneRow::project(
-                &attempt(None),
-                Default::default(),
-            ))
-            .unwrap();
-            lane["provider_seconds"] = Value::Null;
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(lane.as_object().unwrap().clone());
-            check("fabric_output", &value);
+            check("fabric_output", &chunk);
         }
     }
 

@@ -1073,17 +1073,15 @@ impl ToolCall {
             Self::Output(input) => {
                 let mut output =
                     serde_json::to_value(service.facade.output(input, budget, cancel)?)?;
-                if let Some(object) = output.as_object_mut() {
-                    if let Some(path) = object
-                        .get_mut("artifact")
-                        .and_then(|artifact| artifact.get_mut("path"))
-                    {
-                        let relative: provenant_records::PathWire =
-                            serde_json::from_value(path.clone())?;
-                        *path = serde_json::json!(
-                            provenant_records::StructuredPathWire::from_wire(&relative)
-                        );
-                    }
+                if let Some(path) = output
+                    .get_mut("artifact")
+                    .and_then(|artifact| artifact.get_mut("path"))
+                {
+                    let relative: provenant_records::PathWire =
+                        serde_json::from_value(path.clone())?;
+                    *path = serde_json::json!(provenant_records::StructuredPathWire::from_wire(
+                        &relative
+                    ));
                 }
                 response(tool_name, output)
             }
