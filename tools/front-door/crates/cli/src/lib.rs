@@ -1188,8 +1188,8 @@ fn constraints(path: &str) -> Vec<String> {
     let values: &[&str] = match path {
         "provenant run" => &[
             "run needs a template; `provenant templates` lists them",
-            "--set binds template parameters using TOML values",
-            "--file accepts a graph document or a plain text brief",
+            "--set binds a string parameter as written and any other type as TOML; quote nothing for a string",
+            "--file reads a graph document; a plain text brief goes in --brief-file",
             "inside a lane, work joins the calling node's graph as a child",
         ],
         "provenant route resolve" => &[
@@ -1202,8 +1202,6 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant retry" => &[
             "target is NAME[/NODE[#N]]: a graph recovers, a node starts its next attempt, an attempt continues",
-            "prompt is at most 1 MiB; expected generation is 0",
-            "operation-id is generated when omitted; supply it for planned retries",
         ],
         "provenant chair log append" => &[
             "operation-id and issued-at are generated when omitted; supply both for planned retries",
@@ -1218,9 +1216,9 @@ fn constraints(path: &str) -> Vec<String> {
             "--all pages every graph with --limit and --cursor",
         ],
         "provenant wait" => &[
-            "every target resolves before the wait starts; no target waits for this session's unsettled graphs",
+            "every target resolves before the wait starts; no target waits for this project's running graphs",
             "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
-            "with --json, --follow emits newline-delimited snapshot and transition events and a final end event",
+            "with --json, --follow emits one newline-delimited transition event per change",
         ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],

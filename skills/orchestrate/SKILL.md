@@ -24,7 +24,7 @@ first, check authority, write scope and gates, then submit without it.
 provenant run plan --brief-file brief.md --explain
 provenant run implement --brief-file brief.md --branch NAME --base REF --route junior
 provenant run explore --over a,b --brief-file questions.md --route junior
-provenant run review --set subject='"origin/BRANCH"' --set review_base='"origin/main"'
+provenant run review --set subject=origin/BRANCH --set review_base=origin/main
 provenant run --file GRAPH --name NAME
 provenant wait NAME --any --timeout 30m
 provenant status [NAME]
