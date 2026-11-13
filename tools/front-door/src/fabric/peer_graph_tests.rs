@@ -31,6 +31,20 @@ fn submit_parent(
     operation: &str,
     cancel: &CancelToken,
 ) -> TestResult<SubmissionReceipt> {
+    submit_parent_as(
+        factory,
+        operation,
+        cancel,
+        factory.context.identity.inbox.actor,
+    )
+}
+
+fn submit_parent_as(
+    factory: &Factory,
+    operation: &str,
+    cancel: &CancelToken,
+    actor: provenant_core::ActorId,
+) -> TestResult<SubmissionReceipt> {
     let input = serde_json::from_value(json!({
         "op":"submit", "operation_id":operation, "concurrency":1,
         "tasks":[{"prompt":"Launch a child and collect its answer", "access":"read_only",
@@ -42,7 +56,7 @@ fn submit_parent(
         super::super::peer::peer_submit_graph(
             factory,
             input,
-            factory.context.identity.inbox.actor,
+            actor,
             provenant_fabric_runtime::graph::AttemptSpec {
                 provider_timeout: Some(17),
                 ..Default::default()
@@ -75,7 +89,9 @@ fn advance_receiver(
         cancel,
         &factory.clock,
     )?;
-    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None,
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
         repo_facts: Default::default(),
         launch_warnings: Vec::new(),
         factory,
@@ -790,6 +806,91 @@ mod cancellation_tests {
 }
 
 #[test]
+fn peer_retained_steer_receipt_binds_receiver_operation_to_origin_graph_node() -> TestResult {
+    if super::super::peer_tests::host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_retained_steer_receipt_binds_receiver_operation_to_origin_graph_node",
+    )? {
+        return Ok(());
+    }
+    let (_rig, mut factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let origin_actor = provenant_core::ActorId::from_bytes([42; 16]);
+    let source_host = provenant_core::HostId::from_bytes([43; 16]);
+    let agent = format!("graph-{origin_actor}");
+    factory.context.identity.inbox =
+        provenant_fabric_runtime::identity::Address::new(source_host, &agent)?;
+    let receiver_actor = factory.context.identity.inbox.actor;
+    assert_ne!(receiver_actor, origin_actor);
+    let origin_operation: provenant_core::OperationId = "peer-receipt-binding".parse()?;
+    let submitted = submit_parent_as(&factory, origin_operation.as_str(), &cancel, origin_actor)?;
+    let receiver_graph = submitted.extra["peer_graph"]["graph_id"]
+        .as_str()
+        .ok_or("receiver graph ID")?;
+    let checkpoint = FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        receiver_graph,
+    )?
+    .ok_or("receiver checkpoint")?;
+    let root = checkpoint.nodes.first().ok_or("receiver root node")?;
+    let root_attempt = root.attempts.last().ok_or("receiver root attempt")?;
+    assert_eq!(
+        root_attempt
+            .launch_actor
+            .parse::<provenant_core::ActorId>()?,
+        receiver_actor
+    );
+    let receiver_operation =
+        super::super::graph_operation("graph-attempt-operation", &root_attempt.key)?;
+    let retained =
+        super::super::peer::peer_retained_steer_receipt(&factory, &origin_operation, origin_actor)?
+            .ok_or("retained receiver receipt")?;
+    assert_eq!(retained.operation_id, origin_operation);
+    assert_eq!(
+        retained.extra["peer_operation_id"].as_str(),
+        Some(receiver_operation.as_str())
+    );
+    assert_eq!(
+        retained.extra["peer_graph"]["origin_graph_id"].as_str(),
+        Some("origin-graph")
+    );
+    assert_eq!(
+        retained.extra["peer_graph"]["origin_node_id"].as_str(),
+        Some("parent")
+    );
+    assert_eq!(
+        retained.extra["peer_graph"]["graph_id"].as_str(),
+        Some(receiver_graph)
+    );
+    let wrong_origin_operation: provenant_core::OperationId =
+        "peer-receipt-wrong-origin".parse()?;
+    assert!(
+        super::super::peer::peer_retained_steer_receipt(
+            &factory,
+            &wrong_origin_operation,
+            origin_actor,
+        )?
+        .is_none()
+    );
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: Some(root_attempt.launch_actor.parse()?),
+        chair: None,
+    };
+    let records = owner.snapshots_local(&retained.targets, &cancel)?;
+    assert_eq!(records.len(), 1);
+    let context = records[0].context.as_ref().ok_or("receiver lane context")?;
+    assert_eq!(records[0].operation_id, receiver_operation);
+    assert_eq!(context.graph_id.as_deref(), Some(receiver_graph));
+    assert_eq!(
+        context.node_id.as_deref(),
+        Some(root_attempt.key.node_id.as_str())
+    );
+    Ok(())
+}
+
+#[test]
 fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
     if host_test(
         "fabric::peer_tests::peer_graph_tests::retry_output_names_the_recorded_refusal_route_and_reason",
@@ -807,13 +908,15 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             _: Option<&provenant_run::AttemptRecord>,
         ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
             let mut refusal = provenant_run::PrepareRefusal::from("allowance spent");
-            refusal.skipped_routes.push(provenant_records::run::SkippedRoute {
-                extra: Default::default(),
-                route: "codex/gpt".into(),
-                kind: provenant_records::run::SkipKind::Unavailable,
-                cause: None,
-                detail: "allowance spent".into(),
-            });
+            refusal
+                .skipped_routes
+                .push(provenant_records::run::SkippedRoute {
+                    extra: Default::default(),
+                    route: "codex/gpt".into(),
+                    kind: provenant_records::run::SkipKind::Unavailable,
+                    cause: None,
+                    detail: "allowance spent".into(),
+                });
             Err(refusal)
         }
         fn decode(

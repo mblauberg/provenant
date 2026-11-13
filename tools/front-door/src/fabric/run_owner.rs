@@ -913,42 +913,50 @@ impl BinaryRunOwner<'_> {
         if request.tasks.is_empty()
             || request.tasks.iter().any(|task| {
                 task.context.as_ref().is_none_or(|context| {
-                    !context.graph_template_launch
-                        || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
+                    context.graph_id.as_ref().is_none_or(|id| id.is_empty())
                         || context.node_id.as_ref().is_none_or(|id| id.is_empty())
                 })
             })
         {
             return Ok(None);
         }
-        let page = session
-            .service()
-            .lanes(
-                &provenant_run::LaneQuery {
-                    targets: vec![provenant_run::LaneTarget {
-                        run: operation.run_id,
-                        task: None,
-                        attempt: None,
-                    }],
-                    all: true,
-                    limit: 100,
-                    after: 0,
-                    newest_first: false,
-                    owner: None,
-                    unseen_after: None,
-                },
-                &call,
-            )
-            .map_err(run_error)?;
-        if page.lanes.is_empty() {
+        let mut lanes = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = session
+                .service()
+                .lanes(
+                    &provenant_run::LaneQuery {
+                        targets: vec![provenant_run::LaneTarget {
+                            run: operation.run_id,
+                            task: None,
+                            attempt: None,
+                        }],
+                        all: true,
+                        limit: 100,
+                        after,
+                        newest_first: false,
+                        owner: None,
+                        unseen_after: None,
+                    },
+                    &call,
+                )
+                .map_err(run_error)?;
+            lanes.extend(page.lanes);
+            match page.next {
+                Some(next) if next > after => after = next,
+                Some(_) => return Err(FacadeError::StateCorrupt),
+                None => break,
+            }
+        }
+        if lanes.is_empty() {
             return Ok(None);
         }
         Ok(Some(SubmissionReceipt {
             extra: Default::default(),
             operation_id: operation_id.clone(),
             worktree: None,
-            targets: page
-                .lanes
+            targets: lanes
                 .into_iter()
                 .map(|attempt| AttemptTarget {
                     extra: Default::default(),

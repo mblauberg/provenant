@@ -830,32 +830,23 @@ pub(crate) fn unified_graph_steer(
 ) -> Option<u8> {
     use provenant_fabric_mcp::tools::McpFacade;
     enum SteerResult {
-        Delivered(Value),
-        Refused(&'static str),
+        Delivered(Box<provenant_fabric_runtime::inbox::InboxResult>),
+        Refused(String),
     }
     let result = (|| -> Result<Option<SteerResult>, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
-        let Some(target) = factory.graph_target(&args.attempt)? else {
-            return Ok(None);
-        };
-        let checkpoint = FileJournal::read_status_checkpoint(
-            &factory.context.roots.state,
-            factory.context.identity.project,
-            &target.graph,
-        )?
-        .ok_or(FacadeError::NotFound)?;
-        let reference = match provenant_cli::inbox::live_steer_reference(
-            &checkpoint,
-            target.node.as_deref(),
-            target.attempt.as_deref(),
-        ) {
-            Ok(reference) => reference,
-            Err(message) => return Ok(Some(SteerResult::Refused(message))),
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        let cancel = CancelToken::new();
+        let reference = match resolve_graph_steer_target(&factory, &args.attempt, budget, &cancel)?
+        {
+            SteerResolution::NoMatch => return Ok(None),
+            SteerResolution::Refused(message) => {
+                return Ok(Some(SteerResult::Refused(message)));
+            }
+            SteerResolution::Resolved { reference, .. } => reference,
         };
         let text = read_steering_stdin()?;
         let text = String::from_utf8(text)?;
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         let mut facade = BoundFacade { factory: &factory };
 
         let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
@@ -866,7 +857,7 @@ pub(crate) fn unified_graph_steer(
                 let digest = provenant_records::CanonicalV1::record_digest(
                     "graph-steer",
                     1,
-                    &(operation, reference),
+                    &(operation, &reference),
                 )
                 .map_err(|_| FacadeError::StateCorrupt)?;
                 provenant_core::OperationId::parse(&format!(
@@ -883,7 +874,7 @@ pub(crate) fn unified_graph_steer(
             operation_id,
         };
         let receipt = facade.inbox_owner(input, Some(host.into()), budget, &cancel)?;
-        Ok(Some(SteerResult::Delivered(json!({"receipts":[receipt]}))))
+        Ok(Some(SteerResult::Delivered(Box::new(receipt))))
     })();
     match result {
         Ok(None) => None,
@@ -891,15 +882,18 @@ pub(crate) fn unified_graph_steer(
             "steer",
             provenant_records::Outcome::Refused,
             "steer_target_refused",
-            message,
+            &message,
             globals,
         )),
-        Ok(Some(SteerResult::Delivered(data))) => Some(crate::emit(
-            &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
-            globals,
-            "steering queued\n",
-            false,
-        )),
+        Ok(Some(SteerResult::Delivered(data))) => {
+            let result = provenant_cli::inbox::control_result("steer", *data);
+            let human = if result.status == provenant_records::Outcome::Ok {
+                "steering queued\n"
+            } else {
+                ""
+            };
+            Some(crate::emit(&result, globals, human, false))
+        }
         Err(error) => Some(crate::fail(
             "steer",
             provenant_records::Outcome::Error,
@@ -908,6 +902,485 @@ pub(crate) fn unified_graph_steer(
             globals,
         )),
     }
+}
+
+#[derive(Debug)]
+struct RetainedSteerTarget {
+    ids: std::collections::BTreeSet<provenant_core::AttemptId>,
+    current: Option<String>,
+}
+
+#[derive(Debug)]
+enum SteerResolution {
+    NoMatch,
+    Resolved { reference: String },
+    Refused(String),
+}
+
+/// Resolve a graph selector without reading stdin. A ref-less checkpoint row
+/// is recovered from its stable graph operation under the original launch actor.
+fn resolve_graph_steer_target(
+    factory: &Factory,
+    selector: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<SteerResolution, FacadeError> {
+    let graph_target = match factory.graph_target(selector) {
+        Ok(target) => target,
+        Err(FacadeError::Conflict) => {
+            return Ok(SteerResolution::Refused(
+                "target has several live attempts; select graph/node or an attempt ID".into(),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(target) = graph_target {
+        let checkpoint = FileJournal::read_status_checkpoint(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &target.graph,
+        )
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+        let (node, attempt) = match provenant_cli::inbox::live_steer_attempt(
+            &checkpoint,
+            target.node.as_deref(),
+            target.attempt.as_deref(),
+        ) {
+            Ok(selected) => selected,
+            Err(message) => return Ok(SteerResolution::Refused(message)),
+        };
+        let retained =
+            match retained_steer_target(factory, &target.graph, node, attempt, budget, cancel) {
+                Ok(retained) => retained,
+                Err(FacadeError::Conflict) => {
+                    return Ok(SteerResolution::Refused(
+                        "attempt resolves to several current targets; select a specific attempt ID"
+                            .into(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+        let Some(retained) = retained else {
+            return Ok(SteerResolution::Refused(format!(
+                "the accepted launch for node {} is not retained yet",
+                node.id
+            )));
+        };
+        let selected_id = target
+            .attempt
+            .as_deref()
+            .map(|reference| {
+                reference
+                    .rsplit('/')
+                    .next()
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .parse::<provenant_core::AttemptId>()
+                    .map_err(|_| FacadeError::StateCorrupt)
+            })
+            .transpose()?;
+        return match retained_steer_reference(attempt, selected_id, &retained) {
+            Ok(Some(reference)) => Ok(SteerResolution::Resolved { reference }),
+            Ok(None) => Ok(SteerResolution::Refused(format!(
+                "selected attempt is not part of node {}'s accepted launch",
+                node.id
+            ))),
+            Err(message) => Ok(SteerResolution::Refused(format!(
+                "{message} for node {}",
+                node.id
+            ))),
+        };
+    }
+
+    // An attempt ID may identify a retained run target even when the graph
+    // checkpoint was saved before its attempt_ref. Scan only ref-less rows and
+    // check every candidate before deciding whether that ID is unique. An
+    // unavailable candidate cannot prevent a known match; retain its error
+    // when no candidate establishes ownership, rather than report not found.
+    let (graph_filter, node_filter, attempt_id) = parse_unresolved_steer_selector(selector);
+    let Some(attempt_id) = attempt_id else {
+        return Ok(SteerResolution::NoMatch);
+    };
+    let project = factory.context.identity.project;
+    let graphs = if let Some(graph) = &graph_filter {
+        vec![graph.clone()]
+    } else {
+        FileJournal::graph_ids(&factory.context.roots.state, project)
+            .map_err(graph_journal_error)?
+    };
+    let mut matches = Vec::new();
+    let mut candidate_error = None;
+    for graph in graphs {
+        let Some(checkpoint) =
+            FileJournal::read_status_checkpoint(&factory.context.roots.state, project, &graph)
+                .map_err(graph_journal_error)?
+        else {
+            continue;
+        };
+        for node in &checkpoint.nodes {
+            if node_filter
+                .as_deref()
+                .is_some_and(|selected| selected != node.id)
+            {
+                continue;
+            }
+            for attempt in node
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.attempt_ref.is_none())
+            {
+                match retained_steer_target(factory, &graph, node, attempt, budget, cancel) {
+                    Ok(Some(retained)) => {
+                        match retained_steer_reference(attempt, Some(attempt_id), &retained) {
+                            Ok(Some(reference)) => matches.push(Ok(reference)),
+                            Ok(None) => {}
+                            Err(message) => matches.push(Err(message)),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        candidate_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+    }
+    match matches.len() {
+        0 => match candidate_error {
+            Some(error) if graph_filter.is_none() => {
+                // The inbox owns bare local attempt IDs, including continuations
+                // not yet reflected in their graph checkpoint. Give that owner
+                // precedence over errors from unrelated ref-less graph rows.
+                let edge = provenant_cli::run::Edge {
+                    roots: &factory.context.roots,
+                    home: &factory.home,
+                    assets: &factory.assets,
+                    cwd: &factory.cwd,
+                };
+                match provenant_cli::run::attempt_provider(&edge, attempt_id) {
+                    Ok(_) => Ok(SteerResolution::NoMatch),
+                    Err(fail) if fail.kind == provenant_run::ErrorKind::NotFound => Err(error),
+                    Err(fail) => Err(fail_error(fail)),
+                }
+            }
+            Some(error) => Err(error),
+            None => Ok(SteerResolution::NoMatch),
+        },
+        1 => {
+            let resolution = matches.pop().ok_or(FacadeError::StateCorrupt)?;
+            match resolution {
+                Ok(reference) => Ok(SteerResolution::Resolved { reference }),
+                Err(message) => Ok(SteerResolution::Refused(message)),
+            }
+        }
+        _ => Ok(SteerResolution::Refused(
+            "target has several live attempts; select graph/node or an attempt ID".into(),
+        )),
+    }
+}
+
+fn parse_unresolved_steer_selector(
+    selector: &str,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<provenant_core::AttemptId>,
+) {
+    let parts = selector.split('/').collect::<Vec<_>>();
+    let (graph, node, id) = match parts.as_slice() {
+        [graph, node, id] => (Some((*graph).to_owned()), Some((*node).to_owned()), *id),
+        [id] => (None, None, *id),
+        _ => return (None, None, None),
+    };
+    let id = id.parse::<provenant_core::AttemptId>().ok();
+    (graph, node, id)
+}
+
+fn retained_steer_target(
+    factory: &Factory,
+    graph: &str,
+    node: &provenant_fabric_runtime::graph::NodeProgress,
+    attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<Option<RetainedSteerTarget>, FacadeError> {
+    let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
+    let actor = attempt
+        .launch_actor
+        .parse()
+        .map_err(|_| FacadeError::StateCorrupt)?;
+    let host = steer_placement_host(factory, attempt)?;
+    let owner = BinaryRunOwner {
+        factory,
+        allow_remote: true,
+        actor: Some(actor),
+        chair: None,
+    };
+    let receipt = if host == factory.context.identity.host {
+        owner.retained_graph_receipt(&operation, cancel)?
+    } else {
+        match owner.peer(
+            host,
+            PeerAction::Receipt {
+                extra: [
+                    ("graph_launch_actor".into(), json!(actor)),
+                    ("graph_steer_receipt".into(), json!(true)),
+                ]
+                .into(),
+                operation_id: operation.clone(),
+            },
+            budget,
+            cancel,
+        )? {
+            PeerResult::Submitted { data, .. } => Some(data),
+            PeerResult::Error { data, .. }
+                if matches!(&data.error, FacadeError::LaunchUnknown { .. }) =>
+            {
+                None
+            }
+            PeerResult::Error { data, .. } => return Err(data.error),
+            _ => return Err(FacadeError::StateCorrupt),
+        }
+    };
+    let Some(receipt) = receipt else {
+        return Ok(None);
+    };
+    if receipt.operation_id != operation
+        || receipt.worktree.is_some()
+        || receipt.targets.is_empty()
+        || receipt
+            .targets
+            .iter()
+            .any(|target| target.host != Some(host))
+    {
+        return Err(FacadeError::StateCorrupt);
+    }
+    let peer_operation = receipt.extra.get("peer_operation_id");
+    let peer_graph = receipt.extra.get("peer_graph");
+    if peer_operation.is_some() != peer_graph.is_some() {
+        return Err(FacadeError::StateCorrupt);
+    }
+    let record_operation = match peer_operation {
+        Some(value) if host != factory.context.identity.host => value
+            .as_str()
+            .ok_or(FacadeError::StateCorrupt)?
+            .parse()
+            .map_err(|_| FacadeError::StateCorrupt)?,
+        Some(_) => return Err(FacadeError::StateCorrupt),
+        None => operation.clone(),
+    };
+    let (record_graph, record_node) = if let Some(peer_graph) = peer_graph {
+        let peer_graph_host = peer_graph
+            .get("host")
+            .and_then(Value::as_str)
+            .ok_or(FacadeError::StateCorrupt)?
+            .parse::<provenant_core::HostId>()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let record_graph = peer_graph
+            .get("graph_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(FacadeError::StateCorrupt)?;
+        let record_node = peer_graph
+            .get("node_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(FacadeError::StateCorrupt)?;
+        if peer_graph_host != host
+            || peer_graph.get("origin_graph_id").and_then(Value::as_str) != Some(graph)
+            || peer_graph.get("origin_node_id").and_then(Value::as_str) != Some(node.id.as_str())
+        {
+            return Err(FacadeError::StateCorrupt);
+        }
+        (record_graph, record_node)
+    } else {
+        (graph, node.id.as_str())
+    };
+    let records = if host == factory.context.identity.host {
+        owner.snapshots_local(&receipt.targets, cancel)?
+    } else {
+        let mut records = Vec::new();
+        for targets in receipt.targets.chunks(100) {
+            match owner.peer(
+                host,
+                PeerAction::RunStatuses {
+                    extra: [("graph_launch_actor".into(), json!(actor))].into(),
+                    targets: targets.to_vec(),
+                },
+                budget,
+                cancel,
+            )? {
+                PeerResult::RunStatuses { data, .. } => records.extend(data),
+                PeerResult::Error { data, .. } => return Err(data.error),
+                _ => return Err(FacadeError::StateCorrupt),
+            }
+        }
+        records
+    };
+    if records.len() != receipt.targets.len() {
+        return Err(FacadeError::StateCorrupt);
+    }
+    for (target, record) in receipt.targets.iter().zip(&records) {
+        let context = record.context.as_ref().ok_or(FacadeError::StateCorrupt)?;
+        if target.attempt != record.attempt_id
+            || record.project_id != factory.context.identity.project
+            || record.operation_id != record_operation
+            || context.graph_id.as_deref() != Some(record_graph)
+            || context.node_id.as_deref() != Some(record_node)
+        {
+            return Err(FacadeError::StateCorrupt);
+        }
+    }
+    Ok(Some(retained_steer_target_from_records(&records, host)?))
+}
+
+fn retained_steer_target_from_records(
+    records: &[provenant_records::run::AttemptRecord],
+    host: provenant_core::HostId,
+) -> Result<RetainedSteerTarget, FacadeError> {
+    let ids: std::collections::BTreeSet<_> =
+        records.iter().map(|record| record.attempt_id).collect();
+    if ids.len() != records.len() {
+        return Err(FacadeError::StateCorrupt);
+    }
+    let leaves = current_steer_targets(records)?;
+    let current = match leaves.as_slice() {
+        [record] if !steer_lane_is_live(&record.state) => None,
+        [record] => Some(format!("{host}/{}", record.attempt_id)),
+        [] => return Err(FacadeError::StateCorrupt),
+        _ => return Err(FacadeError::Conflict),
+    };
+    Ok(RetainedSteerTarget { ids, current })
+}
+
+fn steer_placement_host(
+    factory: &Factory,
+    attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+) -> Result<provenant_core::HostId, FacadeError> {
+    let local = factory.context.identity.host;
+    let reference_host = attempt
+        .attempt_ref
+        .as_deref()
+        .map(|reference| {
+            reference
+                .split_once('/')
+                .ok_or(FacadeError::StateCorrupt)?
+                .0
+                .parse::<provenant_core::HostId>()
+                .map_err(|_| FacadeError::StateCorrupt)
+        })
+        .transpose()?;
+    if let Some(host) = attempt
+        .extra
+        .get("placement_host_id")
+        .and_then(Value::as_str)
+    {
+        let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        if reference_host.is_some_and(|reference| reference != host) {
+            return Err(FacadeError::StateCorrupt);
+        }
+        return Ok(host);
+    }
+    if let Some(name) = attempt.extra.get("placement_host").and_then(Value::as_str) {
+        let host = if matches!(name, "local" | "localhost")
+            || name
+                .parse::<provenant_core::HostId>()
+                .is_ok_and(|host| host == local)
+        {
+            local
+        } else {
+            factory
+                .context
+                .peer_host(name)
+                .ok_or(FacadeError::UnknownHost)?
+        };
+        if reference_host.is_some_and(|reference| reference != host) {
+            return Err(FacadeError::StateCorrupt);
+        }
+        return Ok(host);
+    }
+    if let Some(host) = reference_host {
+        return Ok(host);
+    }
+    Ok(local)
+}
+
+fn current_steer_targets(
+    records: &[provenant_records::run::AttemptRecord],
+) -> Result<Vec<&provenant_records::run::AttemptRecord>, FacadeError> {
+    use std::collections::BTreeMap;
+    let target_id = current_steer_target_id(
+        &records
+            .iter()
+            .map(|record| (record.attempt_id, record.superseded_by))
+            .collect::<Vec<_>>(),
+    )?;
+    let by_id = records
+        .iter()
+        .map(|record| (record.attempt_id, record))
+        .collect::<BTreeMap<_, _>>();
+    if by_id.len() != records.len() {
+        return Err(FacadeError::StateCorrupt);
+    }
+    Ok(vec![by_id[&target_id]])
+}
+
+fn current_steer_target_id(
+    targets: &[(provenant_core::AttemptId, Option<provenant_core::AttemptId>)],
+) -> Result<provenant_core::AttemptId, FacadeError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let by_id = targets.iter().copied().collect::<BTreeMap<_, _>>();
+    if by_id.len() != targets.len() {
+        return Err(FacadeError::StateCorrupt);
+    }
+    let mut leaves = BTreeSet::new();
+    for (id, _) in targets {
+        let mut current = *id;
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(current) {
+                return Err(FacadeError::StateCorrupt);
+            }
+            match by_id
+                .get(&current)
+                .copied()
+                .ok_or(FacadeError::StateCorrupt)?
+            {
+                Some(next) => current = next,
+                None => {
+                    leaves.insert(current);
+                    break;
+                }
+            }
+        }
+    }
+    match leaves.len() {
+        0 => Err(FacadeError::StateCorrupt),
+        1 => leaves.first().copied().ok_or(FacadeError::StateCorrupt),
+        _ => Err(FacadeError::Conflict),
+    }
+}
+
+fn steer_lane_is_live(state: &provenant_records::run::AttemptState) -> bool {
+    !matches!(state, provenant_records::run::AttemptState::Terminal { .. })
+}
+
+fn retained_steer_reference(
+    attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    selected_id: Option<provenant_core::AttemptId>,
+    retained: &RetainedSteerTarget,
+) -> Result<Option<String>, String> {
+    if selected_id.is_some_and(|selected| !retained.ids.contains(&selected)) {
+        return Ok(None);
+    }
+    if attempt.state == AttemptState::Terminal {
+        return Err("target has no live attempt".into());
+    }
+    retained
+        .current
+        .clone()
+        .map(Some)
+        .ok_or_else(|| "the current target is terminal".into())
 }
 
 pub(crate) fn append_graph_status(
@@ -1951,6 +2424,153 @@ mod tests {
         ]})).unwrap()
     }
 
+    #[test]
+    fn current_steer_target_follows_supersession_and_refuses_ambiguous_or_broken_chains() {
+        let first = provenant_core::AttemptId::from_bytes([1; 16]);
+        let second = provenant_core::AttemptId::from_bytes([2; 16]);
+        let third = provenant_core::AttemptId::from_bytes([3; 16]);
+        assert_eq!(
+            current_steer_target_id(&[(first, Some(second)), (second, None)]),
+            Ok(second)
+        );
+        assert!(matches!(
+            current_steer_target_id(&[(first, None), (second, None)]),
+            Err(FacadeError::Conflict)
+        ));
+        assert!(matches!(
+            current_steer_target_id(&[(first, Some(third))]),
+            Err(FacadeError::StateCorrupt)
+        ));
+        assert!(matches!(
+            current_steer_target_id(&[(first, Some(second)), (second, Some(first))]),
+            Err(FacadeError::StateCorrupt)
+        ));
+    }
+
+    #[test]
+    fn steer_resolves_accepted_attempt_without_checkpoint_reference_state_matrix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::AttemptState as GraphAttemptState;
+        use provenant_records::run::AttemptState as LaneAttemptState;
+        let graph_states = [
+            ("starting", GraphAttemptState::Starting),
+            ("running", GraphAttemptState::Running),
+            ("unresolved", GraphAttemptState::Unresolved),
+            ("terminal", GraphAttemptState::Terminal),
+        ];
+        let lane_states = [
+            (
+                "queued",
+                LaneAttemptState::Queued {
+                    extra: Default::default(),
+                },
+            ),
+            (
+                "starting",
+                LaneAttemptState::Starting {
+                    extra: Default::default(),
+                },
+            ),
+            (
+                "running",
+                LaneAttemptState::Running {
+                    extra: Default::default(),
+                },
+            ),
+            (
+                "settling",
+                LaneAttemptState::Settling {
+                    extra: Default::default(),
+                    publication_pending: false,
+                },
+            ),
+            (
+                "terminal",
+                LaneAttemptState::Terminal {
+                    extra: Default::default(),
+                    outcome: provenant_records::run::Outcome::Succeeded,
+                    exit_code: Some(0),
+                    finished_at: provenant_core::WallTime::from_micros(0)?,
+                    reason: None,
+                },
+            ),
+        ];
+        let attempt_id = provenant_core::AttemptId::from_bytes([2; 16]);
+        let attempt_id_text = attempt_id.to_string();
+        let host = "11111111111111111111111111111111".parse()?;
+        for (graph_name, graph_state) in graph_states {
+            let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+                "schema_version":1, "graph_id":"g", "plan_digest":"digest",
+                "nodes":[{"id":"task", "state":"running", "worktree":null,
+                    "attempts":[{"key":{"graph_id":"g", "node_id":"task", "route_index":0},
+                        "launched":true, "route":{"alias":"senior"}, "state":graph_state,
+                        "attempt_ref":null,
+                        "outcome":if graph_name == "terminal" { Some("task_failed") } else { None::<&str> },
+                        "launch_actor":"fixture"}]}]
+            }))?;
+            for (lane_name, lane_state) in &lane_states {
+                let record: provenant_records::run::AttemptRecord =
+                    serde_json::from_value(json!({
+                        "schema_version":1,"attempt_id":attempt_id_text,"run_id":attempt_id_text,
+                        "project_id":"11111111111111111111111111111111",
+                        "task_id":"11111111111111111111111111111111","operation_id":"graph-op",
+                        "attempt_number":1,"revision":1,"generation":1,
+                        "requested_route":{"kind":"named","name":"senior"},
+                        "authority_digest":format!("sha256:{}", "ab".repeat(32)),
+                        "queued_at":"2026-10-29T00:00:00.000000Z",
+                        "context":{"graph_template_launch":false,"graph_id":"g","node_id":"task"},
+                        "state":serde_json::to_value(lane_state)?,"usage":{},
+                        "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
+                            "digest":format!("sha256:{}", "ab".repeat(32)),
+                            "bytes":0,"complete":true,"redacted":false}
+                    }))?;
+                let retained = retained_steer_target_from_records(&[record], host)?;
+                checkpoint.nodes[0].attempts[0].attempt_ref = None;
+                for (form, selected_id, selected) in [
+                    (
+                        "attempt ID",
+                        parse_unresolved_steer_selector(&attempt_id_text).2,
+                        provenant_cli::inbox::live_steer_attempt(&checkpoint, Some("task"), None),
+                    ),
+                    (
+                        "graph ID",
+                        None,
+                        provenant_cli::inbox::live_steer_attempt(&checkpoint, None, None),
+                    ),
+                    (
+                        "graph/node",
+                        None,
+                        provenant_cli::inbox::live_steer_attempt(&checkpoint, Some("task"), None),
+                    ),
+                ] {
+                    let resolution = match selected {
+                        Ok((_, graph_attempt)) => {
+                            retained_steer_reference(graph_attempt, selected_id, &retained)
+                        }
+                        Err(message) => Err(message),
+                    };
+                    match (
+                        resolution,
+                        graph_name == "terminal" || *lane_name == "terminal",
+                    ) {
+                        (Err(_), true) => {}
+                        (Ok(Some(reference)), false) => {
+                            assert_eq!(
+                                reference,
+                                format!("{host}/{attempt_id}"),
+                                "{graph_name} x {lane_name} x {form}"
+                            );
+                        }
+                        (other, expected_refusal) => panic!(
+                            "{graph_name} x {lane_name} x {form}: expected refusal={expected_refusal}, got {other:?}"
+                        ),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn document(graph: &str) -> GraphDocument {
         serde_json::from_value(json!({"schema_version":1,"graph_id":graph,"nodes":[
             {"id":"parent","access":"read_only","prompt":"parent","route":{"alias":"senior"}},
@@ -2244,6 +2864,195 @@ mod tests {
     }
 
     #[test]
+    fn steer_resolves_accepted_attempt_without_checkpoint_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::unified::tests::steer_resolves_accepted_attempt_without_checkpoint_reference",
+        )? {
+            return Ok(());
+        }
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
+            }
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock::new(),
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input = json!({
+            "op":"run", "brief":"Inspect the parser", "operation_id":"steer-accepted-test",
+            "document":{"use":"task", "routes":[
+                {"adapter":"fixture", "model":"fixture/first"},
+                {"adapter":"fixture", "model":"fixture/fallback"}
+            ]}
+        });
+        let run = provenant_cli::run::with_deferred_provider_launch(|| {
+            factory.graph_document(input.clone(), budget, &cancel)
+        })?;
+        let graph = run["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or("graph ID missing")?;
+        let original = run["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+            .as_str()
+            .ok_or("accepted attempt missing")?
+            .to_owned();
+        let attempt_id = original.rsplit('/').next().ok_or("attempt ID missing")?;
+        let node = run["checkpoint"]["nodes"][0]["id"]
+            .as_str()
+            .ok_or("node ID missing")?;
+        let project = factory.context.identity.project;
+        let mut checkpoint = FileJournal::read_checkpoint(&roots.state, project, graph)?
+            .ok_or("checkpoint missing")?;
+        checkpoint.nodes[0].attempts[0].attempt_ref = None;
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            graph,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let events = FileJournal::read_events(&roots.state, project, graph)?;
+
+        // An unrelated ref-less launch on an unavailable peer must not mask
+        // the locally retained attempt, regardless of graph scan order.
+        let mut other_input = input;
+        other_input["operation_id"] = json!("steer-unrelated-offline-test");
+        let other_run = provenant_cli::run::with_deferred_provider_launch(|| {
+            factory.graph_document(other_input, budget, &cancel)
+        })?;
+        let other_graph = other_run["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or("other graph ID missing")?;
+        let mut other = FileJournal::read_checkpoint(&roots.state, project, other_graph)?
+            .ok_or("other checkpoint missing")?;
+        other.nodes[0].attempts[0].attempt_ref = None;
+        other.nodes[0].attempts[0]
+            .extra
+            .insert("placement_host".into(), json!("unconfigured-offline-peer"));
+        let mut other_journal = FileJournal::open(
+            &roots.state,
+            project,
+            other_graph,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        other_journal.save(&other)?;
+        drop(other_journal);
+
+        for selector in [
+            graph.to_owned(),
+            format!("{graph}/{node}"),
+            attempt_id.to_owned(),
+        ] {
+            let resolution = resolve_graph_steer_target(&factory, &selector, budget, &cancel)?;
+            let reference = match resolution {
+                SteerResolution::Resolved { reference, .. } => reference,
+                unresolved => {
+                    return Err(
+                        format!("selector {selector} was not resolved: {unresolved:?}").into(),
+                    );
+                }
+            };
+            assert_eq!(reference, original);
+        }
+        // A continuation can be retained before the graph checkpoint replaces
+        // its predecessor reference. The inbox still owns that bare ID.
+        for (checkpoint_ref, graph_resolves) in [
+            (None, true),
+            (
+                Some(format!(
+                    "{}/{}",
+                    factory.context.identity.host,
+                    provenant_core::AttemptId::from_bytes([98; 16])
+                )),
+                false,
+            ),
+        ] {
+            checkpoint.nodes[0].attempts[0].attempt_ref = checkpoint_ref;
+            let mut journal = FileJournal::open(
+                &roots.state,
+                project,
+                graph,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.save(&checkpoint)?;
+            drop(journal);
+            let resolution = resolve_graph_steer_target(&factory, attempt_id, budget, &cancel)?;
+            match (graph_resolves, resolution) {
+                (true, SteerResolution::Resolved { reference }) => assert_eq!(reference, original),
+                (false, SteerResolution::NoMatch) => {}
+                (_, other) => return Err(format!("unexpected resolution: {other:?}").into()),
+            }
+        }
+        checkpoint.nodes[0].attempts[0].attempt_ref = None;
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            graph,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        // With no established owner, the candidate failure remains visible.
+        let unknown = provenant_core::AttemptId::from_bytes([99; 16]).to_string();
+        assert!(resolve_graph_steer_target(&factory, &unknown, budget, &cancel).is_err());
+        assert_eq!(
+            FileJournal::read_checkpoint(&roots.state, project, graph)?,
+            Some(checkpoint.clone())
+        );
+        assert_eq!(
+            FileJournal::read_events(&roots.state, project, graph)?,
+            events
+        );
+        let mut wrong_actor_attempt = checkpoint.nodes[0].attempts[0].clone();
+        wrong_actor_attempt.launch_actor =
+            provenant_core::ActorId::from_bytes([99; 16]).to_string();
+        assert!(
+            retained_steer_target(
+                &factory,
+                graph,
+                &checkpoint.nodes[0],
+                &wrong_actor_attempt,
+                budget,
+                &cancel,
+            )?
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn subtree_stop_preserves_detached_children_and_unrelated_nodes()
     -> Result<(), Box<dyn std::error::Error>> {
         struct FreeWorkers;
@@ -2526,12 +3335,13 @@ mod tests {
         let checkpoint =
             FileJournal::read_status_checkpoint(&roots.state, project, "g")?.ok_or("checkpoint")?;
         assert_eq!(
-            provenant_cli::inbox::live_steer_reference(
+            provenant_cli::inbox::live_steer_attempt(
                 &checkpoint,
                 lane.node.as_deref(),
                 lane.attempt.as_deref()
-            ),
-            Ok(format!("{g}/{a}").as_str())
+            )
+            .map(|(_, attempt)| attempt.attempt_ref.as_deref()),
+            Ok(Some(format!("{g}/{a}").as_str()))
         );
         assert!(resolve_target(&roots.state, project, &format!("g/other/{a}"))?.is_none());
         assert!(resolve_target(&roots.state, project, &format!("h/parent/{a}"))?.is_none());

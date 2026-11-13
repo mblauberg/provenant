@@ -46,7 +46,8 @@ fn peer_read_only(action: &PeerAction) -> bool {
         | PeerAction::ConsoleDetail { .. }
         | PeerAction::ConsoleInbox { .. }
         | PeerAction::Doctor { .. }
-        | PeerAction::Receipt { .. } => true,
+        | PeerAction::Receipt { .. }
+        | PeerAction::RunStatuses { .. } => true,
         PeerAction::CancelSubmission { stop, .. } => !stop,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
@@ -640,7 +641,10 @@ pub fn peer(
                     },
                 }
             }
-            PeerAction::Receipt { operation_id, .. } => peer_result(
+            PeerAction::Receipt {
+                operation_id,
+                extra,
+            } => peer_result(
                 (|| {
                     let store_request = provenant_fabric_store::Request {
                         clock: &clock,
@@ -685,22 +689,27 @@ pub fn peer(
                                 .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok())
                                 .is_some();
                             let receipt = if graph_agent {
-                                peer_retained_receipt(
-                                    &peer_factory,
-                                    operation_id,
-                                    request
-                                        .agent
-                                        .strip_prefix("graph-")
-                                        .and_then(|id| id.parse().ok())
-                                        .ok_or(FacadeError::StateCorrupt)?,
-                                )
-                                .and_then(|receipt| {
-                                    if receipt.is_some() {
-                                        Ok(receipt)
-                                    } else {
-                                        owner.retained_graph_receipt(operation_id, &cancel)
-                                    }
-                                })
+                                let actor = request
+                                    .agent
+                                    .strip_prefix("graph-")
+                                    .and_then(|id| id.parse().ok())
+                                    .ok_or(FacadeError::StateCorrupt)?;
+                                if extra
+                                    .get("graph_steer_receipt")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true)
+                                {
+                                    peer_retained_steer_receipt(&peer_factory, operation_id, actor)
+                                } else {
+                                    peer_retained_receipt(&peer_factory, operation_id, actor)
+                                        .and_then(|receipt| {
+                                            if receipt.is_some() {
+                                                Ok(receipt)
+                                            } else {
+                                                owner.retained_graph_receipt(operation_id, &cancel)
+                                            }
+                                        })
+                                }
                             } else {
                                 Ok(None)
                             };
@@ -834,6 +843,19 @@ pub fn peer(
 
 /// The receiver owns a graph for each authenticated remote submission. Its
 /// journal lock spans launch, just as it does for an ordinary local graph.
+fn peer_subgraph_id(
+    actor: provenant_core::ActorId,
+    operation_id: &provenant_core::OperationId,
+) -> Result<String, FacadeError> {
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, operation_id))
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    Ok(format!(
+        "peer-{}",
+        &provenant_core::hex(digest.as_bytes())[..48]
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn peer_submit_graph(
     factory: &Factory,
@@ -870,10 +892,7 @@ pub(crate) fn peer_submit_graph(
     if concurrency.is_some_and(|n| n != 1) {
         return Err(FacadeError::InvalidInput { detail: None });
     }
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation_id))
-            .map_err(|_| FacadeError::StateCorrupt)?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = peer_subgraph_id(actor, &operation_id)?;
     let mut route = match &task.route {
         RequestedRoute::Adapter { provider, name, .. } => {
             serde_json::json!({"adapter":provider,"name":name})
@@ -1042,9 +1061,9 @@ pub(super) fn peer_graph_receipt(
         .first()
         .and_then(|node| node.attempts.last());
     if let Some(root) = root.filter(|attempt| attempt.attempt_ref.is_none()) {
-        // A graph can block on a definite refusal before recording its run
-        // reference. Consult the same sealed launch evidence as local replay;
-        // graph status text cannot prove either refusal or acceptance.
+        // Preserve submission and replay semantics: a retained refusal stays a
+        // refusal, and an uncertain launch stays unknown until receipt evidence
+        // resolves it.
         let cancel = CancelToken::new();
         let owner = BinaryRunOwner {
             factory,
@@ -1377,10 +1396,7 @@ pub(super) fn peer_retained_receipt(
     actor: provenant_core::ActorId,
 ) -> Result<Option<SubmissionReceipt>, FacadeError> {
     use provenant_fabric_runtime::graph::FileJournal;
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, operation_id))
-            .map_err(|_| FacadeError::StateCorrupt)?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = peer_subgraph_id(actor, operation_id)?;
     FileJournal::read_checkpoint(
         &factory.context.roots.state,
         factory.context.identity.project,
@@ -1389,4 +1405,103 @@ pub(super) fn peer_retained_receipt(
     .map_err(graph_journal_error)?
     .map(|checkpoint| peer_graph_receipt(factory, operation_id.clone(), &graph, &checkpoint))
     .transpose()
+}
+
+/// Read the accepted receiver lanes used by `steer`. This deliberately stays
+/// separate from submission/replay receipts, which must preserve launch
+/// refusal classification and their single root target.
+pub(super) fn peer_retained_steer_receipt(
+    factory: &Factory,
+    operation_id: &provenant_core::OperationId,
+    actor: provenant_core::ActorId,
+) -> Result<Option<SubmissionReceipt>, FacadeError> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    let graph = peer_subgraph_id(actor, operation_id)?;
+    let Some(checkpoint) = FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph,
+    )
+    .map_err(graph_journal_error)?
+    else {
+        return Ok(None);
+    };
+    let root = checkpoint
+        .nodes
+        .first()
+        .and_then(|node| node.attempts.last())
+        .ok_or(FacadeError::StateCorrupt)?;
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph,
+    )
+    .map_err(graph_journal_error)?
+    .ok_or(FacadeError::StateCorrupt)?;
+    let origin_context = execution
+        .extra
+        .get("peer_origin_context")
+        .ok_or(FacadeError::StateCorrupt)?;
+    let origin_graph = origin_context
+        .get("graph_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or(FacadeError::StateCorrupt)?;
+    let origin_node = origin_context
+        .get("node_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or(FacadeError::StateCorrupt)?;
+    let bound_operation = execution
+        .extra
+        .get("peer_operation_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(FacadeError::StateCorrupt)?
+        .parse::<provenant_core::OperationId>()
+        .map_err(|_| FacadeError::StateCorrupt)?;
+    let receiver_root = execution
+        .document
+        .nodes
+        .first()
+        .ok_or(FacadeError::StateCorrupt)?;
+    let root_actor = root
+        .launch_actor
+        .parse::<provenant_core::ActorId>()
+        .map_err(|_| FacadeError::StateCorrupt)?;
+    if bound_operation != *operation_id
+        || execution.document.graph_id != graph
+        || checkpoint.graph_id != graph
+        || root.key.graph_id != graph
+        || root.key.node_id != receiver_root.id
+        || root_actor != factory.context.identity.inbox.actor
+    {
+        return Err(FacadeError::StateCorrupt);
+    }
+    let launch_operation = graph_operation("graph-attempt-operation", &root.key)?;
+    let cancel = CancelToken::new();
+    let owner = BinaryRunOwner {
+        factory,
+        allow_remote: false,
+        actor: Some(root_actor),
+        chair: None,
+    };
+    let Some(mut receipt) = owner.retained_graph_receipt(&launch_operation, &cancel)? else {
+        return Ok(None);
+    };
+    receipt.extra.insert(
+        "peer_graph".into(),
+        serde_json::json!({
+            "host":factory.context.identity.host,
+            "graph_id":graph,
+            "node_id":receiver_root.id,
+            "origin_graph_id":origin_graph,
+            "origin_node_id":origin_node,
+        }),
+    );
+    receipt.extra.insert(
+        "peer_operation_id".into(),
+        serde_json::json!(launch_operation),
+    );
+    receipt.operation_id = operation_id.clone();
+    Ok(Some(receipt))
 }
