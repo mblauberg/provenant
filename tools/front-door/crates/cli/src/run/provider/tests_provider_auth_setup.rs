@@ -408,8 +408,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
         let argv = vec![
             std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            std::thread::current().name().unwrap().into(),
+            "cleared_preparation_injects_host_recorded_github_credentials".into(),
             "--nocapture".into(),
         ];
         let cwd = std::env::current_dir()?;
