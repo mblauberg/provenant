@@ -69,7 +69,9 @@ pub fn lane_limits(
     let mut limits = LaneLimits {
         token_budget,
         budget_policy: writer.then_some(budget_policy),
-        context_handoff: writer
+        // Wrap-up must spend its remaining allowance in the same session;
+        // a context restart here would reset that allowance on another route.
+        context_handoff: (writer && !task.profile.extra.contains_key("budget_wrap_up"))
             .then(|| knob("lanes.context_handoff_tokens", LimitSource::Template))
             .flatten(),
         deadline_seconds,
@@ -282,6 +284,27 @@ mod tests {
         assert!(!blind.preamble().contains("fresh tokens"));
     }
 
+    #[test]
+    fn wrap_up_keeps_its_allowance_and_defers_context_restart() {
+        let state = state("");
+        let mut task = writer_task();
+        task.profile
+            .knobs
+            .insert("lanes.context_handoff_tokens".into(), 1.into());
+        assert!(
+            lane_limits(&task, state.path(), "p", "claude", HostCaps::default())
+                .context_handoff
+                .is_some()
+        );
+        task.profile
+            .extra
+            .insert("budget_wrap_up".into(), serde_json::json!({"remaining":17}));
+        let limits = lane_limits(&task, state.path(), "p", "claude", HostCaps::default());
+        assert!(limits.context_handoff.is_none());
+        assert_eq!(crate::launch::capture_plan(&task, &limits).token_budget, 17);
+        assert_eq!(limits.budget_policy.unwrap().action, BudgetAction::Stop);
+    }
+
     /// Acceptance 3: `retry --extend` raises a default and not a ceiling.
     #[test]
     fn an_extension_raises_a_default_and_never_a_ceiling() {
@@ -304,7 +327,10 @@ mod tests {
             found(&limits.deadline_seconds),
             Some((600, LimitSource::Host))
         );
-        assert!(limits.preamble().contains("after 5000 fresh tokens"));
+        assert_eq!(
+            crate::launch::capture_plan(&task, &limits).token_budget,
+            limits.token_budget.as_ref().unwrap().value
+        );
     }
 }
 

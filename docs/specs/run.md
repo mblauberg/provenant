@@ -853,7 +853,9 @@ the node in place, fresh, on the same worktree with that handoff in its brief,
 on another eligible route as for any stopped writer; each restart spends the
 graph's continuation budget. A dirty-work budget boundary takes precedence
 when both are due. Budget wrap-up resumes the same provider session and is
-separate from this fresh context handoff; `warn` never requests a token stop.
+separate from this fresh context handoff. During its bounded continuation the
+context threshold is deferred so a fresh restart cannot reset the remaining
+allowance; `warn` never requests a token stop.
 - Why (default off): whether a fresh restart keeps enough working state is
   untested, so restart stays off until a trial shows it does not lower
   completion.

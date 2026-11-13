@@ -60,3 +60,8 @@ had grown beyond its existing surface policy. Kept the three daily budget knobs
 in the compact list and left domain/tier/project variants in the advanced schema.
 Both pure reference renderers were checked successfully without invoking Cargo.
 Final exact-head CI evidence is recorded in the collected schema-v2 handoff.
+
+The bounded same-session wrap-up defers context-threshold restart, preventing a
+fresh restart from resetting the grace allowance. Its admission invariant checks
+that the hard remaining allowance survives. The retry-extend preamble test also
+uses resolved-value propagation rather than hard-stop wording.
