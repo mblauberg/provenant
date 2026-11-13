@@ -77,7 +77,7 @@ fn foreign_header(root: &Directory, name: &str, expected: u32) -> io::Result<boo
     }
     let file = fs(parent.open_read(OsStr::new(leaf)))?;
     let mut header = [0_u8; 64];
-    let complete = match file.handoff_file().take(64).read_exact(&mut header) {
+    let complete = match file.take(64).read_exact(&mut header) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
         Err(error) => return Err(error),

@@ -2030,18 +2030,24 @@ esac
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
     let downloads = fs::read_to_string(&curl_log)?;
-    assert_eq!(
-        downloads
-            .matches("provenant-apps-aarch64-apple-darwin.tar.gz\n")
-            .count(),
-        1
+    // Preflight and apply may each fetch artifacts. Every fetch must stay
+    // pinned, and the app archive must always have its checksum available.
+    let artifacts: Vec<_> = downloads
+        .lines()
+        .filter(|url| url.contains("/download/"))
+        .collect();
+    assert!(!artifacts.is_empty());
+    assert!(
+        artifacts
+            .iter()
+            .all(|url| url.contains("/download/v9.8.7/"))
     );
-    assert_eq!(
-        downloads
-            .matches("provenant-apps-aarch64-apple-darwin.tar.gz.sha256\n")
-            .count(),
-        1
-    );
+    for artifact in [
+        "provenant-apps-aarch64-apple-darwin.tar.gz",
+        "provenant-apps-aarch64-apple-darwin.tar.gz.sha256",
+    ] {
+        assert!(artifacts.iter().any(|url| url.ends_with(artifact)));
+    }
     assert!(!installed_app.join("old-build").exists());
     assert!(
         installed_app
