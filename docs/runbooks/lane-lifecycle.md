@@ -93,7 +93,7 @@ provenant status --wait=1h --follow --target graph:GRAPH --json
 
 `--target` is repeatable (`lane:`, `graph:`, `pr:`, `land:`, `operation:`);
 `land:N` observes only and grants no merge authority (`provenant land N --wait`
-merges). `--until all` (default) waits for every target to be terminal, `any`
+merges). `--until all` (default) waits for every target to be terminal or a graph to be paused, `any`
 returns on the first transition; `--follow` streams and always waits for all.
 An expired wait exits 124 and leaves work running; a refused operation exits 1.
 Sources are sampled, so intermediate states between samples are not reported.

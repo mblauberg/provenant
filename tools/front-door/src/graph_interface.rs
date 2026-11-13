@@ -425,6 +425,13 @@ pub(crate) fn run(
             return invoke("run", Err(cli_input_error(&message)), globals, workers);
         }
     }
+    if request.over.len() > 5 {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: --over creates {} nodes; check comma-separated items",
+            request.over.len()
+        );
+    }
     invoke("run", run_input(request), globals, workers)
 }
 

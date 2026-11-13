@@ -264,6 +264,12 @@ impl Stop {
 /// decides only when no owner row was selected. A collected attempt keeps the
 /// checkpoint's `terminal` row, which has no `finished_at`.
 fn graph_rows_terminal(rows: &[Value]) -> bool {
+    if let Some(graph) = rows.iter().find(|row| row["kind"] == "graph") {
+        return matches!(
+            graph["state"].as_str(),
+            Some("complete" | "cancelled" | "paused" | "review_required" | "needs_owner_decision")
+        );
+    }
     let mut owners = rows
         .iter()
         .filter(|row| row["kind"] != "attempt")
@@ -284,6 +290,9 @@ fn graph_rows_terminal(rows: &[Value]) -> bool {
                     | "blocked"
                     | "skipped"
                     | "terminal"
+                    | "paused"
+                    | "review_required"
+                    | "needs_owner_decision"
             )
         )
     })
@@ -544,6 +553,11 @@ mod tests {
             graph("complete"),
             attempt("timed_out", done.clone())
         ]));
+        assert!(graph_rows_terminal(&[
+            graph("paused"),
+            json!({"kind":"node", "state":"pending"}),
+            attempt("running", Value::Null)
+        ]));
         assert!(!graph_rows_terminal(&[
             graph("pending"),
             attempt("timed_out", done.clone())
@@ -627,13 +641,10 @@ mod tests {
         assert_eq!(events[3]["terminal"], true);
     }
     #[test]
-    fn all_does_not_finish_on_one_terminal_or_a_notable_pause() {
+    fn all_finishes_when_every_target_is_settled() {
         let (tx, rx) = mpsc::channel();
         assert!(tx.send(update("lane:a", "succeeded", true)).is_ok());
-        let mut paused = update("graph:b", "paused", false);
-        if let Ok(snapshot) = &mut paused.snapshot {
-            snapshot.notable = true;
-        }
+        let paused = update("graph:b", "paused", true);
         assert!(tx.send(paused).is_ok());
         assert_eq!(
             collect(
@@ -645,7 +656,7 @@ mod tests {
                 false,
                 &mut |_| Ok(())
             ),
-            Ok(false)
+            Ok(true)
         );
     }
     #[test]
