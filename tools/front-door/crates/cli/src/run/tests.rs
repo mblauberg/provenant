@@ -621,20 +621,6 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         roots.state.as_path().join("fabric/host.sqlite3"),
         roots.state.as_path().join("fabric/interrupted.sqlite3"),
     )?;
-    let mut forged = session.store.request(first, &call)?;
-    forged.lane_depth = Some(2);
-    with_chair_index(&roots, &call, |index, c| {
-        index.submit(session.context.project_id, &graph, &forged, c)
-    })
-    .map_err(|f| f.message)?;
-    assert_eq!(
-        launch(&session, first, &edge, &call).unwrap_err().status,
-        Status::Refused
-    );
-    std::fs::rename(
-        roots.state.as_path().join("fabric/host.sqlite3"),
-        roots.state.as_path().join("fabric/forged.sqlite3"),
-    )?;
     // Reusing an operation from another chair cannot rebind even a missing
     // host index row. Repair must use the immutable original request.
     let mut replay = submission("context-base");

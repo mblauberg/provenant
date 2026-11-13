@@ -181,7 +181,7 @@ impl<D> crate::ResolvedConfig<D> {
                 .map(|(name, knob)| {
                     // Authored knobs use fractions; immutable launch snapshots
                     // use their exact fixed-point form for canonical hashing.
-                    let value = if spec(registry, &name)?.kind == Kind::Fraction {
+                    let value = if name == "lanes.budget_grace" {
                         let grace = knob
                             .value
                             .as_f64()

@@ -156,6 +156,7 @@ impl<'de> Deserialize<'de> for BudgetGrace {
             Input::Authored(value) => Self::from_fraction(value),
             Input::Snapshot(value) => value.split_once('.').and_then(|(whole, fraction)| {
                 if whole.is_empty()
+                    || (whole.len() > 1 && whole.starts_with('0'))
                     || !whole.bytes().all(|byte| byte.is_ascii_digit())
                     || fraction.len() != 6
                     || !fraction.bytes().all(|byte| byte.is_ascii_digit())
