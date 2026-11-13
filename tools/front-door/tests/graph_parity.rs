@@ -270,7 +270,10 @@ fn assert_same_story(events: &[GraphEvent], checkpoint: &GraphCheckpoint) {
         NodeState::Skipped => "skipped",
     };
     assert_eq!(states.last().copied(), Some(expected), "{events:?}");
-    let settled = node.attempts.iter().filter(|a| a.outcome.is_some()).count();
+    let settled = node
+        .recorded_attempts()
+        .filter(|a| a.outcome.is_some())
+        .count();
     assert_eq!(
         codes(events, GraphEventKind::Attempt)
             .iter()
@@ -280,8 +283,7 @@ fn assert_same_story(events: &[GraphEvent], checkpoint: &GraphCheckpoint) {
         "{events:?}"
     );
     let limited = node
-        .attempts
-        .iter()
+        .recorded_attempts()
         .filter(|a| a.outcome == Some(AttemptOutcome::UsageLimited))
         .count();
     assert_eq!(
@@ -428,11 +430,14 @@ fn quota_limit_retries_on_another_member() -> Result {
     let checkpoint = h.checkpoint()?;
     let node = &checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Succeeded);
-    assert_eq!(node.attempts.len(), 2);
-    assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::UsageLimited));
-    assert_eq!(node.attempts[0].key.route_index, 0);
-    assert_eq!(node.attempts[1].key.route_index, 1);
-    assert_eq!(node.attempts[1].outcome, Some(AttemptOutcome::Succeeded));
+    // Superseded attempts are history; the retry is the node's current one.
+    let attempts: Vec<_> = node.recorded_attempts().collect();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].outcome, Some(AttemptOutcome::UsageLimited));
+    // The retry runs on the other member, whatever its key's route index.
+    assert_eq!(attempts[0].route.adapter.as_deref(), Some("member0"));
+    assert_eq!(attempts[1].route.adapter.as_deref(), Some("member1"));
+    assert_eq!(attempts[1].outcome, Some(AttemptOutcome::Succeeded));
     let events = h.events()?;
     assert_eq!(codes(&events, GraphEventKind::Wait), ["quota"]);
     assert_same_story(&events, &checkpoint);

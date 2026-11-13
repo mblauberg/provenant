@@ -2720,6 +2720,8 @@ fn persisted_attempt_with(
                 &exit,
                 &provenant_cli::run::Registry {
                     roots: options.host_registry.then_some(&roots),
+                    // The holder names the state root that owns shared quota.
+                    state_root: Some(roots.state.as_path()),
                     ..Default::default()
                 },
                 &call,
@@ -3670,9 +3672,14 @@ fn run_graph_provider_with_wait(
     );
     assert!(response["error"].is_null(), "{response}");
     let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
-    let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-        .as_str()
-        .ok_or_else(|| format!("attempt reference missing: {response}"))?;
+    // The lane is the attempt that ran the provider: a retry refused before
+    // launch (a cooled free pool, say) points back at it.
+    let latest = &response["data"]["checkpoint"]["nodes"][0]["attempts"][0];
+    let reference = match (&latest["launched"], &latest["key"]["previous_attempt_ref"]) {
+        (Value::Bool(false), Value::String(previous)) => Some(previous.as_str()),
+        _ => latest["attempt_ref"].as_str(),
+    }
+    .ok_or_else(|| format!("attempt reference missing: {response}"))?;
     let (_, attempt) = reference.split_once('/').ok_or("attempt reference")?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -3776,13 +3783,16 @@ fn opencode_stderr_live_quota() -> Result {
             "PATH".into(),
             format!("{}:/usr/bin:/bin", bin.display()).into(),
         ));
-        let lane = run_graph_provider(
+        // As in opencode_usage_limit_stops_hanging_provider, the wait only
+        // has to outlast settlement; the stop reason is the real bound.
+        let lane = run_graph_provider_with_wait(
             &rig,
             "stderr-quota",
             json!({
                 "id":"provider", "prompt":prompt_text, "access":"read_only",
                 "route":{"adapter":"opencode","model":"opencode/opencode/glm-5.3-flash-free"}
             }),
+            "60s",
         )?;
         assert_eq!(lane["state"], expected, "{prompt_text}: {lane}");
         if expected == "succeeded" {
@@ -3811,14 +3821,23 @@ fn opencode_stderr_live_quota() -> Result {
     Ok(())
 }
 
-/// Medium: real confined writer shells for both primary adapters. The files
-/// are tracked before launch so quarantine/protected-root regressions cannot
-/// hide behind a newly created, unprotected instruction filename.
-fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
+fn codex_writer_shell_edits_instructions_and_redacts_logs() -> Result {
+    writer_shell_edits_instructions_and_redacts_logs("codex")
+}
+
+fn claude_writer_shell_edits_instructions_and_redacts_logs() -> Result {
+    writer_shell_edits_instructions_and_redacts_logs("claude")
+}
+
+/// Medium: a real confined writer shell for one primary adapter; each adapter
+/// is its own case so a writer launch fits one test's budget. The files are
+/// tracked before launch so quarantine/protected-root regressions cannot hide
+/// behind a newly created, unprotected instruction filename.
+fn writer_shell_edits_instructions_and_redacts_logs(adapter: &str) -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    for adapter in ["codex", "claude"] {
+    {
         let rig = if adapter == "claude" {
             claude_fixture()?
         } else {
@@ -4434,8 +4453,12 @@ fn main() -> ExitCode {
                 simultaneous_first_launches_pass_cutover_guard,
             ),
             (
-                "writer_shell_edits_instructions_and_redacts_logs",
-                writer_shell_edits_instructions_and_redacts_logs,
+                "codex_writer_shell_edits_instructions_and_redacts_logs",
+                codex_writer_shell_edits_instructions_and_redacts_logs,
+            ),
+            (
+                "claude_writer_shell_edits_instructions_and_redacts_logs",
+                claude_writer_shell_edits_instructions_and_redacts_logs,
             ),
             (
                 "graph_preparation_refusal_retains_non_adapter_cause",
