@@ -284,13 +284,18 @@ mod tests {
         let old_id = history.attempt_id.to_string();
         let record = String::from_utf8(serde_json::to_vec(&history)?)?;
         let event_record = String::from_utf8(serde_json::to_vec(&event)?)?;
+        let operation_record: Vec<u8> = store.db.query_row(
+            "SELECT operation_record FROM attempts WHERE id=?1",
+            [history.attempt_id.to_string()],
+            |row| row.get(0),
+        )?;
         store.write(&call, |tx| {
             tx.execute(
                 "WITH RECURSIVE history(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM history WHERE n<100999) \
-                 INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) \
-                 SELECT printf('%032x',n),?1,?2,?3,n,?4,1, \
+                 INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,operation_record,revision,terminal,record) \
+                 SELECT printf('%032x',n),?2,'board-history','history',n,?7,?8,?9,?1,?3,n,?10,?4,1, \
                  CAST(json_set(replace(?5,?6,printf('%032x',n)),'$.attempt_number',n) AS BLOB) FROM history",
-                params![history.run_id.to_string(), history.project_id.to_string(), history.task_id.to_string(), history.revision as i64, record, old_id],
+                params![history.run_id.to_string(), history.project_id.to_string(), history.task_id.to_string(), history.revision as i64, record, old_id, "fixture-digest", history.actor_id.to_string(), history.operation_id.as_str(), operation_record],
             )?;
             tx.execute(
                 "WITH RECURSIVE history(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM history WHERE n<100999) \
