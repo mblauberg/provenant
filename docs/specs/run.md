@@ -1203,6 +1203,8 @@ relative to that root. No run or node identifier appears in a path; the
 publication lock is the attempt's own. The files that belong to a whole
 submission (`request.json`, the settlement queue and locks) sit in the
 directory of its first attempt, until graph records replace the run level.
+Each admitted record persists its work key; reads reject a missing key or one
+that disagrees with the indexed project, graph, node or attempt number.
 The store opens from one schema file at one version and refuses any other
 version (`STATE_RESET_REQUIRED`, naming `install --reset-state`) without modifying it; it also
 refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,

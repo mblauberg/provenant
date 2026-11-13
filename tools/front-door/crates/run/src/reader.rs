@@ -851,6 +851,8 @@ impl RunStore {
             hook();
         }
         let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
+        let index_key = provenant_records::WorkKey::new(self.context.project_id, key.0, key.1, key.2)
+            .map_err(|_| RunError::Validation("attempt work key"))?;
         if record.attempt_id != id
             || record.project_id != self.context.project_id
             || record.run_id.to_string() != run_id
@@ -859,17 +861,10 @@ impl RunStore {
             || sql_int(record.revision)? != revision
             || matches!(record.state, AttemptState::Terminal { .. }) != terminal
             || record.operation_id.as_str() != operation
-            || record.key.as_ref().is_some_and(|stored| {
-                (stored.graph(), stored.node(), stored.attempt())
-                    != (key.0.as_str(), key.1.as_str(), key.2)
-            })
+            || record.key.as_ref() != Some(&index_key)
         {
             return Err(RunError::Validation("attempt index identity"));
         }
-        record.key = Some(
-            provenant_records::WorkKey::new(self.context.project_id, key.0, key.1, key.2)
-                .map_err(|_| RunError::Validation("attempt work key"))?,
-        );
         validate_attempt(&record)?;
         let receipt: Option<(i64, Vec<u8>)> = self
             .db

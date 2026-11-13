@@ -3431,6 +3431,13 @@ fn admission_requires_a_key_and_records_it() -> TestResult {
     store.create(&keyed, &call)?;
     let record = store.record(keyed.attempts[0].attempt_id, &call)?;
     let key = record.key.clone().ok_or("admitted attempt has no key")?;
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [record.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let persisted = crate::db::decode_attempt(&raw)?;
+    assert_eq!(persisted.key.as_ref(), Some(&key));
     // A restarted host finds the same attempt by its key alone.
     drop(store);
     let restarted = RunStore::open(&context, &call)?;
