@@ -738,10 +738,9 @@ mod tests {
             &read,
             &mut |_, revalidate| {
                 asked.borrow_mut().push(revalidate);
-                Ok(vec![check(
-                    "build",
-                    if revalidate { "fail" } else { "pass" },
-                )])
+                let mut observed = check("build", if revalidate { "fail" } else { "pass" });
+                observed.head = oid.to_string();
+                Ok(vec![observed])
             },
             clock + Duration::from_secs(600),
             &|| clock,
@@ -798,7 +797,9 @@ mod tests {
             &read,
             &mut |_, _| {
                 calls.set(calls.get() + 1);
-                Ok(vec![check("build", "pending")])
+                let mut observed = check("build", "pending");
+                observed.head = oid.to_string();
+                Ok(vec![observed])
             },
             deadline,
             &|| clock.get(),
