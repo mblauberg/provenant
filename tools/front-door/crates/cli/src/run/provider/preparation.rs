@@ -3324,7 +3324,7 @@ pub(super) fn prepare_candidates(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
-        if sandbox.sandboxed {
+        if sandbox.effective {
             set_cargo_profile(&mut spec.env, &build_settings);
         }
         spec.env.extend(
@@ -3333,7 +3333,7 @@ pub(super) fn prepare_candidates(
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
-        if sandbox.sandboxed {
+        if sandbox.effective {
             set_cargo_jobs(
                 &mut spec.env,
                 registry
@@ -3354,7 +3354,7 @@ pub(super) fn prepare_candidates(
         }
         if let Some(gh) = publishing_gh
             .as_ref()
-            .filter(|_| sandbox.sandboxed && github_auth_permitted(&plan, &spec.profile.spec))
+            .filter(|_| sandbox.effective && github_auth_permitted(&plan, &spec.profile.spec))
         {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
@@ -3429,7 +3429,7 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
-        if !sandbox.sandboxed
+        if !sandbox.effective
             && let Some((environment, fallback)) = adapter_spec
                 .filter(|spec| {
                     spec.model_observation == provenant_records::ModelObservation::Rollout
@@ -3604,7 +3604,7 @@ pub(super) fn prepare_candidates(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        let reader_gh = sandbox.sandboxed
+        let reader_gh = sandbox.effective
             && github_auth_permitted(&plan, &spec.profile.spec)
             && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
         if let Some(gh) = publishing_gh
@@ -3626,7 +3626,7 @@ pub(super) fn prepare_candidates(
         }
         if adapter_spec.is_some_and(|spec| {
             spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
-        }) && (!sandbox.sandboxed || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
+        }) && (!sandbox.effective || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
         {
             super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
         }
@@ -3646,7 +3646,7 @@ pub(super) fn prepare_candidates(
                 }
             }
         }
-        let sandboxed = sandbox.sandboxed;
+        let sandboxed = sandbox.effective;
         apply_sandbox_mode(sandbox, &mut spec.env, &mut provider);
         return Ok(run::PreparedLaunch {
             limits,
