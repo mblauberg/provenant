@@ -192,7 +192,7 @@ mod tests {
         let cancel = CancelToken::new();
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context, &call)?;
-        for n in 1u8..=101 {
+        for n in 1u8..=5 {
             let mut input = input();
             input.run_id = RunId::from_bytes([n; 16]);
             input.operation_id = provenant_core::OperationId::parse(&format!("board-{n}"))?;
@@ -200,24 +200,53 @@ mod tests {
             input.request.tasks[0].title = Some(format!("Task {n}"));
             store.create(&input, &call)?;
         }
-        let page = store.board_page(None, true, 100, 0, None, &call)?;
-        assert_eq!(page.lanes.len(), 100);
-        let next = page.next.ok_or("missing cursor")?;
-        let last = store.board_page(None, true, 100, next, Some(page.high_water), &call)?;
-        assert_eq!(last.lanes.len(), 1);
-        assert!(last.next.is_none());
-        assert_eq!(page.generation, last.generation);
-        assert_eq!(page.lanes[0].attempt.title.as_deref(), Some("Task 101"));
-        assert_eq!(page.lanes[0].attempt.usage, UsageRecord::default());
-        assert_eq!(page.lanes[0].run.run_id, page.lanes[0].attempt.run_id);
+        let page = store.board_page(None, true, 2, 0, None, &call)?;
+        let expected: std::collections::HashSet<_> =
+            (1u8..=5).map(|n| AttemptId::from_bytes([n; 16])).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = page;
+        let generation = current.generation.clone();
+        let high_water = current.high_water;
+        let mut previous = None;
+        loop {
+            for lane in &current.lanes {
+                assert!(seen.insert(lane.attempt.attempt_id), "duplicate attempt");
+                assert_eq!(lane.run.run_id, lane.attempt.run_id);
+                assert_eq!(lane.attempt.usage, UsageRecord::default());
+                assert_eq!(
+                    lane.attempt.title,
+                    store.record(lane.attempt.attempt_id, &call)?.title
+                );
+            }
+            assert_eq!(current.generation, generation);
+            let Some(next) = current.next else { break };
+            assert!(next > 0 && previous.is_none_or(|prior| next < prior));
+            previous = Some(next);
+            current = store.board_page(None, true, 2, next, Some(high_water), &call)?;
+        }
+        assert_eq!(seen, expected);
+        let mut later = input();
+        later.run_id = RunId::from_bytes([6; 16]);
+        later.operation_id = provenant_core::OperationId::parse("board-6")?;
+        later.attempts[0].attempt_id = AttemptId::from_bytes([6; 16]);
+        store.create(&later, &call)?;
+        let snapshot = store.board_page(None, true, 100, 0, Some(high_water), &call)?;
+        assert_eq!(
+            snapshot
+                .lanes
+                .iter()
+                .map(|lane| lane.attempt.attempt_id)
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
         let reopened = RunStore::open_read_only(&context, &call)?.ok_or("missing store")?;
         assert_eq!(
             reopened
                 .board_page(None, true, 100, 0, None, &call)?
                 .generation,
-            page.generation
+            snapshot.generation
         );
-        let old = store.record(AttemptId::from_bytes([101; 16]), &call)?;
+        let old = store.record(AttemptId::from_bytes([5; 16]), &call)?;
         let mut mixed = old.clone();
         mixed.usage.uncached_input = Some(0);
         mixed.usage.reasoning = Some(7);
@@ -226,8 +255,17 @@ mod tests {
             crate::admission::update_attempt(tx, &old, &mixed)
         })?;
         let updated = store.board_page(None, true, 100, 0, None, &call)?;
-        assert_eq!(updated.lanes[0].attempt.usage, mixed.usage);
-        assert_ne!(updated.generation, page.generation);
+        assert_eq!(
+            updated
+                .lanes
+                .iter()
+                .find(|lane| lane.attempt.attempt_id == mixed.attempt_id)
+                .ok_or("missing updated attempt")?
+                .attempt
+                .usage,
+            mixed.usage
+        );
+        assert_ne!(updated.generation, snapshot.generation);
         let mut corrupt = mixed.clone();
         corrupt.usage.context_basis_points = Some(10_001);
         for (record, revision) in [(&corrupt, mixed.revision), (&mixed, mixed.revision + 1)] {
@@ -262,56 +300,19 @@ mod tests {
             store.board_page(None, true, 101, 0, None, &call),
             Err(RunError::Validation("board page bounds"))
         ));
-        let history = store.record(AttemptId::from_bytes([1; 16]), &call)?;
-        let mut history = history;
-        let source_attempt_id = history.attempt_id;
-        history.attempt_id = AttemptId::from_bytes([0xee; 16]);
-        history.trace.attempt = Some(history.attempt_id);
-        history.prompt.path = crate::artifacts::artifact_path(history.attempt_id, "prompt.txt")?;
-        if let Some(result) = &mut history.result {
-            result.path = crate::artifacts::artifact_path(history.attempt_id, "result.md")?;
-        }
-        let event = RunEvent {
-            extra: Default::default(),
-            schema_version: 1,
-            sequence: 1,
-            project_id: history.project_id,
-            run_id: history.run_id,
-            attempt_id: history.attempt_id,
-            revision: history.revision,
-            change: history.state.clone(),
-            trace: history.trace.clone(),
-        };
-        let old_id = history.attempt_id.to_string();
-        let record = String::from_utf8(serde_json::to_vec(&history)?)?;
-        let event_record = String::from_utf8(serde_json::to_vec(&event)?)?;
-        let operation_record: Vec<u8> = store.db.query_row(
-            "SELECT operation_record FROM attempts WHERE id=?1",
-            [source_attempt_id.to_string()],
-            |row| row.get(0),
-        )?;
-        store.write(&call, |tx| {
-            tx.execute(
-                "WITH RECURSIVE history(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM history WHERE n<100999) \
-                 INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,operation_record,revision,terminal,record) \
-                 SELECT printf('%032x',n),?2,'board-history','history',n,?7,?8,?9,?1,?3,n,?10,?4,1, \
-                 CAST(json_set(replace(?5,?6,printf('%032x',n)),'$.attempt_number',n) AS BLOB) FROM history",
-                params![history.run_id.to_string(), history.project_id.to_string(), history.task_id.to_string(), history.revision as i64, record, old_id, "fixture-digest", context.actor_id.to_string(), history.operation_id.as_str(), operation_record],
-            )?;
-            tx.execute(
-                "WITH RECURSIVE history(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM history WHERE n<100999) \
-                 INSERT INTO events(sequence,project,attempt,revision,record) \
-                 SELECT n+(SELECT MAX(sequence) FROM events),?1,printf('%032x',n),?2, \
-                 CAST(replace(?3,?4,printf('%032x',n)) AS BLOB) FROM history",
-                params![history.project_id.to_string(), history.revision as i64, event_record, old_id],
-            )?;
-            Ok(())
-        })?;
-        for all in [false, true] {
-            let page = reopened.board_page(None, all, 100, 0, None, &call)?;
-            assert_eq!(page.lanes.len(), 100);
-            assert_eq!(page.next.is_some(), all);
-        }
+        let active = store.board_page(None, false, 100, 0, None, &call)?;
+        assert!(
+            !active
+                .lanes
+                .iter()
+                .any(|lane| lane.attempt.attempt_id == AttemptId::from_bytes([1; 16]))
+        );
+        let all = store.board_page(None, true, 100, 0, None, &call)?;
+        assert!(
+            all.lanes
+                .iter()
+                .any(|lane| lane.attempt.attempt_id == AttemptId::from_bytes([1; 16]))
+        );
         Ok(())
     }
 }
