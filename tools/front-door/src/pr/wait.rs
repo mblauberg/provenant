@@ -455,6 +455,7 @@ fn checks_with(
     };
     let mut progress = 0;
     let mut pending = 0_u64;
+    let head = expected.to_string();
     let pacing = Backoff::new(
         Duration::from_secs(poll),
         2,
@@ -471,7 +472,7 @@ fn checks_with(
             let checks = ci(expected, revalidated)?;
             let mergeable = check_head()?;
             let state = observe(
-                expected.as_str(),
+                &head,
                 &checks,
                 &policy.checks,
                 jiff::Timestamp::now(),
