@@ -204,7 +204,8 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     .or(node.skip_reason.as_deref()),
             ));
         }
-        for (attempt, number) in node.recorded_attempts().zip(1u32..) {
+        for attempt in node.recorded_attempts() {
+            let number = attempt.key.attempt;
             let Some(reference) = &attempt.attempt_ref else {
                 continue;
             };
@@ -2167,7 +2168,11 @@ mod tests {
 
     #[test]
     fn unified_status_uses_one_row_contract_and_selects_attempts() {
-        let run = graph_snapshot(checkpoint("g"));
+        // A projection may omit earlier rows; each displayed handle must still
+        // resolve to the WorkKey and reference that produced it.
+        let mut projected = checkpoint("g");
+        projected.nodes[0].attempts[0].key.attempt = 7;
+        let run = graph_snapshot(projected);
         let graph = GraphTarget {
             graph: "g".into(),
             node: None,
@@ -2181,6 +2186,19 @@ mod tests {
         );
         assert_eq!(rows[0]["kind"], "graph");
         assert_eq!(rows[1]["id"], "g/parent");
+        for row in rows.iter().filter(|row| row["kind"] == "attempt") {
+            let target = provenant_cli::Target::parse(row["id"].as_str().unwrap()).unwrap();
+            let resolved =
+                provenant_cli::target::resolve(&target, Want::Attempt { settled: false }, |_| {
+                    Ok::<_, std::convert::Infallible>(Some(run.checkpoint.clone()))
+                })
+                .unwrap();
+            assert_eq!(resolved.attempt_ref.as_deref(), row["attempt_id"].as_str());
+            assert_eq!(
+                resolved.number.map(|number| number.get()),
+                Some(run.checkpoint.nodes[0].attempts[0].key.attempt)
+            );
+        }
         let attempt = GraphTarget {
             graph: "g".into(),
             node: Some("parent".into()),
@@ -2196,6 +2214,7 @@ mod tests {
         let mut checkpoint = checkpoint("g");
         let old = checkpoint.nodes[0].attempts[0].clone();
         let mut latest = old.clone();
+        latest.key.attempt += 1;
         latest.attempt_ref = None;
         checkpoint.nodes[0].attempts.push(latest);
         let rows = status_rows(&graph_snapshot(checkpoint), &graph);
