@@ -1708,7 +1708,9 @@ cause its outcome names. It applies the table as follows.
   the stopped route's reset only when `routing.depletion_wait_seconds` is set
   and the reset falls inside it; when no rung yields a route, the stop goes to
   the chair. A host that keeps no routing facts restarts on the node's
-  declared routes instead.
+  declared routes instead, as does a facts read error. Ladder availability
+  observations are used for at most one hour. The ladder preserves a pinned
+  account and does not raise the tier. A chair-bound stop is fenced once.
 - A restart patches the node in place: the worktree and its edits stay, prior
   attempts are archived, and the patch record names the node, the cause and the
   step. The stop is saved in one checkpoint with its restart or its chair pause,
@@ -1718,12 +1720,14 @@ cause its outcome names. It applies the table as follows.
   and, after a provider stop, the node's sealed settlement retry allowance. A
   declared writer stop then pauses the graph with the reason; any other stop
   leaves the node failed for the chair.
-- A reader's fallback across its declared routes, and any fallback after a
-  refusal before launch, stays in the next-attempt decision, which reads the
-  same table. The stop decision acts only after a launched attempt.
+- A refusal before launch follows the preparation fallback decision. A launched
+  stop, including a reader stop, follows the graph stop decision.
+
+A junior writer that reports unfinished work continues at the senior tier.
 
 So by default a writer that stops early, reaches its context threshold or loses
-its lane token restarts fresh on another route; a transient failure retries
+its lane token restarts fresh on another route (or its own route for a
+single-route context handoff or lost lane token); a transient failure retries
 once on its route, then moves; a depleted route hands over at once; everything
 else returns to the chair.
 

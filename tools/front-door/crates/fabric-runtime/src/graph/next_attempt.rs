@@ -300,10 +300,10 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
 /// Launching the next route additionally requires live preparation evidence.
 pub(crate) fn fallback_candidate(
     outcome: AttemptOutcome,
-    access: AccessMode,
+    _access: AccessMode,
     launched: bool,
 ) -> bool {
-    (!launched || access == AccessMode::ReadOnly)
+    !launched
         && fallback_cause(outcome)
             .is_some_and(|cause| cause.default_next() == provenant_records::NextStep::NewRoute)
 }
@@ -745,118 +745,6 @@ pub(super) fn fail_node(
     }
     if message.is_some() {
         progress.advance_error = message;
-    }
-}
-
-/// Settlement fallback decision outcome.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SettlementFallback {
-    Continue,
-    Fail {
-        code: Option<String>,
-        message: Option<String>,
-    },
-}
-
-/// Settle an attempt outcome, evaluating whether fallback should fire or node should fail.
-pub(super) struct FallbackEvidence<'a> {
-    pub preparation: Option<PreparationFallbackEvidence>,
-    pub unreadable: bool,
-    pub review_limit_reached: bool,
-    pub cause: Option<&'a provenant_records::RouteExclusionReason>,
-    pub skipped_accounts: &'a [provenant_records::SkippedAccount],
-}
-
-pub(super) fn settlement_fallback_decision(
-    node: &PlannedNode,
-    route_index: usize,
-    outcome: AttemptOutcome,
-    launched: bool,
-    evidence: FallbackEvidence<'_>,
-) -> SettlementFallback {
-    let FallbackEvidence {
-        preparation: fallback_evidence,
-        unreadable: evidence_unreadable,
-        review_limit_reached,
-        cause: fallback_cause,
-        skipped_accounts,
-    } = evidence;
-    let route = node.routes.get(route_index);
-
-    if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-        || route_index + 1 == node.routes.len()
-        || review_limit_reached
-    {
-        let (mut advance_error_code, mut advance_error) = match outcome {
-            AttemptOutcome::PreparationRefused(cause) => (
-                Some("preparation_refused".into()),
-                Some(bounded(cause.detail(), MAX_ADVANCE_ERROR_BYTES)),
-            ),
-            AttemptOutcome::AuthRequired => (
-                Some("auth_required".into()),
-                Some("The lane requires authentication.".into()),
-            ),
-            AttemptOutcome::AdapterUnavailable => (
-                Some("adapter_unavailable".into()),
-                Some("The lane's adapter is unavailable.".into()),
-            ),
-            _ => (None, None),
-        };
-        if outcome == AttemptOutcome::UsageLimited {
-            advance_error_code = Some("usage_limited".into());
-            let pool = route
-                .and_then(|r| r.alias.as_deref())
-                .map_or_else(String::new, |alias| format!(" for pool {alias}"));
-            // A refusal before launch names each account it passed over: a
-            // stale failure or a login is not a spent allowance.
-            advance_error = Some(bounded(
-                &if !launched && !skipped_accounts.is_empty() {
-                    format!(
-                        "No account could take the route{pool}: {}; repair or refresh an account (`provenant quota tick`) or choose an eligible route.",
-                        provenant_records::SkippedAccount::describe(skipped_accounts)
-                    )
-                } else {
-                    format!(
-                        "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
-                    )
-                },
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
-        }
-        if route_index + 1 == node.routes.len()
-            && launched
-            && node.access == AccessMode::ReadOnly
-            && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
-        {
-            advance_error_code = Some("fallback_route_pinned".into());
-            advance_error = Some("The selected route is pinned and has no fallback.".into());
-        }
-        if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-            && route_index + 1 < node.routes.len()
-        {
-            let (code, message) = fallback_denial(
-                launched,
-                node.access,
-                evidence_unreadable,
-                outcome,
-                fallback_cause,
-            );
-            advance_error_code = Some(code.into());
-            advance_error = Some(message);
-        }
-        if review_limit_reached
-            && route_index + 1 < node.routes.len()
-            && live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
-        {
-            advance_error_code = Some("review_substitution_limit".into());
-            advance_error = Some("review substitution limit reached".into());
-        }
-        SettlementFallback::Fail {
-            code: advance_error_code,
-            message: advance_error,
-        }
-    } else {
-        SettlementFallback::Continue
     }
 }
 

@@ -72,13 +72,8 @@ impl FallbackPolicy {
                 | FallbackOutcome::UsageLimited
                 | FallbackOutcome::ModelUnavailable
                 | FallbackOutcome::AdapterUnavailable
-        ) && ((self.handoff == FallbackHandoff::Local && self.custody_released)
-            || (self.handoff == FallbackHandoff::Launched
-                && self.read_only
-                && matches!(
-                    self.outcome,
-                    FallbackOutcome::AuthRequired | FallbackOutcome::UsageLimited
-                )))
+        ) && self.handoff == FallbackHandoff::Local
+            && self.custody_released
             && self.budget_remaining
             && !self.pinned
     }
@@ -191,7 +186,7 @@ mod tests {
                 custody_released: false,
                 ..base
             };
-            assert!(launched_reader.allows_switch());
+            assert!(!launched_reader.allows_switch());
             assert!(
                 !FallbackPolicy {
                     read_only: false,

@@ -2796,7 +2796,7 @@ fn stable_roll(operation_id: &str, task_index: u64, pool: &str, total: u64) -> u
 /// checks as a dispatch, with that one account as the only choice, so exhausted,
 /// unauthenticated, stale or unobserved accounts are not ready. A pair the
 /// dispatch checks would refuse outright, such as an unsupported launch, has no
-/// fact and so is unknown.
+/// fact and so is unknown. Availability older than one hour is unknown here.
 pub fn depletion_facts(
     context: &RoutingContext<'_>,
     intent: RouteIntent,
@@ -2815,11 +2815,11 @@ pub fn depletion_facts(
     let now = context.now_seconds();
     let mut facts = Vec::new();
     for model in &models {
-        for record in context
-            .availability
-            .iter()
-            .filter(|record| record.adapter == model.adapter())
-        {
+        for record in context.availability.iter().filter(|record| {
+            record.adapter == model.adapter()
+                && record.observed_unix_seconds <= now
+                && now.saturating_sub(record.observed_unix_seconds) <= 3600
+        }) {
             let one = std::slice::from_ref(record);
             let scoped = ValidatedContext(RoutingContext {
                 availability: one,

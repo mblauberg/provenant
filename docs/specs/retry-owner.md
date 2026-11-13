@@ -43,3 +43,6 @@ reopens selected consumers without restarting unrelated work.
 Test: none (gap) for atomic terminal publication across all owners, and for
 every real-provider custody failure. Those requirements
 remain review gates; unit recovery evidence does not prove native enforcement.
+
+A launched stop follows the graph stop rule. Preparation fallback only switches
+with evidence that custody was released before launch.

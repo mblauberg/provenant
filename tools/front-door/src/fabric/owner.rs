@@ -1833,6 +1833,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 account: route.account_label,
                 name: None,
                 alias: None,
+                tier: None,
             }))
     }
 

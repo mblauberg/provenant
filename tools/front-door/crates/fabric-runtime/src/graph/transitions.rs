@@ -90,6 +90,7 @@ pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<Gra
             &mut route.alias,
             &mut route.effort,
             &mut route.account,
+            &mut route.tier,
         ] {
             clean(value);
         }
@@ -568,7 +569,7 @@ pub(super) fn apply_attempt_observation(
                                 .filter(|attempt| attempt.review_substitution)
                                 .count()
                                 >= limits.review_substitutions;
-                        match settlement_fallback_decision(
+                        match next_step::settlement_fallback_decision(
                             node,
                             route_index,
                             outcome,
@@ -673,7 +674,15 @@ pub(super) fn initial_checkpoint(
             .nodes
             .iter()
             .map(|node| NodeProgress {
-                extra: Default::default(),
+                extra: node
+                    .extra
+                    .get("removed_requirements")
+                    .map(|value| {
+                        [("removed_requirements".into(), value.clone())]
+                            .into_iter()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 children: node.composite_members.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_binding: node.source.clone(),

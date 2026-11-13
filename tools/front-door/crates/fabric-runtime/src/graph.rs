@@ -62,6 +62,8 @@ mod admission_tests;
 #[cfg(test)]
 mod ask_link_tests;
 #[cfg(test)]
+mod cutover_g_tests;
+#[cfg(test)]
 mod next_step_tests;
 #[cfg(test)]
 mod typed_records_tests;
@@ -86,6 +88,7 @@ pub fn is_review_node(node: &GraphNode) -> bool {
 }
 
 pub(crate) use next_attempt::*;
+use next_step::{FallbackEvidence, SettlementFallback, settlement_fallback_decision};
 pub use observation::*;
 use outputs::*;
 use transitions::{apply_gate_result, dependency_state};
@@ -1196,6 +1199,7 @@ pub fn settle_cancelled_nodes<R: AttemptOwner, J: GraphJournal>(
     if mark_cancelled_nodes_without_live_attempts(checkpoint) {
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
+    close_resolved_asks(checkpoint, owner, journal)?;
     let mut first_error = None;
     for index in 0..checkpoint.nodes.len() {
         let node = &checkpoint.nodes[index];
@@ -2815,7 +2819,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         prior_attempts: &prior_attempts,
                         family_peers: &family_peers,
                         context: provenant_records::run::WorkContext {
-                            tier: route.alias.clone(),
+                            tier: route.tier.clone().or_else(|| route.alias.clone()),
                             // The work key's attempt: one-based launch order
                             // within the node, never reused.
                             attempt: u32::try_from(
