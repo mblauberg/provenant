@@ -11,7 +11,6 @@ mod edit;
 mod gc;
 mod github_policy;
 mod history;
-mod migrate;
 mod schema;
 pub use gc::{
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
@@ -58,7 +57,6 @@ pub use knobs::{KnobEdit, KnobSource, KnobValue};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
-pub use migrate::{MigrateReport, Migration, migrate};
 pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
@@ -94,7 +92,7 @@ pub enum ConfigError {
     InvalidUtf8 { path: PathBuf },
     #[error("invalid TOML at {location}")]
     Syntax { location: Location },
-    #[error("{rule} at {location}; next: delete the line or run `provenant config migrate`")]
+    #[error("{rule} at {location}; next: run `provenant config check` and edit the reported key")]
     Schema {
         location: Location,
         rule: &'static str,
@@ -105,7 +103,9 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}{rejected}{}; next: provenant config check", retired_repair(.source))]
+    #[error(
+        "invalid domain configuration at {location}: {source}{rejected}; next: provenant config check"
+    )]
     Domain {
         location: Location,
         #[source]
@@ -281,18 +281,5 @@ pub use release::{Release, package_release};
 pub const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 pub use managed::HookRegistration;
-
-/// The repair a retired key calls for, appended to the refusal.
-fn retired_repair(source: &SectionError) -> &'static str {
-    if is_retired_key_code(source.code) {
-        "; repair: run `provenant config migrate`"
-    } else {
-        ""
-    }
-}
-
-pub(crate) fn is_retired_key_code(code: &str) -> bool {
-    code.starts_with("moved_to_schedule.") || code.starts_with("retired.")
-}
 
 pub use knobs::documented_field;

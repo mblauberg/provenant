@@ -61,9 +61,9 @@ To cut over to 2.0.0 with no session or lane active:
 ### Test a candidate binary
 
 Run an uninstalled candidate only with its own `--state-dir`, with
-`PROVENANT_ROOT` set to its checkout. A newer run schema migrates the real store
-and breaks installed binaries. `install --source DIR --upgrade-preflight` is
-read-only and safe on real state.
+`PROVENANT_ROOT` set to its checkout. A candidate can change persisted state;
+never point it at the state of an installed binary. `install --source DIR --upgrade-preflight`
+is read-only and safe on real state.
 
 ## Build a staged release
 

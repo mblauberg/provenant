@@ -72,8 +72,9 @@ RFC 3339, `tz`, hour `windows`). `model_suffix` matches the end of a native ID.
 its sources. Malformed rules are dropped with a warning, or refuse configuration
 when they carry an enforced restriction (`read_only`, `max_context`,
 `max_turns`). Retired timing keys (`starts_unix_seconds`, `expires_unix_seconds`,
-top-level `windows`) block every configuration write until
-`provenant config migrate` rewrites them.
+top-level `windows`) block configuration writes. `provenant config check`
+identifies them; move the reported timing values under
+`[domains.routing.schedule]` or delete them before the next configuration write.
 
 `max_context`, `max_turns` and cache keys are guidance, not kills.
 A graph node's `on_stop` and the graph-wide `limits.continuations` (default 2)

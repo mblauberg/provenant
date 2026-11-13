@@ -1660,63 +1660,6 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
 }
 #[test]
-fn migrate_drops_rigorous_profile_and_refused_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-    let content = "schema_version = 1\nprofile = 'rigorous'\n[knobs]\n'review.polish' = 'always'\n'domains.routing.capacity_cooldown_seconds' = 30\n'confinement.census_host_list_complete' = true\n'lanes.max_concurrency' = 4\n";
-    std::fs::write(&path, content).unwrap();
-    assert!(read(&roots).is_err());
-
-    let report = crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
-    assert_eq!(report.migrations.len(), 2);
-    let profile_m = report
-        .migrations
-        .iter()
-        .find(|m| m.location == "profile")
-        .unwrap();
-    assert_eq!(profile_m.action, "dropped");
-    assert_eq!(profile_m.keys, vec!["rigorous"]);
-    let knobs_m = report
-        .migrations
-        .iter()
-        .find(|m| m.location == "knobs")
-        .unwrap();
-    assert_eq!(knobs_m.action, "dropped");
-    assert!(knobs_m.keys.contains(&"review.polish".to_owned()));
-    assert!(
-        knobs_m
-            .keys
-            .contains(&"domains.routing.capacity_cooldown_seconds".to_owned())
-    );
-    assert!(
-        knobs_m
-            .keys
-            .contains(&"confinement.census_host_list_complete".to_owned())
-    );
-
-    let loaded = read(&roots).unwrap();
-    assert_eq!(loaded.profile, Profile::Balanced);
-    assert_eq!(loaded.knobs["lanes.max_concurrency"].value, 4);
-    let after_text = std::fs::read_to_string(&path).unwrap();
-    assert!(!after_text.contains("rigorous"));
-    assert!(!after_text.contains("review.polish"));
-    assert!(after_text.contains("lanes.max_concurrency"));
-}
-#[test]
-fn migrate_preserves_unrecognised_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-    let original =
-        "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n'domains.routing.future' = 1\n";
-    std::fs::write(&path, original).unwrap();
-    crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
-    let text = std::fs::read_to_string(path).unwrap();
-    assert!(!text.contains("review.polish"));
-    assert!(text.contains("domains.routing.future"));
-}
-#[test]
 fn set_creates_a_missing_private_state_directory() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
@@ -1948,18 +1891,18 @@ fn registered_knobs_have_production_readers() {
 }
 
 #[test]
-fn misplaced_domain_knob_warns_with_the_migrate_repair() {
+fn misplaced_domain_knob_warns_with_manual_repair() {
     let config = load(
         &roots(),
         Some(&b"schema_version=1\n[knobs]\n'domains.routing.capacity_cooldown_seconds'=30"[..]),
     )
     .unwrap();
     assert_warning(&config, "unknown_key");
-    assert!(config.warnings[0].message.contains("config migrate"));
+    assert!(config.warnings[0].message.contains("move its timing value"));
 }
 
 #[test]
-fn unknown_domain_knob_warns_without_the_migrate_repair() {
+fn unknown_domain_knob_warns_without_retired_key_repair() {
     let config = load(
         &roots(),
         Some(&b"schema_version=1\n[knobs]\n'domains.routing.future'=1"[..]),

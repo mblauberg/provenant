@@ -34,9 +34,9 @@ versioned and tolerate extra fields.
 
 Interfaces change without compatibility shims, before and after 1.0: no legacy
 readers, aliases, fallback paths or dual formats. A breaking change ships with
-a release note, and with `provenant config migrate` or a drain before
-upgrade ([install](../runbooks/install.md#bootstrap-and-upgrade)) when
-persisted state changes.
+a release note and a clear operator step, such as draining active work or
+resetting incompatible persisted state before upgrade
+([install](../runbooks/install.md#bootstrap-and-upgrade)).
 
 Provider and launch guards outside the four boundaries warn and continue, or
 are configurable defaults with a visible source. They do not refuse a lane.

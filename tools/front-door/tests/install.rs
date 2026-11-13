@@ -7,6 +7,7 @@ use provenant_config::{Release, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{CommandResult, Outcome, SourceInput, VersionInfo, source_digest};
 
+use sha2::Digest as _;
 use std::{
     fs, io,
     os::unix::fs::PermissionsExt,
@@ -2934,24 +2935,25 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     let state = &rig.state;
     let dropped = [
         "run.sqlite3",
+        "run.sqlite3-wal",
+        "run.sqlite3-shm",
+        "run.sqlite3-journal",
         "runs/r1/attempts/a1/tmp/scratch",
         "fabric/fabric.sqlite3",
+        "fabric/fabric.sqlite3-wal",
+        "fabric/fabric.sqlite3-shm",
+        "fabric/fabric.sqlite3-journal",
         "fabric/graphs/p/g.json",
         "work-index.sqlite3",
         "pr-contributions.sqlite3",
     ];
     let kept = [
-        "usage/segment-0.jsonl",
-        "quota/history.json",
+        "usage-ledger/segment-0.jsonl",
+        "quota/history/work.claude.jsonl",
         "provider/history.jsonl",
-        "workflow/checkpoints/s.json",
-        "workflow/log.sqlite3",
+        "workflow/projects/p/sessions/s/checkpoint.md",
+        "workflow/projects/p/chair-logs/s/log.sqlite3",
     ];
-    for name in dropped.iter().chain(&kept) {
-        let path = state.join(name);
-        fs::create_dir_all(path.parent().ok_or("parent")?)?;
-        fs::write(&path, format!("format-1 {name}"))?;
-    }
     // A lane worktree with a commit the main checkout does not have.
     git(&rig, &rig.project, &["init", "-q", "-b", "main"])?;
     git(
@@ -2990,12 +2992,46 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
         args.extend(extra);
         rig.command(&args)
     };
+
+    // Create a real receipt, then turn it into the old format-1 receipt.
+    let installed = install(&[])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let receipt_path = state.join("install/receipt.json");
+    let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    receipt["state_format_version"] = 1.into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+    for name in dropped
+        .iter()
+        .chain(&kept)
+        .filter(|name| !name.starts_with("run.sqlite3"))
+    {
+        let path = state.join(name);
+        fs::create_dir_all(path.parent().ok_or("parent")?)?;
+        fs::write(&path, format!("format-1 {name}"))?;
+    }
+    // The old database has a dead queued row, with no attempt process or lock.
+    {
+        let database = rusqlite::Connection::open(state.join("run.sqlite3"))?;
+        database.execute_batch(
+            "CREATE TABLE attempts(state TEXT, started_at INTEGER);\
+             INSERT INTO attempts VALUES('queued', NULL);",
+        )?;
+    }
+    for name in ["run.sqlite3-wal", "run.sqlite3-shm", "run.sqlite3-journal"] {
+        fs::write(state.join(name), format!("format-1 {name}"))?;
+    }
     let before = snapshot(state)?;
 
     // No acknowledgement: one typed code, nothing changes.
     let blocked = install(&[])?;
     let value: serde_json::Value = serde_json::from_slice(&blocked.stdout.bytes)?;
     assert_eq!(value["error"]["code"], "STATE_FORMAT_BREAK", "{value}");
+    assert!(snapshot(state)? == before);
+
+    // The CLI does not accept the bootstrap script's --yes as an acknowledgement.
+    let yes = install(&["--yes"])?;
+    let value: serde_json::Value = serde_json::from_slice(&yes.stdout.bytes)?;
+    assert_eq!(value["error"]["code"], "INVALID", "{value}");
     assert!(snapshot(state)? == before);
 
     // A live lane blocks even an acknowledged reset.
@@ -3028,7 +3064,10 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
 
     let kept_before: Vec<_> = kept
         .iter()
-        .map(|name| fs::read(state.join(name)))
+        .map(|name| {
+            let bytes = fs::read(state.join(name))?;
+            Ok(sha2::Sha256::digest(bytes).to_vec())
+        })
         .collect::<io::Result<_>>()?;
     let done = install(&["--reset-state"])?;
     assert_eq!(code(&done), 0, "{done:?}");
@@ -3037,7 +3076,10 @@ fn format_one_state_is_reset_only_on_acknowledgement() -> Result {
     }
     let kept_after: Vec<_> = kept
         .iter()
-        .map(|name| fs::read(state.join(name)))
+        .map(|name| {
+            let bytes = fs::read(state.join(name))?;
+            Ok(sha2::Sha256::digest(bytes).to_vec())
+        })
         .collect::<io::Result<_>>()?;
     assert_eq!(kept_after, kept_before);
     assert!(lane.join(".git").exists());
