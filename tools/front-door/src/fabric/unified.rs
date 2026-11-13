@@ -797,6 +797,18 @@ pub(crate) enum GraphCommand<'a> {
     },
 }
 
+/// Read one graph target through the host relay. Inside a lane the host
+/// resolves the target (cli.md "Targets"), so the read needs neither host
+/// configuration nor state, which a confined lane cannot open.
+fn lane_graph_read(input: Value) -> Result<Value, FacadeError> {
+    provenant_cli::fabric::graph_relay::from_lane(
+        &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
+        &CancelToken::new(),
+        std::time::Duration::from_secs(55),
+    )
+    .map_err(super::interface::relay_error)
+}
+
 /// Read or control graph targets. Every target resolves before any is read
 /// or changed, so one unknown target changes nothing. Inside a lane the host
 /// resolves the target, and an empty list reads the lane's own graph.
@@ -812,17 +824,25 @@ pub(crate) fn unified_graph_command(
         GraphCommand::Retry { .. } => "retry",
     };
     let result = (|| -> Result<(Value, String), Box<dyn std::error::Error>> {
-        let factory = match command {
-            GraphCommand::Status => read_factory(globals, workers),
-            _ => factory(globals, workers),
-        }
-        .map_err(|error| match targets.first() {
-            Some(target) if missing_graph_context(error.as_ref()) => {
-                Box::new(target_fault(ResolveError::NotFound(target.to_string())))
-            }
-            _ => error,
-        })?;
-        if !factory.context.in_lane {
+        // A lane reads through the host, which holds the configuration.
+        let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
+        let factory = if lane_read {
+            None
+        } else {
+            Some(
+                match command {
+                    GraphCommand::Status => read_factory(globals, workers),
+                    _ => factory(globals, workers),
+                }
+                .map_err(|error| match targets.first() {
+                    Some(target) if missing_graph_context(error.as_ref()) => {
+                        Box::new(target_fault(ResolveError::NotFound(target.to_string())))
+                    }
+                    _ => error,
+                })?,
+            )
+        };
+        if let Some(factory) = factory.as_ref().filter(|factory| !factory.context.in_lane) {
             for target in targets {
                 resolve(
                     &factory.context.roots.state,
@@ -860,6 +880,13 @@ pub(crate) fn unified_graph_command(
                     }
                 }
             }
+            let Some(factory) = &factory else {
+                let data = lane_graph_read(input)?;
+                let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
+                human.push_str(&render_graph_status(rows));
+                documents.push(data);
+                continue;
+            };
             let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
             let mut data = factory.graph_document(input, budget, &cancel).map_err(|error| {
                 if matches!(command, GraphCommand::Retry { .. })
@@ -875,7 +902,7 @@ pub(crate) fn unified_graph_command(
             if let (Some(rows), Some(graph)) = (data["rows"].as_array_mut(), graph)
                 && !factory.context.in_lane
             {
-                localise_worktree_actions(&factory, graph, rows);
+                localise_worktree_actions(factory, graph, rows);
             }
             let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
             human.push_str(&render_graph_status(rows));
@@ -1209,6 +1236,16 @@ pub(crate) fn unified_graph_trace(
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
+        let id = match &target.node {
+            Some(node) => format!("{}/{node}", target.name),
+            None => target.name.clone(),
+        };
+        // A lane reads through the host, which holds the configuration.
+        if provenant_cli::fabric::in_lane() {
+            let mut data = lane_graph_read(json!({"op":"trace", "id":id}))?;
+            add_cache_share(&mut data);
+            return Ok(data);
+        }
         let factory = read_factory(globals, workers)?;
         let attempt = if factory.context.in_lane {
             None
@@ -1221,10 +1258,6 @@ pub(crate) fn unified_graph_trace(
             )
             .map_err(target_fault)?
             .attempt_ref
-        };
-        let id = match &target.node {
-            Some(node) => format!("{}/{node}", target.name),
-            None => target.name.clone(),
         };
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         let mut data =
@@ -1754,10 +1787,15 @@ pub(crate) fn read_lane_graph(
             "events" => provenant_cli::Part::Events,
             "receipt" => provenant_cli::Part::Receipt,
             "transcript" => provenant_cli::Part::Transcript,
-            _ => return Err("invalid output part".into()),
+            _ => return Err(FacadeError::invalid(InvalidInputDetail::Field("part".into())).into()),
         };
+        // A malformed target is the caller's input, not a host I/O failure.
+        let target = input["id"]
+            .as_str()
+            .and_then(|id| id.parse().ok())
+            .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("id".into())))?;
         let command = provenant_cli::Output {
-            target: input["id"].as_str().ok_or("missing target")?.parse()?,
+            target,
             part,
             to: None,
             path: false,
