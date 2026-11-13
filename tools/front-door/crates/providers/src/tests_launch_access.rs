@@ -1438,12 +1438,19 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
             &|name| (name == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
         let native = adapter.prepare(input)?;
         for (key, value) in &host {
-            // These selectors bind the child to its provider and Fabric context.
+            // These selectors bind the child to its provider, Fabric context
+            // and private Cargo configuration/target with shared downloads.
             if key.to_str().is_some_and(|key| {
                 key.starts_with("PROVENANT_")
                     || matches!(
                         key,
                         "PATH"
+                            | "CARGO_HOME"
+                            | "RUSTUP_HOME"
+                            | "RUSTUP_AUTO_INSTALL"
+                            | "CARGO_TARGET_DIR"
+                            | "CARGO_BUILD_BUILD_DIR"
+                            | "CARGO_CACHE_AUTO_CLEAN_FREQUENCY"
                             | "CODEX_HOME"
                             | "CLAUDE_CONFIG_DIR"
                             | "CLAUDE_CODE_TMPDIR"
@@ -1461,6 +1468,9 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 "native adapter dropped a host environment binding"
             );
         }
+        let homes: Vec<_> = native.env.iter().filter(|(key, _)| key == "CARGO_HOME").collect();
+        assert_eq!(homes.len(), 1);
+        assert_eq!(homes[0].1, "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home");
         if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
             let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
             let child_paths: Vec<_> = std::env::split_paths(child_path).collect();

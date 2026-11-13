@@ -95,6 +95,8 @@
 (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
 (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
 (deny mach-lookup (require-all (global-name-prefix "com.apple.SecurityServer") (require-not (global-name "com.apple.SecurityServer"))))
+(allow file-read* (subpath "/fixture/home/Library/Caches/provenant-cargo-downloads"))
+(allow file-write* (subpath "/fixture/home/Library/Caches/provenant-cargo-downloads"))
 (allow file-read* (subpath "/fixture/scratch"))
 (allow file-write* (subpath "/fixture/scratch"))
 (allow file-read* (subpath "/fixture/provider-state"))
