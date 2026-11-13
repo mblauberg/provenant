@@ -62,3 +62,11 @@ pub enum AttemptObservation {
         stop: Option<provenant_records::StopCause>,
     },
 }
+
+/// An already-admitted continuation. Its WorkKey and reference are read from
+/// the same RunStore record; the graph never invents a successor identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptContinuation {
+    pub key: provenant_records::WorkKey,
+    pub attempt_ref: String,
+}

@@ -37,7 +37,7 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
         ("equal", Some(head.as_str()), &head),
         ("default-no-origin-head", None, &head),
     ] {
-        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0, "attempt": 1}))?;
         let observation = graph_owner.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
             context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
@@ -100,7 +100,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
         assert_eq!(child.launch.ok_or("missing child launch")?.node["read_roots"], serde_json::json!([root]));
         for write in [false, true] {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-                "graph_id":"child-roots", "node_id":format!("parent--{name}-{write}"), "route_index":0
+                "graph_id":"child-roots", "node_id":format!("parent--{name}-{write}"), "route_index":0, "attempt": 1
             }))?;
             let roots = vec![root.to_string_lossy().into_owned()];
             let attempt = graph::AttemptSpec { write_roots: if write { roots.clone() } else { Vec::new() }, ..Default::default() };
@@ -157,7 +157,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), B
     let pinned = owner.resolve_review_base("review-pin", Some(rig.project.to_str().ok_or("project")?))?.ok_or("base")?;
     assert_eq!(pinned, base);
     let actor = owner.actor();
-    let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"pinned-range","node_id":"review","route_index":0}))?;
+    let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"pinned-range","node_id":"review","route_index":0, "attempt": 1}))?;
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
     let source_roots = vec![rig.project.to_str().ok_or("source path")?.to_owned()];
     let write_root = rig.root.join("extra-write");
@@ -264,7 +264,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result
         integration_branch: Some("batch".into()), network: None, exclude: Vec::new(),
         budget, cancel: &cancel, prices: None, tick: false };
     let actor = owner.actor();
-    let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"batch", "node_id":"lane-outside", "route_index":0}))?;
+    let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"batch", "node_id":"lane-outside", "route_index":0, "attempt": 1}))?;
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
     let delivery = provenant_records::run::DeliveryMode::Integrate("batch".into());
     let error = owner.observe_or_start(&key, graph::NodeInput { review_launch: false,
@@ -423,7 +423,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     let checkpoint = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
             "id":"one","worktree":null,"state":"running","attempts":[{
-                "key":{"graph_id":"hint-test","node_id":"one","route_index":0},
+                "key":{"graph_id":"hint-test","node_id":"one","route_index":0, "attempt": 1},
                 "route":{"adapter":"fixture","model":"fixture/model"},"state":"starting",
                 "launched":true,"launch_actor":"fixture", "attempt_ref":format!("host/{}",record.attempt_id)
             }]

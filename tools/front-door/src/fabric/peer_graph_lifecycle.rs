@@ -442,10 +442,7 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let project = factory.context.identity.project;
-    for (id, contents) in [
-        ("broken", b"invalid json".as_slice()),
-        ("g-test", include_bytes!("fixtures/pre-node-asks-checkpoint.json").as_slice()),
-    ] {
+    for (id, contents) in [("broken", b"invalid json".as_slice())] {
         drop(FileJournal::open(
             &roots.state,
             project,
@@ -474,10 +471,6 @@ fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std:
         assert!(explanation.contains(id), "{explanation}");
         assert!(explanation.contains(&format!("provenant stop -- {id}")), "{explanation}");
         assert!(explanation.contains("Other graphs"), "{explanation}");
-        if id == "g-test" {
-            assert!(explanation.contains("predates node asks"), "{explanation}");
-            assert!(explanation.contains("previous release"), "{explanation}");
-        }
         assert!(!explanation.contains("invalid json"), "{explanation}");
         let retired = factory.graph(
             GraphInput::Cancel {
@@ -538,7 +531,7 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
     let actor = owner.actor();
     let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
     let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"renamed-alias", "node_id":"inspect", "route_index":0
+        "graph_id":"renamed-alias", "node_id":"inspect", "route_index":0, "attempt": 1
     }))?;
     let spec = graph::AttemptSpec { host: Some("old_alias".into()), ..Default::default() };
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
@@ -602,7 +595,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
     };
     let mut attempt: graph::GraphAttempt = serde_json::from_value(serde_json::json!({
         "launched":false,
-        "key":{"graph_id":"peer-without-receipt", "node_id":"inspect", "route_index":0},
+        "key":{"graph_id":"peer-without-receipt", "node_id":"inspect", "route_index":0, "attempt": 1},
         "route":{"alias":"junior"}, "state":"starting", "attempt_ref":null,
         "outcome":null, "launch_actor":owner.actor()
     }))?;

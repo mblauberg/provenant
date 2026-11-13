@@ -42,6 +42,8 @@ pub enum JournalError {
     InvalidGraphId,
     #[error("journal was opened for a different graph")]
     GraphMismatch,
+    #[error("graph name is reserved by a retained or incomplete generation")]
+    NameReserved,
     #[error("graph checkpoint exceeds its byte limit")]
     TooLarge,
     #[error("checkpoint is visible but directory durability is unconfirmed")]
@@ -58,13 +60,7 @@ pub enum JournalError {
     BadEnvelope,
     #[error("graph checkpoint digest does not match its contents")]
     BadDigest,
-    #[error(
-        "graph checkpoint predates node asks; finish or cancel it with the previous release, or cancel it here to retire the record"
-    )]
-    RetiredLoopCheckpoint,
-    #[error(
-        "graph checkpoint topology is incomplete or invalid; finish or cancel it with the previous release, or cancel it here to retire the record"
-    )]
+    #[error("graph checkpoint topology is incomplete or invalid")]
     InvalidTopology,
 }
 
@@ -77,7 +73,6 @@ impl JournalError {
                 | Self::BadEnvelope
                 | Self::BadDigest
                 | Self::Canonical(_)
-                | Self::RetiredLoopCheckpoint
                 | Self::InvalidTopology
         )
     }
@@ -87,6 +82,7 @@ impl JournalError {
         match self {
             Self::InvalidGraphId => "invalid_graph_id",
             Self::GraphMismatch => "graph_mismatch",
+            Self::NameReserved => "name_reserved",
             Self::TooLarge => "too_large",
             Self::DurabilityUnconfirmed(_) => "durability_unconfirmed",
             Self::Filesystem(_) => "filesystem",
@@ -95,21 +91,14 @@ impl JournalError {
             Self::Io(_) => "io",
             Self::BadEnvelope => "bad_envelope",
             Self::BadDigest => "bad_digest",
-            Self::RetiredLoopCheckpoint => "retired_loop_checkpoint",
             Self::InvalidTopology => "invalid_topology",
         }
     }
 }
 
 /// Guidance for an unreadable checkpoint, with any recovery its error allows.
-pub fn unreadable_graph_explanation(graph_id: &str, error: &JournalError) -> String {
-    let guidance = unreadable_graph_guidance(graph_id);
-    match error {
-        JournalError::RetiredLoopCheckpoint => format!(
-            "{guidance} This graph predates node asks: to finish it instead, use the previous release."
-        ),
-        _ => guidance,
-    }
+pub fn unreadable_graph_explanation(graph_id: &str, _error: &JournalError) -> String {
+    unreadable_graph_guidance(graph_id)
 }
 
 /// A tick notice already recorded in the dedicated unreadable marker.
@@ -278,6 +267,9 @@ impl FileJournal {
         if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
             return Err(JournalError::GraphMismatch);
         }
+        if self.execution.is_none() && self.has_retained_identity()? {
+            return Err(JournalError::NameReserved);
+        }
         if execution
             .document
             .review_base
@@ -330,6 +322,36 @@ impl FileJournal {
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /// Names that have identified a graph generation, including collected
+    /// checkpoints. Reservations are never released because retained attempt,
+    /// chair and event stores continue to identify the graph by this name.
+    pub fn reserved_graph_ids(
+        root: &StateRoot,
+        project: ProjectId,
+    ) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Self::graph_ids(root, project)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        ids.extend(Self::event_graph_ids(root, project)?);
+        for entry in directory.entries()? {
+            let name = entry?;
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("graph-"))
+                .and_then(|name| name.strip_suffix(".reserved"))
+                && valid_identifier(id)
+            {
+                ids.insert(id.to_owned());
+            }
+        }
+        Ok(ids.into_iter().collect())
     }
 
     /// Discover retained event logs, including graphs whose checkpoints were collected.
@@ -443,6 +465,7 @@ impl FileJournal {
                 continue;
             }
             collect_scratch_documents(&stored.execution)?;
+            journal.reserve_name()?;
             journal.directory.unlink(&name)?;
             prompt_store::collect(&journal.directory, &id)?;
             for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
@@ -793,6 +816,28 @@ impl FileJournal {
     pub(super) fn checkpoint_name(&self) -> OsString {
         format!("graph-{}.json", self.graph_id).into()
     }
+
+    fn reserve_name(&self) -> Result<(), JournalError> {
+        let name: OsString = format!("graph-{}.reserved", self.graph_id).into();
+        self.directory
+            .atomic_write(&name, ".graph-name.", b"reserved\n", PublishMode::Replace)?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)
+    }
+
+    fn has_retained_identity(&self) -> Result<bool, JournalError> {
+        for name in [
+            OsString::from(format!("graph-{}.reserved", self.graph_id)),
+            OsString::from(format!("{}.events.jsonl", self.graph_id)),
+        ] {
+            match self.directory.open_read(&name) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl GraphJournal for FileJournal {
@@ -836,6 +881,7 @@ impl GraphJournal for FileJournal {
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
             return Err(JournalError::TooLarge);
         }
+        self.reserve_name()?;
         let previous = load_checkpoint(&self.directory, &self.graph_id)?;
         events::append_changes(
             &self.directory,
@@ -1090,13 +1136,6 @@ fn decode_checkpoint_limited(
     max_bytes: u64,
 ) -> Result<StoredCheckpoint, JournalError> {
     let stored = decode_verified_checkpoint(bytes, graph_id, max_bytes.max(MAX_CHECKPOINT_BYTES))?;
-    if stored.checkpoint.nodes.iter().any(|node| {
-        ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
-            .iter()
-            .any(|field| node.extra.contains_key(*field))
-    }) {
-        return Err(JournalError::RetiredLoopCheckpoint);
-    }
     let limits = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,

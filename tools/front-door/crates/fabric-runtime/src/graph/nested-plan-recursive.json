@@ -167,7 +167,8 @@
           "key": {
             "graph_id": "planned",
             "node_id": "plan",
-            "route_index": 0
+            "route_index": 0,
+            "attempt": 1
           },
           "route": {
             "alias": "senior"
@@ -207,7 +208,8 @@
           "key": {
             "graph_id": "planned",
             "node_id": "plan--nested",
-            "route_index": 0
+            "route_index": 0,
+            "attempt": 1
           },
           "route": {
             "alias": "senior"
@@ -247,7 +249,8 @@
           "key": {
             "graph_id": "planned",
             "node_id": "plan--nested--inner",
-            "route_index": 0
+            "route_index": 0,
+            "attempt": 1
           },
           "route": {
             "alias": "senior"
@@ -287,7 +290,8 @@
           "key": {
             "graph_id": "planned",
             "node_id": "after",
-            "route_index": 0
+            "route_index": 0,
+            "attempt": 1
           },
           "route": {
             "alias": "senior"

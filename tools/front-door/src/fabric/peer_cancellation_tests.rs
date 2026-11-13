@@ -84,6 +84,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         graph_id: "origin-cancel".into(),
         node_id: "parent".into(),
         route_index: 0,
+        attempt: 1,
     };
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let receipt = submit_parent(&receiver_factory, operation.as_str(), &cancel)?;

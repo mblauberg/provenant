@@ -27,6 +27,18 @@ A value that can normalise two ways is rejected at the wire boundary.
 - Test: `crates/core/src/ids.rs::identifiers_are_validated_at_the_wire_boundary`
 - Owner: `crates/core/src/`
 
+### Graph names retain one identity
+
+A graph name identifies one graph generation for its project's lifetime.
+Checkpoint collection leaves a durable name reservation because retained
+attempt, chair and event records continue to refer to the graph by name. A
+collected name is not allocated to a later graph.
+- Why: reusing the name can collide with retained attempt keys or inherit a
+  stale chair association.
+- Test: `crates/fabric-runtime/src/graph/journal_tests.rs::checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names`
+- Owner: `crates/fabric-runtime/src/graph/journal.rs`,
+  `src/fabric/interface.rs`
+
 ## Records
 
 ### Commit before signal

@@ -587,6 +587,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
             graph_id: "g".into(),
             node_id: "n".into(),
             route_index: 0,
+            attempt: 1,
         },
         route: route("first"),
         state: AttemptState::Starting,

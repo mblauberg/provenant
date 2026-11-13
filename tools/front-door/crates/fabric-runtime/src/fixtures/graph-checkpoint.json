@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "digest": "sha256:9e6f6b7b7d78fee26418cb7ff5ef4e8e1149f7ba733514184259a680d8ecfa77",
+  "digest": "sha256:9e994e5d129d7cd5f80eb598cd748ac468015209ddb59bb08c5398d16ddc3ba6",
   "checkpoint": {
     "schema_version": 1,
     "graph_id": "g-test",
@@ -16,7 +16,8 @@
             "key": {
               "graph_id": "g-test",
               "node_id": "reader",
-              "route_index": 0
+              "route_index": 0,
+              "attempt": 1
             },
             "route": {
               "adapter": "fixture",

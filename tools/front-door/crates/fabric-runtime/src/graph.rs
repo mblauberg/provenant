@@ -321,6 +321,15 @@ pub trait CiStatus {
 pub trait AttemptOwner {
     type Error: Error + 'static;
 
+    /// Read the admitted successor of a terminal attempt, without replacing
+    /// the predecessor's identity or submitting another operation.
+    fn continuation(
+        &mut self,
+        _reference: &str,
+    ) -> Result<Option<AttemptContinuation>, Self::Error> {
+        Ok(None)
+    }
+
     /// Resolve the existing infrastructure allowance once, before admission.
     /// Hosts without routing policy retain the legacy explicit-route behavior.
     fn retry_allowance(
@@ -2835,10 +2844,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             tier: route.tier.clone().or_else(|| route.alias.clone()),
                             // The work key's attempt: one-based launch order
                             // within the node, never reused.
-                            attempt: u32::try_from(
-                                checkpoint.nodes[node_index].recorded_attempts().count(),
-                            )
-                            .ok(),
+                            attempt: Some(key.attempt),
                             ..node_context(&plan, node)
                         },
                         read_roots: &node.read_roots,
@@ -3010,6 +3016,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     None
                 };
+                if let AttemptObservation::Terminal {
+                    attempt_ref: Some(reference),
+                    ..
+                } = &observation
+                    && let Some(successor) =
+                        owner.continuation(reference).map_err(GraphError::Run)?
+                {
+                    transitions::continue_attempt(
+                        &mut checkpoint,
+                        node_index,
+                        observation,
+                        successor,
+                        usage,
+                    )
+                    .map_err(|invariant| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant,
+                    })?;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    continue;
+                }
                 let recorded_separation =
                     match (&observation, node.distinct_from, &node.family_group) {
                         (AttemptObservation::Terminal { attempt_ref, .. }, distinct, group)

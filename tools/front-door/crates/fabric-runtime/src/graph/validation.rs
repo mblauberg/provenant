@@ -1630,6 +1630,18 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         if node.condition.is_some() {
             continue;
         }
+        let mut previous_number = 0;
+        for attempt in progress.recorded_attempts() {
+            if attempt.key.graph_id != plan.graph_id
+                || attempt.key.node_id != node.id
+                || attempt.key.attempt <= previous_number
+            {
+                return Err(bad(
+                    "attempts must retain distinct WorkKey identities for this node",
+                ));
+            }
+            previous_number = attempt.key.attempt;
+        }
         for (index, attempt) in progress.attempts.iter().enumerate() {
             if document.schema_version >= 2 && attempt.input_manifest.is_none() {
                 return Err(bad("attempt must retain its input manifest"));

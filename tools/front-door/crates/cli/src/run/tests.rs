@@ -813,7 +813,7 @@ fn keyed(
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
         "schema_version":1, "graph_id":graph, "plan_digest":"fixture",
         "nodes":[{"id":node, "state":"running", "attempts":[{
-            "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0},
+            "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0, "attempt": 1},
             "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference,
             "outcome":null, "launch_actor":"fixture"
         }]}]

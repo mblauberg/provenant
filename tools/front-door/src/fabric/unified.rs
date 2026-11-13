@@ -746,6 +746,56 @@ pub(crate) fn target_fault(error: ResolveError<JournalError>) -> TargetFault {
     }
 }
 
+fn is_target_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
+    if matches!(
+        error.downcast_ref::<FacadeError>(),
+        Some(FacadeError::NotFound)
+    ) {
+        return true;
+    }
+    if matches!(
+        error.downcast_ref::<FacadeError>(),
+        Some(FacadeError::GraphRelayRefused { refusal_code, .. })
+            if refusal_code == "NOT_FOUND"
+    ) {
+        return true;
+    }
+    if let Some(service) = error.downcast_ref::<provenant_fabric_mcp::tools::ServiceError>() {
+        return match service {
+            provenant_fabric_mcp::tools::ServiceError::Facade(error) => {
+                matches!(error, FacadeError::NotFound)
+                    || matches!(
+                        error,
+                        FacadeError::GraphRelayRefused { refusal_code, .. }
+                            if refusal_code == "NOT_FOUND"
+                    )
+            }
+            provenant_fabric_mcp::tools::ServiceError::Mutation { source, .. } => {
+                is_target_not_found(source.as_ref())
+            }
+            provenant_fabric_mcp::tools::ServiceError::Cli { code, .. } => code == "NOT_FOUND",
+            _ => false,
+        };
+    }
+    false
+}
+
+fn command_target_fault(
+    error: &(dyn std::error::Error + 'static),
+    target: Option<&str>,
+) -> Option<(provenant_records::Outcome, &'static str, String)> {
+    if let Some(fault) = error.downcast_ref::<TargetFault>() {
+        return Some((fault.outcome, fault.code, fault.message.clone()));
+    }
+    is_target_not_found(error).then(|| {
+        let message = target.map_or_else(
+            || format!("NOT_FOUND: {error}"),
+            |target| format!("NOT_FOUND: {target}"),
+        );
+        (provenant_records::Outcome::Invalid, "NOT_FOUND", message)
+    })
+}
+
 /// Resolve `target` and keep the one checkpoint read it took.
 fn resolve_with_checkpoint(
     factory: &Factory,
@@ -783,8 +833,8 @@ pub(crate) fn command_fail(
     error: &(dyn std::error::Error + 'static),
     globals: &provenant_cli::Globals,
 ) -> u8 {
-    match error.downcast_ref::<TargetFault>() {
-        Some(fault) => crate::fail(name, fault.outcome, fault.code, &fault.message, globals),
+    match command_target_fault(error, None) {
+        Some((outcome, code, message)) => crate::fail(name, outcome, code, &message, globals),
         None => crate::fail(
             name,
             provenant_records::Outcome::Error,
@@ -1397,6 +1447,9 @@ pub(crate) fn unified_graph_output(
     })();
     result.unwrap_or_else(|error| match error.downcast_ref::<ServiceError>() {
         Some(service) => {
+            if let Some((outcome, code, message)) = command_target_fault(service, None) {
+                return output_fail(outcome, code, &message);
+            }
             let diagnostic = service.diagnostic();
             output_fail(
                 provenant_records::Outcome::Error,
@@ -1609,8 +1662,8 @@ fn output_fail(
 }
 
 fn output_error(error: &(dyn std::error::Error + 'static)) -> provenant_cli::run::Reply {
-    match error.downcast_ref::<TargetFault>() {
-        Some(fault) => output_fail(fault.outcome, fault.code, &fault.message),
+    match command_target_fault(error, None) {
+        Some((outcome, code, message)) => output_fail(outcome, code, &message),
         None => output_fail(
             provenant_records::Outcome::Error,
             "graph_target",
@@ -1708,13 +1761,34 @@ fn read_context(edge: &provenant_cli::run::Edge<'_>) -> Result<Option<Context>, 
     }
 }
 
-/// Resolve every target before a wait starts. Inside a lane the host
-/// resolves them on each read.
+/// Resolve every target before a wait starts. Inside a lane the host performs
+/// one status read for validation, then wait reads each target again.
 pub(crate) fn check_targets(
     targets: &[provenant_cli::Target],
     edge: &provenant_cli::run::Edge<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if targets.is_empty() || provenant_cli::fabric::in_lane() {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    if provenant_cli::fabric::in_lane() {
+        for target in targets {
+            let operation = provenant_fabric_runtime::graph::relay::RelayOp::Read {
+                input: json!({"op":"status","id":target.to_string()}),
+            };
+            if let Err(error) = provenant_cli::fabric::graph_relay::from_lane(
+                &operation,
+                &CancelToken::new(),
+                std::time::Duration::from_secs(55),
+            ) {
+                let error = super::interface::relay_error(error);
+                if is_target_not_found(&error) {
+                    return Err(Box::new(target_fault(ResolveError::NotFound(
+                        target.to_string(),
+                    ))));
+                }
+                return Err(Box::new(error));
+            }
+        }
         return Ok(());
     }
     let context = read_context(edge)?;
@@ -1911,7 +1985,10 @@ pub(crate) fn read_lane_graph(
     };
     read().map_err(|error| match error.downcast::<FacadeError>() {
         Ok(error) => ServiceError::Facade(*error),
-        Err(_) => ServiceError::Facade(FacadeError::io("read calling lane graph")),
+        Err(error) => match error.downcast::<TargetFault>() {
+            Ok(fault) if fault.code == "NOT_FOUND" => ServiceError::Facade(FacadeError::NotFound),
+            Ok(_) | Err(_) => ServiceError::Facade(FacadeError::io("read calling lane graph")),
+        },
     })
 }
 
@@ -1952,7 +2029,7 @@ mod tests {
     fn checkpoint(graph: &str) -> GraphCheckpoint {
         serde_json::from_value(json!({"schema_version":1,"graph_id":graph,"plan_digest":"digest","nodes":[
             {"id":"parent","state":"running","worktree":null,"attempts":[
-                {"launched":true,"key":{"graph_id":graph,"node_id":"parent","route_index":0},"route":{"alias":"senior"},"state":"running","attempt_ref":"11111111111111111111111111111111/22222222222222222222222222222222","launch_actor":"actor"}
+                {"launched":true,"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"running","attempt_ref":"11111111111111111111111111111111/22222222222222222222222222222222","launch_actor":"actor"}
             ]},
             {"id":"parent--child","state":"pending","worktree":null,"attempts":[]},
             {"id":"parent--keep","state":"pending","worktree":null,"attempts":[]},
@@ -2601,5 +2678,18 @@ mod tests {
             Err(ResolveError::NotFound(_))
         ));
         Ok(())
+    }
+
+    #[test]
+    fn lane_not_found_is_an_invalid_target_result() {
+        let error = ServiceError::Facade(FacadeError::NotFound);
+        let reply = output_error(&error);
+
+        assert_eq!(reply.result.status, provenant_records::Outcome::Invalid);
+        assert_eq!(
+            reply.result.error.as_ref().map(|error| error.code.as_str()),
+            Some("NOT_FOUND")
+        );
+        assert_eq!(provenant_cli::exit_status(&reply.result.status), 2);
     }
 }

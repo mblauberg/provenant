@@ -41,10 +41,11 @@ fn acceptance(
 }
 
 fn stored_with(node: Value, pause: Value) -> Value {
-    let mut checkpoint: Value =
-        serde_json::from_str::<Value>(include_str!("../fixtures/legacy-graph-checkpoint.json"))
-            .unwrap()["checkpoint"]
-            .clone();
+    let mut checkpoint: Value = serde_json::from_str::<Value>(include_str!(
+        "../fixtures/graph-checkpoint.json"
+    ))
+    .unwrap()["checkpoint"]
+        .clone();
     for (key, value) in node.as_object().unwrap() {
         checkpoint["nodes"][0][key] = value.clone();
     }
@@ -168,7 +169,7 @@ fn a_review_decision_without_a_reviewed_base_fails_closed_at_the_landing_check()
     checkpoint.nodes[review_idx].attempts = vec![
         serde_json::from_value(json!({
             "launched": true,
-            "key": {"graph_id": plan.graph_id, "node_id": "review", "route_index": 0},
+            "key": {"graph_id": plan.graph_id, "node_id": "review", "route_index": 0, "attempt": 1},
             "route": {"alias": "senior"},
             "state": "terminal",
             "attempt_ref": "fixture/1",

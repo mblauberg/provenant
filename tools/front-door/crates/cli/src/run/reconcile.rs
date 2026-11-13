@@ -58,24 +58,6 @@ fn reservation_root(context: &run::ExecutionContext) -> PathBuf {
         .join(context.project_id.to_string())
 }
 
-fn prepare_reservations(
-    session: &Session,
-    call: &run::Request<'_>,
-    visited: &mut BTreeMap<provenant_core::ProjectId, run::ExecutionContext>,
-    issues: &mut Vec<provenant_supervisor::custody::ReservationIssue>,
-) {
-    if visited
-        .insert(session.context.project_id, session.context.clone())
-        .is_none()
-        && let Err(error) = session.store.cutover_writer_reservations(call)
-    {
-        issues.push(provenant_supervisor::custody::ReservationIssue {
-            reservation: reservation_root(&session.context),
-            reason: error.to_string(),
-        });
-    }
-}
-
 pub(super) fn reconcile_inner(
     command: Reconcile,
     edge: &Edge<'_>,
@@ -103,12 +85,9 @@ pub(super) fn reconcile_inner(
             format!("{target} {}\n", reconcile_summary(&state)),
         ));
     }
-    let mut visited = BTreeMap::new();
-    let mut cutover_issues = Vec::new();
     let session = open(edge, &request(&clock, &cancel)?)?;
     let (attempts, truncated) = if command.targets.is_empty() {
         let call = request(&clock, &cancel)?;
-        prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
         let mut attempts = session.store.open_attempts_readonly(SCAN + 1, &call)?;
         let truncated = attempts.len() as u64 > SCAN;
         attempts.truncate(SCAN as usize);
@@ -130,12 +109,6 @@ pub(super) fn reconcile_inner(
     let mut rows = Vec::new();
     let mut human = String::new();
     for run in attempts {
-        prepare_reservations(
-            &session,
-            &request(&clock, &cancel)?,
-            &mut visited,
-            &mut cutover_issues,
-        );
         let registry = Registry {
             roots: Some(edge.roots),
             home: Some(edge.home),
@@ -214,34 +187,20 @@ pub(super) fn reconcile_inner(
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;
-    visited
-        .entry(session.context.project_id)
-        .or_insert(session.context);
-    let mut reservations = provenant_supervisor::custody::ReservationListing::default();
-    for context in visited.values() {
-        let call = request(&clock, &cancel)?;
-        let listing = (|| -> Result<_, run::RunError> {
-            let store = run::RunStore::open_read_only(context, &call)?
-                .ok_or(run::RunError::NotFound)?
-                .with_writer_registry(context.state_root.as_path());
-            store.writer_fence_listing()
-        })();
-        match listing {
-            Ok(listing) => {
-                reservations.reservations.extend(listing.reservations);
-                reservations.issues.extend(listing.issues);
-            }
-            Err(error) => {
-                reservations
-                    .issues
-                    .push(provenant_supervisor::custody::ReservationIssue {
-                        reservation: reservation_root(context),
-                        reason: error.to_string(),
-                    })
-            }
+    let listing = session.store.writer_fence_listing();
+    let mut reservations = match listing {
+        Ok(listing) => listing,
+        Err(error) => {
+            let mut listing = provenant_supervisor::custody::ReservationListing::default();
+            listing
+                .issues
+                .push(provenant_supervisor::custody::ReservationIssue {
+                    reservation: reservation_root(&session.context),
+                    reason: error.to_string(),
+                });
+            listing
         }
-    }
-    reservations.issues.extend(cutover_issues);
+    };
     reservations
         .reservations
         .sort_by(|left, right| left.reservation.cmp(&right.reservation));

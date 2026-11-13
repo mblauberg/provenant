@@ -1286,7 +1286,8 @@ impl Factory {
             use provenant_fabric_runtime::graph::template::{NameDecision, decide_graph_name};
             let state = &self.context.roots.state;
             let project = self.context.identity.project;
-            let existing = FileJournal::graph_ids(state, project).map_err(graph_journal_error)?;
+            let existing =
+                FileJournal::reserved_graph_ids(state, project).map_err(graph_journal_error)?;
             let stored = |id: &str| {
                 FileJournal::execution(state, project, id)
                     .ok()
@@ -3994,7 +3995,7 @@ mod tests {
         let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":if explicit_checkout { None } else { Some(&source) },
             "nodes":[{"id":"parent", "state":"running", "attempts":[{
-                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
+                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0, "attempt": 1},
                 "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
             }]}]
         }))?;
@@ -4714,16 +4715,18 @@ mod tests {
                 .clone(),
         )?;
         let id = document.graph_id.clone();
-        let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3,"cache_read_tokens":60,"input_tokens":80,"queue_time_ms":1500,"outcome":"timed_out","tier":"principal","template":"implement.fix"}});
+        let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3,"cache_read_tokens":60,"input_tokens":80,"queue_time_ms":1500,"outcome":"timed_out","tier":"principal","template":"implement.fix"}});
+        let mut current_attempt = attempt.clone();
+        current_attempt["key"]["attempt"] = json!(3);
         let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(
                 json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
                     {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
-                    {"id":"task","worktree":null,"state":"succeeded","attempts":[attempt.clone()],"previous_attempts":[attempt]}
+                    {"id":"task","worktree":null,"state":"succeeded","attempts":[current_attempt],"previous_attempts":[attempt]}
                 ]}),
             )?;
         checkpoint.nodes[1].previous_attempts.push(serde_json::from_value(json!({
-            "key":{"graph_id":id,"node_id":"task","route_index":1},
+            "key":{"graph_id":id,"node_id":"task","route_index":1, "attempt": 2},
             "launched":false,"route":{"alias":"senior"},"state":"terminal",
             "attempt_ref":null,"outcome":"adapter_unavailable","launch_actor":"actor","settled":1
         }))?);

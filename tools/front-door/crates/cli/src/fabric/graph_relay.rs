@@ -1946,7 +1946,7 @@ mod provisioning_tests {
         let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
             "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0},
+                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
             }]}]
         }))?;
@@ -2048,7 +2048,7 @@ mod provisioning_tests {
         let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
             "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0},
+                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
             }]}]
         }))?;
@@ -2335,7 +2335,7 @@ mod provisioning_tests {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":1,"graph_id":"g-lost-receipt","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0},
+                    "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]}]
@@ -2433,7 +2433,7 @@ mod provisioning_tests {
             "schema_version":1,"graph_id":"edit-scope","plan_digest":"fixture",
             "nodes":[
                 {"id":"writer","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0},
+                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running",
                     "attempt_ref":format!("{}/caller",context.identity.host),"outcome":null,"launch_actor":"fixture"
                 }]},
@@ -2546,7 +2546,7 @@ mod provisioning_tests {
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":1, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[
                 {"id":"a","state":"running","worktree":null,"attempts":[{
-                    "launched":true,"key":{"graph_id":"g-crash","node_id":"a","route_index":0},
+                    "launched":true,"key":{"graph_id":"g-crash","node_id":"a","route_index":0, "attempt": 1},
                     "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
                     "outcome":null,"launch_actor":"fixture"
                 }]},

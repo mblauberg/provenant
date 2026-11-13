@@ -131,10 +131,25 @@ assigns `TEMPLATE-K` (dots become hyphens) and never replays. A name with no
 room for a suffix within 48 bytes is refused in one line. The digest is stored
 on the graph document, so a lost reply that is repeated returns the graph.
 
+A graph name remains reserved after checkpoint collection. Collection leaves a
+durable reservation beside retained events, chairs and WorkKeys, all of which
+identify the graph by name. A collected name has no checkpoint to replay, so a
+later launch takes the next unused family suffix, even when its input digest
+matches the collected graph. Names are not reused while any metadata can retain
+the old identity. A direct journal bind that bypasses family allocation is
+refused when its name belongs to a collected or incomplete generation.
+
 Each attempt row also carries its work key: project, graph, node and attempt
 number. The graph assigns the number, one-based in launch order within the
 node and never reused; the store enforces one row per key and never assigns
-it. A plain lane is a one-node graph keyed by its run and task with attempt 1.
+it. A plain lane is a one-node graph with attempt 1.
+The project-scoped graph checkpoint retains the same graph, node and attempt
+tuple; the owner materialises its WorkKey in that project namespace and verifies
+it against the referenced RunStore record. The route index is routing metadata,
+not attempt identity. A budget wrap-up retains its terminal predecessor as a
+separate history entry and records the admitted successor under its own WorkKey
+number on the same route. `NAME/NODE#N` resolves that stored number, including
+after checkpoint reload, rather than numbering entries by their list positions.
 Admitting a key that already holds a row with the same request digest returns
 that run; a different digest fails with `operation_conflict`. Operation IDs
 remain an adaptor on the attempt row; there is no operation or run table.
@@ -541,12 +556,6 @@ on refusal. This protects shared registries across different run-state roots
 after the original recovery process exits. Predecessors without an import marker
 keep their existing admission semantics. Reservation release retires the marker's
 active fence; its evidence may remain beside the retired reservation.
-
-After the custody cutover, recovery carries a retained slot-root reservation
-to the attempt it names under the writer lock. The attempt record is durable
-before the slot record is removed, and a carried reservation excludes successor
-writers until it is settled. A conflicting or unreadable record stays fenced;
-unreadable evidence appears in reconciliation. Unknown fields are preserved.
 
 If launch preparation fails after acquiring custody, it withdraws the
 unlaunched reservation before reporting a local refusal. A failed withdrawal

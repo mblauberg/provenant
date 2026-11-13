@@ -48,6 +48,7 @@ fn chair_bound_depletion_reads_facts_once_across_passes() {
             graph_id: "g".into(),
             node_id: "n".into(),
             route_index: 0,
+            attempt: 1,
         },
         route: plan.nodes[0].routes[0].clone(),
         state: AttemptState::Terminal,

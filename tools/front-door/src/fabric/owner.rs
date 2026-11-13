@@ -835,6 +835,7 @@ pub(crate) fn graph_journal_error(
             disk: None,
             reason: "graph checkpoint exceeds its byte limit".into(),
         },
+        JournalError::NameReserved => FacadeError::Conflict,
         JournalError::Filesystem(_)
         | JournalError::Io(_)
         | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
@@ -1128,6 +1129,41 @@ impl BoundGraphOwner<'_> {
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn continuation(
+        &mut self,
+        reference: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::AttemptContinuation>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        let mut target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let previous = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let Some(next) = previous.superseded_by else {
+            return Ok(None);
+        };
+        target.attempt = next;
+        let successor = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        if previous.key.next_attempt().as_ref() != Some(&successor.key) {
+            return Err(FacadeError::StateCorrupt);
+        }
+        Ok(Some(provenant_fabric_runtime::graph::AttemptContinuation {
+            key: successor.key,
+            attempt_ref: format!(
+                "{}/{}",
+                target.host.unwrap_or(self.factory.context.identity.host),
+                next
+            ),
+        }))
+    }
+
     fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
         let before =
             provenant_core::GitOid::parse(before).map_err(|_| "repair source commit is invalid")?;
@@ -3494,17 +3530,9 @@ impl BoundGraphOwner<'_> {
             ));
             (target, reference)
         };
-        let mut target = target;
-        let mut reference = reference;
-        let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
-        while let Some(next) = attempt.superseded_by {
-            target.attempt = next;
-            reference = Some(format!(
-                "{}/{}",
-                target.host.unwrap_or(self.factory.context.identity.host),
-                next
-            ));
-            attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        if key.work_key(attempt.key.project()).ok().as_ref() != Some(&attempt.key) {
+            return Err(FacadeError::StateCorrupt);
         }
         // A remote parent is one origin node until its receiver-owned graph
         // has drained, including children that outlive the provider process.
@@ -4318,6 +4346,7 @@ mod journal_error_tests {
             graph_id: "preflight-replay".into(),
             node_id: "writer".into(),
             route_index: 0,
+            attempt: 1,
         };
         let node = |prompt| graph::NodeInput {
             review_launch: false,
@@ -4423,6 +4452,7 @@ mod journal_error_tests {
         assert_eq!(changed.code(), "operation_conflict");
         let missing_key = graph::AttemptKey {
             route_index: 2,
+            attempt: 3,
             ..key.clone()
         };
         let mut missing = first.clone();
@@ -4444,6 +4474,7 @@ mod journal_error_tests {
         // refuse inside RunService, after the graph owner has built its intent.
         let service_key = graph::AttemptKey {
             route_index: 1,
+            attempt: 2,
             ..key.clone()
         };
         let unsupported: graph::GraphRoute = serde_json::from_value(serde_json::json!({
@@ -4542,7 +4573,6 @@ mod journal_error_tests {
         for error in [
             JournalError::BadEnvelope,
             JournalError::BadDigest,
-            JournalError::RetiredLoopCheckpoint,
             JournalError::InvalidTopology,
         ] {
             let reason = error.to_string();
@@ -4558,6 +4588,10 @@ mod journal_error_tests {
         assert_eq!(
             graph_journal_error(JournalError::GraphMismatch),
             FacadeError::StateCorrupt
+        );
+        assert_eq!(
+            graph_journal_error(JournalError::NameReserved),
+            FacadeError::Conflict
         );
     }
 }

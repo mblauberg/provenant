@@ -1317,9 +1317,9 @@ mod result_tests {
             "nodes": [
                 {"id":"ordinary", "state":"failed", "worktree":null,
                  "advance_error":"repair this", "attempts":[
-                    {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":0},
+                    {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":0, "attempt": 1},
                      "route":{"alias":"first"},"state":"terminal","attempt_ref":"old","outcome":"task_failed","launch_actor":"actor"},
-                    {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":1},
+                    {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":1, "attempt": 2},
                      "route":{"adapter":"codex","model":"latest","effort":"high"},"state":"terminal","attempt_ref":"new","outcome":"task_failed","launch_actor":"actor"}]},
                 {"id":"composite", "state":"running", "worktree":null, "children":["member"], "attempts":[]},
                 {"id":"member", "state":"running", "worktree":null, "attempts":[],
@@ -1719,7 +1719,7 @@ mod result_tests {
             "schema_version":1, "source_commit":"1111111111111111111111111111111111111111",
             "review_base":"2222222222222222222222222222222222222222", "graph_review_base":"3333333333333333333333333333333333333333", "integration_base":"4444444444444444444444444444444444444444",
             "applied_route":{"adapter":"fixture", "model":"fixture/model"}, "omitted":0,
-            "inputs":[{"producer_node":"producer", "producer_attempt":{"graph_id":"fixture", "node_id":"producer", "route_index":0},
+            "inputs":[{"producer_node":"producer", "producer_attempt":{"graph_id":"fixture", "node_id":"producer", "route_index":0, "attempt": 1},
                 "kind":"commit", "required":true, "producer_result_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "commit":"1111111111111111111111111111111111111111", "delivery":"delivered", "file_delivery":"omitted"}]
         })).unwrap());
@@ -2125,6 +2125,7 @@ mod result_tests {
             graph_id: "g".into(),
             node_id: "consumer".into(),
             route_index: 0,
+            attempt: 1,
         };
         let inputs = graph_inputs::materialise(
             &factory,
@@ -2946,7 +2947,7 @@ mod provisioned_writer_submission_tests {
             use graph::AttemptOwner;
             let key = graph::AttemptKey {
                 extra: Default::default(), graph_id: "light-reader-source".into(),
-                node_id: "reader".into(), route_index: 0,
+                node_id: "reader".into(), route_index: 0, attempt: 1,
             };
             let spec = if condition == "unpinned" {
                 serde_json::from_value(serde_json::json!({"isolation":"shared", "directory": source}))?
@@ -2958,7 +2959,7 @@ mod provisioned_writer_submission_tests {
                 prior_attempts: &[], family_peers: &[],
                 context: provenant_records::run::WorkContext {
                     graph_id: Some(key.graph_id.clone()), node_id: Some(key.node_id.clone()),
-                    attempt: Some(u32::from(key.route_index) + 1),
+                    attempt: Some(key.attempt),
                     ..Default::default()
                 },
                 read_roots: &[], attachments: &[], capabilities: None, capability_sources: None,

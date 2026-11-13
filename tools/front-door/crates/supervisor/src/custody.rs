@@ -271,13 +271,6 @@ pub(crate) struct Reservation {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 impl Reservation {
-    fn original_reservation_device(&self) -> u64 {
-        self.extra
-            .get("slot_original_device")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(self.reservation_device)
-    }
-
     pub(crate) fn validate(&self) -> Result<()> {
         self.binding.validate()?;
         if self.attempt_device.is_some() != self.attempt_inode.is_some() {
@@ -479,7 +472,6 @@ pub(crate) fn acquire_writer_with_observer(
             other => other,
         })?;
     let lock_directory = directory;
-    carry_forward_slot_reservation(&lock_directory)?;
     ensure_no_exclusive_reservation(&lock_directory)?;
     let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
@@ -586,144 +578,7 @@ pub fn attempt_evidence(
 ) -> provenant_os::fs::Result<Directory> {
     directory.open_verified_directory(OsStr::new(&scope.attempt.to_string()))
 }
-/// Carry retained slot evidence forward while holding the writer lock.
-/// Publish the attempt record durably before removing the slot fence. A crash
-/// between those writes is replayed only when the two records agree exactly.
-fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
-    carry_forward_slot_reservation_with(directory, |child| {
-        child.open_read(OsStr::new("reservation.json"))?.sync()?;
-        child.sync()?;
-        Ok(())
-    })
-}
-
-fn carry_forward_slot_reservation_with(
-    directory: &Directory,
-    sync_evidence: impl FnOnce(&Directory) -> Result<()>,
-) -> Result<()> {
-    match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => {}
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    }
-    let mut value: serde_json::Value = read_record(directory, "reservation.json", RECORD_LIMIT)
-        .map_err(|_| CustodyError::Fenced)?;
-    let record: Reservation =
-        serde_json::from_value(value.clone()).map_err(|_| CustodyError::Fenced)?;
-    record.validate().map_err(|_| CustodyError::Fenced)?;
-    let slot = directory.metadata()?;
-    let child = create_attempt_evidence(directory, record.scope)?;
-    let anchor = child.metadata()?;
-    let device_matches = record.reservation_device == slot.device
-        || record.attempt_device.is_some_and(|old_attempt| {
-            same_device_rebinding(
-                record.reservation_device,
-                old_attempt,
-                slot.device,
-                anchor.device,
-            )
-        });
-    if record.reservation_inode != slot.inode || !device_matches {
-        return Err(CustodyError::Fenced);
-    }
-    let object = value.as_object_mut().ok_or(CustodyError::Fenced)?;
-    // Do not overwrite future fields in retained evidence. These names are
-    // introduced by the cutover and are never expected in a slot record.
-    if object.contains_key("slot_exclusive") || object.contains_key("slot_original_device") {
-        return Err(CustodyError::Fenced);
-    }
-    // A carried reservation may still have a live provider that lost its lock.
-    // Keep excluding all writers until that reservation is settled.
-    object.insert("slot_exclusive".into(), true.into());
-    object.insert(
-        "slot_original_device".into(),
-        record.reservation_device.into(),
-    );
-    object.insert("reservation_device".into(), anchor.device.into());
-    object.insert("reservation_inode".into(), anchor.inode.into());
-    match child.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => {
-            let existing: serde_json::Value = read_record(&child, "reservation.json", RECORD_LIMIT)
-                .map_err(|_| CustodyError::Fenced)?;
-            if existing != value {
-                return Err(CustodyError::Fenced);
-            }
-        }
-        Err(error) if error.is_not_found() => {
-            Publication::require_durable(write_record(
-                &child,
-                "reservation.json",
-                &value,
-                PublishMode::NoReplace,
-            )?)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    // An identical record can be left by a publication whose final directory
-    // sync failed. Reconfirm durability on replay before removing its source.
-    sync_evidence(&child)?;
-    // The attempt directory itself may also be a visible, unsynced creation
-    // from an earlier failed cutover.
-    directory.sync()?;
-    directory.unlink(OsStr::new("reservation.json"))?;
-    directory.sync()?;
-    Ok(())
-}
-
-/// Carry slot-root reservations forward at the recovery boundary. A busy or
-/// unreadable slot stays in place and is reported by the subsequent listing.
-pub fn cutover_writer_reservations(
-    directory: &Directory,
-    cancel: &CancelToken,
-    clock: &dyn Clock,
-) -> Result<()> {
-    let mut storage_error = None;
-    for (index, name) in directory.entries()?.enumerate() {
-        if index >= 10_000 {
-            return Err(CustodyError::InvalidRecord);
-        }
-        let name = name?;
-        let migrate = || -> Result<()> {
-            if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
-                return Ok(());
-            }
-            let slot = directory.open_verified_directory(&name)?;
-            match slot.metadata_at(OsStr::new("reservation.json"), false) {
-                Ok(_) => {}
-                Err(error) if error.is_not_found() => return Ok(()),
-                Err(error) => return Err(error.into()),
-            }
-            let _lease = lock_writer_exclusion(
-                &slot,
-                WaitBudget::nonblocking(clock.mono_now()),
-                cancel,
-                clock,
-            )?;
-            carry_forward_slot_reservation(&slot)
-        };
-        // Malformed and busy slots remain visible in the read-only listing.
-        // A failed write must reach the caller, after carrying any other slots.
-        match migrate() {
-            Ok(())
-            | Err(CustodyError::Fenced | CustodyError::Busy)
-            | Err(CustodyError::Filesystem(FsError::LockTimeout { .. })) => {}
-            Err(error) => {
-                if storage_error.is_none() {
-                    storage_error = Some(error);
-                }
-            }
-        }
-        if cancel.is_cancelled() {
-            return Err(CustodyError::Cancelled);
-        }
-    }
-    match storage_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-/// Unresolved launches and carried fences exclude new attempts until recovery.
+/// Unresolved attempt launches exclude new attempts until recovery.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
@@ -762,21 +617,11 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
         {
             return Err(CustodyError::Fenced);
         }
-        match value.get("slot_exclusive") {
-            None | Some(serde_json::Value::Bool(false)) => {}
-            _ => return Err(CustodyError::Fenced),
-        }
     }
     Ok(())
 }
 
-/// An uncarried slot-root record is a fence for all attempts until the slot is opened.
 pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
-    match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => return Ok(true),
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error),
-    }
     let evidence = match attempt_evidence(directory, scope) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(false),
@@ -1870,7 +1715,6 @@ pub fn acquire_recovery(
 ) -> Result<Recovery> {
     let lease = lock_writer_exclusion(&directory, budget, cancel, clock)?;
     let lock_directory = directory;
-    carry_forward_slot_reservation(&lock_directory)?;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
@@ -1924,7 +1768,6 @@ pub(crate) fn acquire_reboot_recovery_with(
 ) -> Result<Recovery> {
     let lease = lock_writer_exclusion(&directory, budget, cancel, clock)?;
     let lock_directory = directory;
-    carry_forward_slot_reservation(&lock_directory)?;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
@@ -1940,7 +1783,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         || reservation.attempt_inode != Some(target.inode)
         || !reservation.attempt_device.is_some_and(|device| {
             same_device_rebinding(
-                reservation.original_reservation_device(),
+                reservation.reservation_device,
                 device,
                 slot.device,
                 target.device,
@@ -1974,7 +1817,6 @@ pub fn prove_unreserved(
     clock: &dyn Clock,
 ) -> Result<Option<Unreserved>> {
     let lease = lock_writer_exclusion(directory, budget, cancel, clock)?;
-    carry_forward_slot_reservation(directory)?;
     match ensure_no_exclusive_reservation(directory) {
         Ok(()) => {}
         Err(CustodyError::Fenced) => return Ok(None),
@@ -2072,14 +1914,6 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             return Err(CustodyError::InvalidRecord);
         }
         let attempt = attempt?;
-        if attempt == OsStr::new("reservation.json") {
-            let path = PathBuf::from(&attempt);
-            listing.issues.push(ReservationIssue {
-                reservation: path,
-                reason: "slot-root writer reservation requires reconciliation".into(),
-            });
-            continue;
-        }
         let path = PathBuf::from(&attempt).join("reservation.json");
         let entry = || -> Result<Option<WriterReservation>> {
             // Other retired registry files do not hold recovery evidence.
@@ -2222,7 +2056,7 @@ impl Recovery {
             if self.reservation.reservation_inode != slot.inode
                 || !self.reservation.attempt_device.is_some_and(|device| {
                     same_device_rebinding(
-                        self.reservation.original_reservation_device(),
+                        self.reservation.reservation_device,
                         device,
                         slot.device,
                         metadata.device,
