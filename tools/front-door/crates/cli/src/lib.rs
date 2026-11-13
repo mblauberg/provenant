@@ -2148,16 +2148,11 @@ mod tests {
     }
 
     #[test]
-    fn config_migrate_takes_dry_run() {
-        for (words, expected) in [
-            (vec!["config", "migrate"], false),
-            (vec!["config", "migrate", "--dry-run"], true),
-        ] {
-            let Command::Config(Config::Migrate { dry_run }) = valid(&words).command else {
-                panic!("config migrate")
-            };
-            assert_eq!(dry_run, expected);
-        }
+    fn config_migrate_is_removed_from_the_command_surface() {
+        assert!(matches!(
+            parsed(&["config", "migrate"]),
+            ParseOutcome::Invalid { .. }
+        ));
     }
 
     #[test]

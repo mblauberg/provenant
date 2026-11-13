@@ -861,29 +861,6 @@ mod tests {
     }
 
     #[test]
-    fn migrate_refuses_a_conflicting_schedule_and_changes_nothing() {
-        let temp = tempfile::tempdir().unwrap();
-        let roots = roots(&temp);
-        let text = "schema_version = 1\n[domains.routing]\npacing_overrides = [{ provider = \"codex\", policy = \"pace\", expires_unix_seconds = 4102444800, schedule = { expires = \"2100-01-01T00:00:00Z\" } }]\n";
-        let path = write_config(&roots, text);
-        let error = provenant_config::migrate(&roots, &SECTIONS, false)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("schedule.expires"), "{error}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-        assert!(
-            std::fs::read_dir(roots.state.as_path())
-                .unwrap()
-                .all(|entry| !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(".bak-"))
-        );
-    }
-
-    #[test]
     fn calibration_entry_is_created_by_one_patch() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);

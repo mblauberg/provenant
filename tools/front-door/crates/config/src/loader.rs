@@ -1288,23 +1288,23 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
                     source.code
                 )
             }
-            Some(source) if crate::is_retired_key_code(source.code) => {
-                if source.code.starts_with("retired.") {
-                    return Ok(Finding {
-                        rule: issue.rule.into(),
-                        path: user_path()?,
-                        line: issue.location.line,
-                        message: format!(
-                            "{key}: ignored invalid configuration ({}); run `provenant config migrate`",
-                            source.code
-                        ),
-                    });
-                }
+            Some(source) if source.code.starts_with("moved_to_schedule.") => {
                 let replacement = source.code.trim_start_matches("moved_to_schedule.");
                 format!(
-                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}; run `provenant config migrate`",
+                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}",
                     issue.rule, source.code
                 )
+            }
+            Some(source) if source.code.starts_with("retired.") => {
+                return Ok(Finding {
+                    rule: issue.rule.into(),
+                    path: user_path()?,
+                    line: issue.location.line,
+                    message: format!(
+                        "{key}: ignored invalid configuration ({}); run `provenant config check` and edit the reported key",
+                        source.code
+                    ),
+                });
             }
             Some(source) => format!(
                 "{key}: ignored invalid configuration ({}: {})",
@@ -1325,9 +1325,16 @@ fn knob_message(key: &str, rule: &str) -> String {
         };
         return format!("{key}: invalid value ({rule}); {fallback}");
     }
-    if crate::migrate::RETIRED_DOMAIN_KNOBS.contains(&name) {
+    if matches!(
+        name,
+        "domains.routing.capacity_cooldown_seconds"
+            | "domains.routing.settlement_retries"
+            | "domains.routing.capacity_retry_seconds"
+            | "domains.routing.capacity_retry_max_seconds"
+            | "domains.routing.retry_delay_ceiling_seconds"
+    ) {
         return format!(
-            "{key}: ignored; this setting is not a knob and belongs outside [knobs]; run `provenant config migrate` or delete the line"
+            "{key}: retired setting; move its timing value under [domains.routing.schedule] or delete it"
         );
     }
     match crate::knobs::nearest_knobs(name).as_slice() {
@@ -2513,7 +2520,11 @@ mod warning_tests {
         };
         let warning = issue_finding(&issue)?;
         assert!(warning.message.contains("schedule.expires"));
-        assert!(warning.message.contains("provenant config migrate"));
+        assert!(
+            warning
+                .message
+                .contains("replace the retired key with schedule.expires")
+        );
         assert!(first_warning(
             roots.state.as_path(),
             Some("revision one"),

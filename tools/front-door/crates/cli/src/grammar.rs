@@ -495,13 +495,6 @@ pub enum Config {
         #[arg(long, default_value = "50", catalog_u64_range = 1..=500)]
         limit: u64,
     },
-    /// Rewrite retired routing timing keys to `schedule` and remove retired
-    /// fabric limits in place after a timestamped backup.
-    Migrate {
-        /// Report what would change without writing
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Set `profile` (balanced or economy) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {

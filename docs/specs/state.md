@@ -84,10 +84,12 @@ tombstones, never follows links and writes nothing on a dry run
 
 ### A format break needs acknowledgement
 
-An install never opens an older-format store. Without `--reset-state` it stops
-with `STATE_FORMAT_BREAK` and changes nothing, even with `--yes`; a held lane
-custody lock blocks it regardless. The reset removes only the dropped run
-state; ledgers, worktrees and branches stay.
+An install never opens an older-format store. A format-1 receipt or legacy run
+stores trigger `STATE_FORMAT_BREAK`; without `--reset-state` the install changes
+nothing, even with `--yes`. A held lane custody lock blocks an acknowledged
+reset. Reset removes the run database, attempt tree, Fabric database and graph
+journal, work index and PR contributions; usage and quota ledgers, provider
+history, session checkpoints, chair logs, worktrees and branches stay.
 - Why: deleting state is irreversible and a lane may be running.
 - Test: `tests/install.rs::format_one_state_is_reset_only_on_acknowledgement`
 - Owner: `src/state_reset.rs`, `src/install.rs`, `install.sh`
