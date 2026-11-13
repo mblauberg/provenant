@@ -1,68 +1,19 @@
 //! Host-owned membership facts, sealed on the host store's attempt rows.
 //! Lane stores are never lookup authority.
 use crate::{db::open_database, *};
-use provenant_core::{AttemptId, GitOid, ProjectId, RunId, TaskId};
+use provenant_core::{AttemptId, GitOid, ProjectId};
 use provenant_records::AbsolutePath;
 use rusqlite::{OptionalExtension, params};
 const ROW_LIMIT: usize = 64;
 const MEMBER_BYTES: usize = 64 * 1024;
-/// Run selectors also need a host-verifiable namespace, including for runs
-/// predating the host's chair or membership indexes.
-pub(crate) fn child_run_id(
-    project: ProjectId,
-    request: &CanonicalRequest,
-    operation: &provenant_core::OperationId,
-) -> Result<Option<RunId>> {
-    use provenant_records::run::ChildIdError;
-    request
-        .child_run_id(project, operation)
-        .map_err(|error| match error {
-            ChildIdError::UnsupportedVersion => {
-                RunError::Validation("unsupported child attempt ID version")
-            }
-            ChildIdError::MissingParent => {
-                RunError::Validation("derived child IDs require a parent attempt")
-            }
-            ChildIdError::Canonical(error) => error.into(),
-        })
-}
-/// Version 1 binds the ID to the entire proposal and the host's namespace.
-/// No lane-proposed ID is adopted as authority, even at first validation.
-pub(crate) fn child_attempt_id(
-    project: ProjectId,
-    run: RunId,
-    request: &CanonicalRequest,
-    task: TaskId,
-) -> Result<Option<AttemptId>> {
-    match request.child_attempt_id_version {
-        None => Ok(None),
-        Some(1) => {
-            let parent = request.parent_attempt.ok_or(RunError::Validation(
-                "derived child IDs require a parent attempt",
-            ))?;
-            use sha2::{Digest as _, Sha256};
-            let mut hash = Sha256::new();
-            hash.update(b"provenant-child-attempt-v1\0");
-            hash.update(project.as_bytes());
-            hash.update(parent.as_bytes());
-            hash.update(run.as_bytes());
-            hash.update(task.as_bytes());
-            hash.update(request.digest()?.as_bytes());
-            let digest = hash.finalize();
-            let mut id = [0; 16];
-            id.copy_from_slice(&digest[..16]);
-            Ok(Some(AttemptId::from_bytes(id)))
-        }
-        Some(_) => Err(RunError::Validation("unsupported child attempt ID version")),
-    }
-}
 /// Repository is the verified canonical Git common directory. Head is the
 /// host-observed launch HEAD. No selector accepts a nested store locator.
 #[derive(Debug, Clone)]
 pub struct WorkSelector {
     pub project: ProjectId,
-    pub run: RunId,
-    pub task: Option<TaskId>,
+    /// The graph the work belongs to; `node` and `attempt` narrow it.
+    pub graph: String,
+    pub node: Option<String>,
     pub attempt: Option<AttemptId>,
     pub repository: Option<AbsolutePath>,
     pub head: Option<GitOid>,
@@ -79,10 +30,10 @@ pub fn validate_work(
     let (_, db, initialisation) = open_database(host.as_path(), "run.sqlite3", call)?;
     provenant_sqlite::ensure_schema(&db, crate::db::SCHEMA)?;
     drop(initialisation);
-    // Exact predicates let SQLite use the run index even when a selector is
+    // Exact predicates let SQLite use the key index even when a selector is
     // absent or names unknown work.
-    let task = if selection.task.is_some() {
-        "task=?3"
+    let node = if selection.node.is_some() {
+        "node=?3"
     } else {
         "?3 IS NULL"
     };
@@ -93,19 +44,19 @@ pub fn validate_work(
     };
     let mut query = db.prepare(&format!(
         "SELECT substr(repository,1,{read_bytes}),head FROM attempts
-        WHERE run=?2 AND project=?1 AND {task} AND {attempt} AND sealed=1 AND refused=0
-        ORDER BY task,id LIMIT {row_limit}",
+        WHERE graph=?2 AND project=?1 AND {node} AND {attempt} AND sealed=1 AND refused=0
+        ORDER BY node,id LIMIT {row_limit}",
         read_bytes = MEMBER_BYTES + 1,
         row_limit = ROW_LIMIT + 1
     ))?;
     let mut rows = query.query(params![
         selection.project.to_string(),
-        selection.run.to_string(),
-        selection.task.map(|id| id.to_string()),
+        selection.graph,
+        selection.node,
         selection.attempt.map(|id| id.to_string())
     ])?;
     let mut coverage = WorkCoverage::Unindexed;
-    let qualified = selection.task.is_some() || selection.attempt.is_some();
+    let qualified = selection.node.is_some() || selection.attempt.is_some();
     for n in 0..=ROW_LIMIT {
         call.check()?;
         let Some(row) = rows.next()? else {
@@ -255,7 +206,7 @@ mod tests {
         let head = GitOid::parse(&"a".repeat(40))?;
         let mut selection = WorkSelector {
             project: context.project_id,
-            run: input.run_id,
+            run: input.attempt_id,
             task: Some(input.attempts[0].task_id),
             attempt: Some(input.attempts[0].attempt_id),
             repository: Some(repository.clone()),
@@ -304,7 +255,7 @@ mod tests {
             let mut foreign = selection.clone();
             match field {
                 0 => foreign.project = ProjectId::from_bytes([99; 16]),
-                1 => foreign.run = RunId::from_bytes([99; 16]),
+                1 => foreign.run = AttemptId::from_bytes([99; 16]),
                 2 => foreign.task = Some(TaskId::from_bytes([99; 16])),
                 _ => foreign.attempt = Some(AttemptId::from_bytes([99; 16])),
             }
@@ -332,7 +283,7 @@ mod tests {
         store.seal_membership(id, None, None, &call)?;
         let mut selection = WorkSelector {
             project: context.project_id,
-            run: input.run_id,
+            run: input.attempt_id,
             task: Some(input.attempts[0].task_id),
             attempt: None,
             repository: Some(AbsolutePath::new(Path::new("/repo/.git"))?),
@@ -365,17 +316,17 @@ mod tests {
         proposal.request.lane_depth = Some(2);
         proposal.request.child_attempt_id_version = Some(1);
         let task = proposal.attempts[0].task_id;
-        let id = child_attempt_id(host.project_id, proposal.run_id, &proposal.request, task)?
+        let id = child_attempt_id(host.project_id, proposal.attempt_id, &proposal.request, task)?
             .ok_or("missing ID")?;
         for field in 0..5 {
             let mut request = proposal.request.clone();
             let mut project = host.project_id;
-            let mut run = proposal.run_id;
+            let mut run = proposal.attempt_id;
             let mut task = task;
             match field {
                 0 => project = ProjectId::from_bytes([99; 16]),
                 1 => request.parent_attempt = Some(AttemptId::from_bytes([99; 16])),
-                2 => run = RunId::from_bytes([99; 16]),
+                2 => run = AttemptId::from_bytes([99; 16]),
                 3 => task = TaskId::from_bytes([99; 16]),
                 _ => request.concurrency += 1,
             }
@@ -383,7 +334,7 @@ mod tests {
         }
         proposal.request.child_attempt_id_version = Some(2);
         assert!(matches!(
-            child_attempt_id(host.project_id, proposal.run_id, &proposal.request, task),
+            child_attempt_id(host.project_id, proposal.attempt_id, &proposal.request, task),
             Err(RunError::Validation("unsupported child attempt ID version"))
         ));
         Ok(())
@@ -398,7 +349,7 @@ mod tests {
         store.create(&original, &call)?;
         let mut prior = original.attempts[0].attempt_id;
         store.start(
-            original.run_id,
+            original.attempt_id,
             &crate::dispatch_tests::Ready,
             &|_, _| Err(RunError::Validation("fixture host handoff")),
             &call,
@@ -409,7 +360,7 @@ mod tests {
                 prior,
                 expected_generation: 0,
                 operation_id: provenant_core::OperationId::parse(&format!("resume-{n}"))?,
-                run_id: RunId::from_bytes([n; 16]),
+                run_id: AttemptId::from_bytes([n; 16]),
                 attempt_id: AttemptId::from_bytes([n + 1; 16]),
                 prompt: "continue".into(),
                 created_at: original.created_at,
@@ -421,7 +372,7 @@ mod tests {
             };
             let selector = WorkSelector {
                 project: context.project_id,
-                run: run.run_id,
+                run: run.attempt_id,
                 task: Some(original.attempts[0].task_id),
                 attempt: Some(next.attempt_id),
                 repository: None,
@@ -433,7 +384,7 @@ mod tests {
             );
             let handed = std::cell::Cell::new(false);
             store.start(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Ready,
                 &|record, _| {
                     assert_eq!(record.attempt_id, next.attempt_id);

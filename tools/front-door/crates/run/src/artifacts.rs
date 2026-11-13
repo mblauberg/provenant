@@ -1,5 +1,5 @@
 use crate::*;
-use provenant_core::{RelativePath, RunId};
+use provenant_core::RelativePath;
 use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, PublishMode};
 use provenant_records::{CanonicalV1, PathWire};
 use std::{ffi::OsStr, io::Read, path::Component};
@@ -221,27 +221,6 @@ impl RunStore {
     ) -> Result<Directory> {
         let attempts = subdir(&self.root, OsStr::new("attempts"), create)?;
         subdir(&attempts, OsStr::new(&attempt.to_string()), create)
-    }
-    /// Adaptor until the run-level files (`request.json`, settlement queue and
-    /// locks, reaction lock) move to graph records: they live in the directory
-    /// of the run's first admitted attempt, so no run level exists on disk.
-    pub(crate) fn run_dir(&self, run: RunId, create: bool) -> Result<Directory> {
-        self.attempt_dir(self.run_anchor(run)?, create)
-    }
-    /// The first attempt admitted for `run`.
-    pub(crate) fn run_anchor(&self, run: RunId) -> Result<provenant_core::AttemptId> {
-        use rusqlite::OptionalExtension;
-        let first: Option<String> = self
-            .db
-            .query_row(
-                "SELECT id FROM attempts WHERE run=?1 AND project=?2 ORDER BY sequence LIMIT 1",
-                rusqlite::params![run.to_string(), self.context.project_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        first
-            .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
-            .ok_or(RunError::NotFound)
     }
     pub(crate) fn artifact_bytes(&self, artifact: &ArtifactRecord, limit: u64) -> Result<Vec<u8>> {
         if artifact.bytes > limit {

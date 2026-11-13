@@ -356,13 +356,12 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
                 .weight_millionths
                 .map_or_else(|| "unknown".into(), |value| format!("{value}/1000000"));
             text.push_str(&format!(
-                "{} role={} model={} account={} weight={} run={} outcome={} queued_at={} finished_at={} pr_count={} ambiguous={} truncated={}\n",
+                "{} role={} model={} account={} weight={} outcome={} queued_at={} finished_at={} pr_count={} ambiguous={} truncated={}\n",
                 attempt.attempt,
                 attempt.role.as_deref().unwrap_or("unknown"),
                 attempt.model.as_deref().unwrap_or("unknown"),
                 attempt.account.as_deref().unwrap_or("unknown"),
                 weight,
-                attempt.run.map_or_else(|| "unknown".into(), |id| id.to_string()),
                 attempt.outcome.map_or_else(|| "unknown".into(), |outcome| serde_json::to_value(outcome).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_else(|| "unknown".into())),
                 attempt.queued_at.map_or_else(|| "unknown".into(), |time| time.to_string()),
                 attempt.finished_at.map_or_else(|| "unknown".into(), |time| time.to_string()),

@@ -452,7 +452,6 @@ pub(super) fn seal_launch_task(
 ) -> run::SealedTask {
     run::SealedTask {
         request_digest,
-        task_id: task.task_id,
         effective_network: task.access.network(task.writer.is_some()),
         effective_database_ipc: task.access.database_ipc,
     }

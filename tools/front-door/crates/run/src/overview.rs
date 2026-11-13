@@ -1,14 +1,12 @@
 //! Bounded cross-project attempt summaries for local overview surfaces.
 use crate::{AttemptRecord, AttemptState, Outcome, Request, Result, RunStore};
-use provenant_core::{AttemptId, ProjectId, RunId, TaskId};
+use provenant_core::{AttemptId, ProjectId};
 use std::collections::BTreeSet;
 
 /// A bounded overview entry with its retained record for edge projections.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverviewAttempt {
     pub project_id: ProjectId,
-    pub run_id: RunId,
-    pub task_id: TaskId,
     pub attempt_id: AttemptId,
     pub title: Option<String>,
     pub state: OverviewState,
@@ -35,7 +33,7 @@ pub struct RunOverview {
 
 impl RunStore {
     /// Read up to `limit` recent attempts across projects, newest first,
-    /// keeping only the latest observed attempt for each task. Counts derived
+    /// keeping only the latest observed attempt for each node. Counts derived
     /// from these rows are partial when truncated.
     pub fn overview_attempts(
         &self,
@@ -48,7 +46,7 @@ impl RunStore {
         let mut statement = self.db.prepare(
             "WITH recent AS (SELECT sequence, length(record) AS bytes FROM attempts WHERE refused=0 ORDER BY sequence DESC LIMIT ?1), \
              sized AS (SELECT sequence, bytes, sum(bytes) OVER (ORDER BY sequence DESC) AS total FROM recent) \
-             SELECT a.project, a.run, a.task, a.id, s.bytes, s.total, \
+             SELECT a.project, a.graph, a.node, a.id, s.bytes, s.total, \
              CASE WHEN s.total <= ?2 AND s.bytes <= 1048576 THEN a.record END \
              FROM sized s JOIN attempts a ON a.sequence=s.sequence ORDER BY s.sequence DESC",
         )?;
@@ -79,18 +77,18 @@ impl RunStore {
             }
             bytes_read = total as usize;
             let project: String = row.get(0)?;
-            let run: String = row.get(1)?;
-            let task: String = row.get(2)?;
+            let graph: String = row.get(1)?;
+            let node: String = row.get(2)?;
             let id: String = row.get(3)?;
             let record: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(6)?)?;
             if record.project_id.to_string() != project
-                || record.run_id.to_string() != run
-                || record.task_id.to_string() != task
+                || record.key.graph() != graph
+                || record.key.node() != node
                 || record.attempt_id.to_string() != id
             {
                 return Err(crate::RunError::Validation("attempt index identity"));
             }
-            if !seen.insert((run, task)) {
+            if !seen.insert((project, graph, node)) {
                 continue;
             }
             let state = match &record.state {
@@ -102,8 +100,6 @@ impl RunStore {
             };
             attempts.push(OverviewAttempt {
                 project_id: record.project_id,
-                run_id: record.run_id,
-                task_id: record.task_id,
                 attempt_id: record.attempt_id,
                 title: record.title.clone(),
                 state,

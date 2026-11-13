@@ -467,7 +467,7 @@ pub(super) fn credential_authority(
     login: &provenant_providers::claude::Login<'_>,
 ) -> Result<provenant_providers::claude::CredentialAuthority, String> {
     let authority = provenant_providers::claude::CredentialAuthority::for_dispatch(
-        paths.run_id.to_string(),
+        paths.attempt_id.to_string(),
         login,
         paths.deadline_unix_ms,
     )

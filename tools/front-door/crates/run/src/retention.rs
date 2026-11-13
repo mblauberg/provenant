@@ -187,12 +187,12 @@ impl RunStore {
                 call,
             )?;
         }
-        let rows: Vec<(String, String, String, Vec<u8>)> = {
+        let rows: Vec<(String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
-                "SELECT id,run,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
+                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
             let rows = query.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
             rows.collect::<std::result::Result<_, _>>()?
         };
@@ -205,7 +205,7 @@ impl RunStore {
         );
         #[allow(clippy::disallowed_methods)] // Bound read-only maintenance in real time.
         let preview_started = std::time::Instant::now();
-        for (id, run, project, raw) in rows {
+        for (id, project, raw) in rows {
             if dry_run && preview_started.elapsed() >= std::time::Duration::from_secs(1) {
                 report.kept.push(ProviderStateIssue {
                     path: self.context.state_root.as_path().into(),
@@ -229,7 +229,6 @@ impl RunStore {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
                 if record.attempt_id.to_string() != id
-                    || record.run_id.to_string() != run
                     || record.project_id.to_string() != project
                 {
                     return Err(RunError::Validation("retention attempt index identity"));
@@ -309,8 +308,8 @@ impl RunStore {
                         if !dry_run && !pending_writer_cleanup {
                             self.write(call, |tx| {
                                 tx.execute(
-                                    "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
-                                    rusqlite::params![id, record.run_id.to_string(), record.project_id.to_string()],
+                                    "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND project=?2 AND terminal=1",
+                                    rusqlite::params![id, record.project_id.to_string()],
                                 )?;
                                 Ok(())
                             })?;
@@ -330,16 +329,7 @@ impl RunStore {
                     ));
                 }
                 if age >= DAY_MICROS.saturating_mul(logs_days as i64) {
-                    // A terminal attempt in an open run still contributes to live
-                    // diagnostics. Expiry requires every sibling to be terminal.
-                    let open: bool = {
-                        self.db.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)",
-                            [record.run_id.to_string()],
-                            |row| row.get(0),
-                        )?
-                    };
-                    if !open {
+                    {
                         collect_logs(
                             &attempt,
                             path.parent().ok_or_else(|| {
@@ -432,12 +422,8 @@ impl RunStore {
             match crate::artifacts::read_sealed(&run, "request.json", crate::RECORD_LIMIT)? {
                 Some(raw) => {
                     let indexed: String = self.db.query_row(
-                        "SELECT digest FROM attempts WHERE id=?1 AND run=?2 AND project=?3",
-                        rusqlite::params![
-                            id,
-                            record.run_id.to_string(),
-                            record.project_id.to_string()
-                        ],
+                        "SELECT digest FROM attempts WHERE id=?1 AND project=?2",
+                        rusqlite::params![id, record.project_id.to_string()],
                         |row| row.get(0),
                     )?;
                     let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
@@ -446,10 +432,7 @@ impl RunStore {
                     }
                     let request: CanonicalRequest = crate::db::decode(&raw)?;
                     request
-                        .tasks
-                        .iter()
-                        .find(|task| task.task_id == record.task_id)
-                        .and_then(|task| task.writer.as_ref())
+                        .task.writer.as_ref()
                         .map(|writer| crate::writer::writer_project_id(writer, record.project_id))
                         .transpose()?
                         .unwrap_or(record.project_id)
@@ -466,7 +449,7 @@ impl RunStore {
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 if !listing.issues.is_empty()
                     || listing.reservations.iter().any(|reservation| {
-                        reservation.scope.run == record.run_id
+                        reservation.scope.attempt == record.attempt_id
                             && reservation.scope.attempt == record.attempt_id
                     })
                 {
@@ -537,7 +520,6 @@ struct Ledger {
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct LedgerEntry {
-    run: String,
     project: String,
     finished_micros: i64,
     bytes: u64,
@@ -796,17 +778,17 @@ impl RunStore {
         report: &mut PayloadReport,
         call: &Request<'_>,
     ) -> Result<()> {
-        let rows: Vec<(String, String, String, Vec<u8>)> = {
+        let rows: Vec<(String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
-                "SELECT id,run,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
+                "SELECT id,project,record FROM attempts WHERE terminal=1 AND refused=0 ORDER BY sequence",
             )?;
             let rows = query.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut attempts = BTreeMap::new();
-        for (id, run, project, raw) in rows {
+        for (id, project, raw) in rows {
             if call.cancel.is_cancelled() {
                 return Err(RunError::Cancelled);
             }
@@ -819,7 +801,6 @@ impl RunStore {
                 let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
                 if record.attempt_id.to_string() != id
-                    || record.run_id.to_string() != run
                     || record.project_id.to_string() != project
                 {
                     return Err(RunError::Validation("retention attempt index identity"));
@@ -853,7 +834,6 @@ impl RunStore {
                 let bytes = payload_bytes(&attempt, &path);
                 drop(held);
                 Ok(Some(LedgerEntry {
-                    run: run.clone(),
                     project: project.clone(),
                     finished_micros: finished_at.as_micros(),
                     bytes,
@@ -884,8 +864,8 @@ impl RunStore {
         path: &std::path::Path,
     ) -> Result<bool> {
         let raw: Vec<u8> = self.db.query_row(
-            "SELECT record FROM attempts WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
-            rusqlite::params![id, entry.run, entry.project],
+            "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND terminal=1",
+            rusqlite::params![id, entry.project],
             |row| row.get(0),
         )?;
         let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
@@ -1964,7 +1944,7 @@ mod tests {
         for targets in [
             vec![],
             vec![LaneTarget {
-                run: input.run_id,
+                run: input.attempt_id,
                 task: None,
                 attempt: Some(id),
             }],
@@ -1992,7 +1972,7 @@ mod tests {
         let mut input = input();
         let task2 = provenant_core::TaskId::from_bytes([20; 16]);
         let attempt2 = AttemptId::from_bytes([21; 16]);
-        let mut task_def = input.request.tasks[0].clone();
+        let mut task_def = input.request.task.clone();
         task_def.task_id = task2;
         input.request.tasks.push(task_def);
         input.attempts.push(NewAttempt {
@@ -2077,7 +2057,7 @@ mod tests {
         let mut input = input();
         let sibling_id = AttemptId::from_bytes([91; 16]);
         let sibling_task = provenant_core::TaskId::from_bytes([92; 16]);
-        let mut task = input.request.tasks[0].clone();
+        let mut task = input.request.task.clone();
         task.task_id = sibling_task;
         input.request.tasks.push(task);
         input.attempts.push(NewAttempt {
@@ -2575,7 +2555,7 @@ mod tests {
             .mode(0o700)
             .create(attempt.join("tmp"))?;
         fs::write(attempt.join("tmp/keep"), "locked payload")?;
-        let run = store.run_dir(input.run_id, false)?;
+        let run = store.attempt_dir(input.attempt_id, false)?;
         let publication =
             run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Shared)?;
         assert_eq!(
@@ -2873,7 +2853,7 @@ mod tests {
 
     #[test]
     fn a_pending_continuation_keeps_its_source_and_expired_resume_spends_nothing() -> TestResult {
-        use provenant_core::{OperationId, RunId};
+        use provenant_core::{AttemptId, OperationId};
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -2883,7 +2863,7 @@ mod tests {
             prior: input.attempts[0].attempt_id,
             expected_generation: 0,
             operation_id: OperationId::parse("continue-fixture")?,
-            run_id: RunId::from_bytes([8; 16]),
+            run_id: AttemptId::from_bytes([8; 16]),
             attempt_id: AttemptId::from_bytes([9; 16]),
             prompt: "continue".into(),
             created_at: WallTime::from_micros(300)?,
@@ -2915,7 +2895,7 @@ mod tests {
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!attempt.join("provider-state").exists());
-        assert_eq!(store.resume(&resume, &call)?.run_id, resume.run_id);
+        assert_eq!(store.resume(&resume, &call)?.attempt_id, resume.attempt_id);
         let fresh = Resume {
             extend: Vec::new(),
             operation_id: OperationId::parse("expired-fixture")?,
@@ -3003,7 +2983,7 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let first = input();
         let mut second = input();
-        second.run_id = provenant_core::RunId::from_bytes([14; 16]);
+        second.attempt_id = provenant_core::AttemptId::from_bytes([14; 16]);
         second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
         second.attempts[0].attempt_id = AttemptId::from_bytes([16; 16]);
         crate::tests::rekey(&mut second);

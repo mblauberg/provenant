@@ -8,7 +8,7 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         panic!("a queued attempt has no settlement work");
     })?;
     store.withdraw(
@@ -23,13 +23,13 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     )?;
     // The terminal commit owes its reactions, so recovery is queued for them.
     let mut spawned = 0;
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         spawned += 1;
         Ok(())
     })?;
     assert_eq!(spawned, 1);
     // Once they are done, a terminal run has no settlement work.
-    store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+    store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -38,7 +38,7 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     })?;
     assert!(
         store
-            .queue_reconcile_with(run.run_id, &call, |_, _| {
+            .queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("a terminal run has no settlement work");
             })?
             .is_empty()
@@ -97,7 +97,7 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut prepared = input();
-    prepared.request.tasks[0].route = RequestedRoute::Named {
+    prepared.request.task.route = RequestedRoute::Named {
         extra: Default::default(),
         name: "fixture".into(),
         effort: None,
@@ -189,7 +189,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
         let started = store.start(
-            run.run_id,
+            run.attempt_id,
             &Excluded {
                 cause: cause.clone(),
                 message,
@@ -265,7 +265,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         let run = input();
         let id = run.attempts[0].attempt_id;
         store.create(&run, &call)?;
-        store.start(run.run_id, &SignedOut(mixed), &|_, _| unreachable!(), &call)?;
+        store.start(run.attempt_id, &SignedOut(mixed), &|_, _| unreachable!(), &call)?;
         assert_eq!(
             terminal(&store, id, &call)?,
             if mixed {
@@ -344,7 +344,7 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
                 blocker.execute_batch("ROLLBACK").unwrap();
             });
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &Fake::default(),
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver,
@@ -359,7 +359,7 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
                 assert!(
                     store
                         .reconcile_with_observer(
-                            run.run_id,
+                            run.attempt_id,
                             &Fake::default(),
                             &call,
                             &provenant_supervisor::census::SystemProcessObserver

@@ -1,7 +1,7 @@
 //! Explicit controls: cancel, resume and reconcile. None of them guesses at
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
-use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+use provenant_core::{AttemptId, OperationId, WallTime};
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, Scope, StopReceipt},
@@ -54,7 +54,6 @@ pub struct Resume {
     pub prior: AttemptId,
     pub expected_generation: u64,
     pub operation_id: OperationId,
-    pub run_id: RunId,
     pub attempt_id: AttemptId,
     pub prompt: String,
     pub created_at: WallTime,
@@ -346,7 +345,7 @@ mod reboot_tests {
         let path = context.state_root.as_path().join(format!("attempts/{id}"));
         std::fs::rename(path, temp.path().join("missing-attempt"))?;
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -585,7 +584,7 @@ mod reboot_tests {
         assert_eq!(spawned.get(), 1);
         drop(launcher);
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -604,7 +603,7 @@ mod reboot_tests {
         (
             tempfile::TempDir,
             RunStore,
-            provenant_core::RunId,
+            provenant_core::AttemptId,
             AttemptId,
         ),
         Box<dyn std::error::Error>,
@@ -626,7 +625,7 @@ mod reboot_tests {
             None,
             &call,
         )?;
-        Ok((temp, store, run.run_id, id))
+        Ok((temp, store, run.attempt_id, id))
     }
 
     #[test]
@@ -873,7 +872,7 @@ mod reboot_tests {
         let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "attempt_id": provenant_core::AttemptId::from_bytes([1; 16]),
-            "run_id": provenant_core::RunId::from_bytes([2; 16]),
+            "run_id": provenant_core::AttemptId::from_bytes([2; 16]),
             "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
             "task_id": provenant_core::TaskId::from_bytes([4; 16]),
             "operation_id": "overdue-test",
@@ -1018,7 +1017,7 @@ mod lineage_tests {
         .enumerate()
         {
             let mut original = crate::tests::input();
-            original.run_id = RunId::from_bytes([60 + index as u8; 16]);
+            original.attempt_id = AttemptId::from_bytes([60 + index as u8; 16]);
             original.operation_id = format!("explicit-{index}").parse()?;
             original.attempts[0].attempt_id = AttemptId::from_bytes([70 + index as u8; 16]);
             crate::tests::rekey(&mut original);
@@ -1070,9 +1069,9 @@ mod lineage_tests {
                 project: project.clone(),
                 worktree: info.path.clone(),
             };
-            original.request.tasks[0].writer = Some(writer.clone());
-            original.request.tasks[0].head = Some(info.head.to_string());
-            original.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+            original.request.task.writer = Some(writer.clone());
+            original.request.task.head = Some(info.head.to_string());
+            original.request.task.context = Some(provenant_records::run::WorkContext {
                 graph_id: Some("graph-writer-lineage".into()),
                 node_id: Some(format!("writer-{index}")),
                 ..Default::default()
@@ -1094,7 +1093,7 @@ mod lineage_tests {
                 owner_context.project_id = provenant_core::ProjectId::from_bytes([121; 16]);
                 let owner_store = RunStore::open(&owner_context, &call)?;
                 let mut owner = crate::tests::input();
-                owner.run_id = RunId::from_bytes([122; 16]);
+                owner.attempt_id = AttemptId::from_bytes([122; 16]);
                 owner.operation_id = "previous-owner".parse()?;
                 owner.attempts[0].attempt_id = AttemptId::from_bytes([120; 16]);
                 crate::tests::rekey(&mut owner);
@@ -1179,12 +1178,12 @@ mod lineage_tests {
             // sealed predecessor still protects it against ownership changes
             // between admission and the launch-custody check below.
             let mut graph = crate::tests::input();
-            graph.run_id = RunId::from_bytes([180 + index as u8; 16]);
+            graph.attempt_id = AttemptId::from_bytes([180 + index as u8; 16]);
             graph.operation_id = format!("graph-retry-{index}").parse()?;
             graph.attempts[0].attempt_id = AttemptId::from_bytes([190 + index as u8; 16]);
-            graph.request.tasks[0] = original.request.tasks[0].clone();
+            graph.request.task = original.request.task.clone();
             crate::tests::rekey(&mut graph);
-            let graph_task = &mut graph.request.tasks[0];
+            let graph_task = &mut graph.request.task;
             graph_task.source_head = graph_task.head.clone();
             graph_task
                 .context
@@ -1197,11 +1196,11 @@ mod lineage_tests {
             let tree = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
             store.check_launch_writer_lineage(
                 &graph_record,
-                &graph.request.tasks[0],
+                &graph.request.task,
                 &tree.worktree,
                 &call,
             )?;
-            let mut other_node = graph.request.tasks[0].clone();
+            let mut other_node = graph.request.task.clone();
             other_node.context.as_mut().ok_or("graph context")?.node_id = Some("unrelated".into());
             assert!(matches!(
                 store.check_launch_writer_lineage(
@@ -1213,7 +1212,7 @@ mod lineage_tests {
                 Err(RunError::WriterLineage("graph predecessor context"))
             ));
             for field in ["writer", "source", "head"] {
-                let mut mismatch = graph.request.tasks[0].clone();
+                let mut mismatch = graph.request.task.clone();
                 match field {
                     "writer" => {
                         mismatch.writer.as_mut().ok_or("writer")?.worktree =
@@ -1243,14 +1242,14 @@ mod lineage_tests {
                 prior,
                 expected_generation: 0,
                 operation_id: format!("explicit-resume-{index}").parse()?,
-                run_id: RunId::from_bytes([80 + index as u8; 16]),
+                run_id: AttemptId::from_bytes([80 + index as u8; 16]),
                 attempt_id: AttemptId::from_bytes([90 + index as u8; 16]),
                 prompt: "Continue".into(),
                 created_at: clock.wall_now()?,
             };
             let resumed = store.resume_fresh(&next, "no provider session", &call)?;
             assert_eq!(
-                store.request(resumed.run_id, &call)?.tasks[0]
+                store.request(resumed.attempt_id, &call)?.task
                     .writer
                     .as_ref(),
                 Some(&writer)
@@ -1282,7 +1281,7 @@ mod lineage_tests {
             assert!(matches!(
                 store.check_launch_writer_lineage(
                     &graph_record,
-                    &graph.request.tasks[0],
+                    &graph.request.task,
                     &tree.worktree,
                     &call
                 ),
@@ -1320,7 +1319,7 @@ mod lineage_tests {
         let clock = provenant_os::clock::SystemClock;
         let cancel = provenant_core::CancelToken::new();
         let mut original = crate::tests::input();
-        original.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        original.request.task.deliver = Some(WriterDeliveryRequest {
             extra: Default::default(),
             mode: DeliveryMode::Pr,
             remote: "origin".into(),
@@ -1362,20 +1361,20 @@ mod lineage_tests {
             cancel: &cancel,
         };
         let store = RunStore::open(&execution, &call)?;
-        original.request.tasks[0].writer = Some(WriterRequest {
+        original.request.task.writer = Some(WriterRequest {
             extra: Default::default(),
             project: project.clone(),
             worktree: info.path.clone(),
         });
         store.create(&original, &call)?;
         let launch = crate::prepare_writer(
-            original.request.tasks[0].writer.as_ref().unwrap(),
+            original.request.task.writer.as_ref().unwrap(),
             &store.writer_registry,
             project_id,
         )?;
         let mut probe = crate::tests::input();
-        probe.request.tasks[0].writer = original.request.tasks[0].writer.clone();
-        probe.run_id = RunId::from_bytes([70; 16]);
+        probe.request.task.writer = original.request.task.writer.clone();
+        probe.attempt_id = AttemptId::from_bytes([70; 16]);
         probe.operation_id = "lineage-probe".parse()?;
         probe.attempts[0].attempt_id = AttemptId::from_bytes([71; 16]);
         crate::tests::rekey(&mut probe);
@@ -1423,7 +1422,7 @@ mod lineage_tests {
                 .is_some()
         );
         let launch = crate::prepare_writer(
-            original.request.tasks[0].writer.as_ref().unwrap(),
+            original.request.task.writer.as_ref().unwrap(),
             &store.writer_registry,
             project_id,
         )?;
@@ -1467,7 +1466,7 @@ mod lineage_tests {
             prior,
             expected_generation: 0,
             operation_id: "queued-resume".parse()?,
-            run_id: RunId::from_bytes([30; 16]),
+            run_id: AttemptId::from_bytes([30; 16]),
             attempt_id: AttemptId::from_bytes([31; 16]),
             prompt: "Continue".into(),
             created_at: clock.wall_now()?,
@@ -1539,7 +1538,7 @@ mod lineage_tests {
             extend: Vec::new(),
             prior: first.attempt_id,
             operation_id: "new-resume".parse()?,
-            run_id: RunId::from_bytes([50; 16]),
+            run_id: AttemptId::from_bytes([50; 16]),
             attempt_id: AttemptId::from_bytes([51; 16]),
             ..first
         };
@@ -1590,13 +1589,13 @@ mod lineage_tests {
         let accepted =
             store.resume_fresh_in(&next, "original worktree reassigned", &writer, &call)?;
         assert_eq!(
-            store.request(accepted.run_id, &call)?.tasks[0]
+            store.request(accepted.attempt_id, &call)?.task
                 .writer
                 .as_ref(),
             Some(&writer)
         );
         assert_eq!(
-            store.request(accepted.run_id, &call)?.tasks[0]
+            store.request(accepted.attempt_id, &call)?.task
                 .deliver
                 .as_ref()
                 .unwrap()
@@ -1733,12 +1732,9 @@ impl RunStore {
             }
             // Recovery needs the persisted binding, not a fresh Git inspection of
             // the worktree the interrupted writer left behind.
-            let request = self.request(record.run_id, call)?;
+            let request = self.request(record.attempt_id, call)?;
             let writer = request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == record.task_id)
-                .and_then(|task| task.writer.as_ref());
+                .task.writer.as_ref();
             let (directory, expected_slot) = match writer {
                 Some(writer) => {
                     let expected = self.writer_slot(writer, record.project_id)?;
@@ -1847,12 +1843,9 @@ impl RunStore {
             let _ = cleanup;
         } else {
             // Lost without exit evidence deliberately preserves scratch.
-            let request = self.request(record.run_id, call)?;
+            let request = self.request(record.attempt_id, call)?;
             let missing_worktree = request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == record.task_id)
-                .and_then(|task| task.writer.as_ref())
+                .task.writer.as_ref()
                 .is_some_and(crate::writer::worktree_removed);
             if missing_worktree {
                 self.commit_lost(proof.scope(), LostReason::RemovedWorktree.message(), call)?;
@@ -1896,12 +1889,9 @@ impl RunStore {
         attempt: provenant_os::fs::Directory,
         call: &Request<'_>,
     ) -> Result<custody::Recovery> {
-        let request = self.request(record.run_id, call)?;
+        let request = self.request(record.attempt_id, call)?;
         let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(RunError::Validation("recovery task missing"))?;
+            .task;
         let failed_import = record.settlement_receipts.as_ref().is_some_and(|receipts| {
             matches!(receipts.git_import, EffectDisposition::Failed { .. })
         });
@@ -1953,12 +1943,9 @@ impl RunStore {
         }
         // Name the slot from the recorded binding; a lost writer's repository
         // need not be readable for its custody to be settled.
-        let request = self.request(record.run_id, call)?;
+        let request = self.request(record.attempt_id, call)?;
         let writer = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.writer.as_ref());
+            .task.writer.as_ref();
         let directory = match writer {
             Some(writer) => {
                 let slot = self.writer_slot(writer, record.project_id)?;
@@ -2013,12 +2000,9 @@ impl RunStore {
         let collect = || -> Result<_> {
             let attempt = self.attempt_dir(record.attempt_id, false)?;
             // The slot is named from the worktree path, so it needs no Git access.
-            let request = self.request(record.run_id, call)?;
+            let request = self.request(record.attempt_id, call)?;
             let writer = request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == record.task_id)
-                .and_then(|task| task.writer.as_ref());
+                .task.writer.as_ref();
             let slot = writer
                 .map(|writer| self.writer_slot(writer, record.project_id))
                 .transpose()?;
@@ -2053,7 +2037,7 @@ impl RunStore {
                     let scope = Self::scope(record);
                     if !self.writer_fences()?.iter().any(|fence| {
                         fence.reservation == path
-                            && fence.scope.run == scope.run
+                            && fence.scope.attempt == scope.attempt
                             && fence.scope.attempt == scope.attempt
                             && fence.scope.generation < scope.generation
                     }) {
@@ -2107,7 +2091,6 @@ impl RunStore {
     }
     pub(crate) fn scope(record: &AttemptRecord) -> Scope {
         Scope {
-            run: record.run_id,
             attempt: record.attempt_id,
             generation: record.generation,
         }
@@ -2246,7 +2229,7 @@ impl RunStore {
     /// Accept a continuation run. Each terminal attempt can be continued
     /// once; `expected_generation` is 0 before that and 1 after. The route,
     /// access and timeout come from the prior task, never from the caller.
-    pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
+    pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<AttemptRecord> {
         self.resume_mode(input, call, None, None, None, None)
             .map(|(run, _)| run)
     }
@@ -2256,7 +2239,7 @@ impl RunStore {
         input: &Resume,
         reason: &str,
         call: &Request<'_>,
-    ) -> Result<RunRecord> {
+    ) -> Result<AttemptRecord> {
         self.resume_mode(input, call, Some(reason), None, None, None)
             .map(|(run, _)| run)
     }
@@ -2268,7 +2251,7 @@ impl RunStore {
         reason: &str,
         writer: &WriterRequest,
         call: &Request<'_>,
-    ) -> Result<RunRecord> {
+    ) -> Result<AttemptRecord> {
         let branch = self.fresh_writer_branch(input, writer)?;
         self.resume_mode(
             input,
@@ -2289,7 +2272,7 @@ impl RunStore {
         writer: Option<&WriterRequest>,
         providers: &dyn Providers,
         call: &Request<'_>,
-    ) -> Result<(RunRecord, Option<PreparedStart>)> {
+    ) -> Result<(AttemptRecord, Option<PreparedStart>)> {
         let branch = writer
             .map(|writer| self.fresh_writer_branch(input, writer))
             .transpose()?;
@@ -2309,7 +2292,7 @@ impl RunStore {
         input: &Resume,
         remaining: u64,
         call: &Request<'_>,
-    ) -> Result<RunRecord> {
+    ) -> Result<AttemptRecord> {
         self.resume_mode(input, call, None, None, None, Some(remaining))
             .map(|(run, _)| run)
     }
@@ -2341,12 +2324,9 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
         let prior = self.record(prior, call)?;
-        let request = self.request(prior.run_id, call)?;
+        let request = self.request(prior.attempt_id, call)?;
         let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == prior.task_id)
-            .ok_or(RunError::Validation("prior task missing from request"))?;
+            .task;
         let Some(writer) = &task.writer else {
             return Ok(None);
         };
@@ -2392,12 +2372,9 @@ impl RunStore {
         {
             return Err(RunError::WriterLineage("graph predecessor context"));
         }
-        let request = self.request(previous.run_id, call)?;
+        let request = self.request(previous.attempt_id, call)?;
         let previous_task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == previous.task_id)
-            .ok_or(RunError::WriterLineage("graph predecessor task"))?;
+            .task;
         let source = previous_task
             .source_head
             .as_ref()
@@ -2446,7 +2423,11 @@ impl RunStore {
             }
             if lane.is_some_and(|owner| {
                 owner.attempt_id == Some(current.attempt_id)
-                    || owner.operation_id.as_ref() == Some(&current.operation_id)
+                    || self
+                        .attempt_operation(current.attempt_id, call)
+                        .is_ok_and(|operation| {
+                            owner.operation_id.as_ref() == Some(&operation.operation_id)
+                        })
             }) {
                 let owner_id =
                     lane.and_then(|owner| owner.attempt_id)
@@ -2515,21 +2496,12 @@ impl RunStore {
         writer: Option<(&WriterRequest, &str)>,
         providers: Option<&dyn Providers>,
         budget_remaining: Option<u64>,
-    ) -> Result<(RunRecord, Option<PreparedStart>)> {
+    ) -> Result<(AttemptRecord, Option<PreparedStart>)> {
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
             return Err(RunError::Nonterminal);
         }
-        let operation = self.operation(&input.operation_id, call)?;
-        let replay = operation.is_some();
-        let previous = match &operation {
-            Some(operation) => match self.request(operation.run_id, call) {
-                Ok(request) => Some(request),
-                Err(RunError::NotFound) if operation.state == OperationState::Prepared => None,
-                Err(error) => return Err(error),
-            },
-            None => None,
-        };
+        let replay = self.operation(&input.operation_id, call)?.is_some();
         if !replay && writer.is_none() {
             self.check_continuation_writer(input.prior, call)?;
         }
@@ -2538,12 +2510,8 @@ impl RunStore {
         } else {
             Some(self.retain_provider_state(input.prior, call)?)
         };
-        let request = self.request(prior.run_id, call)?;
-        let task = request
-            .tasks
-            .iter()
-            .find(|t| t.task_id == prior.task_id)
-            .ok_or(RunError::Validation("prior task missing from request"))?;
+        let request = self.request(prior.attempt_id, call)?;
+        let task = &request.task;
         let mut deliver = task.deliver.clone();
         if let Some((_, branch)) = writer
             && let Some(prior) = &deliver
@@ -2555,20 +2523,15 @@ impl RunStore {
             destination.open_pr |= prior.open_pr;
             deliver = Some(destination);
         }
-        let mut prepared = PreparedRun {
-            run_id: input.run_id,
+        let prepared = PreparedRun {
+            attempt_id: input.attempt_id,
             operation_id: input.operation_id.clone(),
             request: CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: previous
-                    .as_ref()
-                    .map_or(request.parent_attempt.map(|_| 1), |request| {
-                        request.child_attempt_id_version
-                    }),
                 chair: request.chair.clone(),
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
-                tasks: vec![TaskRequest {
+                task: TaskRequest {
                     context: budget_remaining
                         .and(task.context.clone())
                         .map(|mut context| {
@@ -2593,7 +2556,6 @@ impl RunStore {
                         }
                         profile
                     },
-                    task_id: prior.task_id,
                     prompt_digest: provenant_records::CanonicalV1::file_digest(
                         input.prompt.as_bytes(),
                     ),
@@ -2607,33 +2569,14 @@ impl RunStore {
                     provider_timeout_seconds: task.provider_timeout_seconds,
                     delivery_id: prior.delivery_id,
                     access: task.access.clone(),
-                }],
-                concurrency: 1,
+                },
                 parent: Some(input.prior),
                 lane_depth: request.lane_depth,
                 parent_attempt: request.parent_attempt,
             },
-            attempts: vec![NewAttempt {
-                attempt_id: input.attempt_id,
-                task_id: prior.task_id,
-                prompt: input.prompt.clone(),
-            }],
+            prompt: input.prompt.clone(),
             created_at: input.created_at,
         };
-        if let Some(run) = crate::correlation::child_run_id(
-            self.context.project_id,
-            &prepared.request,
-            &prepared.operation_id,
-        )? {
-            prepared.run_id = run;
-            prepared.attempts[0].attempt_id = crate::correlation::child_attempt_id(
-                self.context.project_id,
-                run,
-                &prepared.request,
-                prior.task_id,
-            )?
-            .ok_or(RunError::Validation("derived continuation attempt ID"))?;
-        }
         // A replay, prepared or accepted, is answered by `create`, which
         // compares the request digest and adopts a prepared operation's IDs.
         if !replay {
@@ -2651,59 +2594,40 @@ impl RunStore {
                 });
             }
         }
-        // Derived final paths are deterministic. Preflight in this call's
-        // fresh staging instead, so an unrecorded directory left by a crash
-        // cannot block retry. Its plan is discarded and launch prepares again.
-        let derived = prepared.request.child_attempt_id_version.is_some();
-        let mut ready = if !replay && derived {
-            if let Some(providers) = providers {
-                let staging = PreparedRun {
-                    run_id: input.run_id,
-                    operation_id: prepared.operation_id.clone(),
-                    request: prepared.request.clone(),
-                    attempts: vec![NewAttempt {
-                        attempt_id: input.attempt_id,
-                        task_id: prior.task_id,
-                        prompt: input.prompt.clone(),
-                    }],
-                    created_at: input.created_at,
-                };
-                drop(self.prepare_fresh_start(&staging, providers, call)?);
-            }
+        let mut ready = if replay {
             None
-        } else if !replay {
+        } else {
             providers
                 .map(|providers| self.prepare_fresh_start(&prepared, providers, call))
                 .transpose()?
-        } else {
-            None
         };
         let created = self.create(&prepared, call);
         if let Some(ready) = &mut ready {
             let recorded = match &created {
-                Ok(run) => run.run_id == prepared.run_id,
+                Ok(run) => run.attempt_id == prepared.attempt_id,
                 // Publication may fail after reserving the operation. Keep
                 // its staging for recovery, including an unreadable index.
-                Err(_) => self
-                    .operation(&input.operation_id, call)
-                    .map(|operation| operation.is_some_and(|op| op.run_id == prepared.run_id))
-                    .unwrap_or(true),
+                Err(_) => match self.operation_attempt(&input.operation_id, call) {
+                    Ok(attempt) => attempt == prepared.attempt_id,
+                    Err(RunError::NotFound) => false,
+                    Err(_) => true,
+                },
             };
             if recorded {
-                self.retain_prepared_start(ready, prepared.run_id);
+                self.retain_prepared_start(ready, prepared.attempt_id);
             }
         }
         let run = created?;
         self.contribution_diagnostic(
-            run.run_id,
+            run.attempt_id,
             self.inherit_contribution(
                 input.prior,
-                run.run_id,
+                run.attempt_id,
                 writer.map(|(_, branch)| branch),
                 call,
             ),
         );
-        if run.run_id != prepared.run_id {
+        if run.attempt_id != prepared.attempt_id {
             ready = None;
         }
         Ok((run, ready))
@@ -2711,7 +2635,7 @@ impl RunStore {
 
     /// Up to `limit` runs needing recovery or terminal temporary cleanup in
     /// this project. Nonterminal work takes priority over temporary cleanup.
-    pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
+    pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         self.cutover_writer_reservations(call)?;
         self.open_runs_readonly(limit, call)
@@ -2719,12 +2643,12 @@ impl RunStore {
 
     /// Inspect pending recovery independently of a failed custody cutover.
     /// Callers report reservation issues alongside these known runs.
-    pub fn open_runs_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
+    pub fn open_runs_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = {
             let mut query = self.db.prepare(
-                "SELECT run FROM attempts WHERE project=?1 AND terminal=0 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
+                "SELECT id FROM attempts WHERE project=?1 AND terminal=0 ORDER BY sequence LIMIT ?2",
             )?;
             let rows = query
                 .query_map(params![self.context.project_id.to_string(), limit], |r| {
@@ -2734,7 +2658,7 @@ impl RunStore {
         };
         let mut runs = ids
             .iter()
-            .map(|id| RunId::parse(id).map_err(|_| RunError::Validation("run index ID")))
+            .map(|id| AttemptId::parse(id).map_err(|_| RunError::Validation("attempt index ID")))
             .collect::<Result<Vec<_>>>()?;
         let fences = match self.writer_fence_listing() {
             Ok(listing) => listing.reservations,
@@ -2742,19 +2666,19 @@ impl RunStore {
             Err(error) => return Err(error),
         };
         for fence in fences {
-            if !runs.contains(&fence.scope.run) && runs.len() < limit as usize {
-                runs.push(fence.scope.run);
+            if !runs.contains(&fence.scope.attempt) && runs.len() < limit as usize {
+                runs.push(fence.scope.attempt);
             }
         }
         if runs.len() < limit as usize {
             let mut query = self.db.prepare(
-                "SELECT run FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
+                "SELECT id FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 ORDER BY sequence LIMIT ?2",
             )?;
             let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
             while runs.len() < limit as usize {
                 let Some(row) = rows.next()? else { break };
-                let run = RunId::parse(&row.get::<_, String>(0)?)
-                    .map_err(|_| RunError::Validation("run index ID"))?;
+                let run = AttemptId::parse(&row.get::<_, String>(0)?)
+                    .map_err(|_| RunError::Validation("attempt index ID"))?;
                 if runs.contains(&run) {
                     continue;
                 }
@@ -2765,8 +2689,7 @@ impl RunStore {
         if runs.len() < limit as usize {
             let owed: Vec<String> = {
                 let mut query = self.db.prepare(
-                    "SELECT a.run FROM reactions r JOIN attempts a ON a.id=r.attempt \
-                     WHERE r.project=?1 AND r.pending=1 GROUP BY a.run ORDER BY MIN(r.rowid) LIMIT ?2",
+                    "SELECT attempt FROM reactions WHERE project=?1 AND pending=1 ORDER BY rowid LIMIT ?2",
                 )?;
                 let rows = query
                     .query_map(params![self.context.project_id.to_string(), limit], |r| {
@@ -2775,7 +2698,7 @@ impl RunStore {
                 rows.collect::<std::result::Result<_, _>>()?
             };
             for id in owed {
-                let run = RunId::parse(&id).map_err(|_| RunError::Validation("run index ID"))?;
+                let run = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
                 if !runs.contains(&run) && runs.len() < limit as usize {
                     runs.push(run);
                 }
@@ -2867,19 +2790,19 @@ impl RunStore {
         let runs: Vec<String> = {
             let mut query = self
                 .db
-                .prepare("SELECT DISTINCT run FROM attempts WHERE project=?1 AND (terminal=0 OR tmp_retained=1)")?;
+                .prepare("SELECT id FROM attempts WHERE project=?1 AND (terminal=0 OR tmp_retained=1)")?;
             let rows =
                 query.query_map(params![self.context.project_id.to_string()], |r| r.get(0))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut queued = 0;
         for run in runs {
-            let Ok(run) = RunId::parse(&run) else {
+            let Ok(run) = AttemptId::parse(&run) else {
                 continue;
             };
             let ids: Vec<String> = {
                 let mut query = self.db.prepare(
-                    "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1)",
+                    "SELECT id FROM attempts WHERE id=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1)",
                 )?;
                 let rows = query.query_map(
                     params![run.to_string(), self.context.project_id.to_string()],
@@ -2907,11 +2830,8 @@ impl RunStore {
                         outcome: Outcome::Rejected,
                         ..
                     } if attempt.provider_launched == Some(false) => {
-                        self.request(run, call).is_ok_and(|request| {
-                            request.tasks.iter().any(|task| {
-                                task.task_id == attempt.task_id && task.writer.is_some()
-                            })
-                        })
+                        self.request(run, call)
+                            .is_ok_and(|request| request.task.writer.is_some())
                     }
                     _ => false,
                 });
@@ -2927,7 +2847,7 @@ impl RunStore {
     /// only after reservations are released; removal failures are reported.
     pub fn reconcile(
         &self,
-        run: RunId,
+        run: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
@@ -2939,7 +2859,7 @@ impl RunStore {
     #[cfg(feature = "fixture")]
     pub fn reconcile_for_fixture(
         &self,
-        run: RunId,
+        run: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
@@ -2947,7 +2867,7 @@ impl RunStore {
     }
     pub(crate) fn reconcile_with_observer(
         &self,
-        run: RunId,
+        run: AttemptId,
         providers: &dyn Providers,
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
@@ -2960,7 +2880,7 @@ impl RunStore {
         let mut ids: Vec<String> = {
             let mut query = self
                 .db
-                .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
+                .prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
@@ -2988,7 +2908,7 @@ impl RunStore {
             }
         }
         for fence in fences {
-            if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
+            if fence.scope.attempt == run && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
             }
         }
@@ -3034,7 +2954,7 @@ impl RunStore {
 
     pub(crate) fn reconcile_is_settled(
         &self,
-        run: RunId,
+        run: AttemptId,
         id: AttemptId,
         call: &Request<'_>,
     ) -> Result<bool> {
@@ -3299,7 +3219,7 @@ impl RunStore {
         let retained = listing
             .reservations
             .into_iter()
-            .find(|fence| fence.scope.run == record.run_id && fence.scope.attempt == id);
+            .find(|fence| fence.scope.attempt == record.attempt_id && fence.scope.attempt == id);
         match retained {
             Some(fence)
                 if fence.scope == scope
@@ -3334,10 +3254,8 @@ impl RunStore {
                 }
             )
             && self
-                .request(record.run_id, call)?
-                .tasks
-                .iter()
-                .any(|task| task.task_id == record.task_id && task.writer.is_some())
+                .request(record.attempt_id, call)?
+                .task.writer.is_some()
             && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
                 matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
             });
@@ -3666,7 +3584,7 @@ impl RunStore {
                     Err(CustodyError::Filesystem(
                         error @ provenant_os::fs::FsError::LockTimeout { .. },
                     )) => Ok(reconcile_failure(RunError::Filesystem(error), || {
-                        self.reconcile_is_settled(record.run_id, id, call)
+                        self.reconcile_is_settled(record.attempt_id, id, call)
                             .unwrap_or(false)
                     })),
                     Err(error) => Ok(Reconciled::custody_unavailable(&error)),
@@ -3702,7 +3620,7 @@ mod tests {
         let context = crate::tests::context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
         let mut run = crate::tests::input();
-        run.request.tasks[0].writer = Some(WriterRequest {
+        run.request.task.writer = Some(WriterRequest {
             extra: Default::default(),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/interrupted"),
@@ -3734,7 +3652,7 @@ mod tests {
             &clock,
         )?);
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -3785,7 +3703,7 @@ mod tests {
             let mut run = crate::tests::input();
             let bad = run.attempts[0].attempt_id;
             let good = AttemptId::from_bytes([7; 16]);
-            let mut task = run.request.tasks[0].clone();
+            let mut task = run.request.task.clone();
             task.task_id = provenant_core::TaskId::from_bytes([8; 16]);
             run.attempts.push(crate::NewAttempt {
                 attempt_id: good,
@@ -3818,7 +3736,7 @@ mod tests {
                     .join(format!("attempts/{bad}/settlement-progress.json")),
             )?;
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -3868,7 +3786,7 @@ mod tests {
         drop(custody::acquire_reader(
             provenant_os::fs::Directory::open_anchor(&slot)?,
             Scope {
-                run: run.run_id,
+                run: run.attempt_id,
                 attempt: orphan,
                 generation: 1,
             },
@@ -3883,7 +3801,7 @@ mod tests {
         store.attempt_dir(orphan, true)?;
         assert_eq!(store.writer_fences()?.len(), 1);
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -3892,7 +3810,7 @@ mod tests {
         assert_eq!(found[0], (run.attempts[0].attempt_id, Reconciled::Queued));
         assert!(matches!(&found[1], (id, Reconciled::Uncertain { reason })
             if *id == orphan && reason.to_string().contains(&RunError::NotFound.to_string())));
-        let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             panic!("queued work and an orphan fence need no recovery worker")
         })?;
         assert_eq!(queued[0], (run.attempts[0].attempt_id, Reconciled::Queued));
@@ -3923,7 +3841,7 @@ mod tests {
         drop(custody::acquire_reader(
             directory.try_clone()?,
             Scope {
-                run: run.run_id,
+                run: run.attempt_id,
                 attempt: orphan,
                 generation: 1,
             },
@@ -3941,7 +3859,7 @@ mod tests {
         store.attempt_dir(orphan, true)?;
         assert!(store.writer_fence_listing()?.reservations.is_empty());
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -3990,7 +3908,7 @@ mod tests {
         drop(custody::acquire_reader(
             directory.try_clone()?,
             Scope {
-                run: run.run_id,
+                run: run.attempt_id,
                 attempt: orphan,
                 generation: 1,
             },
@@ -4010,7 +3928,7 @@ mod tests {
         std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
         let scan = store.open_runs(10, &call);
         let reconcile = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -4064,7 +3982,7 @@ mod tests {
         let run = crate::tests::input();
         store.create(&run, &call)?;
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -4094,7 +4012,7 @@ mod tests {
         )?;
         crate::dispatch_tests::seal_exit(&store, &exit)?;
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,

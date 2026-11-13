@@ -752,17 +752,13 @@ impl crate::RunStore {
     /// not inventory the host's slots.
     pub(crate) fn attempt_writer_slot(
         &self,
-        run: provenant_core::RunId,
-        task: provenant_core::TaskId,
+        attempt: provenant_core::AttemptId,
         project: ProjectId,
         call: &crate::Request<'_>,
     ) -> Result<Option<PathBuf>> {
-        let request = self.request(run, call)?;
+        let request = self.request(attempt, call)?;
         request
-            .tasks
-            .iter()
-            .find(|candidate| candidate.task_id == task)
-            .ok_or(RunError::Validation("attempt task association"))?
+            .task
             .writer
             .as_ref()
             .map(|writer| self.writer_slot(writer, project))
@@ -2395,7 +2391,6 @@ impl crate::RunStore {
         }
         if let Some(retained) = retained_scope {
             let admission = provenant_supervisor::custody::CustodyError::ImportRetained {
-                run: retained.run,
                 attempt: retained.attempt,
             };
             lease
@@ -2537,9 +2532,9 @@ impl crate::RunStore {
                 // follows only this graph project's accepted run namespace.
                 if !all_scopes && project != self.context.project_id {
                     let belongs: bool = self.db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND project=?2 AND refused=0)",
+                        "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND project=?2 AND refused=0)",
                         rusqlite::params![
-                            reservation.scope.run.to_string(),
+                            reservation.scope.attempt.to_string(),
                             self.context.project_id.to_string()
                         ],
                         |row| row.get(0),
@@ -3107,7 +3102,7 @@ pub(crate) struct WriterOwnership {
 mod custody_admission_tests {
     use super::*;
     use crate::tests::{call, clock, context};
-    use provenant_core::{AttemptId, RunId};
+    use provenant_core::{AttemptId};
     use provenant_supervisor::custody::{self, Scope};
 
     #[test]
@@ -3132,7 +3127,7 @@ mod custody_admission_tests {
             .join("shared");
         std::fs::create_dir_all(&slot)?;
         let predecessor = Scope {
-            run: RunId::from_bytes([81; 16]),
+            run: AttemptId::from_bytes([81; 16]),
             attempt: AttemptId::from_bytes([82; 16]),
             generation: 1,
         };
@@ -3170,7 +3165,7 @@ mod custody_admission_tests {
                 .join("unrelated-invalid-project"),
         )?;
         let next = Scope {
-            run: RunId::from_bytes([83; 16]),
+            run: AttemptId::from_bytes([83; 16]),
             attempt: AttemptId::from_bytes([84; 16]),
             generation: 1,
         };
@@ -3226,7 +3221,7 @@ mod custody_admission_tests {
         let path = temp.path().join("slot");
         std::fs::create_dir(&path)?;
         let scope = Scope {
-            run: RunId::from_bytes([3; 16]),
+            run: AttemptId::from_bytes([3; 16]),
             attempt: AttemptId::from_bytes([4; 16]),
             generation: 1,
         };

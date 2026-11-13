@@ -124,10 +124,8 @@ fn custody_refusal(
             custody::CustodyError::ReservationRetained(error),
         ) => HandOff::Protected(format!("custody reservation: {error}")),
         crate::writer::WriterCustodyError::Admission(custody::CustodyError::ImportRetained {
-            run,
             attempt,
         }) => HandOff::RetainedImport {
-            run,
             attempt,
             worktree: writer_path.unwrap_or_default(),
         },
@@ -167,7 +165,6 @@ impl RunStore {
         };
         let id = record.attempt_id;
         let scope = Scope {
-            run: record.run_id,
             attempt: id,
             generation: record.generation,
         };
@@ -268,8 +265,8 @@ impl RunStore {
         match self.record(id, call) {
             Ok(now)
                 if now.revision == record.revision
-                    && now.run_id == record.run_id
-                    && now.task_id == record.task_id => {}
+                    && now.attempt_id == record.attempt_id
+                    && now.key == record.key => {}
             Ok(_) => {
                 local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
                     message: "attempt: changed before handoff".into(),
@@ -397,13 +394,7 @@ impl RunStore {
             .as_ref()
             .filter(|c| c.writer.is_some())
             .and_then(|c| lane_port_plan_or_warn(&c.state_root));
-        let key = local_or_withdraw!(
-            record
-                .key
-                .clone()
-                .ok_or(RunError::Validation("attempt has no work key"))
-                .map_err(|e| typed_local("work key", &e))
-        );
+        let key = record.key.clone();
         let command = ProviderCommand {
             profile_file,
             lane_ports,
@@ -826,7 +817,6 @@ mod tests {
             }
         ));
         let retained = RunError::RetainedWriterImport {
-            run: provenant_core::RunId::from_bytes([3; 16]),
             attempt: provenant_core::AttemptId::from_bytes([4; 16]),
             worktree: "/tmp/writer".into(),
         };
@@ -858,7 +848,7 @@ mod tests {
         let request = input();
         store.create(&request, &call)?;
         let record = store.record(request.attempts[0].attempt_id, &call)?;
-        let mut task = request.request.tasks[0].clone();
+        let mut task = request.request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
             extra: Default::default(),
             project: temp.path().into(),
@@ -995,7 +985,7 @@ mod tests {
             )
         };
         let result = store.hand_off(
-            &request.request.tasks[0],
+            &request.request.task,
             plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
@@ -1038,7 +1028,7 @@ mod tests {
             .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
-            &request.request.tasks[0],
+            &request.request.task,
             plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
@@ -1070,7 +1060,7 @@ mod tests {
             .attempt_dir(id, false)?
             .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
-            &request.request.tasks[0],
+            &request.request.task,
             plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
@@ -1139,7 +1129,7 @@ mod tests {
         TEST_UNCERTAIN_HANDOFF.with(|fault| fault.set(true));
         let start = || {
             store.start_inner(
-                request.run_id,
+                request.attempt_id,
                 &crate::dispatch_tests::Ready,
                 &|_, _| Ok(Vec::new()),
                 &acquire,
@@ -1196,7 +1186,7 @@ mod tests {
         };
         TEST_LOCAL_HANDOFF.with(|fault| fault.set(true));
         let result = store.start_inner(
-            request.run_id,
+            request.attempt_id,
             &crate::dispatch_tests::Ready,
             &|_, _| Ok(Vec::new()),
             &acquire,
@@ -1298,13 +1288,13 @@ mod tests {
             .ok_or("operation")?;
         store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
         assert!(matches!(
-            store.launch_unknown(request.run_id, &call),
+            store.launch_unknown(request.attempt_id, &call),
             Err(RunError::Sqlite(_))
         ));
         assert_eq!(store.operation(&request.operation_id, &call)?, Some(prior));
         assert!(custody::reservation_present(&directory, scope)?);
         store.db.execute_batch("DROP TRIGGER fail_unknown")?;
-        store.launch_unknown(request.run_id, &call)?;
+        store.launch_unknown(request.attempt_id, &call)?;
         assert_eq!(
             store
                 .operation(&request.operation_id, &call)?
@@ -1363,7 +1353,7 @@ mod tests {
             };
             let launch = || {
                 store.start_inner(
-                    request.run_id,
+                    request.attempt_id,
                     &crate::dispatch_tests::Ready,
                     &|_, _| Ok(Vec::new()),
                     &acquire,

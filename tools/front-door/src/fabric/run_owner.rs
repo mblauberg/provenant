@@ -192,11 +192,8 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     reason: "disk observation failed".into(),
                 };
             }
-            Some(DiagnosticFact::PromptLimit { task_index, limit }) => {
-                let field = task_index.map_or_else(
-                    || "tasks".to_owned(),
-                    |index| format!("tasks[{index}].prompt"),
-                );
+            Some(DiagnosticFact::PromptLimit { limit }) => {
+                let field = "prompt".to_owned();
                 return usize::try_from(*limit).map_or(FacadeError::InvalidInput { detail: None }, |limit| {
                     FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { field, limit })
                 });

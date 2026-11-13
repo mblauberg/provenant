@@ -141,7 +141,7 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     let other = store
         .claim(other_id, &at(20_000), &call)?
         .ok_or("other starts")?;
-    let attempt = |id: AttemptId, _run: RunId| {
+    let attempt = |id: AttemptId, _run: AttemptId| {
         store
             .context
             .state_root
@@ -150,7 +150,7 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
             .join(id.to_string())
     };
     // The shim's marker lives in the lane's scratch, `tmp/candidate-N`.
-    let tmp = attempt(id, running.run_id).join("tmp/candidate-0");
+    let tmp = attempt(id, running.attempt_id).join("tmp/candidate-0");
     std::fs::create_dir_all(&tmp)?;
     let marker = tmp.join(format!("{WAIT_MARKER}.100"));
     let records = [running.clone(), other];
@@ -197,7 +197,7 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
         assert!(store.lane_waits(&records, &call).is_empty(), "{forged}");
     }
     // Waits queue oldest first: the lane that began waiting later is second.
-    let other_tmp = attempt(other_id, records[1].run_id).join("tmp/candidate-0");
+    let other_tmp = attempt(other_id, records[1].attempt_id).join("tmp/candidate-0");
     std::fs::create_dir_all(&other_tmp)?;
     let other_marker = other_tmp.join(format!("{WAIT_MARKER}.200"));
     std::fs::write(&marker, "slot 0 0 3 3")?;
@@ -238,11 +238,11 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     std::fs::write(&marker, "slot 0")?;
     assert_eq!(store.lane_waits(&records, &call).len(), 1);
     std::fs::write(
-        attempt(id, running.run_id).join("process-exit.json"),
+        attempt(id, running.attempt_id).join("process-exit.json"),
         br#"{"unresolved_cleanup":true}"#,
     )?;
     assert!(store.lane_waits(&records, &call).is_empty());
-    std::fs::remove_file(attempt(id, running.run_id).join("process-exit.json"))?;
+    std::fs::remove_file(attempt(id, running.attempt_id).join("process-exit.json"))?;
     clock.wait_until(MonoTime::from_micros(400_000_000))?;
     assert!(store.lane_waits(&records, &call).is_empty());
     Ok(())
@@ -327,7 +327,7 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         });
         let mut run = lane(98, writer);
         if write_root {
-            run.request.tasks[0].access.write_roots = vec![temp.path().canonicalize()?];
+            run.request.task.access.write_roots = vec![temp.path().canonicalize()?];
         }
         let has_writes = writer || write_root;
         let id = starting(&store, &run, &call)?;
@@ -672,11 +672,11 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     );
     // A unit-test executable interprets "internal settle" as test filters.
     // Exercise the control's process boundary without starting hidden tests.
-    let run_directory = store.run_dir(run.run_id, false)?;
+    let run_directory = store.attempt_dir(run.attempt_id, false)?;
     for lock_name in ["settlement-spawn.lock", "settlement-worker.lock"] {
         let held =
             run_directory.try_lock(OsStr::new(lock_name), provenant_os::fs::LockMode::Exclusive)?;
-        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             panic!("a concurrent settlement claim must exclude another spawn");
         })?;
         drop(held);
@@ -687,23 +687,23 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         call.clock,
     )?
     .ok_or("settlement owner")?;
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         panic!("a live settlement owner needs no detached worker");
     })?;
     drop(driver);
     let mut launched = false;
-    let queued = store.queue_reconcile_with(run.run_id, &call, |argv, cwd| {
+    let queued = store.queue_reconcile_with(run.attempt_id, &call, |argv, cwd| {
         assert_eq!(argv.len(), 4);
         assert_eq!(argv[0], std::env::current_exe().unwrap().into_os_string());
         assert_eq!(argv[1..3], ["internal", "settle"]);
         assert_eq!(cwd, std::env::current_dir().unwrap());
         let request: serde_json::Value = serde_json::from_str(argv[3].to_str().unwrap()).unwrap();
-        assert_eq!(request["run"], serde_json::to_value(run.run_id).unwrap());
+        assert_eq!(request["run"], serde_json::to_value(run.attempt_id).unwrap());
         launched = true;
         Ok(())
     })?;
     assert!(launched);
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         panic!("an already queued settlement must not spawn another worker");
     })?;
     let marker: serde_json::Value = serde_json::from_slice(
@@ -715,17 +715,17 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         clock.mono_now().as_micros() + u64::try_from(remaining)?,
     ))?;
     let mut requeued = false;
-    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
         requeued = true;
         Ok(())
     })?;
     assert!(requeued, "expiry permits a fresh worker at the boundary");
     // Invalid or obsolete markers must fail visibly instead of permitting a spawn.
     for marker in [
-        serde_json::json!({"schema_version":1,"run":run.run_id,"expires_ms":0}),
-        serde_json::json!({"schema_version":3,"run":run.run_id,"expires":"1970-01-01T00:00:00.000000Z"}),
-        serde_json::json!({"schema_version":2,"run":RunId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
-        serde_json::json!({"schema_version":2,"run":run.run_id,"expires":"broken"}),
+        serde_json::json!({"schema_version":1,"run":run.attempt_id,"expires_ms":0}),
+        serde_json::json!({"schema_version":3,"run":run.attempt_id,"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":AttemptId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":run.attempt_id,"expires":"broken"}),
     ] {
         run_directory
             .atomic_write(
@@ -737,7 +737,7 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
             .require_durable()?;
         assert!(
             store
-                .queue_reconcile_with(run.run_id, &call, |_, _| {
+                .queue_reconcile_with(run.attempt_id, &call, |_, _| {
                     panic!("invalid queue marker must not spawn a worker");
                 })
                 .is_err()

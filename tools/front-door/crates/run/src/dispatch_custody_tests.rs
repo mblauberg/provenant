@@ -77,7 +77,7 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     let dir = stores[0].attempt_dir(dead, false)?;
     artifacts::seal(&dir, "stdout.log", b"partial", CAPTURE_LIMIT)?;
     let mut observed = exit();
-    observed.scope.run = batches[0].run_id;
+    observed.scope.attempt = batches[0].attempt_id;
     observed.scope.attempt = dead;
     observed.scope.generation = 1;
     observed.termination = Some(Termination::Signal(9));
@@ -112,7 +112,7 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
         observed: None,
         ..Fake::default()
     };
-    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let started = store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
     assert!(
         matches!(&started[..], [Started::Refused { reason, .. }] if reason.contains("disabled"))
     );
@@ -134,10 +134,10 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
         provenant_records::AttemptOutcome::Rejected
     );
     assert!(fact.started_at.is_none());
-    assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
     assert!(
         store
-            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
             .is_empty()
     );
     Ok(())
@@ -166,14 +166,14 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     // A 1.8.0 request kept its placement here; it now lands in `extra`.
-    run.request.tasks[0].extra.insert(
+    run.request.task.extra.insert(
         "cloud".into(),
         serde_json::json!({"target": "t", "provider": "claude"}),
     );
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
     let fake = Fake::default();
-    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let started = store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
     assert!(matches!(
         &started[..],
         [Started::Refused { attempt, kind: RefusalKind::CloudPlacementRemoved, .. }]
@@ -187,7 +187,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     assert_eq!(extra["terminal_cause"], "cloud_placement_removed");
     assert!(
         store
-            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
             .is_empty()
     );
     Ok(())
@@ -280,7 +280,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
         fact.output_refs[0].digest,
         CanonicalV1::file_digest(DONE_ANSWER.as_bytes())
     );
-    assert_eq!(store.run(batch.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(batch.attempt_id, &call)?.closure, Closure::Closed);
     Ok(())
 }
 #[test]
@@ -403,7 +403,7 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
         let context = context(temp.path())?;
         let store = RunStore::open(&context, &call)?;
         let mut run = input();
-        run.request.tasks[0].writer = Some(WriterRequest {
+        run.request.task.writer = Some(WriterRequest {
             extra: Default::default(),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/lane"),
@@ -486,7 +486,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     };
     // A held custody lock is a live handoff: cancel leaves it untouched.
     let scope = provenant_supervisor::custody::Scope {
-        run: batch.run_id,
+        run: batch.attempt_id,
         attempt: starting,
         generation: 1,
     };
@@ -536,6 +536,6 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     seal_exit(&store, &observed)?;
     store.finish(starting, &dir, &observed, &Fake::default(), &call)?;
     assert_eq!(terminal(&store, starting, &call)?, Outcome::Cancelled);
-    assert_eq!(store.run(batch.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(batch.attempt_id, &call)?.closure, Closure::Closed);
     Ok(())
 }

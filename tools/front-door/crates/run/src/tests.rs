@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock as _, Digest, MonoTime, OperationId, ProjectId,
-    RootInputs, RunId, TaskId, TestClock, WallTime,
+    RootInputs, AttemptId, TaskId, TestClock, WallTime,
 };
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
@@ -361,7 +361,7 @@ pub(super) fn digest_prefix(digest: impl std::fmt::Display) -> ArtifactValue {
 /// Give every task of a fixture run its own key, derived from the run and
 /// task ids, so fixtures that mint ids also mint keys.
 pub(crate) fn rekey(prepared: &mut PreparedRun) {
-    let run = prepared.run_id;
+    let run = prepared.attempt_id;
     for task in &mut prepared.request.tasks {
         let context = task.context.get_or_insert_with(Default::default);
         context.graph_id = Some(format!("lane-{run}"));
@@ -377,7 +377,7 @@ pub(super) fn input() -> PreparedRun {
 fn raw_input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
     PreparedRun {
-        run_id: RunId::from_bytes([4; 16]),
+        run_id: AttemptId::from_bytes([4; 16]),
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
         request: CanonicalRequest {
@@ -548,7 +548,7 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     );
     for n in 10_u8..91 {
         input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
-        input.run_id = RunId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
         input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
         crate::tests::rekey(&mut input);
         store.record_refusal(
@@ -601,7 +601,7 @@ fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> Test
     let mut expected = Vec::new();
     for n in 0_u8..164 {
         input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
-        input.run_id = RunId::from_bytes([n; 16]);
+        input.attempt_id = AttemptId::from_bytes([n; 16]);
         input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
         crate::tests::rekey(&mut input);
         let record = store.record_refusal(
@@ -669,7 +669,7 @@ fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0]
+    input.request.task
         .profile
         .knobs
         .insert("chair.refusal_notice".into(), serde_json::json!("off"));
@@ -719,7 +719,7 @@ pub(super) fn exit() -> ExitObservation {
         cancel_delivered_before_exit: None,
         publication: PublicationState::Durable,
         scope: Scope {
-            run: input().run_id,
+            run: input().attempt_id,
             attempt: input().attempts[0].attempt_id,
             generation: 0,
         },
@@ -772,7 +772,7 @@ fn overview_reads_committed_wal_and_bounds_rows() -> TestResult {
     let writer = RunStore::open(&context, &call)?;
     let reader = RunStore::open_read_only(&context, &call)?.ok_or("missing reader")?;
     let mut first = input();
-    first.request.tasks[0].title = Some("Review changes".into());
+    first.request.task.title = Some("Review changes".into());
     writer.create(&first, &call)?;
     let batch = reader.overview_attempts(1, 1_048_576, &call)?;
     assert!(!batch.truncated);
@@ -796,13 +796,13 @@ fn overview_bounds_aggregate_record_bytes_before_decoding() -> TestResult {
     let writer = RunStore::open(&context, &call)?;
     for n in 1..=3 {
         let mut value = input();
-        value.run_id = RunId::from_bytes([n; 16]);
+        value.attempt_id = AttemptId::from_bytes([n; 16]);
         value.operation_id = OperationId::parse(&format!("run-{n}"))?;
-        value.request.tasks[0].task_id = TaskId::from_bytes([n; 16]);
-        value.attempts[0].task_id = value.request.tasks[0].task_id;
+        value.request.task.task_id = TaskId::from_bytes([n; 16]);
+        value.attempts[0].task_id = value.request.task.task_id;
         value.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
         crate::tests::rekey(&mut value);
-        value.request.tasks[0].title = Some("x".repeat(200));
+        value.request.task.title = Some("x".repeat(200));
         writer.create(&value, &call)?;
     }
     let mut statement = writer
@@ -856,12 +856,12 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0].writer = Some(WriterRequest {
+    input.request.task.writer = Some(WriterRequest {
         extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
-    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+    input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
@@ -966,12 +966,12 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0].writer = Some(WriterRequest {
+    input.request.task.writer = Some(WriterRequest {
         extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
-    input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+    input.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
@@ -1158,9 +1158,9 @@ fn historical_task_class_preserves_request_verification_and_lane_listing() -> Te
         let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
         input.request = serde_json::from_value(sealed.clone())?;
         store.create(&input, &call)?;
-        assert_eq!(store.run(input.run_id, &call)?.request_digest, digest);
+        assert_eq!(store.run(input.attempt_id, &call)?.request_digest, digest);
         assert_eq!(
-            serde_json::to_value(store.request(input.run_id, &call)?)?,
+            serde_json::to_value(store.request(input.attempt_id, &call)?)?,
             sealed
         );
         let page = store.lanes(
@@ -1357,7 +1357,7 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = input();
     store.create(&input, &call)?;
-    let stored = store.run(input.run_id, &call)?.request_digest;
+    let stored = store.run(input.attempt_id, &call)?.request_digest;
     let path = context.state_root.as_path().join(format!(
         "attempts/{}/request.json",
         input.attempts[0].attempt_id
@@ -1368,7 +1368,7 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
     let recomputed = CanonicalV1::record_digest("run-request", 1, &value)?;
     std::fs::write(&path, raw)?;
     assert_eq!(
-        artifact_provenance(store.request(input.run_id, &call)),
+        artifact_provenance(store.request(input.attempt_id, &call)),
         ArtifactProvenance {
             check: ArtifactCheck::RequestDigest,
             artifact: "request.json".into(),
@@ -1394,7 +1394,7 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     let task = value["tasks"][0].as_object_mut().unwrap();
     task.insert(
         "profile".into(),
-        serde_json::to_value(&input.request.tasks[0].profile)?,
+        serde_json::to_value(&input.request.task.profile)?,
     );
     // The historic request always wrote fallback, including an empty list.
     // Construct those persisted bytes explicitly: current tasks no longer
@@ -1413,13 +1413,13 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
         .ok_or("operation")?;
     operation.request_digest = digest;
     store.db.execute(
-        "UPDATE attempts SET operation_record=?1 WHERE run=?2",
-        rusqlite::params![crate::db::bytes(&operation)?, input.run_id.to_string()],
+        "UPDATE attempts SET operation_record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&operation)?, input.attempt_id.to_string()],
     )?;
-    let decoded = store.request(input.run_id, &call)?;
-    assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
+    let decoded = store.request(input.attempt_id, &call)?;
+    assert_eq!(decoded.task.profile, input.request.task.profile);
     assert_eq!(
-        decoded.tasks[0].extra.get("fallback"),
+        decoded.task.extra.get("fallback"),
         Some(&serde_json::json!([]))
     );
     assert_ne!(decoded.digest()?, digest);
@@ -1427,7 +1427,7 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     raw[0] ^= 1;
     std::fs::write(&path, raw)?;
     assert_eq!(
-        artifact_provenance(store.request(input.run_id, &call)).check,
+        artifact_provenance(store.request(input.attempt_id, &call)).check,
         ArtifactCheck::RequestDigest
     );
     Ok(())
@@ -1549,7 +1549,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         role: Some("reviewer".into()),
         ..Default::default()
     };
-    input.request.tasks[0].context = Some(work.clone());
+    input.request.task.context = Some(work.clone());
     // A schema-v1 request without a profile must keep its sealed digest.
     let mut unstamped = serde_json::to_value(&input.request)?;
     for task in unstamped["tasks"].as_array_mut().ok_or("tasks")? {
@@ -1569,7 +1569,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         store.attempt(id, &call),
         Err(RunError::Nonterminal)
     ));
-    assert_eq!(store.create(&input, &call)?.run_id, run.run_id);
+    assert_eq!(store.create(&input, &call)?.attempt_id, run.attempt_id);
     let mut changed = self::input();
     changed.request.concurrency = 2;
     assert!(matches!(
@@ -1605,7 +1605,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         store.publish_terminal(id, 1, &publication(), &exit(), &call)?,
         record
     );
-    assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store.operation(&input.operation_id, &call)?.unwrap().state,
         OperationState::Terminal
@@ -1635,7 +1635,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert_eq!(all.bytes, publication().result.as_bytes());
     let fact = store.attempt(id, &call)?;
     assert_eq!(
-        store.request(run.run_id, &call)?.tasks[0].context,
+        store.request(run.attempt_id, &call)?.task.context,
         Some(work.clone())
     );
     assert_eq!(fact.context, Some(work));
@@ -1672,7 +1672,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
         extra: record.trace.extra.clone(),
         host: None,
         project: Some(context.project_id),
-        run: Some(run.run_id),
+        run: Some(run.attempt_id),
         attempt: Some(id),
         operation: Some(input.operation_id.clone()),
         actor: Some(context.actor_id),
@@ -1732,7 +1732,7 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
         "process.json",
         &serde_json::to_vec(&serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": input.run_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
+            "scope": {"run": input.attempt_id, "attempt": input.attempts[0].attempt_id, "generation": 0},
             "last_output_at": expected,
             "priority": 15,
             "publication_pending": false
@@ -1757,14 +1757,14 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
     for checkpoint in [
         serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
+            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
             "silent": true,
             "silent_for_ms": 1_800_000
         }),
         serde_json::json!({"schema_version": 1, "scope": "invalid", "silent": true}),
         serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
+            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
             "observed_at": WallTime::from_micros(1_000_000)?,
             "silent": true,
             "silent_for_ms": 1_800_000
@@ -1947,7 +1947,7 @@ fn oversized_prompt_retains_code_and_projects_field_limit() -> TestResult {
         "TOKEN_SENTINEL{}",
         "é".repeat((RECORD_LIMIT / 2 + 1) as usize)
     );
-    request.request.tasks[0].prompt_digest =
+    request.request.task.prompt_digest =
         CanonicalV1::file_digest(request.attempts[0].prompt.as_bytes());
     let Err(error) = store.create(&request, &call) else {
         return Err("oversized prompt accepted".into());
@@ -2159,7 +2159,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         let id = input.attempts[0].attempt_id;
         assert_eq!(
             store.record(id, &call)?.prompt.digest,
-            input.request.tasks[0].prompt_digest
+            input.request.task.prompt_digest
         );
         if phase != "committed" {
             assert!(matches!(
@@ -2171,9 +2171,9 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         }
         // A replay mints fresh IDs; it must land on the reserved ones.
         let mut replay = self::input();
-        replay.run_id = RunId::from_bytes([9; 16]);
+        replay.attempt_id = AttemptId::from_bytes([9; 16]);
         replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
-        assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
+        assert_eq!(store.create(&replay, &call)?.attempt_id, input.attempt_id);
         if !phase.starts_with("withdraw-") {
             seal_exit_fixture(&store, &input)?;
         }
@@ -2311,7 +2311,7 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
         }
     );
     store.recover_result_only(id, &recomputed, &exit(), &call)?;
-    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(input.attempt_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store
             .read_output(
@@ -2357,12 +2357,12 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
         Err(RunError::Nonterminal)
     ));
     assert_eq!(store.events(0, 64, None, &call)?.len(), 1);
-    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Open);
+    assert_eq!(store.run(input.attempt_id, &call)?.closure, Closure::Open);
     store.db.pragma_update(None, "max_page_count", 10000)?;
     store.recover_terminal(id, &exit(), &call)?;
     assert_eq!(admission_count(&store)?, 0);
     assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
-    assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(input.attempt_id, &call)?.closure, Closure::Closed);
     assert_eq!(
         store
             .read_output(
@@ -2465,7 +2465,7 @@ fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
         let id = input.attempts[0].attempt_id;
         store.create(&input, &call)?;
         seal_exit_fixture(&store, &input)?;
-        let run = store.run_dir(input.run_id, false)?;
+        let run = store.attempt_dir(input.attempt_id, false)?;
         let lock = run.try_lock(
             std::ffi::OsStr::new("publication.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -2509,7 +2509,7 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
-    input.request.tasks[0].writer = Some(WriterRequest {
+    input.request.task.writer = Some(WriterRequest {
         extra: Default::default(),
         project: temp.path().into(),
         worktree: temp.path().into(),
@@ -2576,7 +2576,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     let store = RunStore::open(&context, &call)?;
     assert!(
         store
-            .pending_effect_attempts(input.run_id, &call)?
+            .pending_effect_attempts(input.attempt_id, &call)?
             .contains(&id)
     );
     store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
@@ -2619,7 +2619,7 @@ fn publication_manifest_recovery_preserves_conflict_until_intent_is_established(
     ));
     assert!(
         !store
-            .pending_effect_attempts(input.run_id, &call)?
+            .pending_effect_attempts(input.attempt_id, &call)?
             .contains(&id)
     );
     Ok(())
@@ -2939,7 +2939,7 @@ fn work_context_bounds_are_enforced() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     for value in ["x".repeat(257), "  ".into(), "bad\nvalue".into()] {
         let mut request = input();
-        request.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+        request.request.task.context = Some(provenant_records::run::WorkContext {
             work_item: Some(value),
             ..Default::default()
         });
@@ -2949,7 +2949,7 @@ fn work_context_bounds_are_enforced() -> TestResult {
         ));
     }
     let mut request = input();
-    request.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+    request.request.task.context = Some(provenant_records::run::WorkContext {
         work_item: Some("x".repeat(256)),
         ..Default::default()
     });
@@ -2986,7 +2986,7 @@ fn a_terminal_commit_owes_one_frozen_reaction_in_the_same_transaction() -> TestR
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
     let id = input.attempts[0].attempt_id;
-    assert_eq!(store.pending_reactions(input.run_id, &call)?, [id]);
+    assert_eq!(store.pending_reactions(input.attempt_id, &call)?, [id]);
     let owed = store.reaction(id, &call)?.ok_or("row")?;
     assert!(
         owed.notice
@@ -3012,7 +3012,7 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     // The guardian dies after the commit, before any reaction.
     drop(store);
     let recovery = RunStore::open(&context, &call)?;
-    assert_eq!(recovery.pending_reactions(input.run_id, &call)?.len(), 1);
+    assert_eq!(recovery.pending_reactions(input.attempt_id, &call)?.len(), 1);
     let calls = std::cell::RefCell::new((0, 0));
     let mut step = |reaction: &mut Reaction,
                     _save: &mut crate::reactions::Saver<'_>|
@@ -3034,13 +3034,13 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
         reaction.ledger_done = true;
         Ok(())
     };
-    let failed = recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step);
+    let failed = recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step);
     assert_eq!(failed.unwrap_err().to_string(), "inbox busy");
     // Progress is kept and the row is still owed.
-    assert_eq!(recovery.pending_reactions(input.run_id, &call)?.len(), 1);
-    recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step)?;
-    assert!(recovery.pending_reactions(input.run_id, &call)?.is_empty());
-    recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step)?;
+    assert_eq!(recovery.pending_reactions(input.attempt_id, &call)?.len(), 1);
+    recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
+    assert!(recovery.pending_reactions(input.attempt_id, &call)?.is_empty());
+    recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
     // The graph ran once, the failed notice ran twice, and nothing ran after.
     assert_eq!(*calls.borrow(), (1, 2));
     Ok(())
@@ -3065,15 +3065,15 @@ fn two_concurrent_drains_react_once() -> TestResult {
     };
     // One drain is mid-flight and holds the run's lock; a second, from another
     // process's store, defers to it instead of repeating its work.
-    let held = store.reaction_lock(input.run_id)?.ok_or("lock")?;
+    let held = store.reaction_lock(input.attempt_id)?.ok_or("lock")?;
     let other = RunStore::open(&context, &call)?;
-    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    other.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
     assert_eq!(runs.get(), 0);
     drop(held);
-    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    other.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut finish)?;
     assert_eq!(runs.get(), 1);
-    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    assert!(store.pending_reactions(input.attempt_id, &call)?.is_empty());
     Ok(())
 }
 
@@ -3089,7 +3089,7 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
     let id = input.attempts[0].attempt_id;
     store.prune_reactions(i64::MAX, &call)?;
     assert!(store.reaction(id, &call)?.is_some());
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -3133,7 +3133,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
         inner: clock(),
         skew: Default::default(),
     };
-    store.drain_reactions(input.run_id, &skewed, &cancel, &mut |reaction, save| {
+    store.drain_reactions(input.attempt_id, &skewed, &cancel, &mut |reaction, save| {
         // A graph advance can run for longer than one call budget.
         skewed
             .skew
@@ -3145,7 +3145,7 @@ fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
         reaction.ledger_done = true;
         Ok(())
     })?;
-    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    assert!(store.pending_reactions(input.attempt_id, &call)?.is_empty());
     assert!(store.reaction(id, &call)?.ok_or("row")?.graph_done);
     Ok(())
 }
@@ -3159,7 +3159,7 @@ fn a_step_boundary_save_survives_a_failure_after_it() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
     let id = input.attempts[0].attempt_id;
-    let failed = store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, save| {
+    let failed = store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, save| {
         reaction.resolved = true;
         save(reaction)?;
         // The step dies before it records anything else.
@@ -3179,8 +3179,8 @@ fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
-    assert_eq!(store.open_runs(10, &call)?, vec![input.run_id]);
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+    assert_eq!(store.open_runs(10, &call)?, vec![input.attempt_id]);
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.notice_done = true;
         reaction.log_done = true;
         reaction.ledger_done = true;
@@ -3216,7 +3216,7 @@ fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
     // The row has no place for host authority, so it is refused, not obeyed.
     assert!(store.reaction(id, &call).is_err());
     let mut ran = false;
-    let result = store.drain_reactions(input.run_id, &clock, &cancel, &mut |_, _| {
+    let result = store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |_, _| {
         ran = true;
         Ok(())
     });
@@ -3368,7 +3368,7 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
     let id = input.attempts[0].attempt_id;
-    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+    store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
         reaction.notice_done = true;
         reaction.log_done = true;
@@ -3391,11 +3391,11 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
 fn keyed_input(seed: u8, operation: &str, graph: &str, node: &str, attempt: u32) -> PreparedRun {
     let mut prepared = input();
     let task = TaskId::from_bytes([seed; 16]);
-    prepared.run_id = RunId::from_bytes([seed + 1; 16]);
+    prepared.attempt_id = AttemptId::from_bytes([seed + 1; 16]);
     prepared.operation_id = OperationId::parse(operation).unwrap();
-    prepared.request.tasks[0].task_id = task;
+    prepared.request.task.task_id = task;
     crate::tests::rekey(&mut prepared);
-    prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+    prepared.request.task.context = Some(provenant_records::run::WorkContext {
         graph_id: Some(graph.into()),
         node_id: Some(node.into()),
         attempt: Some(attempt),
@@ -3462,7 +3462,7 @@ fn plain_lane_and_one_node_graph_store_the_same_attempt_row() -> TestResult {
     store.create(&graph, &call)?;
     let plain_key = provenant_records::WorkKey::new(
         context.project_id,
-        format!("lane-{}", plain.run_id),
+        format!("lane-{}", plain.attempt_id),
         plain.attempts[0].task_id.to_string(),
         1,
     )?;

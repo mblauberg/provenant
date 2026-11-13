@@ -277,15 +277,14 @@ impl crate::RunStore {
         // not inventoried for each displayed row.
         self.db
             .query_row(
-                "SELECT task,project FROM attempts WHERE id=?1",
+                "SELECT project FROM attempts WHERE id=?1",
                 [scope.attempt.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, String>(0),
             )
             .ok()
-            .and_then(|(task, project)| {
+            .and_then(|project| {
                 self.attempt_writer_slot(
-                    scope.run,
-                    provenant_core::TaskId::parse(&task).ok()?,
+                    scope.attempt,
                     provenant_core::ProjectId::parse(&project).ok()?,
                     call,
                 )
@@ -626,7 +625,7 @@ pub(crate) fn with_cancellation<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, RunId};
+    use provenant_core::{AttemptId};
     use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
 
     fn clock() -> TestClock {
@@ -742,7 +741,7 @@ mod tests {
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
         store.queue_reconcile_mode_with_probe(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| panic!("queued lane does not need a worker"),
             false,
@@ -761,7 +760,7 @@ mod tests {
         for explicit in [false, true] {
             let calls = std::cell::Cell::new(0);
             let found = store.queue_reconcile_mode_with_probe(
-                run.run_id,
+                run.attempt_id,
                 &call,
                 |_, _| panic!("stalled worker must not spawn"),
                 explicit,
@@ -784,7 +783,7 @@ mod tests {
         }
         let mut spawned = false;
         store.queue_reconcile_mode_with_probe(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -852,7 +851,7 @@ mod tests {
             waits[0].waiting_for,
             "host_stalled: supervisor is in uninterruptible sleep"
         );
-        let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             panic!("stalled worker must not spawn")
         })?;
         assert!(matches!(
@@ -865,7 +864,7 @@ mod tests {
             )]
         ));
         let reconciled = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -919,7 +918,7 @@ mod tests {
         assert!(matches!(
             store
                 .reconcile_with_observer(
-                    run.run_id,
+                    run.attempt_id,
                     &crate::dispatch_tests::Fake::default(),
                     &call,
                     &SystemProcessObserver
@@ -941,7 +940,7 @@ mod tests {
             "an unreadable probe is unknown"
         );
         let mut spawned = false;
-        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             spawned = true;
             Ok(())
         })?;
@@ -971,11 +970,11 @@ mod tests {
         )?;
         store.commit_lost(crate::RunStore::scope(&record), "fixture", &call)?;
         store.set_temporary_retained(id, false, &call)?;
-        assert_eq!(store.pending_reactions(run.run_id, &call)?, [id]);
+        assert_eq!(store.pending_reactions(run.attempt_id, &call)?, [id]);
         assert!(store.writer_fences()?.is_empty());
         let mut spawned = false;
         let found = store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |argv, _| {
                 assert_eq!(argv[1..3], ["internal", "settle"]);
@@ -988,13 +987,13 @@ mod tests {
         assert!(found.is_empty());
         assert!(
             read_sealed(
-                &store.run_dir(run.run_id, false)?,
+                &store.attempt_dir(run.attempt_id, false)?,
                 "settlement-queued.json",
                 RECORD_LIMIT
             )?
             .is_some()
         );
-        store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
@@ -1007,7 +1006,7 @@ mod tests {
         let store = store.with_writer_registry(&registry);
         assert!(
             store
-                .queue_reconcile_with(run.run_id, &call, |_, _| {
+                .queue_reconcile_with(run.attempt_id, &call, |_, _| {
                     panic!("an unlistable registry with no candidates must return its error")
                 })
                 .is_err()
@@ -1104,15 +1103,15 @@ mod tests {
         let scope = crate::RunStore::scope(&record);
         store.commit_lost(scope, "fixture", &call)?;
         store.set_temporary_retained(id, false, &call)?;
-        store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
             Ok(())
         })?;
-        assert!(store.pending_reactions(run.run_id, &call)?.is_empty());
-        assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
+        assert!(store.pending_reactions(run.attempt_id, &call)?.is_empty());
+        assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
         let slot = context
             .state_root
             .as_path()
@@ -1143,7 +1142,7 @@ mod tests {
         )?);
         let mut spawned = false;
         let found = store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1161,7 +1160,7 @@ mod tests {
             && matches!(state, crate::Reconciled::Uncertain { .. })));
         assert!(
             read_sealed(
-                &store.run_dir(run.run_id, false)?,
+                &store.attempt_dir(run.attempt_id, false)?,
                 "settlement-queued.json",
                 RECORD_LIMIT
             )?
@@ -1186,7 +1185,7 @@ mod tests {
                 let mut run = crate::tests::input();
                 let bad = run.attempts[0].attempt_id;
                 let good = provenant_core::AttemptId::from_bytes([7; 16]);
-                let mut task = run.request.tasks[0].clone();
+                let mut task = run.request.task.clone();
                 task.task_id = provenant_core::TaskId::from_bytes([8; 16]);
                 run.attempts.push(crate::NewAttempt {
                     attempt_id: good,
@@ -1229,7 +1228,7 @@ mod tests {
                 }
                 let mut spawned = false;
                 let found = store.queue_reconcile_mode(
-                    run.run_id,
+                    run.attempt_id,
                     &call,
                     |_, _| {
                         spawned = true;
@@ -1246,7 +1245,7 @@ mod tests {
                     matches!(&found[1], (id, crate::Reconciled::Settling { .. }) if *id == good),
                     "{found:?}"
                 );
-                let queued = store.run_dir(run.run_id, false)?;
+                let queued = store.attempt_dir(run.attempt_id, false)?;
                 assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
                 queued.unlink(OsStr::new("settlement-queued.json"))?;
                 crate::artifacts::seal(
@@ -1288,7 +1287,7 @@ mod tests {
             &call,
         )?;
         store.commit_lost(crate::RunStore::scope(&record), "fixture", &call)?;
-        store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
@@ -1296,12 +1295,12 @@ mod tests {
             Ok(())
         })?;
         store.set_temporary_retained(id, true, &call)?;
-        assert!(run.request.tasks[0].writer.is_none());
-        assert!(store.pending_reactions(run.run_id, &call)?.is_empty());
+        assert!(run.request.task.writer.is_none());
+        assert!(store.pending_reactions(run.attempt_id, &call)?.is_empty());
         assert!(store.writer_fences()?.is_empty());
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |argv, _| {
                 assert_eq!(argv[1..3], ["internal", "settle"]);
@@ -1311,7 +1310,7 @@ mod tests {
             true,
         )?;
         assert!(spawned);
-        let queued = store.run_dir(run.run_id, false)?;
+        let queued = store.attempt_dir(run.attempt_id, false)?;
         assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
         Ok(())
     }
@@ -1345,11 +1344,11 @@ mod tests {
             let scope = crate::RunStore::scope(&record);
             store.commit_lost(scope, "fixture", &call)?;
             store.set_temporary_retained(id, retained, &call)?;
-            assert_eq!(store.pending_reactions(run.run_id, &call)?, [id]);
+            assert_eq!(store.pending_reactions(run.attempt_id, &call)?, [id]);
             let attempt = store.attempt_dir(id, false)?;
             let mut spawned = false;
             store.queue_reconcile_mode(
-                run.run_id,
+                run.attempt_id,
                 &call,
                 |argv, _| {
                     assert_eq!(argv[1..3], ["internal", "settle"]);
@@ -1359,13 +1358,13 @@ mod tests {
                 true,
             )?;
             assert!(spawned);
-            let queued = store.run_dir(run.run_id, false)?;
+            let queued = store.attempt_dir(run.attempt_id, false)?;
             assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
             queued.unlink(OsStr::new("settlement-queued.json"))?;
             for n in 1..=LIMIT {
                 let call = crate::tests::call(&clock, &cancel);
                 let found = store.reconcile_with_observer(
-                    run.run_id,
+                    run.attempt_id,
                     &crate::dispatch_tests::Fake::default(),
                     &call,
                     &SystemProcessObserver,
@@ -1376,7 +1375,7 @@ mod tests {
                 ));
                 let journal = read(&attempt, scope)?;
                 assert_eq!(journal.recovery_failures, n);
-                let listed = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                let listed = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                     panic!("cooldown must prevent spawn")
                 })?;
                 assert!(
@@ -1386,7 +1385,7 @@ mod tests {
                 if n < LIMIT {
                     let call = crate::tests::call(&clock, &cancel);
                     let mut spawned = false;
-                    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                         spawned = true;
                         Ok(())
                     })?;
@@ -1398,7 +1397,7 @@ mod tests {
                 }
             }
             let call = crate::tests::call(&clock, &cancel);
-            let listed = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            let listed = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("failure limit must prevent spawn")
             })?;
             assert!(
@@ -1407,7 +1406,7 @@ mod tests {
             assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_none());
             let mut spawned = false;
             store.queue_reconcile_mode(
-                run.run_id,
+                run.attempt_id,
                 &call,
                 |_, _| {
                     spawned = true;
@@ -1419,7 +1418,7 @@ mod tests {
             assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
             assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
             let retried = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -1460,7 +1459,7 @@ mod tests {
         store.set_temporary_retained(id, true, &call)?;
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1470,7 +1469,7 @@ mod tests {
         )?;
         assert!(spawned);
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -1515,7 +1514,7 @@ mod tests {
         for n in 1..=LIMIT {
             let call = crate::tests::call(&clock, &cancel);
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -1528,17 +1527,17 @@ mod tests {
             assert_eq!(journal.recovery_failures, n);
             assert!(journal.blocking_reason.is_some());
             let queued = store
-                .queue_reconcile_with(run.run_id, &call, |_, _| panic!("retry must be delayed"))?;
+                .queue_reconcile_with(run.attempt_id, &call, |_, _| panic!("retry must be delayed"))?;
             assert!(
                 matches!(queued.as_slice(), [(_, crate::Reconciled::Uncertain { reason })] if reason.to_string() == journal.blocking_reason.clone().unwrap())
             );
             advance_to(&mut clock, journal.retry_after_ms)?;
         }
         let call = crate::tests::call(&clock, &cancel);
-        store.queue_reconcile_with(run.run_id, &call, |_, _| panic!("retry limit"))?;
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| panic!("retry limit"))?;
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1570,7 +1569,7 @@ mod tests {
             None,
             &call,
         )?;
-        let result = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        let result = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             Err(provenant_os::exec::ExecError::ProcessBudget {
                 used: 950,
                 limit: 1000,
@@ -1591,12 +1590,12 @@ mod tests {
             "launch: last recovery worker refused: user process count 950 of 1000"
         );
         let mut retried = false;
-        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             retried = true;
             Ok(())
         })?;
         assert!(retried, "failed spawn must remove its queued marker");
-        assert!(store.recovery_process_wait(run.run_id, &call).is_none());
+        assert!(store.recovery_process_wait(run.attempt_id, &call).is_none());
         Ok(())
     }
 
@@ -1629,7 +1628,7 @@ mod tests {
         for index in 1..=LIMIT {
             let call = crate::tests::call(&clock, &cancel);
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -1642,7 +1641,7 @@ mod tests {
             assert_eq!(journal.attempts, 0, "failure precedes import claim");
             assert_eq!(journal.recovery_failures, index);
             assert!(journal.owner.is_none());
-            let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("cooldown must prevent another worker");
             })?;
             assert!(
@@ -1652,13 +1651,13 @@ mod tests {
         }
         let call = crate::tests::call(&clock, &cancel);
         for _ in 0..4 {
-            store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("exhausted recovery must stay bounded after cooldown");
             })?;
         }
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1693,7 +1692,7 @@ mod tests {
             RECORD_LIMIT,
         )?;
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -1706,7 +1705,7 @@ mod tests {
         attempt.unlink(OsStr::new("launch.json"))?;
         attempt.unlink(OsStr::new("process.json"))?;
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -1720,7 +1719,7 @@ mod tests {
 
     fn scope() -> Scope {
         Scope {
-            run: RunId::from_bytes([1; 16]),
+            run: AttemptId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         }
@@ -2113,7 +2112,7 @@ impl crate::RunStore {
             }
         }
         if let Some(slot) =
-            self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?
+            self.attempt_writer_slot(record.attempt_id, record.project_id, call)?
         {
             match Directory::open_anchor(&slot) {
                 Ok(slot) => {
@@ -2279,7 +2278,7 @@ pub struct ResumeRequest {
     roots: crate::RootSeed,
     project: provenant_core::ProjectId,
     actor: provenant_core::ActorId,
-    run: provenant_core::RunId,
+    run: provenant_core::AttemptId,
     registry: std::path::PathBuf,
 }
 
@@ -2296,7 +2295,7 @@ impl ResumeRequest {
     pub fn actor(&self) -> provenant_core::ActorId {
         self.actor
     }
-    pub fn run(&self) -> provenant_core::RunId {
+    pub fn run(&self) -> provenant_core::AttemptId {
         self.run
     }
 }
@@ -2305,7 +2304,7 @@ impl ResumeRequest {
     clippy::print_stderr,
     reason = "report the run-level registry failure without suppressing judgeable queued rows"
 )]
-fn report_registry_error(run: provenant_core::RunId, error: &RunError) {
+fn report_registry_error(run: provenant_core::AttemptId, error: &RunError) {
     eprintln!("warning: writer fence listing failed for {run}: {error}");
 }
 
@@ -2313,7 +2312,7 @@ fn report_registry_error(run: provenant_core::RunId, error: &RunError) {
 #[serde(deny_unknown_fields)]
 struct WorkerProcessRefusal {
     schema_version: u64,
-    run: provenant_core::RunId,
+    run: provenant_core::AttemptId,
     expires: provenant_core::WallTime,
     used: u64,
     limit: u64,
@@ -2322,10 +2321,10 @@ struct WorkerProcessRefusal {
 impl crate::RunStore {
     pub(crate) fn recovery_process_wait(
         &self,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Option<String> {
-        let directory = self.run_dir(run, false).ok()?;
+        let directory = self.attempt_dir(run, false).ok()?;
         let raw =
             read_sealed(&directory, "settlement-process-refusal.json", RECORD_LIMIT).ok()??;
         let refusal: WorkerProcessRefusal = crate::db::decode(&raw).ok()?;
@@ -2345,7 +2344,7 @@ impl crate::RunStore {
 impl crate::RunStore {
     pub(crate) fn queue_reconcile(
         &self,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.queue_reconcile_mode(run, call, provenant_os::exec::spawn_detached, true)
@@ -2353,7 +2352,7 @@ impl crate::RunStore {
 
     pub(crate) fn queue_reconcile_with(
         &self,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2365,7 +2364,7 @@ impl crate::RunStore {
 
     fn queue_reconcile_mode(
         &self,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2380,7 +2379,7 @@ impl crate::RunStore {
 
     fn queue_reconcile_mode_with_probe(
         &self,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2393,14 +2392,14 @@ impl crate::RunStore {
         // A run is derived from its attempt records, but recovery must inspect
         // those records independently so one corrupt record cannot hide siblings.
         let exists: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND project=?2 AND refused=0)",
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND project=?2 AND refused=0)",
             rusqlite::params![run.to_string(), self.context.project_id.to_string()],
             |row| row.get(0),
         )?;
         if !exists {
             return Err(RunError::NotFound);
         }
-        let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
+        let mut query = self.db.prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
         let rows = query.query_map(
             rusqlite::params![run.to_string(), self.context.project_id.to_string()],
             |row| row.get::<_, String>(0),
@@ -2413,7 +2412,7 @@ impl crate::RunStore {
             .collect::<Result<Vec<_>>>()?;
         let listing_error = match self.writer_fences() {
             Ok(fences) => {
-                for fence in fences.into_iter().filter(|fence| fence.scope.run == run) {
+                for fence in fences.into_iter().filter(|fence| fence.scope.attempt == run) {
                     if !ids.contains(&fence.scope.attempt) {
                         ids.push(fence.scope.attempt);
                     }
@@ -2457,7 +2456,7 @@ impl crate::RunStore {
         for id in ids {
             let inspected = crate::controls::retry_reconcile(&self.db, call, || -> Result<_> {
                 let attempt = self.record(id, call)?;
-                if attempt.run_id != run {
+                if attempt.attempt_id != run {
                     return Err(RunError::Validation("writer fence run mismatch"));
                 }
                 let directory = self.attempt_dir(id, false)?;
@@ -2541,7 +2540,7 @@ impl crate::RunStore {
                 Err(error) => found.push((id, failed(error.to_string()))),
             }
         }
-        let queued = self.run_dir(run, false)?;
+        let queued = self.attempt_dir(run, false)?;
         let spawn_lock =
             match queued.try_lock(OsStr::new("settlement-spawn.lock"), LockMode::Exclusive) {
                 Ok(lock) => Some(lock),
@@ -2681,12 +2680,12 @@ impl crate::RunStore {
 #[derive(Serialize, Deserialize)]
 struct QueuedWorker {
     schema_version: u64,
-    run: provenant_core::RunId,
+    run: provenant_core::AttemptId,
     expires: provenant_core::WallTime,
 }
 
 impl QueuedWorker {
-    fn decode(raw: &[u8], run: provenant_core::RunId) -> Result<Self> {
+    fn decode(raw: &[u8], run: provenant_core::AttemptId) -> Result<Self> {
         let marker: Self = provenant_records::decode(
             raw,
             provenant_records::Limits {
@@ -2727,7 +2726,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         cancel: &cancel,
     };
     let store = crate::RunStore::open(&context, &call)?.with_writer_registry(&request.registry);
-    let directory = store.run_dir(request.run, false)?;
+    let directory = store.attempt_dir(request.run, false)?;
     // A queuing reader can briefly hold this lock while probing for a worker.
     // Wait through that probe instead of abandoning the queued request.
     let _worker = match directory.lock(

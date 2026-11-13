@@ -2616,7 +2616,10 @@ impl crate::RunStore {
                     tip: integration.integrated,
                     recorded_at,
                     attempt_id: Some(record.attempt_id),
-                    operation_id: Some(record.operation_id.clone()),
+                    operation_id: self
+                        .attempt_operation(record.attempt_id, call)
+                        .ok()
+                        .map(|operation| operation.operation_id),
                 },
                 call.clock,
                 call.cancel,
@@ -2654,11 +2657,8 @@ impl crate::RunStore {
             return Ok(None);
         };
         let request = self
-            .request(record.run_id, call)?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.deliver)
+            .request(record.attempt_id, call)?
+            .task.deliver
             .ok_or(RunError::Validation("delivered destination missing"))?;
         Ok(Some((request, receipt)))
     }
@@ -2766,11 +2766,8 @@ impl crate::RunStore {
             }
         };
         let task = self
-            .request(record.run_id, call)?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(RunError::NotFound)?;
+            .request(record.attempt_id, call)?
+            .task;
         let writer = task
             .writer
             .ok_or(RunError::Validation("delivery needs a writer"))?;
@@ -2859,7 +2856,7 @@ impl crate::RunStore {
             .commit_body(
                 &writer,
                 head,
-                &format!("Run {}\nAttempt {id}", record.run_id),
+                &format!("Run {}\nAttempt {id}", record.attempt_id),
             )
             .and_then(|body| host.push(&writer, &request, head, &body));
         let (state, integration) = match result {

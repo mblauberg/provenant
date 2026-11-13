@@ -988,7 +988,7 @@ fn landed_writer_fence_fixture(
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
     let record = store.mark_starting(

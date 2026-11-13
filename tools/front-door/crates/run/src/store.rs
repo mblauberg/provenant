@@ -140,7 +140,6 @@ impl RunStore {
             let mut current: OperationRecord = decode(&raw)?;
             if current.project_id != self.context.project_id
                 || current.actor_id != self.context.actor_id
-                || current.operation_id != expected.operation_id
                 || current.kind != expected.kind
                 || current.state != OperationState::Refused
                 || current.request_digest != expected.request_digest
@@ -306,7 +305,6 @@ impl RunStore {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.project_id != self.context.project_id
                     || prior.actor_id != self.context.actor_id
-                    || prior.operation_id != operation.operation_id
                     || prior.kind != operation.kind
                     || prior.request_digest != digest
                 {
@@ -396,10 +394,10 @@ impl RunStore {
     /// the failure hiding every other attempt of the run.
     pub(crate) fn pending_effect_attempts(
         &self,
-        run: RunId,
+        run: AttemptId,
         call: &Request<'_>,
     ) -> Result<Vec<AttemptId>> {
-        let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.run=?1 AND a.project=?2 AND a.terminal=1")?;
+        let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.id=?1 AND a.project=?2 AND a.terminal=1")?;
         let rows = query.query_map(
             params![run.to_string(), self.context.project_id.to_string()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -503,10 +501,9 @@ impl RunStore {
         )?;
         super::reader::validate_attempt(&pending)?;
         if pending.attempt_id != id
-            || pending.run_id != old.run_id
+            || pending.attempt_id != old.attempt_id
             || pending.project_id != old.project_id
-            || pending.task_id != old.task_id
-            || pending.operation_id != old.operation_id
+            || pending.key != old.key
             || pending.generation != old.generation
         {
             return Err(RunError::Conflict);
@@ -553,10 +550,9 @@ impl RunStore {
         )?;
         super::reader::validate_attempt(&pending)?;
         if pending.attempt_id != id
-            || pending.run_id != current.run_id
+            || pending.attempt_id != current.attempt_id
             || pending.project_id != current.project_id
-            || pending.task_id != current.task_id
-            || pending.operation_id != current.operation_id
+            || pending.key != current.key
             || pending.generation != current.generation
             || !matches!(pending.state, AttemptState::Terminal { .. })
             || pending.settlement_receipts.is_some()
@@ -847,7 +843,7 @@ impl RunStore {
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                 terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
-                trace: provenant_records::Trace {extra: telemetry_context,
+                trace: provenant_records::Trace {extra: telemetry_context.clone(),
                     host: self.host,
                     project: Some(context.project_id),
                     attempt: Some(attempt_id),
@@ -922,7 +918,7 @@ impl RunStore {
             Some(Termination::Exit(code)) => Some(code),
             _ => None,
         };
-        if exit.scope.run != old.run_id
+        if exit.scope.attempt != old.attempt_id
             || exit.scope.attempt != id
             || exit.scope.generation != old.generation
             || exit.unresolved_cleanup
@@ -1105,7 +1101,7 @@ impl RunStore {
                             extra,
                             ..
                         } if saved.attempt_id == id
-                            && saved.run_id == old.run_id
+                            && saved.attempt_id == old.attempt_id
                             && saved.generation == old.generation
                             && saved.exit_evidence.is_none()
                             && saved.provider_launched == Some(false)
@@ -1189,10 +1185,8 @@ impl RunStore {
                         }
                     )
                     && self
-                        .request(record.run_id, call)?
-                        .tasks
-                        .iter()
-                        .any(|task| task.task_id == record.task_id && task.writer.is_some())
+                        .request(record.attempt_id, call)?
+                        .task.writer.is_some()
                 {
                     return self.record(id, call).map(Some);
                 }
@@ -1235,11 +1229,9 @@ impl RunStore {
                 return;
             }
         }
-        if self.request(record.run_id, call).is_ok_and(|request| {
+        if self.request(record.attempt_id, call).is_ok_and(|request| {
             request
-                .tasks
-                .iter()
-                .any(|task| task.task_id == record.task_id && task.writer.is_some())
+                .task.writer.is_some()
         }) {
             let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
         }
@@ -1416,11 +1408,8 @@ impl RunStore {
                     next.delivery = Some(receipt);
                 }
             } else if let Some(deliver) = self
-                .request(old.run_id, call)?
-                .tasks
-                .into_iter()
-                .find(|task| task.task_id == old.task_id)
-                .and_then(|task| task.deliver)
+                .request(old.attempt_id, call)?
+                .task.deliver
             {
                 // Requested delivery that never ran must not read as success
                 // with no trace.
@@ -1598,10 +1587,9 @@ impl RunStore {
                     return Ok(());
                 }
                 if saved.attempt_id != old.attempt_id
-                    || saved.run_id != old.run_id
+                    || saved.attempt_id != old.attempt_id
                     || saved.project_id != old.project_id
-                    || saved.task_id != old.task_id
-                    || saved.operation_id != old.operation_id
+                    || saved.key != old.key
                     || saved.generation != old.generation
                     || saved.revision != next.revision
                     || !matches!(
@@ -1658,12 +1646,9 @@ impl RunStore {
         if !self.import_release_permitted(record, call)? {
             return Err(RunError::Conflict);
         }
-        let request = self.request(record.run_id, call)?;
+        let request = self.request(record.attempt_id, call)?;
         let writer = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .and_then(|task| task.writer.as_ref())
+            .task.writer.as_ref()
             .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
         // A missing custody directory has no lock holder; keep the import pin.
         let slot = self.writer_custody_directory(record, writer).ok();
@@ -1748,14 +1733,10 @@ impl RunStore {
             return Err(RunError::Validation("terminal state missing"));
         };
         let id = old.attempt_id;
-        let request = self.request(old.run_id, call)?;
+        let request = self.request(old.attempt_id, call)?;
         let reaction = self.freeze_reaction(
             next,
-            request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == old.task_id)
-                .is_some_and(|task| task.writer.is_some()),
+            request.task.writer.is_some(),
         )?;
         let attempt = self.attempt_dir(id, false)?;
         let mut receipts = SettlementReceipts {
@@ -1812,7 +1793,7 @@ impl RunStore {
                 call,
             );
         }
-        self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
+        self.contribution_diagnostic(next.attempt_id, self.retain_contribution_route(next, call));
         Ok(())
     }
 
@@ -1839,9 +1820,6 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     if input.request.schema_version != 1 {
         return Err(RunError::Version(input.request.schema_version as i64));
     }
-    if input.request.parent.is_some() && input.request.tasks.len() != 1 {
-        return Err(RunError::Validation("a continuation has one task"));
-    }
     if input
         .request
         .fresh_continuation
@@ -1854,32 +1832,16 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
             "fresh continuation needs a bounded reason and parent",
         ));
     }
-    if !(1..=64).contains(&input.request.tasks.len())
-        || !(1..=16).contains(&input.request.concurrency)
-        || input.attempts.len() != input.request.tasks.len()
-    {
-        return Err(RunError::Validation("task/concurrency bounds"));
-    }
-    if input
-        .request
-        .tasks
-        .iter()
-        .any(|task| task.context.as_ref().is_some_and(|c| !c.accepted()))
+    let task = &input.request.task;
+    if task
+        .context
+        .as_ref()
+        .is_some_and(|context| !context.accepted() || !context.valid())
     {
         return Err(RunError::Validation("work context"));
     }
     bytes(&input.request)?;
-    let mut tasks = std::collections::BTreeSet::new();
-    let mut attempts = std::collections::BTreeSet::new();
-    let mut prompt_bytes = 0u64;
-    for task in &input.request.tasks {
-        if task
-            .context
-            .as_ref()
-            .is_some_and(|context| !context.valid())
-        {
-            return Err(RunError::Validation("work context"));
-        }
+    {
         if let Some(deliver) = &task.deliver {
             if task.writer.is_none() {
                 return Err(RunError::Validation("delivery requires a writer"));
@@ -1896,32 +1858,14 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
         }) {
             return Err(RunError::Validation("account override"));
         }
-        if !tasks.insert(task.task_id) {
-            return Err(RunError::Validation("duplicate task"));
-        }
-        let new = input
-            .attempts
-            .iter()
-            .find(|a| a.task_id == task.task_id)
-            .ok_or(RunError::Validation("missing task"))?;
-        if !attempts.insert(new.attempt_id)
-            || task.provider_timeout_seconds == 0
-            || CanonicalV1::file_digest(new.prompt.as_bytes()) != task.prompt_digest
+        if task.provider_timeout_seconds == 0
+            || CanonicalV1::file_digest(input.prompt.as_bytes()) != task.prompt_digest
         {
             return Err(RunError::Validation("attempt or prompt identity"));
         }
-        prompt_bytes += new.prompt.len() as u64;
     }
-    if prompt_bytes > RECORD_LIMIT {
-        let task_index = input.request.tasks.iter().position(|task| {
-            input
-                .attempts
-                .iter()
-                .find(|attempt| attempt.task_id == task.task_id)
-                .is_some_and(|attempt| attempt.prompt.len() as u64 > RECORD_LIMIT)
-        });
+    if input.prompt.len() as u64 > RECORD_LIMIT {
         return Err(RunError::PromptTooLarge {
-            task_index,
             limit: RECORD_LIMIT,
         });
     }
@@ -1933,7 +1877,6 @@ pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -
         schema_version: 1,
         sequence: 0,
         project_id: attempt.project_id,
-        run_id: attempt.run_id,
         attempt_id: attempt.attempt_id,
         revision: attempt.revision,
         change: attempt.state.clone(),
@@ -2052,11 +1995,11 @@ mod admission_key_tests {
         let store = RunStore::open(&context, &call)?;
         for number in 1..=3 {
             let mut prepared = input();
-            prepared.run_id = RunId::from_bytes([number as u8; 16]);
+            prepared.attempt_id = AttemptId::from_bytes([number as u8; 16]);
             prepared.operation_id = OperationId::parse(&format!("number-{number}"))?;
             prepared.attempts[0].attempt_id = AttemptId::from_bytes([number as u8 + 10; 16]);
             crate::tests::rekey(&mut prepared);
-            prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+            prepared.request.task.context = Some(provenant_records::run::WorkContext {
                 graph_id: Some("numbered-graph".into()),
                 node_id: Some("writer".into()),
                 attempt: Some(number),
@@ -2066,12 +2009,12 @@ mod admission_key_tests {
             let record = store.record(prepared.attempts[0].attempt_id, &call)?;
             assert_eq!(record.attempt_number, u64::from(number));
             assert_eq!(record.key.as_ref().unwrap().attempt(), number);
-            assert_eq!(store.create(&prepared, &call)?.run_id, admitted.run_id);
+            assert_eq!(store.create(&prepared, &call)?.attempt_id, admitted.attempt_id);
             let mut conflict = prepared;
-            conflict.run_id = RunId::from_bytes([number as u8 + 20; 16]);
+            conflict.attempt_id = AttemptId::from_bytes([number as u8 + 20; 16]);
             conflict.operation_id = OperationId::parse(&format!("other-{number}"))?;
-            assert_eq!(store.create(&conflict, &call)?.run_id, admitted.run_id);
-            conflict.request.tasks[0].title = Some("different request".into());
+            assert_eq!(store.create(&conflict, &call)?.attempt_id, admitted.attempt_id);
+            conflict.request.task.title = Some("different request".into());
             assert!(matches!(
                 store.create(&conflict, &call),
                 Err(RunError::OperationConflict)

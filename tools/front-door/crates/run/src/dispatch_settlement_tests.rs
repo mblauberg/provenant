@@ -173,7 +173,7 @@ fn empty_success_is_rejected_at_settlement() -> TestResult {
             ..
         }
     ));
-    assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
+    assert!(store.pending_attempts(run.attempt_id, &call)?.is_empty());
     Ok(())
 }
 #[test]
@@ -468,7 +468,7 @@ fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult 
             observed: Some(route()),
             ..Fake::default()
         };
-        let held = store.run_dir(run.run_id, false)?.try_lock(
+        let held = store.attempt_dir(run.attempt_id, false)?.try_lock(
             std::ffi::OsStr::new("publication.lock"),
             LockMode::Exclusive,
         )?;
@@ -918,7 +918,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         ..AdmissionPolicy::default()
     });
     let mut spaced = two_tasks(2);
-    spaced.run_id = provenant_core::RunId::from_bytes([10; 16]);
+    spaced.attempt_id = provenant_core::AttemptId::from_bytes([10; 16]);
     spaced.operation_id = provenant_core::OperationId::parse("spaced")?;
     spaced.attempts[0].attempt_id = AttemptId::from_bytes([11; 16]);
     spaced.attempts[1].attempt_id = AttemptId::from_bytes([12; 16]);
@@ -947,7 +947,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         ..AdmissionPolicy::default()
     });
     let mut expired = input();
-    expired.run_id = provenant_core::RunId::from_bytes([13; 16]);
+    expired.attempt_id = provenant_core::AttemptId::from_bytes([13; 16]);
     expired.operation_id = provenant_core::OperationId::parse("expired")?;
     expired.attempts[0].attempt_id = AttemptId::from_bytes([14; 16]);
     crate::tests::rekey(&mut expired);

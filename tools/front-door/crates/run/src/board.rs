@@ -6,7 +6,8 @@ use rusqlite::params;
 #[derive(Debug, serde::Serialize)]
 pub struct BoardLane {
     pub attempt: AttemptRecord,
-    pub run: RunRecord,
+    /// The operation that admitted the attempt.
+    pub operation: OperationRecord,
 }
 
 #[derive(Debug)]
@@ -67,7 +68,7 @@ impl RunStore {
         }
         let generation = format!("events:{event}");
         let mut statement = tx.prepare(
-            "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,a.operation,\
+            "SELECT a.sequence,a.id,a.project,a.operation_record,a.record,a.operation,\
              a.number,a.revision,a.terminal FROM attempts a \
              WHERE a.refused=0 AND (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
              AND (?3=0 OR a.sequence<?3) AND a.sequence<=?5 ORDER BY a.sequence DESC LIMIT ?4",
@@ -75,8 +76,6 @@ impl RunStore {
         let mut rows =
             statement.query(params![project, all, after, (limit + 1) as i64, high_water])?;
         let mut lanes = Vec::new();
-        let mut runs: std::collections::HashMap<(ProjectId, provenant_core::RunId), RunRecord> =
-            std::collections::HashMap::new();
         let mut last = 0;
         let mut more = false;
         while let Some(row) = rows.next()? {
@@ -84,32 +83,23 @@ impl RunStore {
                 more = true;
                 break;
             }
-            let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(5)?)?;
-            let operation: String = row.get(6)?;
+            let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(4)?)?;
+            let operation: OperationRecord = crate::db::decode(&row.get::<_, Vec<u8>>(3)?)?;
             if attempt.attempt_id.to_string() != row.get::<_, String>(1)?
                 || attempt.project_id.to_string() != row.get::<_, String>(2)?
-                || attempt.run_id.to_string() != row.get::<_, String>(3)?
-                || attempt.task_id.to_string() != row.get::<_, String>(4)?
-                || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(7)?
-                || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(8)?
+                || operation.project_id != attempt.project_id
+                || operation.operation_id.as_str() != row.get::<_, String>(5)?
+                || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(6)?
+                || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(7)?
                 || matches!(attempt.state, AttemptState::Terminal { .. })
-                    != row.get::<_, bool>(9)?
-                || attempt.operation_id.as_str() != operation
+                    != row.get::<_, bool>(8)?
             {
                 return Err(RunError::Validation("board index identity"));
             }
-            let run = match runs.get(&(attempt.project_id, attempt.run_id)) {
-                Some(run) => run.clone(),
-                None => {
-                    let run = Self::run_in(&tx, attempt.project_id, attempt.run_id)?;
-                    runs.insert((attempt.project_id, attempt.run_id), run.clone());
-                    run
-                }
-            };
             crate::reader::validate_attempt(&attempt)?;
             last = u64::try_from(row.get::<_, i64>(0)?)
                 .map_err(|_| RunError::Validation("board sequence"))?;
-            lanes.push(BoardLane { attempt, run });
+            lanes.push(BoardLane { attempt, operation });
         }
         Ok(BoardPage {
             generation,
@@ -124,7 +114,7 @@ impl RunStore {
 mod tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
-    use provenant_core::{AttemptId, CancelToken, RunId};
+    use provenant_core::{AttemptId, CancelToken};
 
     #[test]
     fn console_changes_after_creation_transition_and_terminal_commit()
@@ -194,11 +184,11 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         for n in 1u8..=5 {
             let mut input = input();
-            input.run_id = RunId::from_bytes([n; 16]);
+            input.attempt_id = AttemptId::from_bytes([n; 16]);
             input.operation_id = provenant_core::OperationId::parse(&format!("board-{n}"))?;
             input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
             crate::tests::rekey(&mut input);
-            input.request.tasks[0].title = Some(format!("Task {n}"));
+            input.request.task.title = Some(format!("Task {n}"));
             store.create(&input, &call)?;
         }
         let page = store.board_page(None, true, 2, 0, None, &call)?;
@@ -212,7 +202,7 @@ mod tests {
         loop {
             for lane in &current.lanes {
                 assert!(seen.insert(lane.attempt.attempt_id), "duplicate attempt");
-                assert_eq!(lane.run.run_id, lane.attempt.run_id);
+                assert_eq!(lane.operation.operation_id.as_str(), format!("board-{}", lane.attempt.attempt_id.as_bytes()[0]));
                 assert_eq!(lane.attempt.usage, UsageRecord::default());
                 assert_eq!(
                     lane.attempt.title,
@@ -227,7 +217,7 @@ mod tests {
         }
         assert_eq!(seen, expected);
         let mut later = input();
-        later.run_id = RunId::from_bytes([6; 16]);
+        later.attempt_id = AttemptId::from_bytes([6; 16]);
         later.operation_id = provenant_core::OperationId::parse("board-6")?;
         later.attempts[0].attempt_id = AttemptId::from_bytes([6; 16]);
         crate::tests::rekey(&mut later);

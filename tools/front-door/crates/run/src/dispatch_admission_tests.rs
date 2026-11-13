@@ -82,7 +82,7 @@ fn the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen() -> Tes
     let mut run = lane(90, false);
     run.request.concurrency = 16;
     store.create(&run, &call)?;
-    assert_eq!(store.request(run.run_id, &call)?.concurrency, 16);
+    assert_eq!(store.request(run.attempt_id, &call)?.concurrency, 16);
     let mut wider = lane(91, false);
     wider.request.concurrency = 17;
     assert!(matches!(
@@ -632,7 +632,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     // A serial run reports its own concurrency before any spacing.
     let serial = {
         let mut run = two_tasks(1);
-        run.run_id = RunId::from_bytes([110; 16]);
+        run.attempt_id = AttemptId::from_bytes([110; 16]);
         run.operation_id = provenant_core::OperationId::parse("serial-waits")?;
         run.attempts[0].attempt_id = AttemptId::from_bytes([111; 16]);
         run.attempts[1].attempt_id = AttemptId::from_bytes([112; 16]);

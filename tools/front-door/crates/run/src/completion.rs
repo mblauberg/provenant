@@ -262,7 +262,7 @@ mod tests {
         let input = input();
         store.create(&input, &call)?;
         let mut record = store.record(input.attempts[0].attempt_id, &call)?;
-        assert!(input.request.tasks[0].access.write_roots.is_empty());
+        assert!(input.request.task.access.write_roots.is_empty());
         let attempt = store.attempt_dir(record.attempt_id, false)?;
         let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
         let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
@@ -377,7 +377,7 @@ mod tests {
             worktree.join("partial.txt"),
             "parser implementation survives",
         )?;
-        input.request.tasks[0]
+        input.request.task
             .access
             .write_roots
             .push(worktree.clone());
@@ -528,7 +528,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let mut input = input();
         input.attempts[0].prompt = "x".repeat(RECORD_LIMIT as usize - 64);
-        input.request.tasks[0].prompt_digest =
+        input.request.task.prompt_digest =
             provenant_records::CanonicalV1::file_digest(input.attempts[0].prompt.as_bytes());
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
@@ -551,7 +551,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(store.pending_attempts(input.run_id, &call)?.is_empty());
+        assert!(store.pending_attempts(input.attempt_id, &call)?.is_empty());
         Ok(())
     }
 

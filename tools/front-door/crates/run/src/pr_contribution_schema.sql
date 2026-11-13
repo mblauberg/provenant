@@ -7,7 +7,7 @@ CREATE TABLE allocations (attempt TEXT PRIMARY KEY) STRICT;
 CREATE TABLE branch_attempts (
  attempt TEXT PRIMARY KEY, project TEXT NOT NULL, branch TEXT NOT NULL,
  role TEXT NOT NULL, model TEXT, account TEXT,
- generation INTEGER NOT NULL DEFAULT 0, run TEXT, queued_at INTEGER,
+ generation INTEGER NOT NULL DEFAULT 0, queued_at INTEGER,
  outcome TEXT, finished_at INTEGER
 ) STRICT;
 CREATE INDEX branch_attempts_branch ON branch_attempts(project, branch);
@@ -26,4 +26,4 @@ CREATE TABLE reassignments (
  attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
  PRIMARY KEY(attempt, repository, number)
 ) STRICT;
-PRAGMA user_version=1;
+PRAGMA user_version=2;

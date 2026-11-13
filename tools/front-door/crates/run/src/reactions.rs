@@ -7,7 +7,7 @@ use crate::{
     AttemptRecord, AttemptState, Request, Result, RunError, RunStore, WriterDeliveryState,
     db::bytes, db::decode,
 };
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RunId};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId, AttemptId};
 use provenant_records::run::ChairBinding;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ pub const NOTICE_BYTES: usize = 300;
 pub struct Reaction {
     pub schema_version: u64,
     pub attempt: AttemptId,
-    pub run: RunId,
+    pub run: AttemptId,
     pub project: ProjectId,
     /// Sender of the notice: the actor that committed the settlement.
     pub sender: ActorId,
@@ -152,7 +152,7 @@ impl RunStore {
         Ok(Reaction {
             schema_version: 1,
             attempt: next.attempt_id,
-            run: next.run_id,
+            run: next.attempt_id,
             project: next.project_id,
             sender: self.context.actor_id,
             notice,
@@ -196,12 +196,12 @@ impl RunStore {
     }
 
     /// Attempts of a run that still owe reactions.
-    pub fn pending_reactions(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptId>> {
+    pub fn pending_reactions(&self, run: AttemptId, call: &Request<'_>) -> Result<Vec<AttemptId>> {
         call.check()?;
         let ids: Vec<String> = {
             let mut query = self.db.prepare(
                 "SELECT r.attempt FROM reactions r JOIN attempts a ON a.id=r.attempt \
-                 WHERE a.run=?1 AND r.project=?2 AND r.pending=1 ORDER BY r.rowid",
+                 WHERE a.id=?1 AND r.project=?2 AND r.pending=1 ORDER BY r.rowid",
             )?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
@@ -265,7 +265,7 @@ impl RunStore {
     /// run, and the first failure is returned.
     pub fn drain_reactions(
         &self,
-        run: RunId,
+        run: AttemptId,
         clock: &dyn Clock,
         cancel: &CancelToken,
         step: &mut Step<'_>,
@@ -303,9 +303,9 @@ impl RunStore {
     }
 
     /// Exclude other drains of this run. `None` when another holds it.
-    pub fn reaction_lock(&self, run: RunId) -> Result<Option<provenant_os::fs::LockGuard>> {
+    pub fn reaction_lock(&self, run: AttemptId) -> Result<Option<provenant_os::fs::LockGuard>> {
         use provenant_os::fs::{FsError, LockMode};
-        let directory = self.run_dir(run, false)?;
+        let directory = self.attempt_dir(run, false)?;
         match directory.try_lock(std::ffi::OsStr::new("reactions.lock"), LockMode::Exclusive) {
             Ok(lock) => Ok(Some(lock)),
             Err(FsError::LockTimeout { .. }) => Ok(None),

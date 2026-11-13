@@ -775,8 +775,8 @@ impl RunStore {
         let next = self.write(call, |tx| {
             let old = self.record(id, call)?;
             if !matches!(old.state, AttemptState::Queued { .. })
-                || old.run_id != expected.run_id
-                || old.task_id != expected.task_id
+                || old.attempt_id != expected.attempt_id
+                || old.key != expected.key
             {
                 return Err(RunError::Conflict);
             }
@@ -824,7 +824,7 @@ impl RunStore {
             )?;
             Ok(next)
         })?;
-        self.contribution_diagnostic(next.run_id, self.retain_contribution_route(&next, call));
+        self.contribution_diagnostic(next.attempt_id, self.retain_contribution_route(&next, call));
         Ok(next)
     }
     /// Wait until host capacity, startup spacing and resource floors admit
@@ -1561,7 +1561,7 @@ mod process_wait_tests {
         let mut lanes = Vec::new();
         for n in 1..=4u8 {
             let mut run = crate::tests::input();
-            run.run_id = provenant_core::RunId::from_bytes([n; 16]);
+            run.attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
             run.operation_id = provenant_core::OperationId::parse(&format!("view-census-{n}"))?;
             run.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
             crate::tests::rekey(&mut run);

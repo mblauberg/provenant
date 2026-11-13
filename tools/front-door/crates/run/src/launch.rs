@@ -2,7 +2,7 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{ActorId, AttemptId, OperationId, RunId};
+use provenant_core::{ActorId, OperationId, AttemptId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
@@ -419,7 +419,6 @@ pub struct LaunchPaths {
     pub operation_id: OperationId,
     pub task_index: u64,
     pub lane_depth: u64,
-    pub run_id: RunId,
     pub deadline_unix_ms: u64,
     pub scratch: PathBuf,
     pub provider_state: PathBuf,
@@ -438,7 +437,6 @@ pub struct PreparedStart {
     pub attempt: AttemptId,
     pub plan: std::cell::RefCell<Option<PreparedLaunch>>,
     attempts: provenant_os::fs::Directory,
-    run: RunId,
     retained: bool,
 }
 impl Drop for PreparedStart {
@@ -570,29 +568,22 @@ impl RunStore {
         providers: &dyn Providers,
         call: &Request<'_>,
     ) -> Result<PreparedStart> {
-        let [task] = input.request.tasks.as_slice() else {
-            return Err(RunError::Validation("continuation task count"));
-        };
-        let mut effective = self.effective_launch_task(&input.request, task);
+        let mut effective = self.effective_launch_task(&input.request, &input.request.task);
         self.seal_parent_sandbox(&input.request, &mut effective, call);
         let task = &effective;
-        let [attempt] = input.attempts.as_slice() else {
-            return Err(RunError::Validation("continuation attempt count"));
-        };
         let attempts =
             crate::artifacts::subdir(&self.root, std::ffi::OsStr::new("attempts"), true)?;
         // Exclusive creation makes cleanup safe even if admission races a replay.
-        attempts.mkdir(std::ffi::OsStr::new(&attempt.attempt_id.to_string()), 0o700)?;
+        attempts.mkdir(std::ffi::OsStr::new(&input.attempt_id.to_string()), 0o700)?;
         let mut ready = PreparedStart {
             task: task.clone(),
-            attempt: attempt.attempt_id,
+            attempt: input.attempt_id,
             plan: std::cell::RefCell::new(None),
             attempts,
-            run: input.run_id,
             retained: false,
         };
         ready.attempts.sync()?;
-        let directory = self.attempt_dir(attempt.attempt_id, true)?;
+        let directory = self.attempt_dir(input.attempt_id, true)?;
         for name in ["scratch", "provider-state", "tmp"] {
             crate::artifacts::subdir(&directory, std::ffi::OsStr::new(name), true)?;
         }
@@ -600,13 +591,12 @@ impl RunStore {
             .context
             .state_root
             .as_path()
-            .join(format!("attempts/{}", attempt.attempt_id));
+            .join(format!("attempts/{}", input.attempt_id));
         let paths = LaunchPaths {
-            attempt_id: attempt.attempt_id,
+            attempt_id: input.attempt_id,
             operation_id: input.operation_id.clone(),
             task_index: 0,
             lane_depth: input.request.lane_depth.unwrap_or(1),
-            run_id: input.run_id,
             deadline_unix_ms: u64::try_from(
                 call.clock
                     .wall_now()
@@ -621,7 +611,7 @@ impl RunStore {
             temporary: base.join("tmp"),
             temporary_alias: crate::short_temporary::ensure(&directory),
         };
-        let prompt = output_prompt(&base, &attempt.prompt);
+        let prompt = output_prompt(&base, &input.prompt);
         let plan = providers
             .check_policy(task)
             .map_err(|error| RunError::ContinuationRefused {
@@ -649,8 +639,8 @@ impl RunStore {
         Ok(ready)
     }
 
-    pub(crate) fn retain_prepared_start(&self, ready: &mut PreparedStart, run: RunId) {
-        ready.retained = ready.run == run;
+    pub(crate) fn retain_prepared_start(&self, ready: &mut PreparedStart, attempt: AttemptId) {
+        ready.retained = ready.attempt == attempt;
     }
 }
 /// The host-selected cap and its source, carried into each applied receipt.
@@ -761,7 +751,6 @@ enum HandOff {
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
     RetainedImport {
-        run: RunId,
         attempt: AttemptId,
         worktree: std::path::PathBuf,
     },
@@ -807,7 +796,6 @@ pub enum RefusalKind {
     HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
     HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
-        run: RunId,
         attempt: AttemptId,
         worktree: std::path::PathBuf,
     },
@@ -894,11 +882,11 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
 
 impl RunStore {
     /// Refuse queued proposals without touching any launched provider.
-    pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
+    pub fn refuse_queued(&self, run: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
         let ids: Vec<String> = {
             let mut query = self
                 .db
-                .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0")?;
+                .prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND terminal=0")?;
             let rows = query.query_map(
                 rusqlite::params![run.to_string(), self.context.project_id.to_string()],
                 |row| row.get(0),
@@ -924,7 +912,7 @@ impl RunStore {
         }
         Ok(())
     }
-    pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
+    pub fn request(&self, run: AttemptId, call: &Request<'_>) -> Result<CanonicalRequest> {
         Ok(self.request_with_digest(run, call)?.0)
     }
     /// The request and the digest of its stored bytes. Callers compare this
@@ -932,13 +920,13 @@ impl RunStore {
     /// evolved since the run was written.
     pub(crate) fn request_with_digest(
         &self,
-        run: RunId,
+        run: AttemptId,
         call: &Request<'_>,
     ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
-        let raw = read_sealed(&self.run_dir(run, false)?, "request.json", RECORD_LIMIT)?
+        let raw = read_sealed(&self.attempt_dir(run, false)?, "request.json", RECORD_LIMIT)?
             .ok_or(RunError::NotFound)?;
         let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
-        let stored = self.run(run, call)?.request_digest;
+        let stored = self.attempt_operation(run, call)?.request_digest;
         if digest != stored {
             return Err(RunError::artifact_mismatch(
                 ArtifactCheck::RequestDigest,
@@ -956,7 +944,7 @@ impl RunStore {
     /// requester.
     pub fn start(
         &self,
-        run: RunId,
+        run: AttemptId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         call: &Request<'_>,
@@ -981,7 +969,7 @@ impl RunStore {
     }
     pub fn start_checked(
         &self,
-        run: RunId,
+        run: AttemptId,
         expected: &CanonicalRequest,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
@@ -1011,7 +999,7 @@ impl RunStore {
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_writer_lease(
         &self,
-        run: RunId,
+        run: AttemptId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
@@ -1034,7 +1022,7 @@ impl RunStore {
     #[allow(clippy::too_many_arguments)]
     fn start_inner(
         &self,
-        run: RunId,
+        run: AttemptId,
         providers: &dyn Providers,
         context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
         acquire_writer: &dyn Fn(
@@ -1054,7 +1042,8 @@ impl RunStore {
                 "request changed after launch validation",
             ));
         }
-        let requester = self.run(run, call)?.actor_id;
+        let operation = self.attempt_operation(run, call)?;
+        let requester = operation.actor_id;
         let resume = request
             .parent
             .filter(|_| request.fresh_continuation.is_none())
@@ -1062,7 +1051,7 @@ impl RunStore {
             .transpose()?;
         let ids: Vec<String> = {
             let mut query = self.db.prepare(
-                "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
+                "SELECT id FROM attempts WHERE id=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
             )?;
             let rows = query.query_map(
                 params![run.to_string(), self.context.project_id.to_string()],
@@ -1083,12 +1072,7 @@ impl RunStore {
                     .map_err(|_| RunError::Validation("wall clock"))
             };
 
-            let (task_index, task) = request
-                .tasks
-                .iter()
-                .enumerate()
-                .find(|(_, task)| task.task_id == record.task_id)
-                .ok_or(RunError::Validation("attempt task missing from request"))?;
+            let task = &request.task;
             // A request stored before cloud placement was removed still names
             // `cloud`. Never hand it to the local supervisor; settle it so
             // status, reconcile and gc can clear the run.
@@ -1121,7 +1105,7 @@ impl RunStore {
                 continue;
             }
             if let Some(prior) = &resume
-                && prior.run_id == record.run_id
+                && prior.attempt_id == record.attempt_id
                 && !self.custody_released(prior, call)?
             {
                 continue;
@@ -1129,8 +1113,6 @@ impl RunStore {
             let mut effective_task = self.effective_launch_task(&request, task);
             self.seal_parent_sandbox(&request, &mut effective_task, call);
             let task = &effective_task;
-            let task_index = u64::try_from(task_index)
-                .map_err(|_| RunError::Validation("attempt task index"))?;
             let prompt = match self
                 .artifact_bytes(&record.prompt, RECORD_LIMIT)
                 .and_then(|bytes| {
@@ -1188,10 +1170,9 @@ impl RunStore {
                 .join(id.to_string());
             let paths = LaunchPaths {
                 attempt_id: id,
-                operation_id: record.operation_id.clone(),
-                task_index,
+                operation_id: operation.operation_id.clone(),
+                task_index: 0,
                 lane_depth: request.lane_depth.unwrap_or(1),
-                run_id: record.run_id,
                 deadline_unix_ms: u64::try_from(now()?.as_micros() / 1000)
                     .unwrap_or(0)
                     .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
@@ -1411,22 +1392,13 @@ impl RunStore {
                                 format!("launch preparation failed: {message}"),
                                 RefusalKind::HandoffResource(fact),
                             ),
-                            HandOff::RetainedImport {
-                                run,
-                                attempt,
-                                worktree,
-                            } => (
+                            HandOff::RetainedImport { attempt, worktree } => (
                                 RunError::RetainedWriterImport {
-                                    run,
                                     attempt,
                                     worktree: worktree.clone(),
                                 }
                                 .to_string(),
-                                RefusalKind::RetainedImport {
-                                    run,
-                                    attempt,
-                                    worktree,
-                                },
+                                RefusalKind::RetainedImport { attempt, worktree },
                             ),
                             _ => unreachable!(),
                         };
@@ -1482,22 +1454,21 @@ impl RunStore {
         }
         Ok(started)
     }
-    /// The run's adaptor operation record and whether every attempt of the
-    /// run has settled, which makes the operation terminal.
+    /// The attempt's operation record and whether the attempt has settled,
+    /// which makes the operation terminal.
     fn run_operation(
         &self,
         tx: &rusqlite::Connection,
-        run: RunId,
+        run: AttemptId,
     ) -> Result<(OperationRecord, bool)> {
         let (raw, settled): (Vec<u8>, bool) = tx.query_row(
-            "SELECT operation_record, NOT EXISTS(SELECT 1 FROM attempts p WHERE p.run=a.run AND p.terminal=0) \
-             FROM attempts a WHERE run=?1 AND project=?2 AND refused=0 ORDER BY sequence LIMIT 1",
+            "SELECT operation_record, terminal FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
             params![run.to_string(), self.context.project_id.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok((decode(&raw)?, settled))
     }
-    fn launch_unknown(&self, run: RunId, call: &Request<'_>) -> Result<()> {
+    fn launch_unknown(&self, run: AttemptId, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
             let (mut op, settled) = self.run_operation(tx, run)?;
             if settled {
@@ -1505,7 +1476,7 @@ impl RunStore {
             }
             op.state = OperationState::LaunchUnknown;
             tx.execute(
-                "UPDATE attempts SET operation_record=?1 WHERE run=?2 AND project=?3",
+                "UPDATE attempts SET operation_record=?1 WHERE id=?2 AND project=?3",
                 params![
                     crate::db::bytes(&op)?,
                     run.to_string(),
@@ -1515,7 +1486,7 @@ impl RunStore {
             Ok(())
         })
     }
-    fn launch_blocked(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
+    fn launch_blocked(&self, run: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
             let (mut op, settled) = self.run_operation(tx, run)?;
             if settled {
@@ -1524,7 +1495,7 @@ impl RunStore {
             op.state = OperationState::Blocked;
             op.blocked_reason = Some(reason.to_owned());
             tx.execute(
-                "UPDATE attempts SET operation_record=?1 WHERE run=?2 AND project=?3",
+                "UPDATE attempts SET operation_record=?1 WHERE id=?2 AND project=?3",
                 params![
                     crate::db::bytes(&op)?,
                     run.to_string(),
@@ -1804,7 +1775,7 @@ mod resource_status_tests {
             let id = run.attempts[0].attempt_id;
             store.create(&run, &call)?;
             let started = store.start_inner(
-                run.run_id,
+                run.attempt_id,
                 if handoff.is_some() {
                     &crate::dispatch_tests::Ready
                 } else {

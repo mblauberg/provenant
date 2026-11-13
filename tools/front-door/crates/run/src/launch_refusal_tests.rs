@@ -71,7 +71,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let mut run = input();
-        run.request.tasks[0].route = RequestedRoute::Model {
+        run.request.task.route = RequestedRoute::Model {
             extra: Default::default(),
             provider: model.split_once('/').ok_or("adapter")?.0.into(),
             model: model.into(),
@@ -82,7 +82,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             let worktree = temp.path().join("worktree");
             std::fs::create_dir(&project)?;
             std::fs::create_dir(&worktree)?;
-            run.request.tasks[0].writer = Some(WriterRequest {
+            run.request.task.writer = Some(WriterRequest {
                 extra: Default::default(),
                 project,
                 worktree,
@@ -91,7 +91,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
         let started = store.start(
-            run.run_id,
+            run.attempt_id,
             &Refused {
                 typed,
                 disk,
@@ -160,7 +160,7 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    store.refuse_queued(run.run_id, "child proposal is invalid", &call)?;
+    store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
     let record = store.record(run.attempts[0].attempt_id, &call)?;
     let AttemptState::Terminal { extra, outcome, .. } = &record.state else {
         return Err("not terminal".into());

@@ -498,7 +498,6 @@ pub enum DiagnosticFact {
     },
     DiskUnobserved,
     PromptLimit {
-        task_index: Option<usize>,
         limit: u64,
     },
     Resource(ResourceFact),

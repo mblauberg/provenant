@@ -85,10 +85,9 @@ pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
 pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{
-    ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
-    LaneTarget, OutputChunk, fact,
+    ArtifactPart, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery, OutputChunk, fact,
 };
-pub use store::{NewAttempt, PreparedRun, TerminalPublication};
+pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;
 
 pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
@@ -425,10 +424,9 @@ pub enum RunError {
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
-    #[error("writer import retained for worktree {}, run {run}, attempt {attempt}", worktree.display())]
+    #[error("writer import retained for worktree {}, attempt {attempt}", worktree.display())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,
-        run: provenant_core::RunId,
         attempt: provenant_core::AttemptId,
     },
     #[error(transparent)]
@@ -480,10 +478,7 @@ pub enum RunError {
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
     #[error("read or record exceeds byte limit {limit}")]
-    PromptTooLarge {
-        task_index: Option<usize>,
-        limit: u64,
-    },
+    PromptTooLarge { limit: u64 },
     #[error("artifact digest or length does not match its record: {0}")]
     ArtifactMismatch(ArtifactProvenance),
     #[error("terminal publication is already sealed; recover its original facts and result")]
@@ -573,20 +568,11 @@ impl RunError {
             Self::ContinuationRefused { cause } => {
                 diagnostic = diagnostic.detail(cause.detail());
             }
-            Self::PromptTooLarge { task_index, limit } => {
-                let field = task_index.map_or_else(
-                    || "tasks".to_owned(),
-                    |index| format!("tasks[{index}].prompt"),
-                );
+            Self::PromptTooLarge { limit } => {
                 diagnostic = diagnostic
-                    .detail(format!(
-                        "invalid input field `{field}`: exceeds {limit} bytes"
-                    ))
+                    .detail(format!("invalid input field `prompt`: exceeds {limit} bytes"))
                     .next("reduce the prompt input before retrying")
-                    .fact(DiagnosticFact::PromptLimit {
-                        task_index: *task_index,
-                        limit: *limit,
-                    });
+                    .fact(DiagnosticFact::PromptLimit { limit: *limit });
             }
             Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
                 let access = match *access {
@@ -785,20 +771,16 @@ impl RunError {
                         .fact(DiagnosticFact::Resource(fact));
                 }
             }
-            Self::RetainedWriterImport {
-                run,
-                attempt,
-                worktree,
-            } => {
+            Self::RetainedWriterImport { attempt, worktree } => {
                 diagnostic = diagnostic
                     .detail(match safe_path(worktree, destination) {
                         Some(path) => {
-                            format!("worktree {path}; retained run {run}, attempt {attempt}")
+                            format!("worktree {path}; retained attempt {attempt}")
                         }
-                        None => format!("retained run {run}, attempt {attempt}"),
+                        None => format!("retained attempt {attempt}"),
                     })
                     .next(format!(
-                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {run}/{attempt} --reason 'recover retained work manually'`; this stops automatic import"
+                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {attempt} --reason 'recover retained work manually'`; this stops automatic import"
                     ));
             }
             _ => {}

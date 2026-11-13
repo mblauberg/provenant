@@ -3,7 +3,7 @@ use crate::{
     Request, Result, RunError,
     db::{immediate, open_database},
 };
-use provenant_core::{AttemptId, GitOid, ProjectId, RunId, WallTime};
+use provenant_core::{AttemptId, GitOid, ProjectId, WallTime};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, path::Path};
 const FILE: &str = "pr-contributions.sqlite3";
 pub(crate) const SCHEMA: provenant_sqlite::Schema = provenant_sqlite::Schema {
     sql: include_str!("pr_contribution_schema.sql"),
-    version: 1,
+    version: 2,
 };
 /// Allocation is represented in millionths for exact validation.
 pub const WEIGHT_ONE: u32 = 1_000_000;
@@ -45,10 +45,10 @@ pub(crate) fn read_only_branch(
 
 impl crate::RunStore {
     /// Attribution must never change the result of an already accepted run.
-    pub(crate) fn contribution_diagnostic(&self, run: RunId, result: Result<()>) {
+    pub(crate) fn contribution_diagnostic(&self, run: AttemptId, result: Result<()>) {
         if let Err(error) = result {
             let message = format!("PR contribution capture failed: {error}\n");
-            if let Ok(dir) = self.run_dir(run, false) {
+            if let Ok(dir) = self.attempt_dir(run, false) {
                 let _ = crate::artifacts::seal(
                     &dir,
                     "pr-contribution-diagnostic.txt",
@@ -62,11 +62,11 @@ impl crate::RunStore {
     }
     pub(crate) fn contribution_attempts(
         &self,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         call: &Request<'_>,
     ) -> Result<Vec<crate::AttemptRecord>> {
         let mut query = self.db.prepare(
-            "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND refused=0 ORDER BY sequence LIMIT 10001",
+            "SELECT id FROM attempts WHERE id=?1 AND project=?2 AND refused=0 ORDER BY sequence LIMIT 10001",
         )?;
         let ids = query
             .query_map(
@@ -90,7 +90,7 @@ impl crate::RunStore {
     pub(crate) fn inherit_contribution(
         &self,
         prior: AttemptId,
-        run: provenant_core::RunId,
+        run: provenant_core::AttemptId,
         replacement_branch: Option<&str>,
         call: &Request<'_>,
     ) -> Result<()> {
@@ -176,7 +176,6 @@ pub struct Contribution {
     pub role: Option<String>,
     pub model: Option<String>,
     pub account: Option<String>,
-    pub run: Option<RunId>,
     pub outcome: Option<crate::Outcome>,
     pub queued_at: Option<WallTime>,
     pub finished_at: Option<WallTime>,
@@ -489,8 +488,8 @@ impl Contributions {
             _ => (None, None),
         };
         immediate(&self.0, call, |tx| {
-            tx.execute("UPDATE branch_attempts SET run=?2,queued_at=?3,outcome=COALESCE(?4,outcome),finished_at=COALESCE(?5,finished_at),model=COALESCE(?6,model),account=COALESCE(?7,account) WHERE attempt=?1",
-                params![record.attempt_id.to_string(), record.run_id.to_string(), record.queued_at.as_micros(), outcome, finished_at,
+            tx.execute("UPDATE branch_attempts SET queued_at=?2,outcome=COALESCE(?3,outcome),finished_at=COALESCE(?4,finished_at),model=COALESCE(?5,model),account=COALESCE(?6,account) WHERE attempt=?1",
+                params![record.attempt_id.to_string(), record.queued_at.as_micros(), outcome, finished_at,
                     record.resolved_route.as_ref().and_then(|r| r.model.as_deref()), record.resolved_route.as_ref().and_then(|r| r.account_label.as_deref())])?;
             Ok(())
         })
@@ -682,13 +681,13 @@ impl Contributions {
         let number =
             i64::try_from(pr.number).map_err(|_| RunError::Validation("PR number too large"))?;
         let sql = "SELECT l.attempt,l.weight,
-            a.branch,p.head,a.role,a.model,a.account,a.run,a.outcome,a.queued_at,a.finished_at,
+            a.branch,p.head,a.role,a.model,a.account,a.outcome,a.queued_at,a.finished_at,
             (SELECT count(*) FROM links c WHERE c.attempt=l.attempt),
             NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=l.attempt),
             EXISTS(SELECT 1 FROM truncations t WHERE t.attempt=l.attempt)
             FROM links l LEFT JOIN branch_attempts a USING(attempt)
             LEFT JOIN branch_prs p ON p.project=a.project AND p.branch=a.branch AND p.repository=l.repository AND p.number=l.number AND p.generation=a.generation
-            WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001";
+            WHERE l.repository=?1 AND l.number=?2 ORDER BY 9,l.attempt LIMIT 10001";
         let mut query = self.0.prepare(sql)?;
         let mut rows = query.query(params![pr.repository, number])?;
         let mut result = Vec::new();
@@ -723,38 +722,31 @@ impl Contributions {
                 role: row.get(4)?,
                 model: row.get(5)?,
                 account: row.get(6)?,
-                run: row
-                    .get::<_, Option<String>>(7)?
-                    .map(|id| {
-                        id.parse()
-                            .map_err(|_| RunError::Validation("invalid contribution run"))
-                    })
-                    .transpose()?,
                 outcome: row
-                    .get::<_, Option<String>>(8)?
+                    .get::<_, Option<String>>(7)?
                     .map(|raw| {
                         serde_json::from_str(&raw)
                             .map_err(|_| RunError::Validation("invalid contribution outcome"))
                     })
                     .transpose()?,
                 queued_at: row
-                    .get::<_, Option<i64>>(9)?
+                    .get::<_, Option<i64>>(8)?
                     .map(|time| {
                         WallTime::from_micros(time)
                             .map_err(|_| RunError::Validation("invalid contribution time"))
                     })
                     .transpose()?,
                 finished_at: row
-                    .get::<_, Option<i64>>(10)?
+                    .get::<_, Option<i64>>(9)?
                     .map(|time| {
                         WallTime::from_micros(time)
                             .map_err(|_| RunError::Validation("invalid contribution time"))
                     })
                     .transpose()?,
-                pr_count: u64::try_from(row.get::<_, i64>(11)?)
+                pr_count: u64::try_from(row.get::<_, i64>(10)?)
                     .map_err(|_| RunError::Validation("invalid contribution count"))?,
-                ambiguous: row.get::<_, i64>(11)? > 1 && row.get::<_, bool>(12)?,
-                truncated: row.get(13)?,
+                ambiguous: row.get::<_, i64>(10)? > 1 && row.get::<_, bool>(11)?,
+                truncated: row.get(12)?,
             });
         }
         Ok(result)
@@ -1131,7 +1123,7 @@ mod tests {
         assert_eq!(rows[0].account.as_deref(), Some("work"));
         assert_eq!(rows[0].head, Some(head));
         assert_eq!(rows[0].weight_millionths, Some(WEIGHT_ONE));
-        assert_eq!(rows[0].run, Some(queued.run_id));
+        assert_eq!(rows[0].run, Some(queued.attempt_id));
         assert_eq!(rows[0].queued_at, Some(queued.queued_at));
         assert_eq!(rows[0].outcome, Some(crate::Outcome::Cancelled));
         assert_eq!(rows[0].finished_at, Some(queued.queued_at));

@@ -4,7 +4,7 @@ use super::tests;
 use super::tests::{HostFacts, call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
-use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, TestClock, WallTime};
+use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, TestClock, WallTime};
 use provenant_os::{exec::Termination, fs::Directory, sys::resources::MemorySample};
 use provenant_records::CanonicalV1;
 use provenant_supervisor::custody::ExitObservation;
@@ -16,11 +16,11 @@ type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 fn rewrite_child_request(
     store: &RunStore,
-    run: RunId,
+    run: AttemptId,
     request: &CanonicalRequest,
     call: &Request<'_>,
 ) -> TestResult {
-    store.run_dir(run, false)?.atomic_write(
+    store.attempt_dir(run, false)?.atomic_write(
         std::ffi::OsStr::new("request.json"),
         ".swap-",
         &crate::db::bytes(request)?,
@@ -32,7 +32,7 @@ fn rewrite_child_request(
         .ok_or("operation")?;
     operation.request_digest = request.digest()?;
     store.db.execute(
-        "UPDATE attempts SET operation_record=?1 WHERE run=?2",
+        "UPDATE attempts SET operation_record=?1 WHERE id=?2",
         rusqlite::params![crate::db::bytes(&operation)?, run.to_string()],
     )?;
     assert_eq!(&store.request(run, call)?, request);
@@ -386,7 +386,7 @@ fn settle_with_turns(
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
     if let Some(role) = role {
-        run.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+        run.request.task.context = Some(provenant_records::run::WorkContext {
             role: Some(role.into()),
             ..Default::default()
         });
@@ -426,7 +426,7 @@ const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stop
 
 fn two_tasks(concurrency: u64) -> PreparedRun {
     let mut run = input();
-    let mut task = run.request.tasks[0].clone();
+    let mut task = run.request.task.clone();
     task.task_id = TaskId::from_bytes([7; 16]);
     run.request.tasks.push(task.clone());
     run.request.concurrency = concurrency;
@@ -456,7 +456,7 @@ pub(super) fn seal_exit(store: &RunStore, exit: &ExitObservation) -> TestResult 
 fn lane(seed: u8, writer: bool) -> PreparedRun {
     let mut run = batch(seed, 1);
     if writer {
-        run.request.tasks[0].writer = Some(WriterRequest {
+        run.request.task.writer = Some(WriterRequest {
             extra: Default::default(),
             project: "/project".into(),
             worktree: format!("/project/.worktrees/lane-{seed}").into(),
@@ -619,9 +619,9 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     )?;
     let facts = HostFacts::new(100);
     let mut parent = lane(121, true);
-    parent.request.tasks[0].build_heavy = true;
+    parent.request.task.build_heavy = true;
     let mut child = lane(122, true);
-    child.request.tasks[0].build_heavy = true;
+    child.request.task.build_heavy = true;
     let parent_id = starting(&store, &parent, &call)?;
     let parent_record = store
         .claim_observed(parent_id, &clock, &call, &facts)?
@@ -695,7 +695,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let mut finished = vec![parent_id, child_id];
     for seed in 123..126 {
         let mut child = lane(seed, true);
-        child.request.tasks[0].build_heavy = true;
+        child.request.task.build_heavy = true;
         let id = starting(&store, &child, &call)?;
         let record = store
             .claim_observed(id, &clock, &call, &facts)?
@@ -764,8 +764,8 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
 /// A run of `tasks` attempts at full concurrency, with IDs unique to `seed`.
 fn batch(seed: u8, tasks: u64) -> PreparedRun {
     let mut run = input();
-    let template = run.request.tasks[0].clone();
-    run.run_id = provenant_core::RunId::from_bytes([seed; 16]);
+    let template = run.request.task.clone();
+    run.attempt_id = provenant_core::AttemptId::from_bytes([seed; 16]);
     run.operation_id = provenant_core::OperationId::parse(&format!("batch-{seed}")).unwrap();
     crate::tests::rekey(&mut run);
     run.request.concurrency = tasks.min(8);
@@ -806,7 +806,7 @@ fn assert_unreadable_prompt_rejected(
         .join(format!("attempts/{id}/prompt.txt"));
     damage(&prompt)?;
     let fake = Fake::default();
-    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &call)?;
+    let started = store.start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?;
     // Restore access so the tempdir can be removed whatever the outcome.
     if prompt.exists() {
         std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o600))?;
@@ -832,7 +832,7 @@ fn assert_unreadable_prompt_rejected(
     assert_eq!(recorded.len(), reason.len().min(256));
     assert!(
         store
-            .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
+            .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
             .is_empty()
     );
     Ok(())
@@ -978,7 +978,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     let mut run = input();
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
-    run.request.tasks[0].writer = Some(WriterRequest {
+    run.request.task.writer = Some(WriterRequest {
         extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
@@ -1119,7 +1119,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         assert_eq!(std::fs::read(&reservation).ok(), before);
     }
     let reconciled =
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?;
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, observer)?;
     if reservation_case == ReservationCase::DifferentAttempt {
         assert!(
             matches!(reconciled.as_slice(),
@@ -1215,7 +1215,7 @@ fn recover_rebooted_writer_inner(
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
-    run.request.tasks[0].writer = writer.then(|| WriterRequest {
+    run.request.task.writer = writer.then(|| WriterRequest {
         extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
@@ -1329,7 +1329,7 @@ fn recover_rebooted_writer_inner(
             provenant_os::fs::LockMode::Exclusive,
         )?;
         assert!(
-            matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+            matches!(store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
             [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
         );
         assert_eq!(store.record(id, &call)?, before);
@@ -1341,7 +1341,7 @@ fn recover_rebooted_writer_inner(
         }
         if unresolved {
             assert!(matches!(
-                store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+                store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
                 [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
             ));
             assert_eq!(store.record(id, &call)?, before);
@@ -1357,7 +1357,7 @@ fn recover_rebooted_writer_inner(
             );
         }
         assert_eq!(
-            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
             vec![(id, Reconciled::Finished)]
         );
         let AttemptState::Terminal {
@@ -1412,10 +1412,10 @@ fn recover_rebooted_writer_inner(
                 | CancelReceipt::AlreadyRequested
                 | CancelReceipt::Requested
         ));
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?;
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?;
     } else {
         assert_eq!(
-            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
             vec![(id, Reconciled::Finished)]
         );
     }
@@ -1433,19 +1433,19 @@ fn recover_rebooted_writer_inner(
     assert_eq!(after.applied_route, before.applied_route);
     assert_eq!(after.usage, before.usage);
     assert_eq!(after.session, before.session);
-    assert_eq!(store.run(run.run_id, &call)?.closure, Closure::Closed);
+    assert_eq!(store.run(run.attempt_id, &call)?.closure, Closure::Closed);
     assert!(store.writer_fences()?.is_empty());
     assert!(!reservation.exists());
     assert!(
         store
-            .reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?
+            .reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?
             .is_empty()
     );
     // Also retry a crash after fence release but before clearing the marker.
     store.set_temporary_retained(id, true, &call)?;
     assert!(
         store
-            .reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?
+            .reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?
             .is_empty()
     );
     for (name, bytes) in telemetry {

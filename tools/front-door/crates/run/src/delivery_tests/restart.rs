@@ -39,8 +39,8 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let call = tests::call(&clock, &cancel);
         let store = RunStore::open(&execution, &call)?;
         let mut input = tests::input();
-        input.request.tasks[0].writer = Some(fixture.writer.clone());
-        input.request.tasks[0].deliver = Some(fixture.request.clone());
+        input.request.task.writer = Some(fixture.writer.clone());
+        input.request.task.deliver = Some(fixture.request.clone());
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
         let attempt = store.attempt_dir(id, false)?;
@@ -171,7 +171,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     &fixture.writer,
                     &fixture.request,
                     &attempt,
-                    &format!("Run {}\nAttempt {id}", input.run_id)
+                    &format!("Run {}\nAttempt {id}", input.attempt_id)
                 ),
                 Err(RunError::Delivery(WriterDeliveryStage::Push))
             ));
@@ -230,7 +230,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let store = RunStore::open(&execution, &call)?;
         assert_eq!(
             store
-                .pending_effect_attempts(input.run_id, &call)?
+                .pending_effect_attempts(input.attempt_id, &call)?
                 .contains(&id),
             !mode.ends_with("_legacy")
         );
@@ -322,9 +322,9 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     reaction.ledger_done = true;
                     Ok(())
                 };
-                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                store.drain_reactions(input.attempt_id, &clock, &cancel, &mut react)?;
                 store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
-                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                store.drain_reactions(input.attempt_id, &clock, &cancel, &mut react)?;
                 assert_eq!(calls.get(), (1, 1));
                 let pushes =
                     std::fs::read_to_string(fixture.root.join("pushes")).unwrap_or_default();
@@ -453,7 +453,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
     let record = store.mark_starting(
@@ -524,7 +524,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         RECORD_LIMIT,
     )?;
     let found = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &dispatch_tests::Fake::default(),
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
@@ -584,7 +584,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
     let temporary = store.temporary_path(id, &call)?;
@@ -638,7 +638,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             ..
         }
     ));
-    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    assert!(store.open_runs(100, &call)?.contains(&input.attempt_id));
     std::fs::write(&marker, original)?;
 
     // A failed cleanup must retain its retry marker and the pin.
@@ -647,7 +647,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     std::fs::rename(&common, &unavailable)?;
     let observer = provenant_supervisor::census::SystemProcessObserver;
     let result = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &crate::dispatch_tests::Ready,
         &call,
         &observer,
@@ -657,7 +657,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             .iter()
             .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
     );
-    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    assert!(store.open_runs(100, &call)?.contains(&input.attempt_id));
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
         7,
@@ -685,7 +685,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     assert!(spawned.get());
     std::fs::rename(&unavailable, &common)?;
     let second = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &crate::dispatch_tests::Ready,
         &call,
         &observer,
@@ -788,7 +788,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let execution = registered_landed_writer_fixture(&fixture)?;
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
     let marker = fixture.writer.worktree.join(".git");
     let original = std::fs::read(&marker)?;
@@ -799,7 +799,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         project: execution.project_id,
     };
     let result = store.start(
-        input.run_id,
+        input.attempt_id,
         &provider,
         &|_, _| {
             std::fs::write(&marker, b"gitdir: /nonexistent\n").map_err(RunError::Io)?;
@@ -825,7 +825,7 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         let call = tests::call(&clock, &cancel);
         let store = RunStore::open(&execution, &call)?;
         let mut input = tests::input();
-        input.request.tasks[0].writer = Some(fixture.writer.clone());
+        input.request.task.writer = Some(fixture.writer.clone());
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
         let mut exit = tests::exit();

@@ -16,7 +16,7 @@ fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
-    run.request.tasks[0].writer = Some(WriterRequest {
+    run.request.task.writer = Some(WriterRequest {
         extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
@@ -69,7 +69,7 @@ fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
     std::fs::remove_file(&child_reservation)?;
 
     assert_eq!(
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
         vec![(id, Reconciled::Finished)]
     );
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
@@ -143,7 +143,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     let manifest = std::fs::read(&manifest_path)?;
     std::fs::write(&manifest_path, b"invalid manifest")?;
     assert!(
-        matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+        matches!(store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
         [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
     );
     assert!(
@@ -154,7 +154,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     assert_eq!(store.record(id, &call)?, record);
     std::fs::write(manifest_path, manifest)?;
     assert_eq!(
-        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
         vec![(id, Reconciled::Finished)]
     );
     let cleanup = controls::REBOOT_TEMPORARY_CLEANUP.with(|result| result.borrow_mut().take());
@@ -323,7 +323,7 @@ fn reconcile_sealed_never_spawned_exit_without_a_stop_request() -> TestResult {
         )?;
         assert_eq!(
             store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &Fake::default(),
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver
@@ -387,7 +387,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         &call,
     )?;
     let scope = provenant_supervisor::custody::Scope {
-        run: batch.run_id,
+        run: batch.attempt_id,
         attempt: orphan,
         generation: 1,
     };
@@ -404,7 +404,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         ..Fake::default()
     };
     let found = store.reconcile_with_observer(
-        batch.run_id,
+        batch.attempt_id,
         &fake,
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
@@ -422,7 +422,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     assert!(
         store
             .reconcile_with_observer(
-                batch.run_id,
+                batch.attempt_id,
                 &fake,
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver
@@ -439,7 +439,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
-    run.request.tasks[0].writer = Some(WriterRequest {
+    run.request.task.writer = Some(WriterRequest {
         extra: Default::default(),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("removed-lane"),
@@ -459,7 +459,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         .ok_or("not admitted")?;
     let attempt = store.attempt_dir(id, false)?;
     let scope = provenant_supervisor::custody::Scope {
-        run: run.run_id,
+        run: run.attempt_id,
         attempt: id,
         generation: 1,
     };
@@ -507,7 +507,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         ..Fake::default()
     };
     let found = store.reconcile_with_observer(
-        run.run_id,
+        run.attempt_id,
         &fake,
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
@@ -518,7 +518,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     assert!(
         store
             .reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &fake,
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver
@@ -545,7 +545,7 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
         &call,
     )?;
     let found = store.reconcile_with_observer(
-        run.run_id,
+        run.attempt_id,
         &Fake::default(),
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
@@ -700,7 +700,7 @@ fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> 
     )?;
 
     let mut next = input();
-    next.run_id = RunId::from_bytes([9; 16]);
+    next.attempt_id = AttemptId::from_bytes([9; 16]);
     next.operation_id = provenant_core::OperationId::parse("run-test-next")?;
     next.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
     crate::tests::rekey(&mut next);

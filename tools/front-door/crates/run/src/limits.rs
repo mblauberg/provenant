@@ -189,7 +189,7 @@ mod tests {
     use super::*;
 
     fn writer_task() -> TaskRequest {
-        let mut task = crate::tests::input().request.tasks[0].clone();
+        let mut task = crate::tests::input().request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
             extra: Default::default(),
             project: "/p".into(),

@@ -47,7 +47,7 @@ fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> Test
             .collect(),
     });
     let started = store.start(
-        prepared.run_id,
+        prepared.attempt_id,
         &provider,
         &|record, _| {
             let route = record.applied_route.as_ref().expect("applied route");

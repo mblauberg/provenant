@@ -320,14 +320,11 @@ fn scratch_prepare_lock_timeout_keeps_a_fixed_cause() {
 
 #[test]
 fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
-    let error = run_error(provenant_run::RunError::PromptTooLarge {
-        task_index: Some(0),
-        limit: 1_048_576,
-    });
+    let error = run_error(provenant_run::RunError::PromptTooLarge { limit: 1_048_576 });
     let projection = error.diagnostic();
     assert_eq!(projection.code, "invalid_input");
     let detail = projection.detail.unwrap();
-    assert!(detail.contains("tasks[0].prompt"));
+    assert!(detail.contains("prompt"));
     assert!(detail.contains("1048576"));
     assert!(projection.next.is_some());
 }

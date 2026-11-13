@@ -122,8 +122,8 @@ pub fn resolve_work(
         root,
         &provenant_run::WorkSelector {
             project,
-            run: work.run_id,
-            task: work.task_id,
+            graph: work.graph.clone(),
+            node: work.node.clone(),
             attempt: work.attempt_id,
             repository: work.repository.clone(),
             head: work.head,
