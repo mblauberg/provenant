@@ -205,9 +205,6 @@ pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required
     if checks.iter().any(|check| check.head != head) {
         return CiCompletion::Unavailable;
     }
-    if checks.iter().any(|check| check.bucket == "pending") {
-        return CiCompletion::Pending;
-    }
     let selected: Vec<_> = checks
         .iter()
         .filter(|check| {
@@ -222,6 +219,9 @@ pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required
         .any(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
     {
         return CiCompletion::Failed;
+    }
+    if checks.iter().any(|check| check.bucket == "pending") {
+        return CiCompletion::Pending;
     }
     if required.iter().any(|need| {
         !checks
