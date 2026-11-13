@@ -2062,7 +2062,7 @@ pub(crate) fn queued_abandonment_pending(
     }
     Ok(
         read_sealed(attempt, "queued-abandonment.json", RECORD_LIMIT)?
-            .map(|raw| crate::db::decode::<(Scope, String)>(&raw))
+            .map(|raw| crate::db::decode_unversioned::<(Scope, String)>(&raw))
             .transpose()?
             .is_some_and(|(scope, _)| scope == crate::RunStore::scope(record)),
     )
@@ -2146,7 +2146,7 @@ impl crate::RunStore {
         // A cancelled, never-launched terminal row also permits retry after a
         // crash between withdrawal and the abandonment journal publication.
         let intent = read_sealed(&attempt, "queued-abandonment.json", RECORD_LIMIT)?
-            .map(|raw| crate::db::decode::<(Scope, String)>(&raw))
+            .map(|raw| crate::db::decode_unversioned::<(Scope, String)>(&raw))
             .transpose()?;
         let unstarted =
             queued

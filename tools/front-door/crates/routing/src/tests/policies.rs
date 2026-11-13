@@ -546,10 +546,9 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
     assert!(route.exclusions.is_empty());
     let mut with_effort = query.clone();
     with_effort.effort = Some("high".into());
-    assert!(matches!(
-        resolve(&with_effort, &context),
-        Err(RoutingError::UnsupportedEffort { .. })
-    ));
+    let with_effort_route = resolve(&with_effort, &context)?;
+    assert_eq!(with_effort_route.effort, None);
+    assert!(with_effort_route.extra.contains_key("effort_warning"));
     let mut confidential = query;
     confidential.confidential = true;
     assert!(resolve(&confidential, &context).is_ok());

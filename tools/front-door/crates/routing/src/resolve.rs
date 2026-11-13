@@ -1486,7 +1486,8 @@ fn candidate(
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
     let dropped_effort = effort.filter(|value| {
-        model.adapter() == "opencode"
+        provenant_records::AdapterSpec::get(model.adapter())
+            .is_some_and(|spec| spec.drops_unsupported_effort)
             && crate::request::effort_valid(value)
             && context
                 .catalogue
@@ -2340,7 +2341,8 @@ fn classify_pool(
         let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
         {
             Some(("confidential", "confidential model"))
-        } else if member.model.adapter() != "opencode"
+        } else if !provenant_records::AdapterSpec::get(member.model.adapter())
+            .is_some_and(|spec| spec.drops_unsupported_effort)
             && effort
                 .as_deref()
                 .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))

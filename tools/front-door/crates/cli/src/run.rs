@@ -1082,7 +1082,8 @@ impl Registry<'_> {
             }
             decoded.reason = Some(reason);
         }
-        if adapter.id() == "opencode"
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.stdout_error_diagnostic)
             && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(stdout)
         {
             decoded.reason = Some(match decoded.reason.take() {
