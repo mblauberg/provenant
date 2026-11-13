@@ -994,7 +994,9 @@ fn resolve_graph_steer_target(
 
     // An attempt ID may identify a retained run target even when the graph
     // checkpoint was saved before its attempt_ref. Scan only ref-less rows and
-    // check every candidate before deciding whether that ID is unique.
+    // check every candidate before deciding whether that ID is unique. An
+    // unavailable candidate cannot prevent a known match; retain its error
+    // when no candidate establishes ownership, rather than report not found.
     let (graph_filter, node_filter, attempt_id) = parse_unresolved_steer_selector(selector);
     let Some(attempt_id) = attempt_id else {
         return Ok(SteerResolution::NoMatch);
@@ -1007,6 +1009,7 @@ fn resolve_graph_steer_target(
             .map_err(graph_journal_error)?
     };
     let mut matches = Vec::new();
+    let mut candidate_error = None;
     for graph in graphs {
         let Some(checkpoint) =
             FileJournal::read_status_checkpoint(&factory.context.roots.state, project, &graph)
@@ -1026,20 +1029,27 @@ fn resolve_graph_steer_target(
                 .iter()
                 .filter(|attempt| attempt.attempt_ref.is_none())
             {
-                if let Some(retained) =
-                    retained_steer_target(factory, &graph, node, attempt, budget, cancel)?
-                {
-                    match retained_steer_reference(attempt, Some(attempt_id), &retained) {
-                        Ok(Some(reference)) => matches.push(Ok(reference)),
-                        Ok(None) => {}
-                        Err(message) => matches.push(Err(message)),
+                match retained_steer_target(factory, &graph, node, attempt, budget, cancel) {
+                    Ok(Some(retained)) => {
+                        match retained_steer_reference(attempt, Some(attempt_id), &retained) {
+                            Ok(Some(reference)) => matches.push(Ok(reference)),
+                            Ok(None) => {}
+                            Err(message) => matches.push(Err(message)),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        candidate_error.get_or_insert(error);
                     }
                 }
             }
         }
     }
     match matches.len() {
-        0 => Ok(SteerResolution::NoMatch),
+        0 => match candidate_error {
+            Some(error) => Err(error),
+            None => Ok(SteerResolution::NoMatch),
+        },
         1 => {
             let resolution = matches.pop().ok_or(FacadeError::StateCorrupt)?;
             match resolution {
@@ -2913,6 +2923,26 @@ mod tests {
         drop(journal);
         let events = FileJournal::read_events(&roots.state, project, graph)?;
 
+        // An unrelated ref-less launch on an unavailable peer must not mask
+        // the locally retained attempt, regardless of graph scan order.
+        let other_graph = "unrelated-offline-peer";
+        let mut other = checkpoint.clone();
+        other.graph_id = other_graph.into();
+        other.nodes[0].attempts[0].key.graph_id = other_graph.into();
+        other.nodes[0].attempts[0]
+            .extra
+            .insert("placement_host".into(), json!("unconfigured-offline-peer"));
+        let mut other_journal = FileJournal::open(
+            &roots.state,
+            project,
+            other_graph,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        other_journal.save(&other)?;
+        drop(other_journal);
+
         for selector in [
             graph.to_owned(),
             format!("{graph}/{node}"),
@@ -2929,6 +2959,9 @@ mod tests {
             };
             assert_eq!(reference, original);
         }
+        // With no established owner, the candidate failure remains visible.
+        let unknown = provenant_core::AttemptId::from_bytes([99; 16]).to_string();
+        assert!(resolve_graph_steer_target(&factory, &unknown, budget, &cancel).is_err());
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, graph)?,
             Some(checkpoint.clone())
