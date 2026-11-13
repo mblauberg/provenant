@@ -214,6 +214,11 @@ fn collect(
         }
         let left = deadline.saturating_duration_since(Instant::now());
         let Ok(mut update) = receiver.recv_timeout(left) else {
+            for reading in latest.iter_mut().flatten() {
+                if !reading.done() && reading.data.is_object() {
+                    reading.data["stale"] = json!(true);
+                }
+            }
             return false;
         };
         let index = update.target;
@@ -509,34 +514,38 @@ mod tests {
 
     #[test]
     fn failed_reread_retains_the_last_snapshot_as_stale() {
-        let rows = json!({"rows":[{"kind":"graph","state":"pending"}]});
-        let mut latest = vec![Some(Reading {
-            settle: Settle::Pending,
-            line: "g pending".into(),
-            data: rows.clone(),
-        })];
-        let (sender, receiver) = mpsc::channel();
-        sender
-            .send(Update {
-                target: 0,
-                reading: Reading::unavailable("g", "relay timed out"),
-            })
-            .unwrap();
-        drop(sender);
-        let mut settled = Vec::new();
-        assert!(!collect(
-            &receiver,
-            &mut latest,
-            &mut settled,
-            Instant::now() + Duration::from_secs(1),
-            false,
-            &mut |_, _| {}
-        ));
-        let last = latest[0].as_ref().unwrap();
-        assert_eq!(last.data["rows"], rows["rows"]);
-        assert_eq!(last.data["stale"], true);
-        assert_eq!(last.settle, Settle::Pending);
-        assert!(settled.is_empty());
+        for failure_delivered in [false, true] {
+            let rows = json!({"rows":[{"kind":"graph","state":"pending"}]});
+            let mut latest = vec![Some(Reading {
+                settle: Settle::Pending,
+                line: "g pending".into(),
+                data: rows.clone(),
+            })];
+            let (sender, receiver) = mpsc::channel();
+            if failure_delivered {
+                sender
+                    .send(Update {
+                        target: 0,
+                        reading: Reading::unavailable("g", "relay timed out"),
+                    })
+                    .unwrap();
+            }
+            drop(sender);
+            let mut settled = Vec::new();
+            assert!(!collect(
+                &receiver,
+                &mut latest,
+                &mut settled,
+                Instant::now(),
+                false,
+                &mut |_, _| {}
+            ));
+            let last = latest[0].as_ref().unwrap();
+            assert_eq!(last.data["rows"], rows["rows"]);
+            assert_eq!(last.data["stale"], true);
+            assert_eq!(last.settle, Settle::Pending);
+            assert!(settled.is_empty());
+        }
     }
 
     #[test]

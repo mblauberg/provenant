@@ -225,6 +225,7 @@ one line per transition before the result. Bare wait includes unreadable graphs
 as unsuccessful targets. Other failed reads are retried until the shared
 deadline, which also bounds target validation, graph reads and peer enrichment.
 If a later read fails, the last successful data is retained and marked `stale`.
+Expiry also marks retained pending data `stale`, including when a reread ends too late.
 Neither expiry nor cancelling a wait
 stops the work.
 
