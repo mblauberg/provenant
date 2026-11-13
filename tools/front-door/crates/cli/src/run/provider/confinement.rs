@@ -403,7 +403,8 @@ pub(super) fn sandbox_mode(
         matches!(permissions.mode, AccessMode::ReadOnly),
     );
     if let Some(warning) = &mode.warning {
-        eprintln!("provenant: {warning}");
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
     }
     mode
 }
