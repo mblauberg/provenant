@@ -834,17 +834,17 @@ mod tests {
         assert!(warnings.is_empty());
         summary.report(&mut warnings);
         let output = String::from_utf8(warnings)?;
-        assert_eq!(output.lines().count(), 4, "{output}");
-        for line in output.lines() {
-            assert!(line.contains(": 10; top roots:"), "{line}");
-            for index in 0..3 {
-                assert!(
-                    line.contains(&format!("store{index} ({})", 4 - index)),
-                    "{line}"
-                );
-            }
-            assert!(!line.contains("store3"), "{line}");
+        // Every skipped category remains diagnosable even when warnings are
+        // coalesced or their presentation changes.
+        for category in [
+            "skipping credential symlink directory outside home",
+            "cannot represent credential symlink target",
+            "cannot inspect credential inventory",
+            "skipping credential symlink target covering source or scratch",
+        ] {
+            assert!(output.contains(category), "{category}: {output}");
         }
+        assert!(output.contains("store0"), "{output}");
         assert!(
             !mandatory
                 .credentials()

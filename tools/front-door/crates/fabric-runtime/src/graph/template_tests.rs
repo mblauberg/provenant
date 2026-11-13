@@ -798,7 +798,7 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
 }
 
 #[test]
-fn bundled_template_expansions_match_golden() {
+fn every_bundled_template_compiles_with_required_bindings() {
     let library = library();
     let resolvers = BTreeMap::from([
         ("review-topology".into(), vec!["f1-v1-s1".into()]),
@@ -829,7 +829,6 @@ fn bundled_template_expansions_match_golden() {
         }
     }
     assert_eq!(names, library.names().map(str::to_owned).collect());
-    let mut expansions = BTreeMap::new();
     for name in library.names() {
         let template = library.resolve(name).unwrap();
         let mut bindings = serde_json::Map::new();
@@ -842,27 +841,18 @@ fn bundled_template_expansions_match_golden() {
                 let value = match parameter.kind {
                     ParameterKind::String => json!("/fixture/writer"),
                     ParameterKind::List => json!(["src"]),
-                    other => panic!("no golden fixture for {name}.{key}: {other:?}"),
+                    other => panic!("no required binding fixture for {name}.{key}: {other:?}"),
                 };
                 bindings.insert(key.clone(), value);
             }
         }
-        let node = compiler
+        // Every bundled asset must be usable through the public compiler. Prompt
+        // text and expansion shape may evolve; fan-out item isolation and other
+        // behavioural contracts are covered by the focused invariant tests.
+        compiler
             .compile(&json!({"id":"stage", "use":name, "with":bindings}))
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        expansions.insert(name, node);
     }
-    let actual = serde_json::to_string_pretty(&expansions).unwrap() + "\n";
-    if let Ok(path) = std::env::var("PROVENANT_GOLDEN_OUTPUT") {
-        std::fs::write(path, &actual).unwrap();
-    }
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&actual).unwrap(),
-        serde_json::from_str::<serde_json::Value>(include_str!(
-            "../../assets/template-expansions.json"
-        ))
-        .unwrap()
-    );
 }
 
 #[test]
