@@ -38,3 +38,6 @@ target/
 
 # Generated contract reference (scripts/generate-reference); not tracked.
 /docs/reference/
+
+# Lane notes are scratch; they must never be committed.
+/scratchpad/
