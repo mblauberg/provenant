@@ -18,7 +18,11 @@ mod implementation_graph_contract {
             .iter()
             .find(|node| node["access"] == "worktree_write")
             .ok_or("writer")?;
-        assert_eq!(writer["worktree"], ".worktrees/feature");
+        let expected = rig.project.join(".worktrees/feature");
+        assert_eq!(
+            writer["worktree"].as_str().map(std::path::Path::new),
+            Some(expected.as_path())
+        );
         assert_eq!(writer["write_scope"], json!(["src"]));
         assert!(
             children
