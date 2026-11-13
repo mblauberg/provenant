@@ -44,6 +44,15 @@ impl Factory {
             })),
             Err(ResolveError::NotFound(_)) => Ok(None),
             Err(ResolveError::Ambiguous { .. }) => Err(FacadeError::Conflict),
+            // A whole unreadable graph stays addressable so status can name
+            // its retirement command and stop can retire it.
+            Err(ResolveError::Read(error)) if target.node.is_none() && error.is_unreadable() => {
+                Ok(Some(GraphTarget {
+                    graph: target.name,
+                    node: None,
+                    attempt: None,
+                }))
+            }
             Err(ResolveError::Read(error)) => Err(graph_journal_error(error)),
         }
     }
@@ -824,13 +833,20 @@ pub(crate) fn unified_graph_command(
         })?;
         if !factory.context.in_lane {
             for target in targets {
-                resolve(
+                match resolve(
                     &factory.context.roots.state,
                     factory.context.identity.project,
                     target,
                     Want::Work,
-                )
-                .map_err(target_fault)?;
+                ) {
+                    // A whole unreadable graph still reports and stops: the
+                    // graph path names its retirement command.
+                    Err(ResolveError::Read(error))
+                        if target.node.is_none() && error.is_unreadable() => {}
+                    result => {
+                        result.map_err(target_fault)?;
+                    }
+                }
             }
         }
         let selectors: Vec<(String, Option<&str>)> = if targets.is_empty() {
@@ -1400,11 +1416,19 @@ fn host_graph_output(
             }
             Err(fault) => return Err(fault.into()),
         };
-    let reference = resolved.attempt_ref.clone().ok_or_else(|| TargetFault {
-        outcome: provenant_records::Outcome::Invalid,
-        code: "NOT_FOUND",
-        message: format!("NOT_FOUND: {} has not launched", resolved.target()),
-    })?;
+    let Some(reference) = resolved.attempt_ref.clone() else {
+        let fault = TargetFault {
+            outcome: provenant_records::Outcome::Invalid,
+            code: "NOT_FOUND",
+            message: format!("NOT_FOUND: {} has not launched", resolved.target()),
+        };
+        if command.target.attempt.is_none()
+            && let Some(reply) = unlaunched_failure_output(command, factory, budget, cancel)?
+        {
+            return Ok(reply);
+        }
+        return Err(fault.into());
+    };
     let failure_rows = if command.target.attempt.is_none() {
         node_failure_rows(
             factory,

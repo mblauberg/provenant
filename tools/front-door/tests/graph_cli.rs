@@ -478,16 +478,16 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     std::fs::write(&broken, b"PRIVATE_CONTENT_SENTINEL")?;
     let (output, listing) = rig.run(&["status"])?;
     assert!(output.status.success(), "{listing}");
-    let rows = listing["data"]["rows"].as_array().ok_or("rows")?;
+    let rows = listing["data"]["graphs"].as_array().ok_or("graphs")?;
     let bad = rows
         .iter()
-        .find(|row| row["id"] == "broken")
+        .find(|row| row["name"] == "broken")
         .ok_or("broken row")?;
     assert_eq!(bad["state"], "unreadable");
     let reason = bad["reason"].as_str().ok_or("reason")?;
     assert!(reason.contains("provenant stop -- broken"), "{reason}");
     assert!(reason.contains("Other graphs"), "{reason}");
-    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    assert!(rows.iter().any(|row| row["name"] == "healthy"));
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !listing
@@ -514,22 +514,30 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         status.to_string().contains("provenant stop -- broken"),
         "{status}"
     );
-    assert_eq!(
-        status["data"]["rows"][0]["next"],
-        "provenant stop -- broken"
-    );
     assert!(!status.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !status
             .to_string()
             .contains(&rig.state().display().to_string())
     );
-    let (output, stopped) = rig.run(&["stop", "--", "broken"])?;
+    // The row's own next action is the command that retires the record.
+    let next = status["data"]["rows"][0]["next"]
+        .as_str()
+        .ok_or("next action")?;
+    let words: Vec<&str> = next.split_whitespace().collect();
+    assert_eq!(words.first(), Some(&"provenant"), "{next}");
+    assert!(
+        words.contains(&"stop") && words.last() == Some(&"broken"),
+        "{next}"
+    );
+    let (output, stopped) = rig.run(&words[1..])?;
     assert!(output.status.success(), "{stopped}");
     let (_, after) = rig.run(&["status"])?;
-    let rows = after["data"]["rows"].as_array().ok_or("rows after stop")?;
-    assert!(!rows.iter().any(|row| row["id"] == "broken"));
-    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    let rows = after["data"]["graphs"]
+        .as_array()
+        .ok_or("graphs after stop")?;
+    assert!(!rows.iter().any(|row| row["name"] == "broken"), "{after}");
+    assert!(rows.iter().any(|row| row["name"] == "healthy"), "{after}");
     Ok(())
 }
 
