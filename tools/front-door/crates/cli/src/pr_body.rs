@@ -401,7 +401,7 @@ fn detail(body: &Body<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, RunId, TaskId};
+    use provenant_core::AttemptId;
 
     const TEMPLATE: &str = include_str!("../../../../../.github/pull_request_template.md");
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -410,8 +410,6 @@ mod tests {
     fn facts(attempt: u8, route: &str, head: &str) -> AttemptFacts {
         AttemptFacts {
             attempt_id: AttemptId::from_bytes([attempt; 16]),
-            run_id: RunId::from_bytes([9; 16]),
-            task_id: TaskId::from_bytes([8; 16]),
             state: "succeeded".into(),
             exit_code: Some(0),
             route: route.into(),
@@ -444,11 +442,6 @@ mod tests {
         let reviews = [facts(2, "claude/opus@high", HEAD)];
         let text = fill(TEMPLATE, &body(&author, &reviews)).unwrap();
         assert!(!text.contains("<!--"), "{text}");
-        assert!(!text.contains(&format!("run {}", author.run_id)), "{text}");
-        assert!(
-            !text.contains(&format!("task {}", author.task_id)),
-            "{text}"
-        );
         for needle in [
             "## Summary\n\nAdd the thing.\n\nIt does it.\n\nCloses #12\nCloses #13\n",
             &format!("Approve merge of `{HEAD}` to `main`."),

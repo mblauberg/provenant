@@ -227,7 +227,7 @@ fn session_inventory_page(
                     _ => None,
                 };
                 json!({"cursor": cursor, "lane": {
-                    "run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id,
+                    "key": lane.key, "attempt_id": lane.attempt_id,
                     "state": state, "reason": reason, "finished_at": finished,
                     "requested_route": lane.requested_route, "applied_route": lane.applied_route,
                     "delivery": lane.delivery,
@@ -250,8 +250,6 @@ fn session_inventory_page(
 #[derive(Debug, Clone, Serialize)]
 pub struct AttemptFacts {
     pub attempt_id: AttemptId,
-    pub run_id: RunId,
-    pub task_id: TaskId,
     pub state: String,
     pub exit_code: Option<i64>,
     /// `adapter/model@effort`, as the attempt ran.
@@ -318,8 +316,6 @@ pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
     let exit_code = lane.exit_code;
     AttemptFacts {
         attempt_id: record.attempt_id,
-        run_id: record.run_id,
-        task_id: record.task_id,
         state,
         exit_code,
         route: route_label(record),

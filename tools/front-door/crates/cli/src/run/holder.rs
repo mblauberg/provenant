@@ -380,7 +380,7 @@ impl Holder for HostHolder<'_> {
                 clock: &clock,
                 cancel: &cancel,
             };
-            let request = runs.request(holder.run_id, &call)?;
+            let request = runs.request(holder.attempt_id, &call)?;
             let Some(chair) = request.chair else {
                 return Ok(());
             };

@@ -92,7 +92,7 @@ pub fn compose_tree(mut local: Value, peers: Vec<PeerTree>) -> Result<Value, &'s
                     .is_some()
                 && matches!(
                     edge["kind"].as_str(),
-                    Some("dispatch" | "continuation" | "retry")
+                    Some("dispatch" | "continuation")
                 )
                 && matches!(edge["parent_status"].as_str(), Some("present" | "missing"));
             if valid {
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(result["coverage"]["peers"][3]["state"], "unsupported");
 
         let edge = json!({"project_id":project,"child_attempt":attempt,"parent_attempt":attempt,
-            "kind":"retry","parent_status":"present"});
+            "kind":"continuation","parent_status":"present"});
         let mut page = tree(remote, false);
         page["nodes"] = json!([node(remote), node(remote), node(local_host)]);
         page["edges"] = json!([edge]);

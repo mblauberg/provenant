@@ -148,8 +148,6 @@ pub(super) fn continuation_for(
     let continuation =
         provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)?;
     let prior_state = state_root
-        .join("runs")
-        .join(prior.run_id.to_string())
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");

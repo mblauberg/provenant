@@ -152,32 +152,32 @@ pub(super) fn lane_dispatch_values(
     Ok((lane_depth, parent_attempt))
 }
 
-/// Hand every queued attempt of `run` to its own guardian. Fabric's facade
+/// Hand the queued attempt to its own guardian. Fabric's facade
 /// shares this path with the CLI leaves.
 pub fn launch(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_prepared(session, run, edge, call, None)
+    launch_prepared(session, attempt, edge, call, None)
 }
 
 /// Launch the holder-admitted budget continuation with its original host
 /// executable authority, after predecessor custody has been released.
 pub fn launch_budget_wrap_up(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: &run::HostLaunchContext,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_on_host_with_wait(session, run, edge, call, Some(host), None, None)
+    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
 }
 
 /// The detached launcher's entry point. It reopens the admitted run and uses
 /// the ordinary host launch path, including writer custody and guardian handoff.
-pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
+pub fn launch_worker(id: AttemptId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
     let outcome = (|| {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -194,7 +194,7 @@ pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_
 /// cannot drop a writer lease while preparation is still in progress.
 pub(super) fn launch_with_deadline(
     session: &Session,
-    record: &run::RunRecord,
+    record: &run::AttemptRecord,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     wait: Duration,
@@ -207,23 +207,21 @@ pub(super) fn launch_with_deadline(
         edge.roots.state.as_path().as_os_str().into(),
         "internal".into(),
         "launch".into(),
-        record.run_id.to_string().into(),
+        record.attempt_id.to_string().into(),
         // The caller's wait also bounds a wait for an updating provider.
         "--provider-lease-wait".into(),
         wait.as_secs().max(1).to_string().into(),
     ];
-    // Process startup and each admitted task need a usable receipt window
-    // even when the requested observation wait is very short.
-    let task_seconds = u64::try_from(record.task_ids.len()).unwrap_or(u64::MAX);
-    let preparation_budget =
-        Duration::from_secs(5_u64.saturating_add(task_seconds.saturating_sub(1)));
+    // Process startup needs a usable receipt window even when the requested
+    // observation wait is very short.
+    let preparation_budget = Duration::from_secs(5);
     let result =
         provenant_os::exec::detached_receipt(&argv, edge.cwd, wait.max(preparation_budget));
     // Unit tests run inside a test harness, which cannot re-execute itself as
     // the CLI. End-to-end tests exercise the actual worker process.
     #[cfg(any(test, feature = "fixture"))]
     if matches!(result, Err(provenant_os::exec::ExecError::TestHarness)) {
-        return launch_prepared(session, record.run_id, edge, call, None);
+        return launch_prepared(session, record.attempt_id, edge, call, None);
     }
     let _ = (session, call);
     let receipt =
@@ -233,8 +231,8 @@ pub(super) fn launch_with_deadline(
             Status::Error,
             ErrorKind::LaunchUnknown,
             format!(
-                "launch preparation: outcome unknown; rerun with --operation-id {} to recover the receipt",
-                record.operation_id
+                "launch preparation: outcome unknown; run `provenant status {}` to recover the receipt",
+                record.key
             ),
         )
     };
@@ -271,17 +269,17 @@ pub(super) fn launch_with_deadline(
 
 pub(super) fn launch_prepared(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
-    launch_prepared_with_wait(session, run, edge, call, ready, None)
+    launch_prepared_with_wait(session, attempt, edge, call, ready, None)
 }
 
 pub(super) fn launch_prepared_with_wait(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     ready: Option<&run::PreparedStart>,
@@ -292,7 +290,7 @@ pub(super) fn launch_prepared_with_wait(
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host_with_wait(session, run, edge, call, None, ready, provider_lease_wait)
+    launch_on_host_with_wait(session, attempt, edge, call, None, ready, provider_lease_wait)
 }
 
 pub(super) struct PreparedProvider<'a> {
@@ -406,38 +404,6 @@ pub(super) fn with_chair_index<T>(
         })
 }
 
-/// Resolve the graph label for a run at the CLI boundary. The run store still
-/// exposes its short-lived run adapter in a few launch APIs; chair records use
-/// the attempt's canonical work key.
-pub(super) fn graph_for_run(
-    session: &Session,
-    run: RunId,
-    call: &run::Request<'_>,
-) -> Result<String, Fail> {
-    let page = session.store.lanes(
-        &run::LaneQuery {
-            targets: vec![run::LaneTarget {
-                run,
-                task: None,
-                attempt: None,
-            }],
-            all: true,
-            limit: 1,
-            after: 0,
-            newest_first: false,
-            owner: None,
-            unseen_after: None,
-        },
-        call,
-    )?;
-    let attempt = page.lanes.first().ok_or(run::RunError::NotFound)?;
-    Ok(session
-        .store
-        .work_key(attempt.attempt_id, call)?
-        .graph()
-        .to_owned())
-}
-
 fn graph_for_attempt(
     session: &Session,
     attempt: AttemptId,
@@ -460,7 +426,7 @@ pub(super) fn seal_launch_task(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_on_host_with_wait(
     session: &Session,
-    run: RunId,
+    attempt: AttemptId,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
@@ -500,18 +466,15 @@ pub(super) fn launch_on_host_with_wait(
             "launch requires the host run store",
         ));
     }
-    let read = session.store.request(run, call)?;
+    let read = session.store.request(attempt, call)?;
     let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
 
     {
-        let graph = graph_for_run(session, run, call)?;
+        let graph = graph_for_attempt(session, attempt, call)?;
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
-                let parent = session.store.record(prior, call).map_err(|_| {
-                    provenant_fabric_runtime::chairs::Error::Invalid("continuation parent")
-                })?;
-                let original = session.store.request(parent.run_id, call).map_err(|_| {
+                let original = session.store.request(prior, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
                 let parent_graph = graph_for_attempt(session, prior, call).map_err(|_| {
@@ -543,13 +506,8 @@ pub(super) fn launch_on_host_with_wait(
         state_root: session.context.state_root.as_path().into(),
     };
     let holder = |attempt: &run::AttemptRecord, requester| {
-        let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == attempt.task_id)
-            .ok_or(run::RunError::Validation(
-                "attempt task missing from request",
-            ))?;
+        let task = &request.task;
+        let operation = session.store.attempt_operation(attempt.attempt_id, call)?;
         let mut host = host.clone();
         if !inherited_host {
             // Called after preparation, while its selected provider lease is held.
@@ -560,12 +518,7 @@ pub(super) fn launch_on_host_with_wait(
                 }
             }
         }
-        if let Some(writer) = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == attempt.task_id)
-            .and_then(|task| task.writer.as_ref())
-        {
+        if let Some(writer) = task.writer.as_ref() {
             host.cwd = writer.worktree.clone();
             provenant_confinement::worktrees::with_context(
                 edge.roots,
@@ -579,12 +532,12 @@ pub(super) fn launch_on_host_with_wait(
                         provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                     if let Some(mut owner) = worktrees::load_owner(&tree)?
                         && owner.origin == worktrees::WorktreeOrigin::Lane
-                        && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
+                        && (owner.operation_id.as_ref() == Some(&operation.operation_id)
                             || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
                     {
                         let expected = owner.clone();
                         owner.attempt_id = Some(attempt.attempt_id);
-                        owner.operation_id = Some(attempt.operation_id.clone());
+                        owner.operation_id = Some(operation.operation_id.clone());
                         worktrees::update_owner_when_unchanged(
                             context,
                             &tree,
@@ -603,13 +556,10 @@ pub(super) fn launch_on_host_with_wait(
             roots: seed.clone(),
             project_id: attempt.project_id,
             actor_id: requester,
-            run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
-            host_delivery: request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == attempt.task_id)
-                .and_then(|task| task.deliver.as_ref())
+            host_delivery: task
+                .deliver
+                .as_ref()
                 .map(|_| run::HostDeliveryContext::capture()),
             launch: Some(host),
             sealed: Some(seal_launch_task(
@@ -642,7 +592,7 @@ pub(super) fn launch_on_host_with_wait(
     #[cfg(feature = "fixture")]
     if host.fixture_state_write {
         let started = session.store.start_with_writer_lease(
-            run,
+            attempt,
             &providers,
             &holder,
             &|directory, scope, binding| {
@@ -663,7 +613,7 @@ pub(super) fn launch_on_host_with_wait(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, request, call)?;
+        .start(attempt, &providers, &holder, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }
@@ -710,24 +660,14 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
-    if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
+    if let Some((attempt, worktree)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
-            kind:
-                run::RefusalKind::RetainedImport {
-                    run,
-                    attempt,
-                    worktree,
-                },
+            kind: run::RefusalKind::RetainedImport { attempt, worktree },
             ..
-        } => Some((*run, *attempt, worktree.clone())),
+        } => Some((*attempt, worktree.clone())),
         _ => None,
     }) {
-        return Err(run::RunError::RetainedWriterImport {
-            run,
-            attempt,
-            worktree,
-        }
-        .into());
+        return Err(run::RunError::RetainedWriterImport { attempt, worktree }.into());
     }
     // Report any all-refused batch using its typed diagnostic where available.
     if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {

@@ -292,14 +292,14 @@ pub(super) fn reviewer_receipt(
     let label = if writer { "Writer" } else { "Reviewer" };
     let qualified_model = qualified_model.as_deref().unwrap_or("unknown");
     let line = format!(
-        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), run {}/{}/{}",
-        record.run_id, record.task_id, record.attempt_id
+        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}), attempt {} {}",
+        record.key, record.attempt_id
     );
     let attribution = format!(
         "Reviewer provenance: {provenance}, actor {actor}, model {reviewer_model}, family {reviewer_family}"
     );
     Ok((
-        json!({"run_id": record.run_id, "task_id": record.task_id, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
+        json!({"key": record.key, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
         format!("{line}\n{attribution}\n"),
     ))
 }
@@ -395,13 +395,7 @@ fn output_read_part(
     }
     let part = match command.part {
         Part::Receipt => {
-            let task = session
-                .store
-                .request(record.run_id, call)?
-                .tasks
-                .into_iter()
-                .find(|task| task.task_id == record.task_id)
-                .ok_or(run::RunError::NotFound)?;
+            let task = session.store.request(record.attempt_id, call)?.task;
             return reviewer_receipt(&record, task.writer.is_some());
         }
         Part::Result => run::ArtifactPart::Result,
@@ -765,13 +759,7 @@ fn residual_tree_evidence(
 ) -> Value {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let read = || -> Option<&'static str> {
-        let task = session
-            .store
-            .request(record.run_id, call)
-            .ok()?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)?;
+        let task = session.store.request(record.attempt_id, call).ok()?.task;
         let worktree = task.writer?.worktree;
         let git = provenant_os::git::git_executable()?;
         let executor = SystemExecutor::new(1).ok()?;
@@ -817,13 +805,7 @@ pub(super) fn changed_file_evidence(
     call: &run::Request<'_>,
 ) -> (Value, Value) {
     let read = || -> Option<(Vec<Option<provenant_records::StructuredPathWire>>, usize)> {
-        let task = session
-            .store
-            .request(record.run_id, call)
-            .ok()?
-            .tasks
-            .into_iter()
-            .find(|task| task.task_id == record.task_id)?;
+        let task = session.store.request(record.attempt_id, call).ok()?.task;
         let writer = task.writer?;
         let project = writer.project;
         let base = run::writer_base(session.context.state_root.as_path(), record).ok()??;

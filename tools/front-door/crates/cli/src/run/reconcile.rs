@@ -106,30 +106,30 @@ pub(super) fn reconcile_inner(
     let mut visited = BTreeMap::new();
     let mut cutover_issues = Vec::new();
     let session = open(edge, &request(&clock, &cancel)?)?;
-    let (runs, truncated) = if command.targets.is_empty() {
+    let (attempts, truncated) = if command.targets.is_empty() {
         let call = request(&clock, &cancel)?;
         prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
-        let mut runs = session.store.open_runs_readonly(SCAN + 1, &call)?;
-        let truncated = runs.len() as u64 > SCAN;
-        runs.truncate(SCAN as usize);
-        (runs, truncated)
+        let mut attempts = session.store.open_runs_readonly(SCAN + 1, &call)?;
+        let truncated = attempts.len() as u64 > SCAN;
+        attempts.truncate(SCAN as usize);
+        (attempts, truncated)
     } else {
-        let mut runs = Vec::new();
+        let mut attempts = Vec::new();
         for target in &command.targets {
             let resolved = key::resolve_target(edge, target, crate::Want::Work)?;
-            runs.extend(key::local_runs(
+            attempts.extend(key::local_attempts(
                 &session,
                 &resolved,
                 &request(&clock, &cancel)?,
             )?);
         }
-        runs.sort();
-        runs.dedup();
-        (runs, false)
+        attempts.sort();
+        attempts.dedup();
+        (attempts, false)
     };
     let mut rows = Vec::new();
     let mut human = String::new();
-    for run in runs {
+    for run in attempts {
         prepare_reservations(
             &session,
             &request(&clock, &cancel)?,
@@ -155,7 +155,7 @@ pub(super) fn reconcile_inner(
             Err(fail) => {
                 *fenced = true;
                 human.push_str(&format!("{run} error: {}\n", fail.message));
-                rows.push(json!({ "run_id": run, "error": { "code": fail.kind.code(), "message": fail.message } }));
+                rows.push(json!({ "attempt_id": run, "error": { "code": fail.kind.code(), "message": fail.message } }));
                 continue;
             }
         };
@@ -191,13 +191,13 @@ pub(super) fn reconcile_inner(
                 ) {
                     *fenced = true;
                 }
-                human.push_str(&format!("{run}/{id} {}\n", reconcile_summary(state)));
+                human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
                 json!({ "attempt_id": id, "found": state })
             })
             .collect();
         *fenced |= !unknown.is_empty() || launch_error.is_some();
         rows.push(json!({
-            "run_id": run,
+            "attempt_id": run,
             "attempts": attempts,
             "launched": launched,
             "launch_unknown": unknown,
@@ -206,11 +206,11 @@ pub(super) fn reconcile_inner(
         }));
     }
     if rows.is_empty() {
-        human.push_str("no open runs\n");
+        human.push_str("no open attempts\n");
     }
     if truncated {
         human.push_str(&format!(
-            "more than {SCAN} open runs; name the rest as targets\n"
+            "more than {SCAN} open attempts; name the rest as targets\n"
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;

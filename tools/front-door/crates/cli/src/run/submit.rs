@@ -88,16 +88,6 @@ pub fn requested(
     }
 }
 
-/// Task IDs default to a value derived from the operation, so replaying the
-/// same operation reproduces the same canonical request.
-pub fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
-    let digest = CanonicalV1::record_digest("run-task-id", 1, &(operation.as_str(), index))
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-    let mut bytes = [0; 16];
-    bytes.copy_from_slice(&digest.as_bytes()[..16]);
-    Ok(TaskId::from_bytes(bytes))
-}
-
 /// The reach a network switch asks for. Off keeps a granted local database.
 pub(super) fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::NetworkAccess> {
     match (switch, postgres) {
@@ -257,7 +247,6 @@ pub struct Submitted {
     pub settlement_retry_limit: Option<u8>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub title: Option<String>,
-    pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
     pub pinned_base: Option<provenant_core::GitOid>,
@@ -275,8 +264,7 @@ pub struct Submitted {
 pub struct Submission {
     pub chair: Option<run::ChairBinding>,
     pub operation_id: OperationId,
-    pub tasks: Vec<Submitted>,
-    pub concurrency: Option<u64>,
+    pub task: Submitted,
     pub knobs: Vec<String>,
 }
 
@@ -287,7 +275,7 @@ pub fn submit(
     edge: &Edge<'_>,
     submission: Submission,
     call: &run::Request<'_>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host(session, edge, submission, call, None)
 }
 
@@ -472,7 +460,7 @@ pub fn submit_with_host(
     submission: Submission,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
@@ -486,7 +474,7 @@ pub fn submit_with_host_for_refusal(
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
     refusal: run::RefusalContext,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host_context(session, edge, submission, call, host, deadline, refusal)
 }
 
@@ -500,7 +488,7 @@ pub fn submit_with_host_and_wait(
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host_context(
         session,
         edge,
@@ -521,7 +509,7 @@ fn submit_with_host_context(
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
     refusal: run::RefusalContext,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_launcher(
         session,
         edge,
@@ -534,7 +522,7 @@ fn submit_with_host_context(
             } else if let Some(host) = host {
                 launch_on_host_with_wait(
                     session,
-                    record.run_id,
+                    record.attempt_id,
                     edge,
                     call,
                     Some(host),
@@ -550,7 +538,7 @@ fn submit_with_host_context(
                     deadline.saturating_duration_since(Instant::now()),
                 )
             } else {
-                launch_prepared_with_wait(session, record.run_id, edge, call, None, None)
+                launch_prepared_with_wait(session, record.attempt_id, edge, call, None, None)
             }
         },
     )
@@ -564,15 +552,16 @@ fn submit_with_launcher(
     submission: Submission,
     call: &run::Request<'_>,
     refusal: run::RefusalContext,
-    launch: impl FnOnce(&run::RunRecord, bool) -> Result<Vec<run::Started>, Fail>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    launch: impl FnOnce(&run::AttemptRecord, bool) -> Result<Vec<run::Started>, Fail>,
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::config(Status::Invalid, error))?;
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
     if parent_attempt.is_none() {
-        for task in &submission.tasks {
+        let task = &submission.task;
+        {
             if let Some(path) = &task.worktree {
                 let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
                 check_writer_disk(
@@ -610,17 +599,9 @@ fn submit_with_launcher(
     let profile = config
         .dispatch_profile(&submission.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let read_only = submission.tasks.iter().all(|task| task.worktree.is_none());
-    let bound = (read_only
-        && config.knob_is_set("lanes.max_concurrency", &submission.knobs)
-        && !config.knob_is_set("lanes.max_concurrency_read_only", &submission.knobs))
-    .then(|| profile.knob_u64("lanes.max_concurrency"))
-    .flatten();
-    let concurrency = run::concurrency(submission.concurrency, &profile, read_only, bound);
-    let tasks = submission
-        .tasks
-        .into_iter()
-        .map(|task| {
+    let task = {
+        let task = submission.task;
+        {
             let mut task_profile = profile.clone();
             task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task
@@ -644,12 +625,11 @@ fn submit_with_launcher(
                     "resolve the attempt's new worktree, capabilities and write roots before submission",
                 ));
             }
-            Ok(run::DispatchTask {
+            Ok::<_, Fail>(run::DispatchTask {
                 context: task.context,
                 build_heavy: attempt.build_heavy,
                 profile: task_profile,
                 title: task.title,
-                task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
                 pinned_base: task.pinned_base,
@@ -663,8 +643,8 @@ fn submit_with_launcher(
                 worktree: task.worktree,
                 access: task.access,
             })
-        })
-        .collect::<Result<Vec<_>, Fail>>()?;
+        }
+    }?;
     let chair = parent_attempt
         .is_none()
         .then_some(submission.chair)
@@ -675,8 +655,7 @@ fn submit_with_launcher(
             run::DispatchRequest {
                 chair,
                 operation_id: submission.operation_id,
-                tasks,
-                concurrency,
+                task,
                 lane_depth,
                 parent_attempt,
             },
@@ -684,14 +663,14 @@ fn submit_with_launcher(
             call,
         )?;
     if parent_attempt.is_none() {
-        let canonical = session.store.request(record.run_id, call)?;
-        let graph = super::launch::graph_for_run(session, record.run_id, call)?;
+        let canonical = session.store.request(record.attempt_id, call)?;
+        let graph = record.key.graph().to_owned();
         with_chair_index(edge.roots, call, |index, call| {
             index.submit(session.context.project_id, &graph, &canonical, call)
         })?;
-        let pending = session.store.pending_attempts(record.run_id, call)?;
-        for task in &canonical.tasks {
-            if let Some(writer) = &task.writer {
+        let operation = session.store.attempt_operation(record.attempt_id, call)?;
+        {
+            if let Some(writer) = &canonical.task.writer {
                 provenant_confinement::worktrees::with_context_using_facts(
                     edge.roots,
                     edge.home,
@@ -705,13 +684,10 @@ fn submit_with_launcher(
                             provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                         if let Some(mut owner) = worktrees::load_owner(&tree)?
                             && owner.origin == worktrees::WorktreeOrigin::Lane
-                            && owner.operation_id.as_ref() == Some(&record.operation_id)
-                            && let Some(attempt) = pending
-                                .iter()
-                                .find(|attempt| attempt.task_id == task.task_id)
+                            && owner.operation_id.as_ref() == Some(&operation.operation_id)
                         {
                             let expected = owner.clone();
-                            owner.attempt_id = Some(attempt.attempt_id);
+                            owner.attempt_id = Some(record.attempt_id);
                             worktrees::update_owner_when_unchanged(
                                 context,
                                 &tree,

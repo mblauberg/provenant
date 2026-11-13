@@ -229,7 +229,6 @@ pub struct HolderContext {
     pub roots: RootSeed,
     pub project_id: ProjectId,
     pub actor_id: ActorId,
-    pub run_id: AttemptId,
     pub attempt_id: AttemptId,
     /// Private handoff only, never copied to the attempt or provider environment.
     #[serde(default)]

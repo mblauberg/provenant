@@ -6,16 +6,11 @@ use provenant_records::inbox::HumanRequest;
 use provenant_run::AttemptRecord;
 use serde_json::{Value, json};
 
-fn linked(
-    request: &HumanRequest,
-    run: provenant_core::RunId,
-    task: provenant_core::TaskId,
-    attempt: provenant_core::AttemptId,
-) -> bool {
+fn linked(request: &HumanRequest, attempt: &AttemptRecord) -> bool {
     request.verified_work().is_some_and(|work| {
-        work.run_id == run
-            && work.task_id.is_none_or(|id| id == task)
-            && work.attempt_id.is_none_or(|id| id == attempt)
+        work.graph == attempt.key.graph()
+            && work.node.as_deref().is_none_or(|node| node == attempt.key.node())
+            && work.attempt_id.is_none_or(|id| id == attempt.attempt_id)
     })
 }
 
@@ -43,7 +38,7 @@ pub(super) fn read(roots: &Roots, attempt: &AttemptRecord) -> (Vec<Value>, &'sta
         };
         scanned += page.items.len();
         for item in &page.items {
-            if linked(item, attempt.run_id, attempt.task_id, attempt.attempt_id) {
+            if linked(item, attempt) {
                 if links.len() == 100 {
                     return (links, "truncated");
                 }

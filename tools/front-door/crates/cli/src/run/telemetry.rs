@@ -132,13 +132,7 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
         .as_ref()
         .map(|store| {
             store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: None,
-                        task_id: None,
-                    },
-                    &call,
-                )?
+                .attempts(&call)?
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?
@@ -170,13 +164,9 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
         let access = record.as_ref().and_then(|record| {
             let store = store.as_ref()?;
             let request = requests
-                .entry(record.run_id)
-                .or_insert_with(|| store.request(record.run_id, &call).ok());
-            let task = request
-                .as_ref()?
-                .tasks
-                .iter()
-                .find(|task| task.task_id == fact.task_id)?;
+                .entry(record.attempt_id)
+                .or_insert_with(|| store.request(record.attempt_id, &call).ok());
+            let task = &request.as_ref()?.task;
             Some(
                 if task.writer.is_some() {
                     "worktree-write"
@@ -511,13 +501,7 @@ pub(crate) fn accepted_attempts(edge: &Edge<'_>, since: i64) -> Result<AcceptedA
         .as_ref()
         .map(|store| {
             store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: None,
-                        task_id: None,
-                    },
-                    &call,
-                )?
+                .attempts(&call)?
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?

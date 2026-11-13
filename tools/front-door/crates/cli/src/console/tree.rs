@@ -45,7 +45,7 @@ pub(super) fn read_inner(
         (ProjectId, AttemptId),
         (
             provenant_records::WorkKey,
-            (Option<AttemptId>, Option<AttemptId>, Option<AttemptId>),
+            (Option<Value>, Option<AttemptId>),
             String,
         ),
     > = BTreeMap::new();
@@ -133,19 +133,24 @@ pub(super) fn read_inner(
                 examined += 1;
                 let attempt = &lane.attempt;
                 let key = (attempt.project_id, attempt.attempt_id);
-                let work_key = attempt.key.clone().ok_or(Error::Encode)?;
-                let parents = (lane.run.parent_attempt, lane.run.parent, attempt.retry_of);
+                let work_key = attempt.key.clone();
+                // A dispatch parent is sealed on the admitting operation; a
+                // continuation is the only source of `retry_of`.
+                let parents = (
+                    lane.operation.extra.get("parent_attempt").cloned(),
+                    attempt.retry_of,
+                );
                 if let Some((existing, existing_parents, existing_store)) = seen.get(&key) {
                     duplicate_count += 1;
                     if *existing != work_key {
                         conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_work_key","values":{"stored":existing,"observed":work_key},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     if *existing_parents != parents {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1,"retry":existing_parents.2},"observed":{"dispatch":parents.0,"continuation":parents.1,"retry":parents.2}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
+                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1},"observed":{"dispatch":parents.0,"continuation":parents.1}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     continue;
                 }
-                seen.insert(key, (work_key.clone(), parents, store_path.clone()));
+                seen.insert(key, (work_key.clone(), parents.clone(), store_path.clone()));
                 let usage =
                     serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
                 for (name, (sum, missing)) in &mut totals {
@@ -162,7 +167,7 @@ pub(super) fn read_inner(
                     clock.wall_now().ok(),
                     false,
                 );
-                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"metadata":{"run":lane.run,"attempt":projected}}));
+                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"parents":{"dispatch":parents.0,"continuation":parents.1},"metadata":{"operation":lane.operation,"attempt":projected}}));
             }
             match page.next {
                 Some(next) => after = next,
@@ -181,14 +186,10 @@ pub(super) fn read_inner(
         .collect();
     let mut edges = Vec::new();
     for node in &nodes {
-        let run = &node["metadata"]["run"];
-        for (field, kind) in [("parent_attempt", "dispatch"), ("parent", "continuation")] {
-            if let Some(parent) = run[field].as_str() {
+        for kind in ["dispatch", "continuation"] {
+            if let Some(parent) = node["parents"][kind].as_str() {
                 edges.push(json!({"project_id":node["lane_id"]["project_id"],"kind":kind,"parent_attempt":parent,"child_attempt":node["lane_id"]["attempt_id"],"parent_status":if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent)) { "present" } else { "missing" }}));
             }
-        }
-        if let Some(parent) = node["metadata"]["attempt"]["retry_of"].as_str() {
-            edges.push(json!({"project_id":node["lane_id"]["project_id"],"kind":"retry","parent_attempt":parent,"child_attempt":node["lane_id"]["attempt_id"],"parent_status":if ids.contains(&(node["lane_id"]["project_id"].as_str().unwrap_or(""), parent)) { "present" } else { "missing" }}));
         }
     }
     let partial = truncated
@@ -213,7 +214,6 @@ pub(super) fn read_inner(
         node["children"] = json!(children);
         node["status"] = metadata["attempt"]["state"].clone();
         node["title"] = metadata["attempt"]["title"].clone();
-        node["parents"] = json!({"dispatch":metadata["run"]["parent_attempt"],"continuation":metadata["run"]["parent"],"retry":metadata["attempt"]["retry_of"]});
         if !detail {
             node.as_object_mut()
                 .ok_or(Error::Encode)?
@@ -348,7 +348,6 @@ mod tests {
             ("dispatch", "present"),
             ("dispatch", "missing"),
             ("continuation", "present"),
-            ("retry", "present"),
         ] {
             assert!(
                 edges
@@ -372,7 +371,7 @@ mod tests {
                 .any(|n| n["children"].as_array().is_some_and(|c| !c.is_empty()))
         );
         let detailed = read(&roots, None, 3, 100, true)?;
-        assert!(detailed["nodes"][0]["metadata"]["run"].is_object());
+        assert!(detailed["nodes"][0]["metadata"]["operation"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());
         let detail =
             super::super::detail::read(&roots, &AttemptId::from_bytes([2; 16]).to_string())?;

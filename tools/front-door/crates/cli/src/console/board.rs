@@ -164,11 +164,11 @@ pub(super) fn read(
         }
         for lane in page.lanes {
             let attempt = &lane.attempt;
-            let work_key = attempt.key.as_ref().ok_or(Error::Encode)?;
+            let work_key = &attempt.key;
             let chair = match &chairs {
                 Ok(Some(index)) => {
                     match index.read(attempt.project_id, work_key.graph(), &chair_call) {
-                        Ok(Some(found)) if found.request_digest == lane.run.request_digest => {
+                        Ok(Some(found)) if found.request_digest == lane.operation.request_digest => {
                             found.chair
                         }
                         Ok(None) => None,
@@ -208,7 +208,7 @@ pub(super) fn read(
             );
             lanes.push(json!({"lane_id":{"host":host,"key":work_key,
                 "attempt_id":projected.attempt_id},
-                "chair":chair,"metadata":{"run":lane.run, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
+                "chair":chair,"metadata":{"operation":lane.operation, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
                 "attention":attention,"usage_coverage":{"known":known,"missing":missing},
                 "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
         }

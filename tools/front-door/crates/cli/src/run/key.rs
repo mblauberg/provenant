@@ -64,34 +64,28 @@ pub(super) fn open_attempt(
     Ok((session, id))
 }
 
-/// The run ids of every local attempt under `target`: a graph, a node or one
-/// attempt. Reconcile and trace act on runs.
-pub(super) fn local_runs(
+/// Every local attempt under `target`: a graph, a node or one attempt.
+pub(super) fn local_attempts(
     session: &Session,
     resolved: &Resolved,
     call: &run::Request<'_>,
-) -> Result<Vec<RunId>, Fail> {
-    let mut runs = std::collections::BTreeSet::new();
+) -> Result<Vec<AttemptId>, Fail> {
+    let mut attempts = std::collections::BTreeSet::new();
     let mut query = lane_query(true, 100, 0);
     loop {
         let page = session.service().lanes(&query, call)?;
-        runs.extend(
+        attempts.extend(
             page.lanes
                 .iter()
-                .filter(|record| {
-                    record
-                        .key
-                        .as_ref()
-                        .is_some_and(|key| key_matches(key, resolved))
-                })
-                .map(|record| record.run_id),
+                .filter(|record| key_matches(&record.key, resolved))
+                .map(|record| record.attempt_id),
         );
         match page.next {
             Some(after) => query.after = after,
             None => break,
         }
     }
-    Ok(runs.into_iter().collect())
+    Ok(attempts.into_iter().collect())
 }
 
 /// Whether `key` lies under the resolved target.

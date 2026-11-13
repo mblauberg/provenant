@@ -28,13 +28,7 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                     "No delivery requested.\n".into(),
                 ));
             }
-            let task = session
-                .store
-                .request(record.run_id, &call)?
-                .tasks
-                .into_iter()
-                .find(|task| task.task_id == record.task_id)
-                .ok_or(run::RunError::NotFound)?;
+            let task = session.store.request(record.attempt_id, &call)?.task;
             let writer = task
                 .writer
                 .as_ref()

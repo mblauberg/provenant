@@ -5,12 +5,12 @@ use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace
 #[cfg(test)]
 use provenant_core::ActorId;
 use provenant_core::{
-    AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
+    AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
-use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
+use provenant_records::{CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
@@ -1701,13 +1701,7 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let (_, store) = open_read_only(edge, &call)?;
     let mut facts = Vec::new();
     if let Some(store) = store {
-        for fact in store.attempts(
-            run::AttemptFilter {
-                run_id: None,
-                task_id: None,
-            },
-            &call,
-        )? {
+        for fact in store.attempts(&call)? {
             let fact = fact?;
             if keep(fact.context.as_ref()) {
                 facts.push(fact);
@@ -1787,7 +1781,7 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         lanes.extend(
             page.lanes
                 .iter()
-                .map(|lane| format!("{}/{}/{}", lane.run_id, lane.task_id, lane.attempt_id)),
+                .map(|lane| format!("{} {}", lane.key, lane.attempt_id)),
         );
         if lanes.len() > 1024 {
             return Err(Fail::new(

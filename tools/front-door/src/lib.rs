@@ -992,7 +992,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
         Command::Internal(provenant_cli::Internal::Launch {
-            run,
+            attempt,
             provider_lease_wait,
         }) => {
             let receipt_globals = provenant_cli::Globals {
@@ -1002,7 +1002,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 project: globals.project.clone(),
             };
             run_edge(&inv.leaf, &receipt_globals, |edge| {
-                provenant_cli::run::launch_worker(run, provider_lease_wait, edge)
+                provenant_cli::run::launch_worker(attempt, provider_lease_wait, edge)
             })
         }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {

@@ -1,7 +1,7 @@
 //! CLI-owned grammar with mounted owner subtrees.
 use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
-use provenant_core::{GitOid, OperationId, RunId};
+use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
 use std::{ffi::OsString, path::PathBuf};
 
@@ -1055,9 +1055,9 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
-    /// Resume preparation of an admitted local run in a separate process.
+    /// Resume preparation of an admitted local attempt in a separate process.
     Launch {
-        run: RunId,
+        attempt: AttemptId,
         /// Seconds to wait when every candidate provider is updating.
         #[arg(long)]
         provider_lease_wait: Option<u64>,

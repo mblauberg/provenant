@@ -137,7 +137,7 @@ pub(super) fn read(
                 let match_position = original_positions[folded_position];
                 let start = match_position.saturating_sub(SNIPPET_CHARS / 3);
                 let snippet: String = chars.iter().skip(start).take(SNIPPET_CHARS).collect();
-                let key = attempt.key.as_ref().ok_or(Error::Encode)?;
+                let key = &attempt.key;
                 matches.push(json!({"lane_id":{"host":null,"project_id":attempt.project_id,"key":key,"attempt_id":attempt.attempt_id},"part":part,"snippet":snippet,"artifact_bytes":expected_bytes}));
             }
             if page.next.is_none() {
