@@ -891,28 +891,6 @@ impl RunStore {
             refused_at: None,
             refusal_chair: None,
         };
-        let dir = self.run_dir(input.run_id, true)?;
-        let _writer = dir.lock(
-            OsStr::new("publication.lock"),
-            LockMode::Exclusive,
-            call.lock_budget(),
-            call.cancel,
-            call.clock,
-        )?;
-        if let Some(op) = self.operation(&input.operation_id, call)? {
-            if op.request_digest != digest {
-                return Err(RunError::OperationConflict);
-            }
-            if op.state == OperationState::Refused {
-                return Err(RunError::RecordedRefusal(Box::new(
-                    op.refusal
-                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-                )));
-            }
-            if op.state != OperationState::Prepared {
-                return self.run(op.run_id, call);
-            }
-        }
         let admitted = self.write(call, |tx| {
             // The operation ID is the caller's replay handle until work keys
             // replace it; the work key is the attempt's identity.
@@ -969,7 +947,7 @@ impl RunStore {
                     continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
                     profile: task.profile.clone(),
                     limits: None,
-                    schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
+                    schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                     terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
@@ -984,7 +962,7 @@ impl RunStore {
                         parent: input.request.parent.or(input.request.parent_attempt),
                     },
                 };
-                tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,?14)", params![attempt.attempt_id.to_string(), run.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), run.run_id.to_string(), task.task_id.to_string(), number, input.request.parent.map(|target| target.to_string()), operation_bytes, crate::db::attempt_bytes(&attempt)?])?;
+                tx.execute("INSERT INTO attempts(id,project,graph,node,attempt,digest,actor,operation,run,task,number,continues,operation_record,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,?14)", params![attempt.attempt_id.to_string(), run.project_id.to_string(), key.graph(), key.node(), key.attempt(), digest.to_string(), context.actor_id.to_string(), input.operation_id.as_str(), run.run_id.to_string(), task.task_id.to_string(), i64::from(key.attempt()), input.request.parent.map(|target| target.to_string()), operation_bytes, crate::db::attempt_bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
                 let waves = index as u64 / input.request.concurrency.max(1);
                 let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
@@ -995,6 +973,16 @@ impl RunStore {
         if let Some(existing) = admitted {
             return self.run(existing, call);
         }
+        // Reserve first: a conflicting or replayed work key must not leave an
+        // unindexed run directory. Publication still serialises per admitted run.
+        let dir = self.run_dir(input.run_id, true)?;
+        let _writer = dir.lock(
+            OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
         provenant_os::changes::hint(
             self.context.state_root.as_path(),
             &[provenant_os::changes::Scope::Board],
@@ -2135,4 +2123,54 @@ fn sealed_exit(
         complete: true,
         redacted: true,
     })
+}
+
+#[cfg(test)]
+mod admission_key_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input};
+
+    #[test]
+    fn graph_number_is_preserved_in_the_record_and_operation_replay()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        for number in 1..=3 {
+            let mut prepared = input();
+            prepared.run_id = RunId::from_bytes([number as u8; 16]);
+            prepared.operation_id = OperationId::parse(&format!("number-{number}"))?;
+            prepared.attempts[0].attempt_id = AttemptId::from_bytes([number as u8 + 10; 16]);
+            prepared.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+                graph_id: Some("numbered-graph".into()),
+                node_id: Some("writer".into()),
+                attempt: Some(number),
+                ..Default::default()
+            });
+            let admitted = store.create(&prepared, &call)?;
+            let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+            assert_eq!(record.attempt_number, u64::from(number));
+            assert_eq!(record.key.as_ref().unwrap().attempt(), number);
+            assert_eq!(store.create(&prepared, &call)?.run_id, admitted.run_id);
+            let mut conflict = prepared;
+            conflict.run_id = RunId::from_bytes([number as u8 + 20; 16]);
+            conflict.operation_id = OperationId::parse(&format!("other-{number}"))?;
+            assert!(matches!(
+                store.create(&conflict, &call),
+                Err(RunError::OperationConflict)
+            ));
+            assert!(
+                !context
+                    .state_root
+                    .as_path()
+                    .join("runs")
+                    .join(conflict.run_id.to_string())
+                    .exists()
+            );
+        }
+        Ok(())
+    }
 }
