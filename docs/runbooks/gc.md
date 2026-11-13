@@ -86,3 +86,18 @@ provenant --project /absolute/path/to/repo gc --apply --json
 On macOS the tick agent runs every 60 seconds and collects when its daily
 deadline is due; logs are in `<state>/tick/` (`gc-result.json`,
 `seed-result.json`). Other installs schedule `provenant tick` themselves.
+
+## Detached services and unsettled lanes
+
+Provider executables do not inherit the guardian's writer, custody or port
+leases. Ordinary detached services may keep running without holding those lane
+descriptors. Unsandboxed services have no Seatbelt membership mark; an open
+resource path alone never authorises killing them.
+
+If cleanup reaches its stop deadline, warnings name an observable PID, short
+command and writer-lock resource, or state that the holder is unknown. Close
+an identified service through its normal controls, or wait for it to exit, then
+run `provenant reconcile --id ATTEMPT`. Descriptor discovery is bounded and may
+be incomplete. A remaining unresolved reservation is a custody fence: do not
+unlink `writer.lock` or delete the worktree to bypass it. Guardian loss retains
+that fence even when no process holds the kernel lock.

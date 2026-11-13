@@ -213,6 +213,16 @@ impl ProcessObserver for CensusGateObserver {
         let census = if std::env::var_os("PROVENANT_STATE_DIR")
             .is_some_and(|root| PathBuf::from(root).join("s2-provider-exit-first").exists())
         {
+            // Gate before the authoritative snapshot, not afterward: a
+            // snapshot taken while the provider lives can retain a detached
+            // service's old parent edge even after observe waits for exit.
+            for fact in census
+                .facts()
+                .filter(|fact| fact.parent_pid == i64::from(std::process::id()) && !fact.zombie)
+            {
+                let _ = self.observe(fact.identity.pid);
+            }
+            let census = fixture::RecordedBootObserver.census(max_entries)?;
             // Omit the provider's row even when Linux lists its zombie, so
             // refresh_census must obtain the explicit Absent observation.
             Census::from_observations(
@@ -1798,6 +1808,34 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
     Ok(())
 }
 #[cfg(target_os = "macos")]
+fn unsandboxed_detached_service_does_not_block_settlement(root: &Path) -> Result<()> {
+    std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
+    std::fs::write(
+        root.join("PROVENANT_STATE_DIR/s2-provider-exit-first"),
+        b"gate",
+    )?;
+    let ready_path = root.join("native-detached.sock");
+    let listener = UnixListener::bind(&ready_path)?;
+    let (_writer, handle) = start(
+        root,
+        "native-detached",
+        "s2-detach-provider",
+        &[ready_path.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut stream = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let service = process_identity(read_pid_line(&mut stream)?)?;
+    assert_eq!(service.session_id, service.pid);
+    let exit = exited(&handle)?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    // No sandbox mark or ancestry gives cleanup authority over this service.
+    assert_eq!(process_identity(service.pid)?, service);
+    drop(stream);
+    wait_for_identity_absence(&service)?;
+    Ok(())
+}
+#[cfg(target_os = "macos")]
 fn detached_descendant_in_the_attempt_sandbox_is_found_and_ended(root: &Path) -> Result<()> {
     let ready_path = root.join("mark-ready.sock");
     let ready_listener = UnixListener::bind(&ready_path)?;
@@ -2757,14 +2795,13 @@ fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -
         admit(WaitBudget::nonblocking(provenant_core::Clock::mono_now(
             &clock
         ))),
-        Err(CustodyError::Busy)
+        Err(CustodyError::Fenced)
     ));
     assert!(!root.join("inherited-attempt/process-exit.json").exists());
     drop(descendant_gate);
     wait_for_identity_absence(&descendant)?;
-    // Darwin can report the process absent just before the last inherited flock
-    // descriptor closes. Wait on the lock itself before reacquiring custody.
-    admit(budget(&clock)?)?.withdraw_unlaunched()?;
+    // Descriptor closure cannot clear an unresolved durable reservation.
+    assert!(matches!(admit(budget(&clock)?), Err(CustodyError::Fenced)));
     assert!(
         writer_path
             .join(scope().attempt.to_string())
@@ -2788,7 +2825,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     byte(&mut held, b'R')?;
     drop(writer);
     let clock = SystemClock::new();
-    // The live provider retains the inherited lease after guardian loss.
+    // Guardian loss frees the kernel lease, but never clears the durable fence.
     let writer_path = root.join("crash-writer");
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
@@ -2798,12 +2835,12 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         &CancelToken::new(),
         &clock,
     );
-    assert!(matches!(
-        locked,
-        Err(CustodyError::Filesystem(
-            provenant_os::fs::FsError::LockTimeout { .. }
-        ))
-    ));
+    let locked = locked?;
+    assert_eq!(
+        fixture::recovery_observation(&locked),
+        RecoveryState::Unknown
+    );
+    drop(locked);
     assert!(!root.join("crash-attempt/process-exit.json").exists());
     drop(held);
     wait_for_identity_absence(&provider)?;
@@ -3220,6 +3257,11 @@ const CASES: &[Case] = &[
     (
         "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
         escapee_is_ended_only_when_the_host_reports_no_nested_runs,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "unsandboxed_detached_service_does_not_block_settlement",
+        unsandboxed_detached_service_does_not_block_settlement,
     ),
     #[cfg(target_os = "macos")]
     (

@@ -65,6 +65,26 @@ decision with matching authority clears one, and that decision permits no signal
   `crates/supervisor/src/custody_tests.rs::an_unrecorded_escape_cannot_be_cleared_by_an_empty_census`;
   `::reconcile_requires_matching_authority_and_records_before_release`
 
+### Provider descriptors and detached services
+
+Writer, custody, port and directory descriptors close on provider exec. Only
+explicit executable inputs (secrets and confinement profiles) cross that edge;
+the private guardian handoff retains its capability transfer. An ordinary
+service detached by an unsandboxed provider therefore cannot retain the lane's
+inherited writer lease. Guardian loss still leaves the durable unresolved
+reservation fenced against every new attempt, even if the kernel lease is free.
+
+Cleanup has a bounded stop budget. At its deadline a separate, cooperatively
+bounded diagnostic census names observable PIDs, short native command names and
+open writer-lock paths, with a reconcile action. An open path is not proof of
+flock ownership and grants no signal authority. Unknown or unreadable holders
+remain explicit uncertainty. The guardian continues retaining unresolved
+custody; a timeout alone never authorises settlement or an unrelated signal.
+- Test: `crates/supervisor/src/process_os/provider.rs::lane_descriptors_are_cloexec`;
+  `::orphaned_provider_descendant_does_not_retain_writer_flock`;
+  `crates/supervisor/tests/custody.rs::unsandboxed_detached_service_does_not_block_settlement`;
+  `::guardian_loss_never_invents_exit_or_releases_the_reservation`
+
 ### Durable exit publication
 
 The exit record is published without replacing an existing one, after what it

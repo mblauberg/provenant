@@ -23,6 +23,90 @@ fn live_or_full(
 }
 
 impl Driver<'_> {
+    /// Descriptor observations explain contention, but never grant signal or
+    /// settlement authority. Share one deadline across the entire scan.
+    #[allow(clippy::disallowed_methods)]
+    fn warn_cleanup_holders(
+        &self,
+        census: Option<&crate::census::Census>,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) {
+        use provenant_os::pid::{CwdObserver, SystemCwdObserver};
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let resource = self
+            .lock_dir
+            .current_path()
+            .unwrap_or_else(|_| self.lock_dir.anchored_path())
+            .join("writer.lock");
+        let mut found = false;
+        // Explain known custody blockers before spending the diagnostic budget
+        // on host-wide descriptor discovery. Their identity is already pinned.
+        if let Some(census) = census {
+            for fact in census.facts().filter(|fact| {
+                !fact.zombie
+                    && (self.tracked.contains(&fact.identity)
+                        || self.reservation.provider.as_ref() == Some(&fact.identity))
+            }) {
+                found = true;
+                push_warning(
+                    warnings,
+                    omitted,
+                    &format!(
+                        "cleanup deadline: pid {} command {:?} remains in attempt process custody; resource {} cannot be released; close the service or wait for it to exit, then run `provenant reconcile --id {}`; writer custody remains fenced",
+                        fact.identity.pid,
+                        fact.command.as_deref().unwrap_or("unknown"),
+                        resource.display(),
+                        self.reservation.scope.attempt,
+                    ),
+                );
+            }
+        }
+        let full = self
+            .observer
+            .census_while(crate::census::MAX_CENSUS_ENTRIES, &|| {
+                Instant::now() < deadline
+            })
+            .ok();
+        if let Some(census) = full.as_ref().or(census) {
+            for fact in census.facts() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                if fact.identity == self.guardian || fact.zombie {
+                    continue;
+                }
+                let observed = SystemCwdObserver
+                    .occupancy_while(fact.identity.pid, &|| Instant::now() < deadline);
+                if observed.paths.iter().any(|path| path == &resource) {
+                    found = true;
+                    push_warning(
+                        warnings,
+                        omitted,
+                        &format!(
+                            "cleanup deadline: pid {} command {:?} has resource {} open; lock ownership is unproven; close the service or wait for it to exit, then run `provenant reconcile --id {}`",
+                            fact.identity.pid,
+                            fact.command.as_deref().unwrap_or("unknown"),
+                            resource.display(),
+                            self.reservation.scope.attempt,
+                        ),
+                    );
+                }
+            }
+        }
+        if !found {
+            push_warning(
+                warnings,
+                omitted,
+                &format!(
+                    "cleanup deadline: resource {} or process census remains unresolved; holder pid and command unavailable; inspect open descriptors and run `provenant reconcile --id {}` after the holder exits; writer custody remains fenced",
+                    resource.display(),
+                    self.reservation.scope.attempt,
+                ),
+            );
+        }
+    }
+
     pub(super) fn holder_reports_no_live_children(&self) -> bool {
         host_allows_escapee_stop(self.holder, &self.holder_context)
     }
@@ -436,8 +520,9 @@ impl Driver<'_> {
         {
             return Ok(false);
         }
-        // Close, never LOCK_UN: descendants share this open file description.
-        // A fresh nonblocking flock succeeds only after every inheritor closes.
+        // Close, never LOCK_UN: the private guardian handoff may share this
+        // open file description. Providers never inherit it. A fresh lease
+        // still checks custody independently of the process census.
         drop(self.writer.take());
         match try_writer_lease(&self.lock_dir, self.writer_identity) {
             Ok(lease) => {
@@ -551,6 +636,7 @@ impl Driver<'_> {
                     census_warning_active = true;
                 }
                 if Instant::now() >= deadline {
+                    self.warn_cleanup_holders(None, warnings, omitted);
                     return Ok(false);
                 }
                 let _ = self.reactor.wait(&[], Duration::from_millis(20));
@@ -636,6 +722,7 @@ impl Driver<'_> {
             }
             self.persist_tracking(warnings, omitted);
             if Instant::now() >= deadline {
+                self.warn_cleanup_holders(Some(&census), warnings, omitted);
                 return Ok(false);
             }
             let _ = self.reactor.wait(
