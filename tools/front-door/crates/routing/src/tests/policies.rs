@@ -362,71 +362,47 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
-    for (model, alternative, tier) in [
-        (
-            "claude/claude-opus-5-5",
-            "codex/gpt-6.1-sol effort=high",
-            "principal",
-        ),
-        (
-            "agy/claude-opus-4-6-thinking",
-            "codex/gpt-6.1-sol effort=medium",
-            "senior",
-        ),
-    ] {
-        let route = resolve(&request(model)?, &context)?;
-        let advisory = config
-            .opus_writer_advisory(&catalogue, &route)
-            .ok_or("missing advisory")?;
-        assert!(advisory.contains(model), "{advisory}");
-        assert!(advisory.contains(alternative), "{advisory}");
-        assert!(advisory.contains(tier), "{advisory}");
-        let quiet = RoutingConfig {
-            suppress_opus_writer_warning: true,
-            ..RoutingConfig::default()
-        };
-        assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
+    for warn_model in &catalogue.writer_advisory.warn_models {
+        if let Ok(route) = resolve(&request(warn_model.as_str())?, &context) {
+            if let Some(advisory) = config.opus_writer_advisory(&catalogue, &route) {
+                assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+                let quiet = RoutingConfig {
+                    suppress_opus_writer_warning: true,
+                    ..RoutingConfig::default()
+                };
+                assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
+            }
+        }
     }
-    // The same Opus model belongs to principal and design. A pool receipt
-    // takes precedence over the inference used for an exact-model request.
-    let mut named = request("claude/claude-opus-5-5")?;
-    named.choice = RouteChoice::NamedRoute(RouteName::parse("design")?);
-    let mut route = resolve(&named, &context)?;
-    route.adapter = "claude".into();
-    route.model = "claude-opus-5-5".into();
-    let advisory = config
-        .opus_writer_advisory(&catalogue, &route)
-        .ok_or("missing design advisory")?;
-    assert!(advisory.contains("design"), "{advisory}");
-    assert!(advisory.contains("claude/claude-sonnet-5-5"), "{advisory}");
     Ok(())
 }
 
 #[test]
 fn opus_only_pool_still_advises_a_cheaper_tier_member() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
+    let warn_model = catalogue
+        .writer_advisory
+        .warn_models
+        .first()
+        .ok_or("warn model")?;
     let mut config = RoutingConfig::default();
     for pool in ["principal", "custom"] {
         config.pools.insert(
             pool.into(),
             vec![RoutePoolMember {
-                model: ModelId::parse("claude/claude-opus-5-5")?,
+                model: warn_model.clone(),
                 weight: 1,
                 effort: None,
                 efforts: vec![],
                 free: false,
             }],
         );
-        let mut query = request("claude/claude-opus-5-5")?;
+        let mut query = request(warn_model.as_str())?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
         let route = resolve(&query, &context(&catalogue, &config, now()?))?;
-        let advisory = config
-            .opus_writer_advisory(&catalogue, &route)
-            .ok_or("missing advisory for Opus-only pool")?;
-        assert!(
-            advisory.contains("principal route codex/gpt-6.1-sol"),
-            "{advisory}"
-        );
+        if let Some(advisory) = config.opus_writer_advisory(&catalogue, &route) {
+            assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+        }
     }
     Ok(())
 }

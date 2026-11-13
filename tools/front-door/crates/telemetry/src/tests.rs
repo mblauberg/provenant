@@ -1173,13 +1173,13 @@ fn zero_weight_external_rows_leave_the_share_unknown() {
 
 #[test]
 fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
-    let mut fact = fact(1, Some(1));
+    let mut base_fact = fact(1, Some(1));
     // One input token at a rate of one microdollar per million tokens leaves
     // a fractional numerator that must be divided without losing its unit.
-    fact.usage.cache_read = Some(1_000_000);
+    base_fact.usage.cache_read = Some(1_000_000);
     let mut labels = BTreeMap::new();
     labels.insert(
-        fact.attempt_id,
+        base_fact.attempt_id,
         vec![
             ExternalGroup {
                 value: "b".into(),
@@ -1192,7 +1192,7 @@ fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
         ],
     );
     let report =
-        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
+        stats_by_external_key([base_fact], &prices(Some(1)), Window::default(), &labels).unwrap();
     let groups = report.context_groups.unwrap();
     assert_eq!(groups[0].value.as_deref(), Some("a"));
     assert_eq!(groups[0].totals.usage.uncached_input.known, 1);
@@ -1218,6 +1218,38 @@ fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
         grouped_cost,
         report.totals.cost.known_lower_bound.unwrap().microdollars
     );
+
+    // Merged from context_cost_rounding_uses_largest_fractional_remainders:
+    for (inputs, expected) in [
+        ([100_000, 400_000, 300_000], [0, 1, 0]),
+        ([600_000, 900_000, 700_000], [0, 1, 1]),
+        ([1_100_000, 1_400_000, 1_300_000], [1, 2, 1]),
+    ] {
+        let facts = inputs.into_iter().enumerate().map(|(index, input)| {
+            let mut fact = fact(index as u64 + 10, Some(input));
+            fact.context = Some(provenant_records::run::WorkContext {
+                node_id: Some(format!("node-{index}")),
+                ..Default::default()
+            });
+            fact
+        });
+        let report = stats_by_context(
+            facts,
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::NodeId,
+        )
+        .unwrap();
+        let total = report.totals.cost.complete.unwrap().microdollars;
+        let costs = report
+            .context_groups
+            .unwrap()
+            .iter()
+            .map(|group| group.totals.cost.complete.as_ref().unwrap().microdollars)
+            .collect::<Vec<_>>();
+        assert_eq!(costs, expected, "input numerators: {inputs:?}");
+        assert_eq!(costs.iter().sum::<u64>(), total);
+    }
 }
 
 #[test]
@@ -1274,40 +1306,6 @@ fn context_cost_rounding_skips_unknown_and_zero_cost_groups() {
                 .unwrap()
                 .microdollars
         );
-    }
-}
-
-#[test]
-fn context_cost_rounding_uses_largest_fractional_remainders() {
-    for (inputs, expected) in [
-        ([100_000, 400_000, 300_000], [0, 1, 0]),
-        ([600_000, 900_000, 700_000], [0, 1, 1]),
-        ([1_100_000, 1_400_000, 1_300_000], [1, 2, 1]),
-    ] {
-        let facts = inputs.into_iter().enumerate().map(|(index, input)| {
-            let mut fact = fact(index as u64 + 1, Some(input));
-            fact.context = Some(provenant_records::run::WorkContext {
-                node_id: Some(format!("node-{index}")),
-                ..Default::default()
-            });
-            fact
-        });
-        let report = stats_by_context(
-            facts,
-            &prices(Some(1)),
-            Window::default(),
-            ContextKey::NodeId,
-        )
-        .unwrap();
-        let total = report.totals.cost.complete.unwrap().microdollars;
-        let costs = report
-            .context_groups
-            .unwrap()
-            .iter()
-            .map(|group| group.totals.cost.complete.as_ref().unwrap().microdollars)
-            .collect::<Vec<_>>();
-        assert_eq!(costs, expected, "input numerators: {inputs:?}");
-        assert_eq!(costs.iter().sum::<u64>(), total);
     }
 }
 

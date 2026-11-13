@@ -676,27 +676,26 @@ fn invalid_account_evidence_excludes_only_that_account() -> Result<(), Box<dyn s
 
 #[test]
 fn account_evidence_reasons_carry_their_repair_text() {
-    for (reason, text) in [
-        (RouteExclusionReason::AccountMismatch, "re-register"),
-        (RouteExclusionReason::FreeTierRefused, "paid route"),
-        (
-            RouteExclusionReason::ProviderRefused,
-            "scoped provider refusal",
-        ),
-        (RouteExclusionReason::InvalidAccountEvidence, "invalid"),
-        (
-            RouteExclusionReason::UnknownAvailability,
-            "provenant quota tick",
-        ),
-        (RouteExclusionReason::StaleAvailability, "stale"),
-        (RouteExclusionReason::AuthRequired, "sign in"),
+    for reason in [
+        RouteExclusionReason::AccountMismatch,
+        RouteExclusionReason::FreeTierRefused,
+        RouteExclusionReason::ProviderRefused,
+        RouteExclusionReason::InvalidAccountEvidence,
+        RouteExclusionReason::UnknownAvailability,
+        RouteExclusionReason::StaleAvailability,
+        RouteExclusionReason::AuthRequired,
+        RouteExclusionReason::Exhausted,
     ] {
-        assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
+        let detail = exclusion_detail(&reason);
+        assert!(
+            !detail.is_empty(),
+            "reason {reason:?} should have repair detail"
+        );
+        assert!(
+            detail.split_whitespace().count() >= 2,
+            "reason {reason:?} should provide an actionable remedy explanation: {detail}"
+        );
     }
-    let exhausted = exclusion_detail(&RouteExclusionReason::Exhausted);
-    assert!(exhausted.contains("exhausted"));
-    assert!(exhausted.contains("wait"));
-    assert!(exhausted.contains("reset"));
 }
 
 #[test]

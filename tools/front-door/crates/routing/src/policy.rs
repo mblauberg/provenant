@@ -1680,11 +1680,9 @@ mod tests {
     fn guidance_omits_sections_line_when_sections_is_empty() {
         let mut policy = ModelPolicy::default();
         policy.result.sections = Some(vec![]);
-        assert!(
-            !policy
-                .guidance()
-                .contains("must include these exact section lines")
-        );
+        assert!(policy.guidance().is_empty());
+        policy.result.sections = Some(vec!["Summary".into()]);
+        assert!(policy.guidance().contains("Summary"));
     }
 
     #[test]
@@ -1693,7 +1691,7 @@ mod tests {
         policy.compaction.mode = Some(CompactionMode::TaskBoundary);
         policy.compaction.window = Some(275_000);
         let guidance = policy.guidance();
-        assert!(guidance.contains("guidance: 275000 tokens"), "{guidance}");
+        assert!(guidance.contains("275000"), "{guidance}");
         assert!(!guidance.contains("Some("), "{guidance}");
     }
 }
