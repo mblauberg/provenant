@@ -1284,12 +1284,23 @@ pub(super) fn peer_origin_matches(
 }
 
 pub(super) fn checked_output_origin(
-    output: OutputResult,
+    mut output: OutputResult,
     expected: &provenant_records::WorkKey,
 ) -> Result<OutputResult, FacadeError> {
-    let (OutputResult::Chunk { extra, .. } | OutputResult::Artifact { extra, .. }) = &output;
+    let (OutputResult::Chunk { extra, .. } | OutputResult::Artifact { extra, .. }) = &mut output;
     if !peer_origin_matches(extra, expected) {
         return Err(FacadeError::StateCorrupt);
+    }
+    // These authenticate the peer read; the CLI output schema contains lane
+    // fields only. Consume transport metadata before rendering the payload.
+    for field in [
+        "peer_graph",
+        "peer_origin_context",
+        "peer_origin_work_key",
+        "peer_graph_collected",
+        "peer_subtree",
+    ] {
+        extra.remove(field);
     }
     Ok(output)
 }

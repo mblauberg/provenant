@@ -338,6 +338,32 @@ fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
 }
 
 #[test]
+fn peer_output_binding_is_consumed_before_the_cli_projection() {
+    let origin = provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([7; 16]),
+        "origin",
+        "worker",
+        1,
+    )
+    .unwrap();
+    let output = serde_json::from_value(serde_json::json!({
+        "kind":"chunk", "target":{"attempt":"11111111111111111111111111111111"},
+        "part":"result", "state":"succeeded", "reason":null, "offset":0,
+        "next_offset":2, "eof":true, "digest":provenant_core::Digest::from_bytes([2; 32]),
+        "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
+        "peer_origin_work_key":origin, "peer_graph":{}, "peer_origin_context":{},
+        "peer_graph_collected":true, "peer_subtree":{}
+    }))
+    .unwrap();
+    let checked = peer::checked_output_origin(output, &origin).unwrap();
+    let OutputResult::Chunk { extra, .. } = checked else {
+        panic!("chunk expected")
+    };
+    assert_eq!(extra.get("length"), Some(&serde_json::json!(2)));
+    assert!(extra.keys().all(|key| !key.starts_with("peer_")));
+}
+
+#[test]
 fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
     let error = run_error(provenant_run::RunError::Writer(
         provenant_confinement::worktrees::WorktreeError::Dirty("TOKEN_SENTINEL".into()),
