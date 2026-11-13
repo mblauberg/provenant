@@ -1810,6 +1810,7 @@ pub(crate) fn check_targets(
                         return Err(Box::new(error));
                     }
                 };
+            wait_remaining(deadline, cancel)?;
             observed(
                 target,
                 value["rows"]
@@ -1925,6 +1926,7 @@ pub(crate) fn read_status_rows(
             left,
         )
         .map_err(super::interface::relay_error)?;
+        wait_remaining(deadline, cancel)?;
         return Ok(value["rows"]
             .as_array()
             .ok_or(FacadeError::StateCorrupt)?
