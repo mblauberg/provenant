@@ -136,7 +136,8 @@ pub fn model_family(model: &str) -> Option<String> {
     catalogue.model(&id).and_then(|m| m.family.clone())
 }
 
-const PROMPT_LIMIT: u64 = 1024 * 1024;
+/// Maximum bytes accepted from a prompt source.
+pub const PROMPT_LIMIT: u64 = 1024 * 1024;
 
 /// Paths the binary resolved for this invocation.
 pub struct Edge<'a> {

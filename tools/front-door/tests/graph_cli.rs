@@ -1740,21 +1740,118 @@ fn settled_task_graph(rig: &GraphProject) -> Result<String> {
 }
 
 #[test]
-fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
-    for qualified in [true, false] {
-        let rig = GraphProject::new()?;
-        let id = settled_task_graph(&rig)?;
-        let target = if qualified {
-            format!("{id}/task")
-        } else {
-            id.clone()
-        };
-        let brief = "line one\nline two: corrected scope\n";
-        let (output, retried) = rig.run(&["retry", &target, "--brief", brief])?;
-        assert!(output.status.success(), "{target}: {retried}");
-        let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
-        assert_eq!(prompt, brief, "{target}");
-        assert!(previous > 0, "started attempts are kept: {target}");
+fn retry_prompt_sources_follow_the_same_target_rules() -> Result {
+    use std::io::Write;
+    for flag in [
+        "--brief",
+        "--prompt-file",
+        "--prompt-stdin",
+        "--no-fallback",
+    ] {
+        for form in ["graph", "node", "attempt"] {
+            let rig = GraphProject::new()?;
+            let id = settled_task_graph(&rig)?;
+            let (_, status) = rig.run(&["status", &id])?;
+            let attempt = status["data"]["rows"]
+                .as_array()
+                .ok_or("status rows")?
+                .iter()
+                .find(|row| row["kind"] == "attempt")
+                .and_then(|row| row["attempt_id"].as_str())
+                .ok_or("attempt id")?;
+            let target = match form {
+                "node" => format!("{id}/task"),
+                "attempt" => attempt.to_owned(),
+                _ => id.clone(),
+            };
+            let brief = "line one\nline two: corrected scope\n";
+            let path = rig.temp.path().join("brief");
+            std::fs::write(&path, brief)?;
+            let mut command = rig.command();
+            command.args(["retry", &target, flag]);
+            match flag {
+                "--brief" => {
+                    command.arg(brief);
+                }
+                "--prompt-file" => {
+                    command.arg(&path);
+                }
+                "--prompt-stdin" => {
+                    command.stdin(std::process::Stdio::piped());
+                }
+                _ => {}
+            }
+            command.stdout(std::process::Stdio::piped());
+            let mut child = command.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(brief.as_bytes())?;
+            }
+            let output = child.wait_with_output()?;
+            let value: Value = serde_json::from_slice(&output.stdout)?;
+            if flag == "--no-fallback" {
+                assert!(!output.status.success(), "{form}: {value}");
+                let message = value["error"]["message"].as_str().ok_or("message")?;
+                assert!(
+                    message.contains(flag) && message.contains("provider"),
+                    "{value}"
+                );
+                assert!(
+                    value["error"]["detail"]
+                        .as_str()
+                        .is_some_and(|detail| detail.contains(flag)),
+                    "{value}"
+                );
+            } else {
+                assert!(output.status.success(), "{flag} {form}: {value}");
+                let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
+                assert_eq!(prompt, brief, "{flag} {form}");
+                assert!(previous > 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn retry_prompt_input_refusals_name_the_source() -> Result {
+    use std::io::Write;
+    for flag in ["--prompt-file", "--prompt-stdin"] {
+        for (bytes, reason) in [
+            (vec![0xff], "UTF-8"),
+            (vec![b'x'; 1024 * 1024 + 1], "1 MiB"),
+        ] {
+            let rig = GraphProject::new()?;
+            let id = settled_task_graph(&rig)?;
+            let path = rig.temp.path().join("brief");
+            std::fs::write(&path, &bytes)?;
+            let mut command = rig.command();
+            command
+                .args(["retry", &id, flag])
+                .stdout(std::process::Stdio::piped());
+            if flag == "--prompt-file" {
+                command.arg(&path);
+            } else {
+                command.stdin(std::process::Stdio::piped());
+            }
+            let mut child = command.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&bytes)?;
+            }
+            let output = child.wait_with_output()?;
+            let value: Value = serde_json::from_slice(&output.stdout)?;
+            assert!(!output.status.success(), "{value}");
+            let message = value["error"]["message"].as_str().ok_or("message")?;
+            assert!(
+                message.contains(flag) && message.contains(reason),
+                "{value}"
+            );
+            assert!(
+                value["error"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(flag) && detail.contains(reason)),
+                "{value}"
+            );
+        }
     }
     Ok(())
 }
@@ -1773,14 +1870,20 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
         .arg("--wait=10s")
         .output()?;
     assert!(output.status.success(), "{output:?}");
-    let (output, refusal) = rig.run(&["retry", "two-nodes", "--brief", "corrected"])?;
-    assert!(!output.status.success(), "{refusal}");
-    assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
-    assert!(
-        refusal["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("--node")),
-        "{refusal}"
-    );
+    for args in [
+        vec!["retry", "two-nodes", "--brief", "corrected"],
+        vec!["retry", "two-nodes", "--prompt-file", "missing-file"],
+        vec!["retry", "two-nodes", "--prompt-stdin"],
+    ] {
+        let (output, refusal) = rig.run(&args)?;
+        assert!(!output.status.success(), "{refusal}");
+        assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
+        assert!(
+            refusal["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("--node")),
+            "{refusal}"
+        );
+    }
     Ok(())
 }

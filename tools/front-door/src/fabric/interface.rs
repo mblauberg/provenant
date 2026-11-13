@@ -58,6 +58,25 @@ fn decode_input<T: serde::de::DeserializeOwned>(
     })
 }
 
+pub(super) fn retry_brief_node(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    selected: Option<&str>,
+) -> Result<String, FacadeError> {
+    use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    match selected {
+        Some(id) if checkpoint.nodes.iter().any(|node| node.id == id) => Ok(id.to_owned()),
+        Some(_) => Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+            GraphRelayCause::RetryUnknownNode,
+        ))),
+        None => match checkpoint.nodes.as_slice() {
+            [only] => Ok(only.id.clone()),
+            _ => Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                GraphRelayCause::RetryBriefNeedsNode,
+            ))),
+        },
+    }
+}
+
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
     if error.parameter.is_some() {
@@ -1682,19 +1701,7 @@ impl Factory {
                 .load(&id)
                 .map_err(graph_journal_error)?
                 .ok_or(FacadeError::NotFound)?;
-            // A brief belongs to one node. A graph of one node names it;
-            // otherwise the chair must say which.
-            let node = match target.node.clone() {
-                Some(node) => node,
-                None => match checkpoint.nodes.as_slice() {
-                    [only] => only.id.clone(),
-                    _ => {
-                        return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                            provenant_fabric_runtime::coordination::facade::GraphRelayCause::RetryBriefNeedsNode,
-                        )));
-                    }
-                },
-            };
+            let node = retry_brief_node(&checkpoint, target.node.as_deref())?;
             let library = self.template_library(None)?;
             let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
             patch::retry_node_and_dependants(

@@ -657,10 +657,53 @@ pub(crate) enum GraphCommand<'a> {
         extend: &'a [String],
         node: Option<&'a str>,
         brief: Option<&'a str>,
-        legacy_prompt: bool,
+        prompt: &'a provenant_cli::Prompt,
         no_fallback: bool,
         wait: Option<u64>,
     },
+}
+
+fn retry_brief(
+    brief: Option<&str>,
+    prompt: &provenant_cli::Prompt,
+) -> Result<Option<String>, FacadeError> {
+    use provenant_fabric_runtime::coordination::facade::{RetryPromptFlag, RetryPromptProblem};
+    use std::io::Read;
+    let (flag, mut source): (RetryPromptFlag, Box<dyn Read>) =
+        if let Some(path) = &prompt.prompt_file {
+            let flag = RetryPromptFlag::File;
+            let invalid = || {
+                FacadeError::invalid(InvalidInputDetail::RetryPrompt {
+                    flag,
+                    problem: RetryPromptProblem::Unreadable,
+                })
+            };
+            if !std::fs::metadata(path).map_err(|_| invalid())?.is_file() {
+                return Err(invalid());
+            }
+            (
+                flag,
+                Box::new(std::fs::File::open(path).map_err(|_| invalid())?),
+            )
+        } else if prompt.prompt_stdin {
+            (RetryPromptFlag::Stdin, Box::new(std::io::stdin()))
+        } else {
+            return Ok(brief.map(str::to_owned));
+        };
+    const LIMIT: u64 = provenant_cli::run::PROMPT_LIMIT;
+    let failure = |problem| FacadeError::invalid(InvalidInputDetail::RetryPrompt { flag, problem });
+    let mut bytes = Vec::new();
+    source
+        .by_ref()
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| failure(RetryPromptProblem::Unreadable))?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(failure(RetryPromptProblem::TooLarge));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| failure(RetryPromptProblem::InvalidUtf8))
 }
 
 /// None means this identifier belongs to the ordinary attempt store.
@@ -743,16 +786,18 @@ pub(crate) fn unified_graph_command(
                 extend,
                 node,
                 brief,
-                legacy_prompt,
+                prompt,
                 no_fallback,
                 wait,
             } => {
-                if *legacy_prompt || *no_fallback {
-                    return Err(
-                        FacadeError::invalid(InvalidInputDetail::Field("node".into())).into(),
-                    );
+                if *no_fallback {
+                    return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::RetryNoFallback,
+                    )).into());
                 }
-                if !extend.is_empty() && (node.is_some() || brief.is_some()) {
+                let has_brief =
+                    brief.is_some() || prompt.prompt_file.is_some() || prompt.prompt_stdin;
+                if !extend.is_empty() && (target.node.is_some() || has_brief) {
                     return Err(
                         FacadeError::invalid(InvalidInputDetail::Field("node".into())).into(),
                     );
@@ -761,7 +806,16 @@ pub(crate) fn unified_graph_command(
                 if let Some(node) = node {
                     input["node"] = json!(node);
                 }
-                if let Some(brief) = brief {
+                if has_brief {
+                    let checkpoint = FileJournal::read_status_checkpoint(
+                        &factory.context.roots.state,
+                        factory.context.identity.project,
+                        &target.graph,
+                    )?
+                    .ok_or(FacadeError::NotFound)?;
+                    super::interface::retry_brief_node(&checkpoint, target.node.as_deref())?;
+                }
+                if let Some(brief) = retry_brief(*brief, prompt)? {
                     input["brief"] = json!(brief);
                 }
                 if let Some(seconds) = wait {
@@ -809,17 +863,25 @@ pub(crate) fn unified_graph_command(
             &human,
             false,
         )),
-        Err(error) => Some(crate::fail(
-            name,
-            provenant_records::Outcome::Error,
-            if error.is::<TripleNotFound>() {
+        Err(error) => {
+            let code = if error.is::<TripleNotFound>() {
                 "not_found"
             } else {
                 "graph_target"
-            },
-            &error.to_string(),
-            globals,
-        )),
+            };
+            let mut result =
+                provenant_records::CommandResult::new(name, provenant_records::Outcome::Error, ());
+            result.error = Some(provenant_records::CommandError {
+                code: code.into(),
+                message: error.to_string(),
+                cause: None,
+                repair: None,
+                diagnostic: error
+                    .downcast_ref::<FacadeError>()
+                    .map(|error| (&error.diagnostic()).into()),
+            });
+            Some(crate::emit(&result, globals, "", false))
+        }
     }
 }
 

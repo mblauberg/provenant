@@ -1281,7 +1281,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     extend: &cmd.extend,
                     node: cmd.node.as_deref(),
                     brief: cmd.brief.as_deref(),
-                    legacy_prompt: cmd.prompt.prompt_file.is_some() || cmd.prompt.prompt_stdin,
+                    prompt: &cmd.prompt,
                     no_fallback: cmd.no_fallback,
                     wait: cmd.wait,
                 },

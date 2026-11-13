@@ -202,6 +202,7 @@ pub enum GraphRelayCause {
     RetryContainerBrief,
     RetryBriefNeedsNode,
     RetryInvalidConfiguration,
+    RetryNoFallback,
     ChildDepth,
     WriterParentRequired,
     WriterWorktree,
@@ -227,6 +228,9 @@ pub enum GraphRelayCause {
 impl GraphRelayCause {
     fn text(self) -> &'static str {
         match self {
+            Self::RetryNoFallback => {
+                "--no-fallback cannot be used for a graph retry: graph retries start a node rather than continuing a provider session"
+            }
             Self::RetryInvalidConfiguration => {
                 "the selected node cannot be retried with its current graph configuration"
             }
@@ -295,6 +299,22 @@ impl GraphRelayCause {
     }
 }
 
+/// Prompt sources and failures safe to expose in a retry refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryPromptFlag {
+    File,
+    Stdin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryPromptProblem {
+    Unreadable,
+    TooLarge,
+    InvalidUtf8,
+}
+
 /// Facts the input owner has explicitly approved for disclosure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -321,6 +341,10 @@ pub enum InvalidInputDetail {
         limit: usize,
     },
     FieldTitle(String),
+    RetryPrompt {
+        flag: RetryPromptFlag,
+        problem: RetryPromptProblem,
+    },
     InputUnreadable,
     InputTooLarge,
     InputInvalidUtf8,
@@ -367,6 +391,11 @@ impl InvalidInputDetail {
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::UnresolvableBase(name) => safe_base_ref(name)
                 .map(|name| format!("unresolvable base `{name}`")),
+            Self::RetryPrompt { flag, problem } => {
+                let flag = match flag { RetryPromptFlag::File => "--prompt-file", RetryPromptFlag::Stdin => "--prompt-stdin" };
+                let reason = match problem { RetryPromptProblem::Unreadable => "cannot be read", RetryPromptProblem::TooLarge => "exceeds the 1 MiB limit", RetryPromptProblem::InvalidUtf8 => "is not UTF-8" };
+                Some(format!("{flag} input {reason}"))
+            }
             Self::InputUnreadable => {
                 Some("input file is unreadable or is not a regular file".into())
             }
