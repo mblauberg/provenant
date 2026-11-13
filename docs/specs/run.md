@@ -22,7 +22,9 @@ store, separate from the host's trusted `~/.cargo`. Each writer keeps a private
 `CARGO_HOME` for configuration and credentials and links only the download
 stores and Cargo's package-cache locks to that shared store. Cargo serialises
 concurrent cache mutation; automatic cache cleanup is disabled in lanes.
-Startup never copies or traverses the host registry. Existing private stores
+The launcher anchors and revalidates an existing shared download root before
+compiling the profile; a substituted symlink cannot redirect that grant to
+the host registry. Startup never copies or traverses the host registry. Existing private stores
 are retained without walking or deleting them; fresh lane homes use sharing.
 An absent host Git store is normal when the host has no Git dependencies and
 is no longer a seed failure: the lane store is created empty.

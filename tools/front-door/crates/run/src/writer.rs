@@ -1024,7 +1024,7 @@ impl LaunchConfinement {
     }
 
     pub(crate) fn command(
-        &self,
+        &mut self,
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
         cancel: &CancelToken,
@@ -1044,6 +1044,31 @@ impl LaunchConfinement {
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         self.prepare_writer_directories()?;
+        // Treat the separate shared store as a read root too, so normal
+        // compilation holds and revalidates its canonical directory identity.
+        // An absent store grants nothing when seeding is disabled.
+        let shared = self.home.join("Library/Caches/provenant-cargo-downloads");
+        if let Some(grant) = self
+            .profile
+            .spec
+            .tool_writes
+            .iter()
+            .find(|grant| grant.path == shared)
+            .cloned()
+        {
+            match std::fs::symlink_metadata(&shared) {
+                Ok(_) if !self.profile.spec.runtime_reads.contains(&grant) => {
+                    self.profile.spec.runtime_reads.push(grant)
+                }
+                Ok(_) => {}
+                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+                Err(failure) => {
+                    return Err(error("verify shared Cargo downloads", Some(&shared))(
+                        failure,
+                    ));
+                }
+            }
+        }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
             .map(AnchoredDirectory::open_canonical)

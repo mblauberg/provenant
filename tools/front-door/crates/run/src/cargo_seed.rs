@@ -1,8 +1,31 @@
 //! Shared lane Cargo downloads and best-effort private target seeds.
+use provenant_core::{Clock, Deadline, DurationMicros, WaitBudget};
+use provenant_os::clock::SystemClock;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
-const TARGET_SEED_BUDGET: Duration = Duration::from_secs(2);
+/// The filesystem preparation edge samples time through the shared clock.
+/// Carry one clock and deadline through selection, cloning and cleanup.
+struct SeedBudget {
+    clock: SystemClock,
+    deadline: Deadline,
+}
+impl SeedBudget {
+    fn new() -> Self {
+        let clock = SystemClock::new();
+        let deadline =
+            WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(2_000_000)).deadline();
+        Self { clock, deadline }
+    }
+    fn expired(&self) -> bool {
+        self.deadline.is_expired(self.clock.mono_now())
+    }
+    #[cfg(test)]
+    fn exhausted() -> Self {
+        let clock = SystemClock::new();
+        let deadline = WaitBudget::nonblocking(provenant_core::MonoTime::from_micros(0)).deadline();
+        Self { clock, deadline }
+    }
+}
 
 /// Every `detail` a toolchain-verification refusal can report in
 /// `cargo-target-setup.json`. One list, so a typo cannot invent a code and a
@@ -307,9 +330,10 @@ fn seed_target_cancellable(
     version: &str,
     triple: &str,
     cancel: Option<&provenant_core::CancelToken>,
-    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, Instant) -> Result<(), &'static str>,
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
-    let deadline = Instant::now() + TARGET_SEED_BUDGET;
+    let budget = SeedBudget::new();
+    let deadline = &budget;
     use provenant_os::fs::{Directory, temporary_name};
     use std::ffi::{OsStr, OsString};
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
@@ -330,7 +354,7 @@ fn seed_target_cancellable(
         return Outcome::fallback("staging_cleanup_failed");
     };
     for stage in stages {
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             return Outcome::fallback("seed_budget_exhausted");
         }
         if cancel.is_some_and(|token| token.is_cancelled()) {
@@ -366,7 +390,7 @@ fn seed_target_cancellable(
     let mut saw_entry = false;
     let mut selected = None;
     for entry in entries {
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             return Outcome::fallback("seed_budget_exhausted");
         }
         if cancel.is_some_and(|token| token.is_cancelled()) {
@@ -429,7 +453,7 @@ fn seed_target_cancellable(
             .open_verified_directory(&stage)
             .map_err(|_| "staging_unavailable")?;
         clone(&source, &staging, deadline)?;
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             return Err("seed_budget_exhausted");
         }
         // Publish only a complete private target.
@@ -475,12 +499,7 @@ fn clone_target(
     destination: &provenant_os::fs::Directory,
     cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
-    clone_target_until(
-        source,
-        destination,
-        cancel,
-        Instant::now() + TARGET_SEED_BUDGET,
-    )
+    clone_target_until(source, destination, cancel, &SeedBudget::new())
 }
 
 #[cfg(unix)]
@@ -488,7 +507,7 @@ fn clone_target_until(
     source: &Path,
     destination: &provenant_os::fs::Directory,
     cancel: &provenant_core::CancelToken,
-    deadline: Instant,
+    deadline: &SeedBudget,
 ) -> Result<(), &'static str> {
     // The seed can be read-only; make each clone writable without changing the seed.
     clone_tree(
@@ -511,10 +530,10 @@ fn remove_seed_tree(
     parent: &provenant_os::fs::Directory,
     name: &std::ffi::OsStr,
     cancel: Option<&provenant_core::CancelToken>,
-    deadline: Instant,
+    deadline: &SeedBudget,
 ) -> provenant_os::fs::Result<bool> {
     use provenant_os::fs::FileKind;
-    if Instant::now() >= deadline || cancel.is_some_and(|token| token.is_cancelled()) {
+    if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
         return Ok(false);
     }
     let metadata = match parent.metadata_at(name, false) {
@@ -530,7 +549,7 @@ fn remove_seed_tree(
     directory.make_writable()?;
     let mut entries = Vec::new();
     for entry in directory.entries()? {
-        if Instant::now() >= deadline || cancel.is_some_and(|token| token.is_cancelled()) {
+        if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
             return Ok(false);
         }
         entries.push(entry?);
@@ -546,13 +565,13 @@ fn remove_seed_tree(
 
 /// One seeded store: its refusal codes, and whether clones must be writable.
 #[cfg(unix)]
-struct CloneStore {
+struct CloneStore<'a> {
     unavailable: &'static str,
     read_failed: &'static str,
     too_deep: &'static str,
     unsupported: &'static str,
     writable_files: bool,
-    deadline: Instant,
+    deadline: &'a SeedBudget,
 }
 
 /// Clone one entry at a time so cancellation can interrupt large stores.
@@ -560,10 +579,10 @@ struct CloneStore {
 fn clone_tree(
     source: &Path,
     destination: &provenant_os::fs::Directory,
-    store: &CloneStore,
+    store: &CloneStore<'_>,
     cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
-    if Instant::now() >= store.deadline {
+    if store.deadline.expired() {
         return Err("seed_budget_exhausted");
     }
     let source = provenant_os::fs::Directory::open_anchor(source).map_err(|_| store.unavailable)?;
@@ -574,19 +593,19 @@ fn clone_tree(
 fn clone_entries(
     source: &provenant_os::fs::Directory,
     destination: &provenant_os::fs::Directory,
-    store: &CloneStore,
+    store: &CloneStore<'_>,
     cancel: &provenant_core::CancelToken,
     depth: usize,
 ) -> Result<(), &'static str> {
     use provenant_os::fs::FileKind;
-    if Instant::now() >= store.deadline {
+    if store.deadline.expired() {
         return Err("seed_budget_exhausted");
     }
     if depth > 128 {
         return Err(store.too_deep);
     }
     for entry in source.entries().map_err(|_| store.read_failed)? {
-        if Instant::now() >= store.deadline {
+        if store.deadline.expired() {
             return Err("seed_budget_exhausted");
         }
         if cancel.is_cancelled() {
@@ -888,7 +907,7 @@ mod tests {
                 Path::new("/missing"),
                 &directory,
                 &provenant_core::CancelToken::new(),
-                Instant::now()
+                &SeedBudget::exhausted()
             ),
             Err("seed_budget_exhausted")
         );
