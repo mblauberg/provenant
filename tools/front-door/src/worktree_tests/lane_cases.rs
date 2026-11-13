@@ -242,9 +242,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .into(),
             effort: None,
         };
-        let attempt = roots.state.as_path().join(format!(
-            "attempts/{}", prepared.attempts[0].attempt_id
-        ));
+        let attempt = roots
+            .state
+            .as_path()
+            .join(format!("attempts/{}", prepared.attempts[0].attempt_id));
         // Launch preparation links a short alias to `tmp` on macOS. The name
         // is unique to this process and attempt, and the rig unlinks it.
         let temporary_alias = cfg!(target_os = "macos").then(|| {
@@ -453,10 +454,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 attempt.join("quarantine"),
                 attempt.join("quarantine-result.json"),
                 attempt.join("custody.lock"),
-                roots
-                    .state
-                    .as_path()
-                    .join("attempts/other/custody.lock"),
+                roots.state.as_path().join("attempts/other/custody.lock"),
             ] {
                 assert!(
                     !(grant.path == denied

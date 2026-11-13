@@ -851,8 +851,9 @@ impl RunStore {
             hook();
         }
         let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
-        let index_key = provenant_records::WorkKey::new(self.context.project_id, key.0, key.1, key.2)
-            .map_err(|_| RunError::Validation("attempt work key"))?;
+        let index_key =
+            provenant_records::WorkKey::new(self.context.project_id, key.0, key.1, key.2)
+                .map_err(|_| RunError::Validation("attempt work key"))?;
         if record.attempt_id != id
             || record.project_id != self.context.project_id
             || record.run_id.to_string() != run_id

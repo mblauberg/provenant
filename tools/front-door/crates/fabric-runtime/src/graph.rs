@@ -88,7 +88,7 @@ pub fn is_review_node(node: &GraphNode) -> bool {
 }
 
 pub(crate) use next_attempt::*;
-use next_step::{FallbackEvidence, SettlementFallback, settlement_fallback_decision};
+use next_step::{FallbackEvidence, SettlementFallback};
 pub use observation::*;
 use outputs::*;
 use transitions::{apply_gate_result, dependency_state};

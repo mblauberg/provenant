@@ -750,6 +750,7 @@ pub(super) fn fail_node(
 
 #[cfg(test)]
 mod tests {
+    use super::super::next_step::settlement_fallback_decision;
     use super::*;
     use provenant_records::run::PreparationFailure;
     use provenant_routing::FallbackHandoff;

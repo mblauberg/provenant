@@ -276,9 +276,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     let expired = collect_pressure(None, &roots, &home, &assets, 7, 5, 16 << 30, false);
     assert!(expired.errors.is_empty(), "{:?}", expired.errors);
     assert!(store.reaction(attempt, &call)?.is_none());
-    let candidate = child_path.join(format!(
-        "attempts/{attempt}/provider-state/candidate-0"
-    ));
+    let candidate = child_path.join(format!("attempts/{attempt}/provider-state/candidate-0"));
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

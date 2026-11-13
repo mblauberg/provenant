@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, Digest, RootInputs, RunId, TaskId, WaitBudget,
+    ActorId, AttemptId, CancelToken, Clock, Digest, RootInputs, RunId, WaitBudget,
 };
 use provenant_os::{
     clock::SystemClock,

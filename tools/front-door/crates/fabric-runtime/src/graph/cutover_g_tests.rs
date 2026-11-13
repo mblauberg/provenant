@@ -63,7 +63,7 @@ fn chair_bound_depletion_reads_facts_once_across_passes() {
         stop: Some(provenant_records::StopCause::UsageLimited),
     });
     let mut reads = 0;
-    let mut facts = |_request| {
+    let mut facts = |_request: next_step::DepletionRequest<'_>| {
         reads += 1;
         Ok(None)
     };

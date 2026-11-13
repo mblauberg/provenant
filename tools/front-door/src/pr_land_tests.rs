@@ -443,9 +443,10 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     assert!(text.contains("role=repair model=unknown account=unknown weight=unknown"));
     assert!(text.contains("peer_attempts: unknown (known hosts: unreachable)"));
     let first = store.record(ids[0].parse()?, &call)?;
-    let log = context.state_root.as_path().join(format!(
-        "attempts/{}/stdout.log", first.attempt_id
-    ));
+    let log = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}/stdout.log", first.attempt_id));
     fs::write(&log, vec![b'x'; 128 * 1024])?;
     let gc = command(&landing.rig, &["gc", "--apply", "--json"])?;
     assert_eq!(
@@ -746,10 +747,7 @@ fn contribution_terminal(
         .ok_or("exit fixture")?
         .remove("publication");
     evidence["schema_version"] = 1.into();
-    let directory = context
-        .state_root
-        .as_path()
-        .join(format!("attempts/{id}"));
+    let directory = context.state_root.as_path().join(format!("attempts/{id}"));
     for (name, bytes) in [
         ("process-exit.json", serde_json::to_vec(&evidence)?),
         (
@@ -1678,10 +1676,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
             attempt: id,
             generation: running.generation,
         };
-        let attempt = context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{id}"));
+        let attempt = context.state_root.as_path().join(format!("attempts/{id}"));
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope,

@@ -426,10 +426,7 @@ mod tests {
         }
         fs::create_dir_all(rig.state.join("attempts/attempt/tmp"))?;
         fs::create_dir_all(rig.state.join("attempts/attempt/scratch"))?;
-        fs::write(
-            rig.state.join("attempts/attempt/tmp/keep"),
-            "unindexed",
-        )?;
+        fs::write(rig.state.join("attempts/attempt/tmp/keep"), "unindexed")?;
         fs::write(rig.state.join("config.toml"), "schema_version = 1\n")?;
         for index in 0..50 {
             fs::write(rig.state.join(format!("metadata-{index}")), "state")?;
