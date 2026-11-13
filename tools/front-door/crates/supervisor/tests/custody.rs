@@ -213,6 +213,16 @@ impl ProcessObserver for CensusGateObserver {
         let census = if std::env::var_os("PROVENANT_STATE_DIR")
             .is_some_and(|root| PathBuf::from(root).join("s2-provider-exit-first").exists())
         {
+            // Gate before the authoritative snapshot, not afterward: a
+            // snapshot taken while the provider lives can retain a detached
+            // service's old parent edge even after observe waits for exit.
+            for fact in census
+                .facts()
+                .filter(|fact| fact.parent_pid == i64::from(std::process::id()) && !fact.zombie)
+            {
+                let _ = self.observe(fact.identity.pid);
+            }
+            let census = fixture::RecordedBootObserver.census(max_entries)?;
             // Omit the provider's row even when Linux lists its zombie, so
             // refresh_census must obtain the explicit Absent observation.
             Census::from_observations(
