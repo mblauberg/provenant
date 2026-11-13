@@ -204,7 +204,7 @@ fn collect_store(
 #[cfg(test)]
 pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RootInputs, RunId, TaskId, WallTime};
+    use provenant_core::{AttemptId, OperationId, RootInputs, WallTime};
     use provenant_records::CanonicalV1;
     use std::{fs, os::unix::fs::DirBuilderExt};
     let temp = tempfile::tempdir()?;
@@ -233,25 +233,21 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         cancel: &cancel,
     };
     let store = RunStore::open(&context, &call)?;
-    let (run, attempt, task) = (
-        RunId::from_bytes([3; 16]),
-        AttemptId::from_bytes([4; 16]),
-        TaskId::from_bytes([5; 16]),
-    );
+    let attempt = AttemptId::from_bytes([4; 16]);
     store.create(&provenant_run::PreparedRun {
-        run_id: run, operation_id: OperationId::parse("retention-child")?, created_at: WallTime::from_micros(100)?,
-        attempts: vec![provenant_run::NewAttempt { attempt_id: attempt, task_id: task, prompt: String::new() }],
+        attempt_id: attempt, operation_id: OperationId::parse("retention-child")?, created_at: WallTime::from_micros(100)?,
+        prompt: String::new(),
         request: serde_json::from_value(serde_json::json!({
-            "schema_version":1, "concurrency":1, "parent":null, "tasks":[{
-                "task_id": task, "prompt_digest": CanonicalV1::file_digest(b""),
+            "schema_version":1, "parent":null, "task":{
+                "context": {"graph_id":"lane-retention","node_id":"retention","attempt":1},
+                "prompt_digest": CanonicalV1::file_digest(b""),
                 "route": {"kind":"model","provider":"codex","model":"codex/fixture"}, "authority_digest": provenant_core::Digest::from_bytes([0;32]),
-                "provider_timeout_seconds":20, "delivery_id":null }]
+                "provider_timeout_seconds":20, "delivery_id":null }
         }))?,
     }, &call)?;
     let reaction = provenant_run::Reaction {
         schema_version: 1,
         attempt,
-        run,
         project: context.project_id,
         sender: context.actor_id,
         notice: "fixture".into(),
@@ -308,7 +304,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     index.submit(
         context.project_id,
         &graph,
-        &store.request(run, &call)?,
+        &store.request(attempt, &call)?,
         &index_call,
     )?;
     let association = index.read(context.project_id, &graph, &index_call)?;

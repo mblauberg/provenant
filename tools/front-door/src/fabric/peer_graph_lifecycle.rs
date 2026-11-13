@@ -735,12 +735,9 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
         )?.ok_or("sealed graph execution missing")?;
         assert_eq!(execution.document.limits.as_ref().and_then(|limits| limits["concurrency"].as_u64()), Some(3));
         let record = store.record(attempt_id.parse()?, &call)?;
-        assert_eq!(record.run_id, operation.run_id);
-        let request = store.request(operation.run_id, &call)?;
-        // The graph schedules up to its requested concurrency; each node
-        // seals one provider process in a one-task run.
-        assert_eq!(request.concurrency, 1);
-        let task = request.tasks.first().ok_or("sealed task missing")?;
+        assert_eq!(store.operation_attempt(&operation.operation_id, &call)?, record.attempt_id);
+        let request = store.request(store.operation_attempt(&operation.operation_id, &call)?, &call)?;
+        let task = &request.task;
         assert_eq!(task.route, serde_json::from_value(serde_json::json!({
             "kind":"model", "provider":"fixture", "model":"fixture/model", "effort":"high"
         }))?);
@@ -769,7 +766,10 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
         let replay_key = serde_json::from_value(replay["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone())?;
         let replay_operation = store.operation(&graph_operation("graph-attempt-operation", &replay_key)?, &call)?
             .ok_or("replayed operation missing")?;
-        assert_eq!(replay_operation.run_id, operation.run_id);
+        assert_eq!(
+            store.operation_attempt(&replay_operation.operation_id, &call)?,
+            record.attempt_id
+        );
     }
     Ok(())
 }

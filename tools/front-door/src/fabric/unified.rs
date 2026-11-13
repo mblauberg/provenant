@@ -1844,8 +1844,8 @@ mod tests {
         let id = "11111111111111111111111111111111";
         let digest = format!("sha256:{}", "ab".repeat(32));
         let attempt: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
-            "schema_version":1,"attempt_id":id,"run_id":id,"project_id":id,
-            "task_id":id,"operation_id":"operation","attempt_number":1,"revision":1,"generation":1,
+            "schema_version":1,"attempt_id":id,"project_id":id,
+            "key":{"project":id,"graph":"graph","node":"node","attempt":1},"attempt_number":1,"revision":1,"generation":1,
             "requested_route":{"kind":"named","name":"senior"},
             "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
             "state":{"state":"starting"},"usage":{},

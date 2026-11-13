@@ -110,7 +110,7 @@ extend: Vec::new(),
         prior: fixture.settled.attempt_id,
         expected_generation: 0,
         operation_id: "graph-b-attempt".parse()?,
-        run_id: RunId::from_bytes([40; 16]),
+
         attempt_id: AttemptId::from_bytes([41; 16]),
         prompt: "continue".into(),
         created_at: clock.wall_now()?,
@@ -164,8 +164,6 @@ extend: Vec::new(),
     let receipt_path = fixture
         .rig
         .state
-        .join("runs")
-        .join(fixture.settled.run_id.to_string())
         .join("attempts")
         .join(fixture.settled.attempt_id.to_string())
         .join("worktree-settlement.json");
@@ -379,7 +377,7 @@ extend: Vec::new(),
         prior: fixture.settled.attempt_id,
         expected_generation: 0,
         operation_id: "graph-corrupt-auth".parse()?,
-        run_id: RunId::from_bytes([43; 16]),
+
         attempt_id: AttemptId::from_bytes([44; 16]),
         prompt: "continue".into(),
         created_at: factory.clock.wall_now()?,
@@ -586,7 +584,7 @@ extend: Vec::new(),
         prior: fixture.settled.attempt_id,
         expected_generation: 0,
         operation_id: "graph-exact-upstream".parse()?,
-        run_id: RunId::from_bytes([53; 16]),
+
         attempt_id: AttemptId::from_bytes([54; 16]),
         prompt: "continue".into(),
         created_at: factory.clock.wall_now()?,
@@ -794,8 +792,8 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
             let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
             let record = fixture.store.record(id.parse()?, &call)?;
             let operation = fixture.store.operation(&graph_operation("graph-attempt-operation", &attempt.key)?, &call)?.ok_or("operation")?;
-            let request = fixture.store.request(operation.run_id, &call)?;
-            let task = request.tasks.first().ok_or("task")?;
+            let request = fixture.store.request(fixture.store.operation_attempt(&operation.operation_id, &call)?, &call)?;
+            let task = &request.task;
             let model = match &task.route {
                 RequestedRoute::Model { model, .. } => model.clone(),
                 RequestedRoute::Review { name, effort, excluded_families, preferred_families, require_distinct, distinct_families, .. } => {

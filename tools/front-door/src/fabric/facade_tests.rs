@@ -451,7 +451,7 @@ pub(crate) mod peer_tests {
     #[allow(unused_imports)]
     // The worktree driver includes this module without libtest functions.
     use provenant_confinement::worktrees;
-    use provenant_core::{AttemptId, RunId, TaskId};
+    use provenant_core::AttemptId;
     use provenant_run::{AttemptState, Outcome, RunStore};
 
 
@@ -588,8 +588,6 @@ pub(crate) mod peer_tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let attempt = rig
             .state
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(record.attempt_id.to_string());
         let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
@@ -599,7 +597,6 @@ pub(crate) mod peer_tests {
         let exit = ExitObservation {
             publication: PublicationState::Durable,
             scope: Scope {
-                run: record.run_id,
                 attempt: record.attempt_id,
                 generation: record.generation,
             },
@@ -758,17 +755,18 @@ pub(crate) mod peer_tests {
                 provenant_run::DispatchRequest {
                     chair: None,
                     operation_id: if graph_id.is_some() { operation } else { "settlement-original" }.parse()?,
-                    concurrency: 1,
                     lane_depth: 1,
                     parent_attempt: None,
-                    tasks: vec![provenant_run::DispatchTask {
+                    task: provenant_run::DispatchTask {
                     source_head: None,
-                        context: graph_id.map(|id| provenant_records::run::WorkContext {
-                            graph_id: Some(id.to_owned()), ..Default::default()
+                        context: Some(provenant_records::run::WorkContext {
+                            graph_id: Some(graph_id.unwrap_or("lane-resumed").to_owned()),
+                            node_id: Some("lane".into()),
+                            attempt: Some(1),
+                            ..Default::default()
                         }),
                         build_heavy: false,
                         title: None,
-                        task_id: TaskId::from_bytes([3; 16]),
                         prompt: "reply OK".into(),
                         base: Some(info.head.to_string()),
                         pinned_base: None,
@@ -786,16 +784,13 @@ pub(crate) mod peer_tests {
                         deliver: None,
                         worktree: Some(info.path.clone()),
                         access: Default::default(),
-                    }],
+                    },
                 },
                 &rig.project,
                 &call,
             )?;
-            let prior = store
-                .pending_attempts(run.run_id, &call)?
-                .first()
-                .ok_or("attempt")?
-                .attempt_id;
+            let prior = run.attempt_id;
+            let prior_operation = store.attempt_operation(prior, &call)?.operation_id;
             worktrees::with_context(
                 &roots,
                 &rig.home,
@@ -808,7 +803,7 @@ pub(crate) mod peer_tests {
                         &tree,
                         &WorktreeOwner {
                             attempt_id: Some(prior),
-                            operation_id: Some(run.operation_id.clone()),
+                            operation_id: Some(prior_operation.clone()),
                             branch: "resumed-lane".into(),
                             base: info.head.to_string(),
                             host: identity.host,
@@ -840,7 +835,7 @@ pub(crate) mod peer_tests {
                     schema_version: 1,
                     roots: provenant_run::RootSeed { home: rig.home.clone(), checkout: rig.project.clone(), state_root: rig.state.clone() },
                     project_id: identity.project, actor_id: identity.inbox.actor,
-                    run_id: record.run_id, attempt_id: record.attempt_id,
+                    attempt_id: record.attempt_id,
                     host_delivery: None, launch: None, sealed: None,
                 };
                 return Ok(Self { rig, roots, store, settled, worktree: info.path });
@@ -860,7 +855,7 @@ extend: Vec::new(),
                 prior,
                 expected_generation: 0,
                 operation_id: operation.parse()?,
-                run_id: RunId::from_bytes([30; 16]),
+
                 attempt_id: AttemptId::from_bytes([31; 16]),
                 prompt: "continue".into(),
                 created_at: clock.wall_now()?,
@@ -877,7 +872,6 @@ extend: Vec::new(),
                 },
                 project_id: identity.project,
                 actor_id: identity.inbox.actor,
-                run_id: record.run_id,
                 attempt_id: record.attempt_id,
                 host_delivery: None,
                 launch: None,
@@ -1058,15 +1052,18 @@ extend: Vec::new(),
             provenant_run::DispatchRequest {
                 chair: None,
                 operation_id: "writer-output-op".parse()?,
-                concurrency: 1,
                 lane_depth: 1,
                 parent_attempt: None,
-                tasks: vec![provenant_run::DispatchTask {
+                task: provenant_run::DispatchTask {
                     source_head: None,
-                    context: None,
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some("lane-writer-output".into()),
+                        node_id: Some("writer".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     build_heavy: false,
                     title: Some("writer".into()),
-                    task_id: TaskId::from_bytes([60; 16]),
                     prompt: "implement slice".into(),
                     base: Some(node_source.to_string()),
                     pinned_base: None,
@@ -1084,17 +1081,12 @@ extend: Vec::new(),
                     deliver: None,
                     worktree: Some(fixture.worktree.clone()),
                     access: Default::default(),
-                }],
+                },
             },
             &fixture.rig.project,
             &call,
         )?;
-        let attempt_1 = fixture
-            .store
-            .pending_attempts(dispatch.run_id, &call)?
-            .first()
-            .ok_or("attempt_1")?
-            .attempt_id;
+        let attempt_1 = dispatch.attempt_id;
         let attempt_1_record = fixture.store.record(attempt_1, &call)?;
         // This graph adopts the fixture's idle lane. Bind its owner to the
         // writer attempt rather than the unrelated resume fixture lineage.
@@ -1106,7 +1098,7 @@ extend: Vec::new(),
         )?;
         let mut lane_owner = worktrees::load_owner(&writer.worktree)?.ok_or("lane owner")?;
         lane_owner.attempt_id = Some(attempt_1);
-        lane_owner.operation_id = Some(dispatch.operation_id.clone());
+        lane_owner.operation_id = Some(fixture.store.attempt_operation(attempt_1, &call)?.operation_id);
         worktrees::save_owner(&writer.worktree, &lane_owner)?;
 
 
@@ -1237,12 +1229,8 @@ extend: Vec::new(),
             .ok_or("lens attempt_ref")?;
         let (_, lens_attempt_id) = lens_attempt_ref.split_once('/').ok_or("attempt split")?;
         let lens_record = fixture.store.record(lens_attempt_id.parse()?, &call)?;
-        let lens_request = fixture.store.request(lens_record.run_id, &call)?;
-        let lens_task = lens_request
-            .tasks
-            .into_iter()
-            .find(|t| t.task_id == lens_record.task_id)
-            .ok_or("lens task")?;
+        let lens_request = fixture.store.request(lens_record.attempt_id, &call)?;
+        let lens_task = lens_request.task;
 
         let node_source_str = node_source.to_string();
         let head_1_str = head_1.to_string();

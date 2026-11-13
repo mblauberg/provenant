@@ -698,7 +698,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &merged)?;
     let ended = writer_run(merged_writer, "gc-merged", 120, "finished")?;
     store.create(&ended, &call)?;
-    store.cancel(ended.attempts[0].attempt_id, "finished", &call)?;
+    store.cancel(ended.attempt_id, "finished", &call)?;
     fs::create_dir(merged.join("target"))?;
     fs::write(merged.join("target/artifact"), "old build")?;
     age_gc_output(&merged.join("target"))?;
@@ -846,7 +846,7 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     );
     assert!(has_branch(&rig, "unmerged")?);
     assert_eq!(git(&rig, &["rev-parse", "main"])?, stale_main);
-    store.cancel(queued.attempts[0].attempt_id, "queue ended", &call)?;
+    store.cancel(queued.attempt_id, "queue ended", &call)?;
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(!queued_path.exists());
     Ok(())
@@ -889,7 +889,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let call = writer_call(&clock, &cancel)?;
     let writer = provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, &path)?;
     let prepared = writer_run(writer.clone(), "gc-ended", 101, "regenerate")?;
-    let attempt = prepared.attempts[0].attempt_id;
+    let attempt = prepared.attempt_id;
     store.create(&prepared, &call)?;
     let config = format!(
         "schema_version=1\n[gc]\nfree_floor='1B'\n[gc.projects.'{}']\nregenerable=['target','node_modules']\nkeep=['kept/target']\n",
@@ -919,7 +919,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(path.join("old/target").is_dir());
-    child_store.cancel(child_run.attempts[0].attempt_id, "child ended", &call)?;
+    child_store.cancel(child_run.attempt_id, "child ended", &call)?;
     let snapshot =
         crate::gc_support::lane_states(&roots, &rig.home, &rig.project, context.project_id)?;
     assert!(snapshot.is_current());
@@ -927,7 +927,7 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     let later = writer_run(writer, "gc-later", 112, "queued after snapshot")?;
     store.create(&later, &call)?;
     assert!(!snapshot.is_current());
-    store.cancel(later.attempts[0].attempt_id, "later ended", &call)?;
+    store.cancel(later.attempt_id, "later ended", &call)?;
     assert!(!snapshot.is_current(), "a changed snapshot stays invalid");
     let dry = ok(&rig, &["gc", "--dry-run", "--json"])?;
     assert_eq!(dry["data"]["dry_run"], true);
@@ -946,8 +946,8 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     // Unreadable sealed lane state protects the worktree.
     let request = rig
         .state
-        .join("runs")
-        .join(prepared.run_id.to_string())
+        .join("attempts")
+        .join(prepared.attempt_id.to_string())
         .join("request.json");
     let sealed = fs::read(&request)?;
     fs::write(&request, b"broken")?;
@@ -1000,10 +1000,10 @@ pub(super) fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Resu
         201,
         "fixture",
     )?;
-    input.request.tasks[0].writer = None;
+    input.request.task.writer = None;
     input.created_at = provenant_core::WallTime::from_micros(1)?;
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     store.withdraw(
         id,
         provenant_run::AttemptState::Queued {
@@ -1218,8 +1218,8 @@ pub(super) fn gc_collects_a_settled_lane_whose_completion_attempt_failed() -> Re
     let after = files_under(&rig.state)?;
     let added: Vec<_> = after.difference(&before).collect();
     assert!(
-        added.iter().all(|path| path.starts_with("runs")),
-        "settlement wrote outside its run record: {added:?}"
+        added.iter().all(|path| path.starts_with("attempts")),
+        "settlement wrote outside its attempt record: {added:?}"
     );
     assert!(fixture.worktree.exists());
     ok(rig, &["gc", "--apply", "--json"])?;

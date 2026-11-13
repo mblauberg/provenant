@@ -55,7 +55,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
 extend: Vec::new(),
         prior: fixture.settled.attempt_id, expected_generation: 0,
         operation_id: "family-composition-writer".parse()?,
-        run_id: RunId::from_bytes([71; 16]), attempt_id: AttemptId::from_bytes([72; 16]),
+ attempt_id: AttemptId::from_bytes([72; 16]),
         prompt: "writer".into(), created_at: factory.clock.wall_now()?,
     };
     fixture.store.resume_fresh(&upstream, "fixture", &call)?;
@@ -86,8 +86,8 @@ extend: Vec::new(),
         })?;
         let operation = graph_operation("graph-attempt-operation", &key)?;
         let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
-        let request = store.request(operation.run_id, &owner.call(&cancel))?;
-        let task = request.tasks.first().ok_or("task missing")?;
+        let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+        let task = &request.task;
         Ok((task.route.clone(), task.profile.overrides.clone()))
     };
     let review = |excluded: &[&str]| RequestedRoute::Review {
@@ -567,9 +567,9 @@ fn graph_submission_pins_the_integration_base_across_replay()
     })?;
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("later lens operation missing")?;
-    let request = store.request(operation.run_id, &owner.call(&cancel))?;
+    let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
     let base_text = base.to_string();
-    assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+    assert_eq!(request.task.base.as_deref(), Some(base_text.as_str()));
     assert_ne!(base_text, head);
     // A different integration base does not displace the pinned review base.
     bound.integration_base = Some(BoundGraphBases {
@@ -591,8 +591,8 @@ fn graph_submission_pins_the_integration_base_across_replay()
     })?;
     let operation = graph_operation("graph-attempt-operation", &second)?;
     let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("second lens operation missing")?;
-    let request = store.request(operation.run_id, &owner.call(&cancel))?;
-    assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+    let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+    assert_eq!(request.task.base.as_deref(), Some(base_text.as_str()));
     bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
     for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
         let path = fixture.rig.project.join(format!("{id}.json"));
@@ -603,9 +603,9 @@ fn graph_submission_pins_the_integration_base_across_replay()
         let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
         let operation = graph_operation("graph-attempt-operation", &result.checkpoint.nodes[0].attempts[0].key)?;
         let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("operation missing")?;
-        let request = store.request(operation.run_id, &owner.call(&cancel))?;
-        assert_eq!(request.tasks[0].base.as_deref(), Some(expected));
-        assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+        assert_eq!(request.task.base.as_deref(), Some(expected));
+        assert_eq!(request.task.head.as_deref(), Some(head.as_str()));
     }
     Ok(())
 }

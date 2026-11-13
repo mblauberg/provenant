@@ -629,19 +629,19 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
 pub(super) fn writer_process_cleanup(
     context: &provenant_run::ExecutionContext,
 ) -> provenant_supervisor::fixture::ProcessCleanupGuard {
-    // Guardian records live under runs, alongside worktree metadata and child stores.
+    // Guardian records live under the state root, alongside worktree metadata and attempt state.
     provenant_supervisor::fixture::ProcessCleanupGuard::new(context.state_root.as_path())
 }
 
 pub(super) fn start_writer(
     store: &provenant_run::RunStore,
-    run: provenant_core::RunId,
+    attempt: provenant_core::AttemptId,
     provider: &dyn provenant_run::Providers,
     holder: &dyn Fn(&provenant_run::AttemptRecord) -> provenant_run::Result<Vec<u8>>,
     call: &provenant_run::Request<'_>,
 ) -> Result<Vec<provenant_run::Started>> {
     Ok(store.start_with_writer_lease(
-        run,
+        attempt,
         provider,
         &|record, _| holder(record),
         &|directory, scope, binding| {
@@ -704,21 +704,24 @@ pub(super) fn writer_run(
     seed: u8,
     prompt: &str,
 ) -> Result<provenant_run::PreparedRun> {
-    let task = provenant_core::TaskId::from_bytes([seed; 16]);
     let attempt = provenant_core::AttemptId::from_bytes([seed.wrapping_add(1); 16]);
     let prompt_digest = provenant_records::CanonicalV1::file_digest(prompt.as_bytes());
     let clock = provenant_os::clock::SystemClock::new();
     Ok(provenant_run::PreparedRun {
-        run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
+        attempt_id: attempt,
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![provenant_run::TaskRequest {
-                context: None,
+            task: provenant_run::TaskRequest {
+                context: Some(provenant_run::WorkContext {
+                    graph_id: Some(format!("lane-{attempt}")),
+                    node_id: Some("writer".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -728,7 +731,6 @@ pub(super) fn writer_run(
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),
-                task_id: task,
                 prompt_digest,
                 route: provenant_run::RequestedRoute::Model {
                     extra: Default::default(),
@@ -742,17 +744,12 @@ pub(super) fn writer_run(
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: Some(1),
             parent_attempt: None,
         },
-        attempts: vec![provenant_run::NewAttempt {
-            attempt_id: attempt,
-            task_id: task,
-            prompt: prompt.into(),
-        }],
+        prompt: prompt.into(),
         created_at: clock.wall_now()?,
     })
 }
@@ -961,7 +958,6 @@ pub(super) fn holder_context<'a>(
             roots: seed.clone(),
             project_id: attempt.project_id,
             actor_id: context.actor_id,
-            run_id: attempt.run_id,
             attempt_id: attempt.attempt_id,
             host_delivery: None,
             launch: None,

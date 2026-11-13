@@ -7,7 +7,7 @@
 )]
 use super::*;
 use crate::worktree_tests::support::{Result, TestRig, code};
-use provenant_core::{AttemptId, RunId, TaskId};
+use provenant_core::AttemptId;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
@@ -144,27 +144,21 @@ fn settled_attempt(
         52
     };
     let id = AttemptId::from_bytes([number; 16]);
-    let run = RunId::from_bytes([number; 16]);
-    let task = TaskId::from_bytes([number; 16]);
     let prompt = "fixture child";
     let request = serde_json::from_value(json!({
-        "schema_version":1,"concurrency":1,"parent":null,
-        "tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),
-            "context":{"graph_id":graph,"node_id":if success {"parent--success"} else {"parent--failure"}},
+        "schema_version":1,"parent":null,
+        "task":{"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),
+            "context":{"graph_id":graph,"node_id":if success {"parent--success"} else {"parent--failure"},"attempt":1},
             "route":{"kind":"model","provider":"codex","model":"gpt-6-luna","effort":null},
             "authority_digest":provenant_core::Digest::from_bytes([7;32]),
-            "provider_timeout_seconds":30,"delivery_id":null}]
+            "provider_timeout_seconds":30,"delivery_id":null}
     }))?;
     store.create(
         &provenant_run::PreparedRun {
-            run_id: run,
+            attempt_id: id,
             operation_id: format!("lane-read-{number}").parse()?,
             request,
-            attempts: vec![provenant_run::NewAttempt {
-                attempt_id: id,
-                task_id: task,
-                prompt: prompt.into(),
-            }],
+            prompt: prompt.into(),
             created_at: clock.wall_now()?,
         },
         &call,
@@ -174,7 +168,6 @@ fn settled_attempt(
         launch_refusal: None,
         publication: PublicationState::Durable,
         scope: Scope {
-            run,
             attempt: id,
             generation: record.generation,
         },
@@ -204,13 +197,8 @@ fn settled_attempt(
     let fields = sealed_exit.as_object_mut().ok_or("exit object")?;
     fields.remove("publication");
     fields.insert("schema_version".into(), 1.into());
-    let directory = provenant_os::fs::Directory::open_anchor(
-        &rig.state
-            .join("runs")
-            .join(run.to_string())
-            .join("attempts")
-            .join(id.to_string()),
-    )?;
+    let directory =
+        provenant_os::fs::Directory::open_anchor(&rig.state.join("attempts").join(id.to_string()))?;
     directory
         .atomic_write(
             std::ffi::OsStr::new("process-exit.json"),
@@ -358,7 +346,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         },
         project_id: context.identity.project,
         actor_id: context.identity.inbox.actor,
-        run_id: RunId::from_bytes([53; 16]),
+
         attempt_id: caller,
         host_delivery: None,
         sealed: None,

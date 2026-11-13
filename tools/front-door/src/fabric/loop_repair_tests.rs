@@ -70,18 +70,18 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         provenant_run::DispatchRequest {
             chair: None,
             operation_id: "graph-round-two".parse()?,
-            concurrency: 1,
             lane_depth: 1,
             parent_attempt: None,
-            tasks: vec![provenant_run::DispatchTask {
+            task: provenant_run::DispatchTask {
                     source_head: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
+                    node_id: Some("repair".into()),
+                    attempt: Some(1),
                     ..Default::default()
                 }),
                 build_heavy: false,
                 title: None,
-                task_id: TaskId::from_bytes([71; 16]),
                 prompt: "reply OK".into(),
                 base: Some(head.to_string()),
                 pinned_base: None,
@@ -98,17 +98,16 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 deliver: None,
                 worktree: Some(fixture.worktree.clone()),
                 access: Default::default(),
-            }],
+            },
         },
         &fixture.rig.project,
         &call,
     )?;
-    let second_id = fixture.store.pending_attempts(second.run_id, &call)?[0].attempt_id;
+    let second_id = second.attempt_id;
     let second_record = fixture.store.record(second_id, &call)?;
     assert!(second_record.retry_of.is_none());
     publish_success(&fixture.rig, &fixture.store, &second_record, head, &call)?;
     let mut second_holder = fixture.settled.clone();
-    second_holder.run_id = second.run_id;
     second_holder.attempt_id = second_id;
     let document: graph::GraphDocument = serde_json::from_value(
         serde_json::json!({"schema_version":1,"graph_id":"loop-settlement","nodes":[{"id":"revise","kind":"loop","access":"read_only","loop":{"max_rounds":2,"until":"approved","body":[{"id":"repair","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}},{"id":"approved","kind":"gate","access":"read_only","depends_on":["repair"],"inputs":[{"node":"repair","outputs":["verdict"]}],"condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}]}}]}),
@@ -358,7 +357,14 @@ fn loop_corrupt_unrelated_checkpoint_does_not_fail_ordinary_settlement()
         cancel: &cancel,
     };
     let record = fixture.store.record(fixture.settled.attempt_id, &call)?;
-    assert!(!record.operation_id.as_str().starts_with("graph-"));
+    assert!(
+        !fixture
+            .store
+            .attempt_operation(record.attempt_id, &call)?
+            .operation_id
+            .as_str()
+            .starts_with("graph-")
+    );
     {
         let _journal = provenant_fabric_runtime::graph::FileJournal::open(
             &fixture.roots.state,

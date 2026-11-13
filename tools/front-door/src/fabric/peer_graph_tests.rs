@@ -32,11 +32,11 @@ fn submit_parent(
     cancel: &CancelToken,
 ) -> TestResult<SubmissionReceipt> {
     let input = serde_json::from_value(json!({
-        "op":"submit", "operation_id":operation, "concurrency":1,
-        "tasks":[{"prompt":"Launch a child and collect its answer", "access":"read_only",
+        "op":"submit", "operation_id":operation,
+        "task":{"prompt":"Launch a child and collect its answer", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"parent"}}]
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1}}
     }))?;
     Ok(provenant_cli::run::with_deferred_provider_launch(|| {
         super::super::peer::peer_submit_graph(
@@ -137,11 +137,11 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     assert_eq!(replay.targets, receipt.targets);
     assert_eq!(replay.extra["peer_graph"], receipt.extra["peer_graph"]);
     let changed: SubmitInput = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"peer-parent-result", "concurrency":1,
-        "tasks":[{"prompt":"A changed brief must not reuse the accepted operation", "access":"read_only",
+        "op":"submit", "operation_id":"peer-parent-result",
+        "task":{"prompt":"A changed brief must not reuse the accepted operation", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"parent"}}]
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1}}
     }))?;
     assert!(matches!(
         super::super::peer::peer_submit_graph(
@@ -174,8 +174,8 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
         },
         &parent_call,
     )?;
-    let request = parent_store.request(parent_record.run_id, &parent_call)?;
-    assert_eq!(request.tasks[0].provider_timeout_seconds, 17);
+    let request = parent_store.request(parent_record.attempt_id, &parent_call)?;
+    assert_eq!(request.task.provider_timeout_seconds, 17);
     let directory = provenant_os::fs::Directory::open_anchor(
         &rig.state
             .join(format!("attempts/{parent}")),
@@ -733,10 +733,9 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     let started =
         session
             .store
-            .start(record.run_id, &Pacing(fact), &|_, _| Ok(Vec::new()), &call)?;
-    let run = session.store.run(record.run_id, &call)?;
+            .start(record.attempt_id, &Pacing(fact), &|_, _| Ok(Vec::new()), &call)?;
     let first = owner
-        .receipt(&session, operation.clone(), &run, &started, &call)
+        .receipt(&session, operation.clone(), &record, &started, &call)
         .unwrap_err();
     // Recreate the reply-loss boundary: the host sealed the refusal, while the
     // graph has not yet recorded an attempt reference.
@@ -858,7 +857,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
         let record = session.store.record(attempt, &call)?;
         let _ = session
             .store
-            .start(record.run_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
+            .start(record.attempt_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
     }
     let mut result = json!({"checkpoint":{"nodes":[{
         "id":"parent", "advance_error_code":"preparation_refused",

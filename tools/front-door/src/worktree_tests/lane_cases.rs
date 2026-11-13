@@ -216,7 +216,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             seed,
             "fixture prompt",
         )?;
-        let task = &mut prepared.request.tasks[0];
+        let task = &mut prepared.request.task;
         if !writer {
             task.writer = None;
         }
@@ -245,11 +245,11 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let attempt = roots
             .state
             .as_path()
-            .join(format!("attempts/{}", prepared.attempts[0].attempt_id));
+            .join(format!("attempts/{}", prepared.attempt_id));
         // Launch preparation links a short alias to `tmp` on macOS. The name
         // is unique to this process and attempt, and the rig unlinks it.
         let temporary_alias = cfg!(target_os = "macos").then(|| {
-            let id = u128::from_be_bytes(*prepared.attempts[0].attempt_id.as_bytes());
+            let id = u128::from_be_bytes(*prepared.attempt_id.as_bytes());
             let alias = PathBuf::from(format!(
                 "/private/tmp/pv-{:08x}{:024x}",
                 std::process::id(),
@@ -259,9 +259,8 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             alias
         });
         let paths = provenant_run::LaunchPaths {
-            attempt_id: prepared.attempts[0].attempt_id,
+            attempt_id: prepared.attempt_id,
             lane_depth: 1,
-            run_id: prepared.run_id,
             operation_id: prepared.operation_id.clone(),
             task_index: 0,
             deadline_unix_ms: 4_000_000_000_000,
@@ -289,7 +288,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let call = writer_call(&clock, &cancel)?;
         let store = provenant_run::RunStore::open(&context, &call)?;
         store.create(&prepared, &call)?;
-        let task = &prepared.request.tasks[0];
+        let task = &prepared.request.task;
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
             fs::create_dir_all(path)?;
         }
@@ -522,7 +521,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             },
             project_id: context.project_id,
             actor_id: context.actor_id,
-            run_id: prepared.run_id,
             attempt_id: paths.attempt_id,
             host_delivery: None,
             launch: Some(provenant_run::HostLaunchContext {
@@ -541,7 +539,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             }),
             sealed: Some(provenant_run::SealedTask {
                 request_digest: prepared.request.digest()?,
-                task_id: task.task_id,
                 effective_network: task.access.network(task.writer.is_some()),
                 effective_database_ipc: task.access.database_ipc,
             }),

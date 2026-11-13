@@ -4137,8 +4137,8 @@ mod journal_error_tests {
         let store = binary.store(&cancel)?;
         let call = binary.call(&cancel);
         let record = store.record(id.parse()?, &call)?;
-        let request = store.request(record.run_id, &call)?;
-        let task = request.tasks.first().ok_or("review task")?;
+        let request = store.request(record.attempt_id, &call)?;
+        let task = &request.task;
         assert_eq!(task.base_ref.as_deref(), Some(fork.as_str()), "{scenario}");
         assert_eq!(task.head.as_deref(), Some(subject.as_str()), "{scenario}");
         // The checkpoint keeps the bound ref tip, never the derived comparison base.
@@ -4406,11 +4406,8 @@ mod journal_error_tests {
                 .contains("the writer worktree has uncommitted edits")
         );
         assert_eq!(
-            store
-                .operation(&scope.operation, &call)?
-                .ok_or("refusal")?
-                .run_id,
-            first.run_id
+            store.operation(&scope.operation, &call)?.ok_or("refusal")?,
+            first
         );
         let changed = owner
             .observe_or_start(
@@ -4429,7 +4426,6 @@ mod journal_error_tests {
         };
         let mut missing = first.clone();
         missing.operation_id = graph_operation("graph-attempt-operation", &missing_key)?;
-        missing.run_id = provenant_core::RunId::from_bytes([31; 16]);
         missing.extra.remove("origin_intent_digest");
         store.insert_refusal(missing, &call)?;
         let missing = owner
@@ -4804,7 +4800,6 @@ mod recovery_rebuild_tests {
                                     build_heavy: spec.build_heavy,
                                     title: None,
                                     profile,
-                                    task_id: provenant_core::TaskId::from_bytes([1; 16]),
                                     prompt_digest: provenant_records::CanonicalV1::file_digest(
                                         b"prompt",
                                     ),
@@ -4877,7 +4872,7 @@ mod recovery_rebuild_tests {
                                 };
 
                                 let rebuilt_request = provenant_records::run::CanonicalRequest {
-                                    tasks: vec![rebuilt_task],
+                                    task: rebuilt_task,
                                     ..original_request.clone()
                                 };
 

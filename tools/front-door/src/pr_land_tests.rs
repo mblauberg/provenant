@@ -51,7 +51,7 @@ pub(crate) fn pr_contribution_unbound_project() -> Result {
 
 /// Capture through dispatch, then retain through real land and gc.
 pub(crate) fn pr_contribution_roundtrip() -> Result {
-    use provenant_core::{CancelToken, Clock, OperationId, TaskId};
+    use provenant_core::{CancelToken, Clock, OperationId};
     use provenant_run::{DispatchRequest, DispatchTask, Service};
     let landing = landing()?;
     let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
@@ -79,12 +79,16 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             Ok(DispatchRequest {
                 chair: None,
                 operation_id: OperationId::parse(&format!("contribution-{index}"))?,
-                tasks: vec![DispatchTask {
-                    context: None,
+                task: DispatchTask {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-contribution-{index}")),
+                        node_id: Some("local".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     build_heavy: false,
                     title: None,
                     profile: Default::default(),
-                    task_id: TaskId::from_bytes([index + 1; 16]),
                     prompt: "local work".into(),
                     base: None,
                     pinned_base: None,
@@ -101,14 +105,13 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     deliver: None,
                     worktree: (index < 3).then(|| landing.worktree.clone()),
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 lane_depth: 1,
                 parent_attempt: None,
             })
         };
         let run = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
-        let attempt = store.pending_attempts(run.run_id, &call)?[0].attempt_id;
+        let attempt = run.attempt_id;
         ids.push(attempt.to_string());
         if index == 0 {
             // An attribution conflict after create cannot turn accepted work
@@ -121,7 +124,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                 [attempt.to_string()],
             )?;
             let replay = Service::new(&store).dispatch(submit()?, &landing.worktree, &call)?;
-            assert_eq!(replay.run_id, run.run_id);
+            assert_eq!(replay.attempt_id, run.attempt_id);
             let diagnostic = fs::read_to_string(context.state_root.as_path().join(format!(
                 "attempts/{}/pr-contribution-diagnostic.txt",
                 attempt
@@ -136,8 +139,8 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             assert_eq!(
                 Service::new(&store)
                     .dispatch(submit()?, &landing.worktree, &call)?
-                    .run_id,
-                run.run_id
+                    .attempt_id,
+                run.attempt_id
             );
         }
         if index < 2 {
@@ -171,17 +174,18 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                 prior: attempt,
                 expected_generation: 0,
                 operation_id: OperationId::parse("contribution-repair")?,
-                run_id: provenant_core::RunId::from_bytes([91; 16]),
                 attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
                 prompt: "repair".into(),
                 created_at: clock.wall_now()?,
             };
             let repaired = store.resume_fresh(&resume, "repair fixture", &call)?;
             assert_eq!(
-                store.resume_fresh(&resume, "repair fixture", &call)?.run_id,
-                repaired.run_id
+                store
+                    .resume_fresh(&resume, "repair fixture", &call)?
+                    .attempt_id,
+                repaired.attempt_id
             );
-            let id = store.pending_attempts(repaired.run_id, &call)?[0].attempt_id;
+            let id = repaired.attempt_id;
             ids.push(id.to_string());
             store.cancel(id, "repair cancelled", &call)?;
         }
@@ -343,13 +347,15 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             .ok_or("missing projected land lane")?;
         let record = Service::new(&store).status(id.parse()?, &call)?;
         let (state, _) = provenant_records::wire::LaneRow::state_and_reason(&record.state);
-        assert_eq!(lane["run_id"], record.run_id.to_string());
-        assert_eq!(lane["task_id"], record.task_id.to_string());
+        let key = store.work_key(record.attempt_id, &call)?;
+        assert_eq!(lane["graph"], key.graph());
+        assert_eq!(lane["node"], key.node());
+        assert_eq!(lane["attempt_number"], key.attempt());
         assert_eq!(lane["state"], state);
         assert_eq!(lane["retry_of"], serde_json::json!(record.retry_of));
     }
-    // The retained non-graph attempts have no graph name, so no target names
-    // them; the land report is their only projection.
+    // The retained attempts sit in synthetic lane graphs no target names;
+    // the land report is their only projection.
     db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());
@@ -363,7 +369,6 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             .find(|row| row["attempt"] == id.as_str())
             .ok_or("missing attempt")?;
         assert!(row["weight_millionths"].is_null());
-        assert!(row["run"].is_string());
         assert!(row["queued_at"].is_string());
         assert!(row["finished_at"].is_string());
         assert!(row["outcome"].is_string());
@@ -418,17 +423,21 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     // no attempts with the retained, merged PR, even after bind replay.
     let recreated = command(&landing.rig, &["worktree", "create", "feat", "--json"])?;
     assert_eq!(code(&recreated), 0);
-    let dispatch_reused = |operation: &str, task: u8| -> Result<provenant_core::AttemptId> {
+    let dispatch_reused = |operation: &str| -> Result<provenant_core::AttemptId> {
         let new_run = Service::new(&store).dispatch(
             DispatchRequest {
                 chair: None,
                 operation_id: OperationId::parse(operation)?,
-                tasks: vec![DispatchTask {
-                    context: None,
+                task: DispatchTask {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(format!("lane-{operation}")),
+                        node_id: Some("reused".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     build_heavy: false,
                     title: None,
                     profile: Default::default(),
-                    task_id: TaskId::from_bytes([task; 16]),
                     prompt: "new work".into(),
                     base: None,
                     pinned_base: None,
@@ -445,19 +454,18 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     deliver: None,
                     worktree: Some(landing.worktree.clone()),
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 lane_depth: 1,
                 parent_attempt: None,
             },
             &landing.worktree,
             &call,
         )?;
-        let new_attempt = store.pending_attempts(new_run.run_id, &call)?[0].attempt_id;
+        let new_attempt = new_run.attempt_id;
         store.cancel(new_attempt, "fixture ended", &call)?;
         Ok(new_attempt)
     };
-    let new_attempt = dispatch_reused("reused-branch", 98)?;
+    let new_attempt = dispatch_reused("reused-branch")?;
     assert_eq!(read()?, before);
     let links = provenant_run::Contributions::open(store.writer_registry(), &call)?;
     let new_pr = provenant_run::PullRequest {
@@ -543,7 +551,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let bound_new = bind_cli("1672")?;
     assert_eq!(code(&bound_new), 0);
     let calls_before = fs::read(landing.rig.project.join("gh-calls"))?;
-    let reused = dispatch_reused("externally-merged-branch", 99)?;
+    let reused = dispatch_reused("externally-merged-branch")?;
     assert_eq!(
         fs::read(landing.rig.project.join("gh-calls"))?,
         calls_before,
@@ -593,7 +601,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let active = links.open_bindings(context.project_id, "feat", &call)?;
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].number, 1674);
-    let after_open = dispatch_reused("swept-pr-open", 100)?;
+    let after_open = dispatch_reused("swept-pr-open")?;
     let rows = links.for_pr(&active[0], &call)?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].attempt, after_open);
@@ -663,7 +671,6 @@ fn contribution_terminal(
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
-            run: record.run_id,
             attempt: id,
             generation: record.generation,
         },
@@ -1485,7 +1492,6 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
         let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
             provenant_os::fs::Directory::open_anchor(&state)?,
             Scope {
-                run: provenant_core::RunId::from_bytes([81; 16]),
                 attempt: provenant_core::AttemptId::from_bytes([82; 16]),
                 generation: 1,
             },
@@ -1603,7 +1609,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
         let input =
             super::worktree_tests::writer_run(request.clone(), "land-terminal", 91, "done")?;
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut running = store.record(id, &call)?;
         running.revision += 1;
         running.generation = 1;
@@ -1623,7 +1629,6 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Resu
             ],
         )?;
         let scope = Scope {
-            run: input.run_id,
             attempt: id,
             generation: running.generation,
         };
@@ -2269,7 +2274,7 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
         "never launched",
     )?;
     store.create(&prepared, &call)?;
-    let attempt = prepared.attempts[0].attempt_id.to_string();
+    let attempt = prepared.attempt_id.to_string();
     let refusal = open_refusal(
         &rig,
         &[

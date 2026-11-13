@@ -168,11 +168,10 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
         .and_then(|row| row["attempt_id"].as_str())
         .ok_or_else(|| format!("no attempt: stdout={stdout} stderr={stderr}"))?;
     let (_, attempt) = attempt_ref.rsplit_once('/').ok_or("attempt reference")?;
-    let attempt = fs::read_dir(rig.state.join("runs"))?
-        .flatten()
-        .map(|run| run.path().join("attempts").join(attempt))
-        .find(|path| path.is_dir())
-        .ok_or_else(|| format!("no attempt directory: stdout={stdout}"))?;
+    let attempt = rig.state.join("attempts").join(attempt);
+    if !attempt.is_dir() {
+        return Err(format!("no attempt directory: stdout={stdout}").into());
+    }
     let record = attempt_record(rig, &attempt)?;
     assert_eq!(
         record["state"]["exit_code"],
