@@ -319,6 +319,21 @@ impl WriterLaunch {
         } else {
             &source.refs
         };
+        for directory in [repo.private_dir(), &source.refs] {
+            for name in [
+                "MERGE_HEAD",
+                "CHERRY_PICK_HEAD",
+                "REVERT_HEAD",
+                "rebase-merge",
+                "rebase-apply",
+            ] {
+                match directory.metadata_at(OsStr::new(name), false) {
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         index_dir.read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
         let index = index_dir.current_path()?.join("index");
         let objects = source.objects.current_path()?;

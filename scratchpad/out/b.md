@@ -9,10 +9,13 @@ for tokens. Missing notice delivery is a guardian warning.
 
 Wrap-up uses the existing RunStore same-session resume, admitted once before
 predecessor custody releases and launched by the durable settlement reaction
-once custody drops. Its prompt carries the remaining grace and its persisted
+once custody drops. Permanent resume refusals are recorded without retaining
+predecessor custody; transient storage failures remain retryable. Its prompt carries the remaining grace and its persisted
 profile makes that allowance a hard stop. The graph follows the run-internal
 successor. Natural completion wins and skips budget snapshots; a clean effective
-index plus a locally recorded pushed upstream lets the writer finish itself.
+index plus a locally recorded pushed upstream stops at the boundary with the
+lane's recorded handoff/outcome, without a timeout or snapshot. Git operations
+in progress are not clean points.
 Clean-point checks use a clean Git view with the effective private/native index.
 
 Supporting files outside the owned list: records/run.rs and fabric-runtime/graph.rs
@@ -35,6 +38,8 @@ Verification at implementation: cargo fmt and git diff --check. The sole local
 cargo check -p provenant --tests found an omitted Kind::Fraction schema match arm;
 fixed it and audited the other Kind matches. It was not rerun. Tests, clippy and
 nextest were not run locally; pushed-branch CI owns compilation and execution.
+The first lane CI (43418383505) found a collapsible-if lint, repaired alongside
+the clean-boundary and refusal-release findings from focused source review.
 Integrated review/full CI remain the batch chair's gate. Current branch/CI evidence
 is in the final schema-v2 handoff collected by the host.
 

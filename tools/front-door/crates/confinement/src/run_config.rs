@@ -79,7 +79,7 @@ pub struct RunConfig {
     /// number.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
-    /// Per-risk-tier writer token budget overrides.
+    /// Per-routing-tier writer token budget overrides.
     #[serde(default)]
     pub writer_budget_tiers: BTreeMap<String, WriterBudgetTier>,
     /// Default response when a writer passes its token budget.
@@ -257,7 +257,7 @@ pub struct ProjectRunConfig {
     #[serde(default)]
     pub sandbox_cache_reads: Option<Vec<PathBuf>>,
 }
-/// Host or project defaults for a writer's token budget at one risk tier.
+/// Host defaults for a writer's token budget at one routing tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WriterBudgetTier {
@@ -1072,9 +1072,15 @@ mod tests {
             (unset.value, unset.source),
             (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Default)
         );
-        let host: RunConfig = toml_edit::de::from_str("writer_token_budget = 500000\n").unwrap();
+        let host: RunConfig = toml_edit::de::from_str(&format!(
+            "writer_token_budget = {DEFAULT_WRITER_TOKEN_BUDGET}\n"
+        ))
+        .unwrap();
         let budget = host.writer_token_budget_for("p");
-        assert_eq!((budget.value, budget.source), (500_000, LimitSource::Host));
+        assert_eq!(
+            (budget.value, budget.source),
+            (DEFAULT_WRITER_TOKEN_BUDGET, LimitSource::Host)
+        );
         let off: RunConfig = toml_edit::de::from_str("writer_token_budget = 0\n").unwrap();
         assert_eq!(off.writer_token_budget_for("p").value, 0);
     }

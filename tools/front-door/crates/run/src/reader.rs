@@ -936,6 +936,18 @@ impl RunStore {
                 crate::db::decode::<serde_json::Value>(&raw)?,
             );
         }
+        if let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
+            && let Some(raw) = crate::artifacts::read_sealed_observed(
+                &attempt,
+                "budget-wrap-up-refused.json",
+                RECORD_LIMIT,
+            )?
+        {
+            record.extra.insert(
+                "budget_wrap_up_refused".into(),
+                crate::db::decode::<serde_json::Value>(&raw)?,
+            );
+        }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {

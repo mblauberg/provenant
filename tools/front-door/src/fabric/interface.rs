@@ -1541,20 +1541,22 @@ impl Factory {
                         );
                     }
                 }
-                let tier = context
-                    .tier
-                    .as_deref()
-                    .or_else(|| node.route.as_ref().and_then(|route| route.alias.as_deref()));
-                let (token_budget, policy) = provenant_run::writer_budget_limits(
-                    &run_config,
-                    &self.context.identity.project.to_string(),
-                    &profile,
-                    Some(&context),
-                    tier,
-                );
-                writer_budgets.push(
-                    json!({"node":node.id,"token_budget":token_budget,"budget_policy":policy}),
-                );
+                let routes: Vec<Option<&provenant_fabric_runtime::graph::GraphRoute>> = node
+                    .routes
+                    .as_ref()
+                    .map(|routes| routes.iter().map(Some).collect())
+                    .unwrap_or_else(|| vec![node.route.as_ref()]);
+                for route in routes {
+                    let tier = route.and_then(|route| route.alias.as_deref());
+                    let (token_budget, policy) = provenant_run::writer_budget_limits(
+                        &run_config,
+                        &self.context.identity.project.to_string(),
+                        &profile,
+                        Some(&context),
+                        tier,
+                    );
+                    writer_budgets.push(json!({"node":node.id,"tier":tier,"token_budget":token_budget,"budget_policy":policy}));
+                }
             }
             return Ok(
                 json!({"document":document, "skipped":skipped, "writer_budgets":writer_budgets}),

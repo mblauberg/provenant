@@ -586,14 +586,24 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         let attempt = store
             .attempt_dir(record.run_id, record.attempt_id, false)
             .map_err(custody_error)?;
-        Ok(crate::prepare_writer_with_facts(
+        let clean = crate::prepare_writer_with_facts(
             writer,
             &store.writer_registry,
             record.project_id,
             &store.repo_facts,
         )
         .and_then(|writer| writer.budget_clean_point(&attempt))
-        .unwrap_or(false))
+        .unwrap_or(false);
+        if clean {
+            crate::artifacts::seal(
+                &attempt,
+                "budget-clean-point.json",
+                b"{\"schema_version\":1,\"clean\":true}",
+                RECORD_LIMIT,
+            )
+            .map_err(custody_error)?;
+        }
+        Ok(clean)
     }
     fn budget_crossed(&self, raw: &[u8], tokens: u64, budget: u64) -> custody::Result<()> {
         let (context, store) =
@@ -1068,11 +1078,33 @@ impl RunStore {
         run_bytes.copy_from_slice(&digest.as_bytes()[..16]);
         let mut attempt_bytes = [0; 16];
         attempt_bytes.copy_from_slice(&digest.as_bytes()[16..]);
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        if read_sealed(&attempt, "budget-wrap-up-refused.json", RECORD_LIMIT)?.is_some() {
+            return Ok(None);
+        }
+        let operation_id = provenant_core::OperationId::parse(&format!("budget-wrap-up-{id}"))
+            .map_err(|_| RunError::Validation("wrap-up operation"))?;
+        let refused = |reason: &str| -> Result<Option<RunId>> {
+            crate::artifacts::seal(
+                &attempt,
+                "budget-wrap-up-refused.json",
+                &crate::db::bytes(&serde_json::json!({"schema_version":1,"reason":reason}))?,
+                RECORD_LIMIT,
+            )?;
+            Ok(None)
+        };
+        if self
+            .operation(&operation_id, call)?
+            .is_some_and(|operation| operation.state == OperationState::Refused)
+        {
+            return refused(
+                "budget wrap-up admission was refused; the lane remains stopped for the chair",
+            );
+        }
         let input = crate::Resume {
             prior: id,
             expected_generation: 0,
-            operation_id: provenant_core::OperationId::parse(&format!("budget-wrap-up-{id}"))
-                .map_err(|_| RunError::Validation("wrap-up operation"))?,
+            operation_id,
             run_id: RunId::from_bytes(run_bytes),
             attempt_id: AttemptId::from_bytes(attempt_bytes),
             prompt: format!(
@@ -1084,8 +1116,17 @@ impl RunStore {
             },
             extend: Vec::new(),
         };
-        self.resume_budget_wrap_up(&input, remaining, call)
-            .map(|run| Some(run.run_id))
+        match self.resume_budget_wrap_up(&input, remaining, call) {
+            Ok(run) => Ok(Some(run.run_id)),
+            Err(
+                error @ (RunError::RecordedRefusal(_)
+                | RunError::ContinuationRefused { .. }
+                | RunError::ProviderStateExpired
+                | RunError::WriterLineage(_)
+                | RunError::GenerationConflict { .. }),
+            ) => refused(&error.to_string()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Reconcile a failed import as a final failure once custody proves that
@@ -1673,8 +1714,31 @@ impl RunStore {
                     .and_then(|capture| path_denial_hint(&capture))
             })
         });
+        let clean_budget = exit.stop_reason == Some(StopReason::TokenBudget)
+            && read_sealed(attempt, "budget-clean-point.json", RECORD_LIMIT)?.is_some();
+        if clean_budget && !decoded.complete {
+            // Use the lane's recorded outcome, including a done progress
+            // handoff. With no completed report, ordinary review is required;
+            // a clean boundary must not invent success or impose a timeout.
+            let done = handoff.as_ref().is_some_and(|handoff| {
+                handoff.status == provenant_records::handoff::HandoffStatus::Done
+            });
+            decoded.outcome = if done {
+                Outcome::Succeeded
+            } else {
+                Outcome::ReviewRequired
+            };
+            decoded.terminal_cause = None;
+            if decoded.result.trim().is_empty()
+                && let Some(handoff) = &handoff
+            {
+                decoded.result = handoff.fenced();
+            }
+            decoded.reason = Some("token target reached at a clean pushed point; retained the lane's handoff without a budget snapshot".into());
+        }
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded
+            && !clean_budget
             && !(exit.stop_reason == Some(StopReason::TokenBudget) && decoded.complete)
         {
             match exit.stop_reason {
@@ -1835,6 +1899,7 @@ impl RunStore {
                                 .ok_or(RunError::Validation("writer terminal custody missing"))?,
                             driver,
                             exit.stop_reason == Some(StopReason::TokenBudget)
+                                && !clean_budget
                                 && decoded.outcome == Outcome::TimedOut
                                 && !soft_budget_wrap_up(&record, &decoded.usage),
                         )
@@ -4275,7 +4340,9 @@ mod writer_recovery_tests {
     fn budget_wrap_up_resumes_once_with_remaining_grace_and_natural_completion_wins()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         budget_stop_case(BudgetStopCase::WrapUp)?;
-        budget_stop_case(BudgetStopCase::Natural)
+        budget_stop_case(BudgetStopCase::Natural)?;
+        budget_stop_case(BudgetStopCase::Clean)?;
+        budget_stop_case(BudgetStopCase::WrapUpRefused)
     }
 
     #[derive(Clone, Copy)]
@@ -4284,7 +4351,9 @@ mod writer_recovery_tests {
         InProgress(&'static str),
         Commit,
         WrapUp,
+        WrapUpRefused,
         Natural,
+        Clean,
         Native {
             dirty: bool,
         },
@@ -4307,7 +4376,13 @@ mod writer_recovery_tests {
         run.request.tasks[0].writer = Some(fixture.writer.clone());
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
-        let limits = if matches!(case, BudgetStopCase::WrapUp | BudgetStopCase::Natural) {
+        let limits = if matches!(
+            case,
+            BudgetStopCase::WrapUp
+                | BudgetStopCase::WrapUpRefused
+                | BudgetStopCase::Natural
+                | BudgetStopCase::Clean
+        ) {
             provenant_records::LaneLimits {
                 token_budget: Some(provenant_records::Limit::new(
                     1_000_000,
@@ -4371,7 +4446,11 @@ mod writer_recovery_tests {
             "uncommitted work before budget stop\n",
         )?;
 
-        let native_head = if let BudgetStopCase::Native { dirty } = case {
+        let native_head = if let Some(dirty) = match case {
+            BudgetStopCase::Native { dirty } => Some(dirty),
+            BudgetStopCase::Clean => Some(false),
+            _ => None,
+        } {
             fixture.lane_git(&["add", "budget-work.txt"])?;
             fixture.lane_git(&["commit", "-m", "Native lane work"])?;
             let head =
@@ -4547,6 +4626,14 @@ mod writer_recovery_tests {
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         observed.stop_reason = Some(StopReason::TokenBudget);
+        if matches!(case, BudgetStopCase::Clean) {
+            crate::artifacts::seal(
+                &attempt,
+                "budget-clean-point.json",
+                b"{\"schema_version\":1,\"clean\":true}",
+                RECORD_LIMIT,
+            )?;
+        }
         crate::dispatch_tests::seal_exit(&store, &observed)?;
         crate::artifacts::seal(
             &attempt,
@@ -4564,20 +4651,35 @@ mod writer_recovery_tests {
                 Outcome::TimedOut
             }),
         );
-        if matches!(case, BudgetStopCase::WrapUp | BudgetStopCase::Natural) {
+        if matches!(
+            case,
+            BudgetStopCase::WrapUp
+                | BudgetStopCase::WrapUpRefused
+                | BudgetStopCase::Natural
+                | BudgetStopCase::Clean
+        ) {
             fake.codex_usage = Some(UsageRecord {
                 uncached_input: Some(1_000_001),
                 ..Default::default()
             });
         }
+        if matches!(case, BudgetStopCase::WrapUpRefused) {
+            crate::artifacts::seal(&attempt, "provider-state-expired.json", b"{}", RECORD_LIMIT)?;
+        }
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
-        if matches!(case, BudgetStopCase::WrapUp | BudgetStopCase::Natural) {
+        if matches!(
+            case,
+            BudgetStopCase::WrapUp
+                | BudgetStopCase::WrapUpRefused
+                | BudgetStopCase::Natural
+                | BudgetStopCase::Clean
+        ) {
             assert!(read_sealed(&attempt, "budget-commit.json", RECORD_LIMIT)?.is_none());
             assert!(
                 std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?
                     .contains("uncommitted work")
             );
-            if matches!(case, BudgetStopCase::Natural) {
+            if matches!(case, BudgetStopCase::Natural | BudgetStopCase::Clean) {
                 assert!(!matches!(
                     finished.state,
                     AttemptState::Terminal {
@@ -4586,6 +4688,12 @@ mod writer_recovery_tests {
                     }
                 ));
                 assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
+            } else if matches!(case, BudgetStopCase::WrapUpRefused) {
+                assert!(store.prepare_budget_wrap_up(id, &call)?.is_none());
+                assert!(
+                    read_sealed(&attempt, "budget-wrap-up-refused.json", RECORD_LIMIT)?.is_some()
+                );
+                assert!(store.custody_released(&store.record(id, &call)?, &call)?);
             } else {
                 assert!(matches!(
                     finished.state,
@@ -4614,7 +4722,7 @@ mod writer_recovery_tests {
                 );
                 assert_eq!(budget.ok_or("remaining grace")?.value, 99_999);
                 assert_eq!(policy.action, provenant_records::BudgetAction::Stop);
-                assert_eq!(store.record(id, &call)?.superseded_by.is_some(), true);
+                assert!(store.record(id, &call)?.superseded_by.is_some());
             }
             return Ok(());
         }

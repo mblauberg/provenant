@@ -810,8 +810,10 @@ snapshot to a remote.
 
 Natural completion takes precedence over every action. A clean point, meaning
 no uncommitted paths and a locally recorded upstream equal to the effective
-lane head, also leaves the lane to finish on its own outcome. Neither case
-creates a budget snapshot or reclassifies completion as `timed_out`. Unknown
+lane head, stops at that boundary using the lane's recorded handoff and
+outcome. A recorded done handoff keeps completion; an incomplete report follows
+ordinary review settlement. Neither case creates a budget snapshot or
+reclassifies completion as `timed_out`. Unknown
 Git state is not proof of a clean point. The first wrap-up boundary preserves
 edits without a snapshot and settles as a resumable intermediate outcome; the
 successor's natural completion is the lane's result.

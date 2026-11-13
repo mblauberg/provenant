@@ -1758,21 +1758,22 @@ fn budget_actions_preserve_clean_points_and_natural_completion() {
             for used in [0, budget, budget.saturating_add(1), u64::MAX] {
                 for clean in [false, true] {
                     for completed in [false, true] {
-                        let stop = super::budget_stop_due(budget, action, used, clean, completed);
-                        if clean
-                            || completed
+                        let boundary =
+                            super::budget_boundary(budget, action, used, clean, completed);
+                        if completed
                             || action == BudgetAction::Warn
                             || budget == 0
                             || used <= budget
                         {
-                            assert!(
-                                !stop,
-                                "{action:?} budget={budget} used={used} clean={clean} completed={completed}"
-                            );
+                            assert_eq!(boundary, None);
                         } else {
-                            assert!(
-                                stop,
-                                "dirty unfinished work must reach its configured budget boundary"
+                            assert_eq!(
+                                boundary,
+                                Some(if clean {
+                                    super::BudgetBoundary::Clean
+                                } else {
+                                    super::BudgetBoundary::Dirty
+                                })
                             );
                         }
                     }

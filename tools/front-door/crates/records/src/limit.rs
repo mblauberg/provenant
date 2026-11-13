@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Where a limit's value was set. The nearest setting to the work wins:
-/// `Launch`, then `Template`, then `Project`, then `Host`, then `Default`
+/// `Launch`, then `Template`, then `Tier`, then `Project`, then `Host`, then `Default`
 /// (see [`Limit::resolve`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,7 +101,7 @@ impl BudgetGrace {
     pub const SCALE: u64 = 1_000_000;
     pub const DEFAULT: Self = Self(100_000);
 
-    /// Construct a grace fraction in the inclusive range 0..=1.
+    /// Construct a finite nonnegative grace fraction representable in millionths.
     pub fn from_fraction(value: f64) -> Option<Self> {
         let scaled = value * Self::SCALE as f64;
         if !value.is_finite() || value < 0.0 || !scaled.is_finite() || scaled > u64::MAX as f64 {
