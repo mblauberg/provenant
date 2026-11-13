@@ -105,7 +105,7 @@ Size bands are `domains.routing.review.size`. A template review of a `head` or
 `node` subject with no `size` or `review_shape` is deferred: the host measures
 the pinned commit when the review starts. Risk tags (`security`, `concurrency`,
 `terminal`) add conditional lenses. They come only from the top-level `review`
-object of a graph document (`review = { risk_tags = ["security"] }`, run with
+object of a graph document (`{"review": {"risk_tags": ["security"]}}`, run with
 `--file`); no template declares a parameter for them, and a risk tier alone adds
 only the `terminal` tag at tier `terminal`. `[review.minimum_family_counts]` in a run document is
 advisory unless `review.diversity = "strict"`.

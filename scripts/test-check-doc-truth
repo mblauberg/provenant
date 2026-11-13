@@ -4,6 +4,8 @@
 import test_git_env
 test_git_env.isolate()
 
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -14,6 +16,9 @@ import unittest
 
 SCRIPTS = Path(__file__).resolve().parent
 FIXTURES = SCRIPTS / "fixtures/doc-truth"
+_loader = importlib.machinery.SourceFileLoader("check_doc_truth", str(SCRIPTS / "check-doc-truth"))
+check_doc_truth = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
+_loader.exec_module(check_doc_truth)
 
 
 class DocTruthTests(unittest.TestCase):
@@ -158,6 +163,37 @@ class DocTruthTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(f"deleted command `provenant {verb}`", result.stdout)
 
+    def test_every_removed_flag_in_the_cli_table_fails_as_a_command(self):
+        # The table is the CLI's own; the check reads it, so a new entry is covered.
+        guide = self.root / "README.md"
+        for path, flag, _ in check_doc_truth.removed_table(
+                SCRIPTS.parent / check_doc_truth.REMOVED_SOURCE):
+            if flag is None:
+                continue
+            command = "provenant " + " ".join(path) + f" NAME --{flag} VALUE"
+            with self.subTest(command=command):
+                guide.write_text(f"```sh\n{command}\n```\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"README.md:2: error: deleted command `provenant {' '.join(path)} --{flag}`",
+                              result.stdout)
+
+    def test_a_removed_flag_fails_across_a_continued_line_and_in_every_guide_kind(self):
+        for relative in ("README.md", "docs/runbooks/example.md", "skills/demo/SKILL.md"):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("```sh\nprovenant run implement BRIEF \\\n  --tier senior --branch b\n```\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertIn(f"{relative}:2: error: deleted command `provenant run --tier`", result.stdout)
+
+    def test_a_removed_flag_in_prose_for_another_command_is_allowed(self):
+        (self.root / "README.md").write_text(
+            "Use `provenant land 12 --tier substantial --wait=30m` and `provenant wait NAME --any`.\n"
+            "Use `provenant route override set --until 1d` and `provenant output NAME --part events`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_global_options_cannot_hide_deleted_verbs(self):
         guide = self.root / "README.md"
         options = (
@@ -176,7 +212,7 @@ class DocTruthTests(unittest.TestCase):
 
     def test_global_option_values_are_not_commands(self):
         (self.root / "README.md").write_text(
-            "Use `provenant --project 'dispatch review' run --use review`.\n"
+            "Use `provenant --project 'dispatch review' run review BRIEF`.\n"
             "Use `provenant --project=cancel --state-dir /tmp/preset status`.\n")
         result = self.check("--inventory-only", source=False)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -184,7 +220,7 @@ class DocTruthTests(unittest.TestCase):
 
     def test_template_names_fields_and_historical_commands_are_allowed(self):
         (self.root / "README.md").write_text(
-            "Use `provenant run --use review`, `provenant retry ID` and `status`.\n"
+            "Use `provenant run review BRIEF`, `provenant retry ID` and `status`.\n"
             "The `review` template has a `preset` parameter and `lanes` field.\n"
             "Deleted: `provenant cancel ID`.\n"
             "See `src/dispatch.rs#review` and `fabric_graph.schema.json`.\n")
