@@ -578,7 +578,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             return Ok(false);
         };
         let attempt = store
-            .attempt_dir(record.run_id, record.attempt_id, false)
+            .attempt_dir(record.attempt_id, false)
             .map_err(custody_error)?;
         let clean = crate::prepare_writer_with_facts(
             writer,
@@ -603,7 +603,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         let (context, store) =
             HolderContext::open_with_clock(raw, self.clock).map_err(custody_error)?;
         let attempt = store
-            .attempt_dir(context.run_id, context.attempt_id, false)
+            .attempt_dir(context.attempt_id, false)
             .map_err(custody_error)?;
         crate::artifacts::seal(
             &attempt,
@@ -1072,7 +1072,7 @@ impl RunStore {
         run_bytes.copy_from_slice(&digest.as_bytes()[..16]);
         let mut attempt_bytes = [0; 16];
         attempt_bytes.copy_from_slice(&digest.as_bytes()[16..]);
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         if read_sealed(
             &attempt,
             provenant_records::AttemptFile::BudgetWrapUpRefused.name(),
