@@ -144,7 +144,7 @@ fn land_reports_a_queued_merge_as_pending_with_its_own_exit_code() -> Result {
     assert_eq!(code(&output), 5, "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout.bytes)?,
-        format!("pending #1668 {HEAD} (OPEN)\nnext: provenant pr status 1668 --wait\n")
+        format!("pending #1668 {HEAD} (OPEN)\nnext: provenant pr watch 1668\n")
     );
     let json = rig.command(&["land", "1668", "--head", HEAD, "--json"])?;
     assert_eq!(code(&json), 5);

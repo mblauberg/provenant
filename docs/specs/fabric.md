@@ -61,11 +61,12 @@ an unreachable peer is `Unknown`, never complete.
 
 ### Chair bindings follow graph names
 
-The host chair index is keyed by project and graph name. A named child graph
-inherits a sealed binding when its parent's proposal digest matches; a missing
-parent can only produce an unbound association, and a stale digest or an
-explicitly different chair binding conflicts. The graph name is the index key,
-so run and task identifiers do not participate in lookup.
+The host chair index is keyed by project and graph name. A graph's first
+launch seals its binding; every later attempt in the graph resolves it, and a
+request naming a different chair conflicts. A graph launched from another
+inherits the parent graph's binding; a missing parent can only produce an
+unbound association. The graph name is the index key, so no attempt or
+operation identifier participates in lookup.
 - Why: every node in a graph resolves the same dispatching chair without a
   second identity mapping.
 - Test: `crates/fabric-runtime/src/chairs.rs::tests::associations_are_keyed_by_project_and_graph_and_inherit_by_name`

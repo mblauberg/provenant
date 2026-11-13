@@ -655,7 +655,7 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
         "provenant route resolve" => Some("provenant route resolve senior".into()),
         "provenant output" => Some("provenant output fix-login/review".into()),
         "provenant steer" => Some("provenant steer fix-login/implement --text-stdin".into()),
-        "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
+        "provenant run" => Some("provenant run task 'Meet the acceptance criteria'".into()),
         _ => {
             if let Some(core) = selected.get::<metadata::CoreCommand>() {
                 return Some(core.1.to_string());
@@ -1187,7 +1187,7 @@ fn constraints(path: &str) -> Vec<String> {
     }
     let values: &[&str] = match path {
         "provenant run" => &[
-            "a brief uses task by default; --use selects a layered template",
+            "run needs a template; `provenant templates` lists them",
             "--set binds template parameters using TOML values",
             "--file accepts a graph document or a plain text brief",
             "inside a lane, work joins the calling node's graph as a child",

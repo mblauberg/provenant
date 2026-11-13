@@ -62,8 +62,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        // Graph patches use confinement scanners; cutover reads legacy run stores
-        // through the shared read-only SQLite boundary.
+        // Graph patches use confinement scanners.
         &[
             "core",
             "records",
@@ -72,7 +71,6 @@ const LAYERS: &[(&str, &[&str])] = &[
             "confinement",
             "fabric-store",
             "routing",
-            "sqlite",
         ],
     ),
     // The relay validates its socket directory against the effective UID.

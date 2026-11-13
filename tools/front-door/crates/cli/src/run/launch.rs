@@ -290,7 +290,15 @@ pub(super) fn launch_prepared_with_wait(
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host_with_wait(session, attempt, edge, call, None, ready, provider_lease_wait)
+    launch_on_host_with_wait(
+        session,
+        attempt,
+        edge,
+        call,
+        None,
+        ready,
+        provider_lease_wait,
+    )
 }
 
 pub(super) struct PreparedProvider<'a> {
@@ -474,29 +482,21 @@ pub(super) fn launch_on_host_with_wait(
         let graph = graph_for_attempt(session, attempt, call)?;
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
-                let original = session.store.request(prior, call).map_err(|_| {
-                    provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
-                })?;
+                // The parent's graph comes from the host store, never the lane.
                 let parent_graph = graph_for_attempt(session, prior, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation work key")
                 })?;
                 index.inherit(
                     session.context.project_id,
-                    (&parent_graph, original.digest()?),
+                    &parent_graph,
                     &graph,
                     request,
                     index_call,
                 )
             } else {
-                match index.read(session.context.project_id, &graph, index_call)? {
-                    Some(value) if value.request_digest != request_digest => {
-                        Err(provenant_fabric_runtime::chairs::Error::Conflict)
-                    }
-                    // Only the host root's immutable request may repair an
-                    // interrupted submission, including owned-worktree replay.
-                    None => index.submit(session.context.project_id, &graph, request, index_call),
-                    _ => Ok(()),
-                }
+                // The host's immutable request seals or resolves the graph's
+                // binding, including an interrupted submission's replay.
+                index.submit(session.context.project_id, &graph, request, index_call)
             }
         })?;
     }

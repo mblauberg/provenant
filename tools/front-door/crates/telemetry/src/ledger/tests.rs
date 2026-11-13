@@ -53,7 +53,12 @@ fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<Attemp
     Ok(AttemptFact {
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
-        key: WorkKey::new(ProjectId::from_bytes([2; 16]), "g", "n", u32::try_from(number)?)?,
+        key: WorkKey::new(
+            ProjectId::from_bytes([2; 16]),
+            "g",
+            "n",
+            u32::try_from(number)?,
+        )?,
         attempt_number: number,
         project_id: ProjectId::from_bytes([2; 16]),
         terminal_state: AttemptOutcome::Succeeded,

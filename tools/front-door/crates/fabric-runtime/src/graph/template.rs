@@ -413,7 +413,7 @@ fn template_example(
         let binding = format!("{key}={literal}");
         args.push(format!("--set '{}'", binding.replace('\'', "'\\''")));
     }
-    Some(format!("provenant run --use {template} {}", args.join(" ")))
+    Some(format!("provenant run {template} {}", args.join(" ")))
 }
 
 impl std::fmt::Display for ParameterRefusal {

@@ -271,37 +271,16 @@ not infer contribution from transcripts or centrally backfill old attempts.
 ## Work correlation lookup
 
 Membership facts (repository and head) live on the host's attempt rows in
-`<host-state>/run.sqlite3`; there is no separate work index. The trusted host
-seals root, resume and continuation attempts before marking them Starting. New nested dispatches use host-verifiable derived IDs. Their
-canonical request carries `child_attempt_id_version: 1`. The child run ID is
-the first 16 bytes of SHA-256 over `provenant-child-run-v1\0`, then the raw
-project and parent attempt IDs, the SHA-256 digest of the operation ID's UTF-8
-bytes, and the canonical request digest. Each attempt ID is the
-first 16 bytes of SHA-256 over `provenant-child-attempt-v1\0` followed by the raw,
-fixed-width project, parent attempt, run, task and canonical request digest
-bytes, in that order. The namespace comes from the host's project and sealed
-parent context. The host checks every proposed ID during child validation and
-checks both run and attempt identities again at launch and sealing. A mismatch refuses
-launch before membership capture, so rewriting a queued child ID cannot claim
-a sibling's membership or poison its launch. A lane cannot claim a historical
-run namespace by choosing its run ID and recomputing the public attempt hash.
-
-Nested continuation requests use version 1, retaining the original
-parent-attempt namespace and including their continuation parent in the
-canonical digest. Replays retain the original scheme. A child-store
-continuation uses its requesting parent's sealed network bound, or open network
-when that context is unavailable. The host network ceiling still
-narrows the effective access; see [child launch policy](routing.md#the-host-validates-and-launches-children).
-
-This scheme avoids rekeying lane-published records and IDs already returned to
-callers. There is no migration of existing child records: an absent version
-marker preserves explicit `Unindexed` coverage. Chair admission separately
-requires a retained host seal for legacy child launch, as described below.
-An unknown version refuses launch. Removing the marker only loses indexing;
-it never adopts a lane-proposed ID as trusted membership. Replays preserve the
-original version. Calling the
-ordinary start path on a child store cannot seal membership. Only host child
-launch from a validated versioned request can seal nested membership.
+`<host-state>/run.sqlite3`, beside the attempt's work key; there is no separate
+work index. The trusted host seals root, resume and continuation attempts
+before marking them Starting. A nested dispatch is a child node of the calling
+graph, admitted by the host graph owner, so its work key and attempt ID come
+from the host's graph journal and run store, never from lane bytes. Calling the
+ordinary start path on a child store cannot seal membership; only host launch
+of an admitted attempt can. A child-store continuation uses its requesting
+parent's sealed network bound, or open network when that context is
+unavailable. The host network ceiling still narrows the effective access; see
+[child launch policy](routing.md#the-host-validates-and-launches-children).
 
 Opening and sealing remain crate-private. The public `validate_work` reader
 accepts only the configured host `StateRoot`; CLI/MCP bind it to their trusted
@@ -313,14 +292,14 @@ host-observed launch HEAD for readers; writer heads and unavailable Git facts
 remain explicitly unproven. Membership proves neither chair-session ownership,
 successful launch nor workflow authority.
 
-`WorkSelector` requires project and run, with optional task, attempt, repository
-and head constraints. Reads check at most 64 candidates and 64 KiB per record,
-using the same byte bound as writes. `Verified` requires a task or attempt;
-run-only matches are at best `Partial` because there is no trusted complete member list.
-Legacy or missing nested, historical and unprepared work, including an empty
-run-only selection, returns `Unindexed`. Contradictory
+`WorkSelector` requires project and graph, with optional node, attempt,
+repository and head constraints. Reads check at most 64 candidates and 64 KiB
+per record, using the same byte bound as writes. `Verified` requires a node or
+attempt; graph-only matches are at best `Partial` because there is no trusted
+complete member list. Missing nested and unprepared work, including an empty
+graph-only selection, returns `Unindexed`. Contradictory
 facts return `Mismatch`, ahead of unavailable repository/head facts and unindexed
-coverage, including run-only selectors. A mismatch observed among the first 64
+coverage, including graph-only selectors. A mismatch observed among the first 64
 candidates also wins over `Limit`; otherwise `Limit` never proves absence. Lookups traverse no child roots and accept
 no caller-supplied store locator. Configured grants cannot expose the host store,
 its companions or lock. Membership is retained with the attempt row.
@@ -336,66 +315,41 @@ its companions or lock. Membership is retained with the attempt row.
 Local CLI and MCP submissions seal a chair's host and Fabric inbox actor with
 the request. CLI selection matches session discovery; MCP uses its bound inbox.
 This actor-scoped association identifies no particular live chair session and
-does not change run ownership. Worker provider sessions never establish it.
+does not change attempt ownership. Worker provider sessions never establish it.
 
-The Fabric `run_chairs` index in `<state>/fabric/host.sqlite3` is authoritative,
-keyed by project and run. This database and its companions are outside the exact
-coordination database write grants lanes receive. It seals the request digest
-and optional chair before launch. Each nested launch inherits from the host
-index using the parent's host-sealed request
-digest. The index write uses the exact request returned by child validation;
-it never re-reads lane-writable request bytes to choose the digest to seal.
-A disagreeing child proposal is refused. Lane-local requests and even a
-lane-local Fabric database or the shared mail database cannot replace this
-association. A retry preserves the original proposal; continuations copy the
-original host index binding.
-Index failures or exposing write grants refuse launch. Replay a root submission with the
-same operation ID: launch repairs its index from the immutable host request,
-including owned-worktree replay. Lane stores cannot repair it.
-Transient index errors leave queued children available for a later scan.
+The Fabric `graph_chairs` index in `<state>/fabric/host.sqlite3` is
+authoritative, keyed by project and graph name, as
+[Fabric](fabric.md#chair-bindings-follow-graph-names) states. This database and
+its companions are outside the exact coordination database write grants lanes
+receive. The host seals a graph's binding at its first launch, from the host's
+immutable request, before any provider starts. Every later attempt in the graph
+resolves that binding: a request naming no chair inherits it, and one naming a
+different chair is refused. A continuation inherits its parent's graph binding,
+reading the parent's graph from the host store; a missing parent binding yields
+an unbound association. Lane-local requests, a lane-local Fabric database and
+the shared mail database cannot replace an association. Index failures or
+exposing write grants refuse launch. Replaying a root submission (the same
+`run --name`) repairs a missing binding from the immutable host request,
+including owned-worktree replay; lane stores cannot repair it, and a replay
+naming a different chair is refused. Transient index errors leave queued
+children available for a later scan.
 
-Chair inheritance must obey these boundaries:
+The binding is sealed before handoff, so presence in the index does not imply
+that an attempt launched. Launch validation reads
+`fabric-runtime::chairs::ChairIndex`; for reads, a graph with no record is
+unbound. `console board` reads existing host associations without initialising
+the index. Provider handles and child requests are never fallbacks. Board and
+tree rendering are separate.
 
-- New child associations require the version 1 derived run ID check used by
-  WorkIndex, before any index write. An unversioned request with a lane-chosen
-  run ID is refused, so it cannot bind a missing row or shadow another run.
-  Existing legacy host rows remain readable and replayable only with their
-  sealed request digest; lane stores cannot create or repair missing legacy
-  rows. Removing the version marker grants no chair association. A legacy
-  continuation whose host seal is lost is therefore refused permanently rather
-  than repaired from lane bytes.
-- New nested continuations never take a lane-supplied ID: resume derives and
-  overwrites their run and attempt IDs.
-- Host continuations given a reopened lane-local store check the replayed run ID
-  against the request and operation using the same derivation before copying
-  the chair binding. New inheritance also verifies the source run and attempt
-  derivations and requires the source's host seal. Copying another run's
-  request and operation while substituting the source attempt is refused.
-  A legacy source cannot prove attempt membership for new inheritance.
-  Retained continuation rows, including unversioned ones, replay their sealed
-  binding without copying a lane-proposed source. Forged continuation
-  operations cannot create a chair row under a lane-chosen ID, including the
-  host's early operation replay after reopening the lane store.
-- Root replay with the same operation ID and a different submitting chair
-  retains the original immutable request. Even repair of a missing host row
-  seals the original chair and digest; a conflicting row is refused.
-
-The chair row is sealed before handoff, so presence in the index does not imply
-that the run launched. Launch validation reads `fabric-runtime::chairs::ChairIndex`;
-for reads of existing runs, missing records and older runs are unbound. `console board` reads existing host associations
-without initialising the index. Provider handles and child requests are never fallbacks. Graph and
-peer executions remain unbound until they retain an originating chair separately
-from the actor owning operation replay. Board and tree rendering are separate.
-
-Association rows live as long as run metadata. Current GC removes provider
-payloads, logs, events and worktrees; it never removes run/attempt metadata.
-Whole-run collection must delete its association in the same host-owned removal
-workflow. Lane-writable missing child records alone cannot authorise deletion.
+Association rows live as long as graph metadata. GC removes provider payloads,
+logs, events and worktrees; it never removes attempt metadata. Whole-graph
+collection must delete its association in the same host-owned removal workflow.
+Lane-writable missing child records alone cannot authorise deletion.
 
 - Test: `crates/fabric-runtime/src/chairs.rs::tests::associations_are_keyed_by_project_and_graph_and_inherit_by_name`;
   `crates/run/src/service_tests.rs::chair_binding_replays_the_original_submission`;
   `crates/cli/src/run/tests.rs::operation_replays_after_its_context_ref_moves_or_is_deleted`;
-  `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_uses_host_derived_ids`;
+  `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_keeps_the_host_attempt_id_and_replays`;
   `crates/run/src/dispatch_lifecycle_tests.rs::nested_continuation_preflight_does_not_reuse_crashed_staging`
 - Owner: `crates/fabric-runtime/src/chairs.rs`, `crates/fabric-store/src/chairs.rs`,
   `crates/cli/src/run.rs`, `crates/cli/src/fabric/graph_relay.rs`
@@ -432,8 +386,7 @@ promotes a ticket that gains write authority. The host monotonic clock and boot
 identity are read inside the ledger transaction, so lock order is clock order;
 wall-clock adjustments cannot shorten spacing. Reboot clears prior-boot spacing.
 An unreadable clock/boot identity refuses the claim. Spacing constrains admission,
-not eventual provider spawn. A run's own concurrency remains independent of host
-caps and can never launch more tasks than it contains.
+not eventual provider spawn. Each launch admits exactly one attempt.
 
 Status derives queued waits from the owner store and ledger, including over peer
 reads. Unknown observations remain unavailable. A running guardian's observed

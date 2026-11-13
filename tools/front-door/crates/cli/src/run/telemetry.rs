@@ -130,11 +130,7 @@ pub(super) fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, Str
     };
     let facts = store
         .as_ref()
-        .map(|store| {
-            store
-                .attempts(&call)?
-                .collect::<Result<Vec<_>, _>>()
-        })
+        .map(|store| store.attempts(&call)?.collect::<Result<Vec<_>, _>>())
         .transpose()?
         .unwrap_or_default();
     let unfinished = unfinished_attempts(store.as_ref(), &call)?;
@@ -499,11 +495,7 @@ pub(crate) fn accepted_attempts(edge: &Edge<'_>, since: i64) -> Result<AcceptedA
     let (context, store) = open_read_only(edge, &call)?;
     let facts = store
         .as_ref()
-        .map(|store| {
-            store
-                .attempts(&call)?
-                .collect::<Result<Vec<_>, _>>()
-        })
+        .map(|store| store.attempts(&call)?.collect::<Result<Vec<_>, _>>())
         .transpose()?
         .unwrap_or_default();
     let selected: Vec<_> = facts

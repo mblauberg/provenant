@@ -608,7 +608,11 @@ fn submit_with_launcher(
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
             let attempt = task.attempt;
-            if attempt.confidential { task_profile.extra.insert("confidential".into(), serde_json::json!(true)); }
+            if attempt.confidential {
+                task_profile
+                    .extra
+                    .insert("confidential".into(), serde_json::json!(true));
+            }
             if attempt.parent_sandboxed {
                 task_profile.extra.insert(
                     provenant_records::run::PARENT_SANDBOXED_FIELD.into(),

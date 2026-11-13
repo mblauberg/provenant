@@ -772,7 +772,7 @@ fn recover_provisioning(
                 progress.advance_error_code = Some("launch_refused".into());
                 progress.advance_owner_code = Some(error.code().into());
                 progress.advance_error = Some(format!(
-                    "writer provisioning refused [{}]; correct the cause, then retry with `provenant retry {} --node {node}`",
+                    "writer provisioning refused [{}]; correct the cause, then retry with `provenant retry {}/{node}`",
                     error.code(),
                     checkpoint.graph_id,
                 ));

@@ -90,7 +90,7 @@ pub enum Command {
     #[command(subcommand)]
     Route(crate::route::Route),
     /// Start work from a template or graph document
-    #[command(add = crate::metadata::CoreCommand(0, "provenant run 'Meet the acceptance criteria' --use task"))]
+    #[command(add = crate::metadata::CoreCommand(0, "provenant run task 'Meet the acceptance criteria'"))]
     Run(Box<GraphRunArgs>),
     /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]

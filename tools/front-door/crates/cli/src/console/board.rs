@@ -168,7 +168,9 @@ pub(super) fn read(
             let chair = match &chairs {
                 Ok(Some(index)) => {
                     match index.read(attempt.project_id, work_key.graph(), &chair_call) {
-                        Ok(Some(found)) if found.request_digest == lane.operation.request_digest => {
+                        Ok(Some(found))
+                            if found.request_digest == lane.operation.request_digest =>
+                        {
                             found.chair
                         }
                         Ok(None) => None,

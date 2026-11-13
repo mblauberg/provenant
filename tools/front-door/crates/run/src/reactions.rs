@@ -290,10 +290,7 @@ impl RunStore {
     }
 
     /// Exclude other drains of this attempt. `None` when another holds it.
-    pub fn reaction_lock(
-        &self,
-        attempt: AttemptId,
-    ) -> Result<Option<provenant_os::fs::LockGuard>> {
+    pub fn reaction_lock(&self, attempt: AttemptId) -> Result<Option<provenant_os::fs::LockGuard>> {
         use provenant_os::fs::{FsError, LockMode};
         let directory = self.attempt_dir(attempt, false)?;
         match directory.try_lock(std::ffi::OsStr::new("reactions.lock"), LockMode::Exclusive) {

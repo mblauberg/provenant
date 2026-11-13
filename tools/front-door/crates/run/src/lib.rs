@@ -782,7 +782,7 @@ impl RunError {
                         None => format!("retained attempt {attempt}"),
                     })
                     .next(format!(
-                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {attempt} --reason 'recover retained work manually'`; this stops automatic import"
+                        "to release the fence and recover the preserved private Git manually, find attempt {attempt}'s NAME/NODE#N with `provenant status`, then run `provenant reconcile --abandon NAME/NODE#N --reason 'recover retained work manually'`; this stops automatic import"
                     ));
             }
             _ => {}

@@ -90,10 +90,7 @@ pub fn compose_tree(mut local: Value, peers: Vec<PeerTree>) -> Result<Value, &'s
                     .as_str()
                     .and_then(|s| AttemptId::parse(s).ok())
                     .is_some()
-                && matches!(
-                    edge["kind"].as_str(),
-                    Some("dispatch" | "continuation")
-                )
+                && matches!(edge["kind"].as_str(), Some("dispatch" | "continuation"))
                 && matches!(edge["parent_status"].as_str(), Some("present" | "missing"));
             if valid {
                 let mut edge = edge.clone();

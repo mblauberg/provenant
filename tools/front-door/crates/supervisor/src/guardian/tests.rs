@@ -1176,11 +1176,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
         &writer.reservation,
     )
     .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("provenant reconcile")
-    );
+    assert!(error.to_string().contains("provenant reconcile"));
     assert!(writer.lease.is_some());
     assert!(matches!(
         directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),

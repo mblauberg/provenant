@@ -12,7 +12,6 @@ provenant-config = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
-rusqlite = { workspace = true }
 provenant-routing = { workspace = true }
 provenant-fabric-store = { workspace = true }
 serde = { workspace = true }
@@ -22,12 +21,11 @@ sha2 = { workspace = true }
 toml_edit = { workspace = true }
 
 [features]
-# Lets tests seed associations sealed before derived child run IDs existed.
-retained-seed = []
 # Records checkpoint reads for host-path counting fixtures.
 fixture = []
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 provenant-core = { workspace = true, features = ["fixture"] }
 provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }

@@ -29,8 +29,7 @@ pub(crate) fn recover_accepted_launch(
         (provenant_run::AttemptRecord, Vec<provenant_run::Started>),
         provenant_cli::run::Fail,
     >,
-) -> Result<(provenant_run::AttemptRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail>
-{
+) -> Result<(provenant_run::AttemptRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail> {
     match submitted {
         // The CLI reports an all-refused launch batch as an error even
         // after admitting its terminal preparation records. The graph

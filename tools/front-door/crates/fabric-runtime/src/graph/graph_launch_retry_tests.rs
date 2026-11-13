@@ -662,7 +662,7 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     );
     let reason = progress.advance_error.as_deref().expect("blocked reason");
     assert!(reason.contains("invalid input"));
-    assert!(reason.contains("provenant retry g-test --node one"));
+    assert!(reason.contains("provenant retry g-test/one"));
     assert_eq!(run.checkpoint.wake_at, None);
 
     // The refusal is durable: the next advance never relaunches the node.

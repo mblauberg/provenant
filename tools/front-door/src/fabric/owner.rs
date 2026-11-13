@@ -1111,7 +1111,11 @@ impl BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", key)?
+        if store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?
+            .operation_id
+            != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
@@ -1545,7 +1549,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", key)?
+        if store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?
+            .operation_id
+            != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
@@ -1592,7 +1600,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", key)?
+        if store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?
+            .operation_id
+            != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
@@ -1646,7 +1658,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let call = owner.call(self.cancel);
         let id = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let record = store.record(id, &call).map_err(run_error)?;
-        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", request.key)?
+        if store
+            .attempt_operation(record.attempt_id, &call)
+            .map_err(run_error)?
+            .operation_id
+            != graph_operation("graph-attempt-operation", request.key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(request.key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(request.key.node_id.as_str())
@@ -2072,7 +2088,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let (_, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
             let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
             let attempt = session.service().status(id, &call).map_err(run_error)?;
-            body.push_str(&format!("Node {}: attempt {id} ({})\n\n", node.id, attempt.key));
+            body.push_str(&format!(
+                "Node {}: attempt {id} ({})\n\n",
+                node.id, attempt.key
+            ));
             if graph_review_node(document, &node.id) {
                 // Retain each launched review route, including failed attempts
                 // before a successful retry. These are evidence, not a verdict.
@@ -2618,7 +2637,9 @@ impl BoundGraphOwner<'_> {
                 ) {
                     submission_prompt.push_str("\n\nThe previous member stopped on quota. Inspect the retained worktree and any commits, then continue the original task from that work rather than restart. Use another eligible member of the same alias.");
                 }
-                let request = store.request(previous.attempt_id, &call).map_err(run_error)?;
+                let request = store
+                    .request(previous.attempt_id, &call)
+                    .map_err(run_error)?;
                 let previous_task = &request.task;
                 let writer = provenant_run::resolve_writer(
                     self.factory.context.roots.state.as_path(),
@@ -2671,10 +2692,8 @@ impl BoundGraphOwner<'_> {
                         let task = &request.task;
                         if accepted {
                             let session = owner.session(self.cancel)?;
-                            let record = session
-                                .store
-                                .record(admitted, &call)
-                                .map_err(run_error)?;
+                            let record =
+                                session.store.record(admitted, &call).map_err(run_error)?;
                             if record.prompt.bytes > provenant_records::run::RECORD_LIMIT {
                                 return Err(FacadeError::StateCorrupt);
                             }

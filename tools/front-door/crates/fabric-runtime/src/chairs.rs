@@ -1,5 +1,5 @@
 //! Host-only dispatch associations. Never open this index in a lane's child root.
-use provenant_core::{Digest, ProjectId, StateRoot};
+use provenant_core::{ProjectId, StateRoot};
 use provenant_fabric_store::HostStore;
 pub use provenant_fabric_store::{Error, GraphChair, Request};
 use provenant_records::run::CanonicalRequest;
@@ -29,7 +29,10 @@ impl ChairIndex {
         self.0.graph_chair(project, graph, call)
     }
 
-    /// Seal an association at root submission before any provider can launch.
+    /// Bind a graph's chair at its first launch, before any provider starts.
+    /// Every later attempt in the graph resolves the same binding: one that
+    /// names no chair inherits it, and one that names a different chair
+    /// conflicts. The seal keeps the first request's digest.
     pub fn submit(
         &self,
         project: ProjectId,
@@ -37,38 +40,41 @@ impl ChairIndex {
         proposal: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<(), Error> {
-        self.0.seal_graph_chair(
-            project,
-            graph,
-            &GraphChair {
-                extra: Default::default(),
-                request_digest: proposal.digest()?,
-                chair: proposal.chair.clone(),
-            },
-            call,
-        )
+        self.seal(project, graph, proposal, proposal.chair.clone(), call)
     }
-
-    /// Carry a sealed association to a named child graph. An explicit
-    /// disagreement refuses the launch; an absent proposal inherits the seal.
+    /// Carry a parent graph's binding to a graph launched from it. A missing
+    /// parent seal yields an unbound association; a proposal naming a
+    /// different chair conflicts.
     pub fn inherit(
         &self,
         project: ProjectId,
-        parent: (&str, Digest),
+        parent: &str,
         graph: &str,
         proposal: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<(), Error> {
-        let original = self.read(project, parent.0, call)?;
-        if original
-            .as_ref()
-            .is_some_and(|value| value.request_digest != parent.1)
-        {
-            return Err(Error::Conflict);
-        }
-        let chair = original.and_then(|value| value.chair);
+        let chair = self
+            .read(project, parent, call)?
+            .and_then(|value| value.chair);
         if proposal.chair.is_some() && proposal.chair != chair {
             return Err(Error::Conflict);
+        }
+        self.seal(project, graph, proposal, chair, call)
+    }
+    fn seal(
+        &self,
+        project: ProjectId,
+        graph: &str,
+        proposal: &CanonicalRequest,
+        chair: Option<provenant_records::run::ChairBinding>,
+        call: &Request<'_>,
+    ) -> Result<(), Error> {
+        if let Some(sealed) = self.read(project, graph, call)? {
+            return if chair.is_none() || sealed.chair == chair {
+                Ok(())
+            } else {
+                Err(Error::Conflict)
+            };
         }
         self.0.seal_graph_chair(
             project,
@@ -82,7 +88,6 @@ impl ChairIndex {
         )
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,13 +147,11 @@ mod tests {
         index.submit(project, "graph", &parent, &call)?;
 
         let child = proposal();
-        index.inherit(
-            project,
-            ("graph", parent.digest()?),
-            "graph-child",
-            &child,
-            &call,
-        )?;
+        // A second node of the same graph naming no chair resolves the seal.
+        let mut sibling = proposal();
+        sibling.lane_depth = Some(1);
+        index.submit(project, "graph", &sibling, &call)?;
+        index.inherit(project, "graph", "graph-child", &child, &call)?;
         assert_eq!(
             index.read(project, "graph", &call)?.unwrap().chair,
             Some(chair.clone())
@@ -160,22 +163,6 @@ mod tests {
         assert!(index.read(project, "missing", &call)?.is_none());
         assert!(index.read(other_project, "graph", &call)?.is_none());
 
-        let mut changed = parent.clone();
-        changed.chair = None;
-        assert!(matches!(
-            index.submit(project, "graph", &changed, &call),
-            Err(Error::Conflict)
-        ));
-        assert!(matches!(
-            index.inherit(
-                project,
-                ("graph", Digest::from_bytes([8; 32])),
-                "other-child",
-                &child,
-                &call
-            ),
-            Err(Error::Conflict)
-        ));
         let mut conflicting_child = child.clone();
         conflicting_child.chair = Some(ChairBinding {
             extra: Default::default(),
@@ -184,22 +171,14 @@ mod tests {
             actor: ActorId::from_bytes([8; 16]),
         });
         assert!(matches!(
-            index.inherit(
-                project,
-                ("graph", parent.digest()?),
-                "other-child",
-                &conflicting_child,
-                &call
-            ),
+            index.submit(project, "graph", &conflicting_child, &call),
             Err(Error::Conflict)
         ));
-        index.inherit(
-            project,
-            ("unknown-parent", Digest::from_bytes([7; 32])),
-            "unbound-child",
-            &child,
-            &call,
-        )?;
+        assert!(matches!(
+            index.inherit(project, "graph", "other-child", &conflicting_child, &call),
+            Err(Error::Conflict)
+        ));
+        index.inherit(project, "unknown-parent", "unbound-child", &child, &call)?;
         assert!(
             index
                 .read(project, "unbound-child", &call)?

@@ -117,7 +117,9 @@ pub(crate) fn advance_graphs_after_settlement(
             .map_err(|failure| std::io::Error::other(failure.message))?;
     }
     let record = store.record(settled.attempt_id, &call)?;
-    let operation = store.attempt_operation(settled.attempt_id, &call)?.operation_id;
+    let operation = store
+        .attempt_operation(settled.attempt_id, &call)?
+        .operation_id;
     if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record, &operation) {
         let result = advance_attempt_graph(settled, &roots, &record, &operation, &id, workers);
         // If the attempt store itself refused the retention receipt, retain
@@ -172,7 +174,9 @@ pub(crate) fn advance_live_graph(
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
     let record = store.record(holder.attempt_id, &call)?;
-    let operation = store.attempt_operation(holder.attempt_id, &call)?.operation_id;
+    let operation = store
+        .attempt_operation(holder.attempt_id, &call)?
+        .operation_id;
     advance_attempt_graph(holder, &roots, &record, &operation, id, workers)
 }
 
@@ -329,9 +333,7 @@ pub(crate) fn settle_owned_worktree(
     {
         return Ok(());
     }
-    let task = store
-        .request(record.attempt_id, &call)?
-        .task;
+    let task = store.request(record.attempt_id, &call)?.task;
     let Some(writer) = task.writer else {
         return Ok(());
     };
@@ -340,7 +342,9 @@ pub(crate) fn settle_owned_worktree(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let operation = store.attempt_operation(record.attempt_id, &call)?.operation_id;
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)?
+            .operation_id;
         let graph_member =
             matching_graph_hint(&roots.state, settled.project_id, &record, &operation).is_some();
         // An unmatched graph operation retains custody without scanning other graphs.

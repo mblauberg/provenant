@@ -212,7 +212,7 @@ pub(crate) fn apply_launch_disposition(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
     }) {
-        format!("; after correcting the cause, retry with `provenant retry {graph_id} --node {id}`")
+        format!("; after correcting the cause, retry with `provenant retry {graph_id}/{id}`")
     } else {
         "; inspect the graph, then use `provenant retry` with its graph and node selectors".into()
     };

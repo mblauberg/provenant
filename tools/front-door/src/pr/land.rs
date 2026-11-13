@@ -1586,7 +1586,7 @@ pub(crate) fn execute(
         ));
     }
     let next = if !merged {
-        format!("provenant pr status {number} --wait")
+        format!("provenant pr watch {number}")
     } else {
         "provenant status".into()
     };

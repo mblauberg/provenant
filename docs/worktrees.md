@@ -109,7 +109,7 @@ The kernel `writer.lock` is the exclusion authority. Its descriptor is inherited
 by descendants, so a guardian crash does not free the writer while a descendant
 still holds it. Never delete a lock or reservation to force admission.
 
-Inspect `provenant reconcile --id RUN --json` for the exact scoped attempt and
+Inspect `provenant reconcile NAME/NODE#N --json` for the exact scoped attempt and
 reservation. A free lock alone does not prove that the result was imported.
 Reconcile can recover a durable exit or prove loss after a reboot using recorded
 boot and directory bindings; an unchanged boot is not absence evidence.

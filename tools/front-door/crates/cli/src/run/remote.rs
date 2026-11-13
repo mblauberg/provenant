@@ -46,12 +46,12 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         Some(detail) => format!("{error} ({detail})"),
         None => error.to_string(),
     };
-    if let FacadeError::LaunchUnknown { operation_id } = &error {
+    if matches!(error, FacadeError::LaunchUnknown { .. }) {
         return Fail::new(
             Status::Error,
             ErrorKind::LaunchUnknown,
             format!(
-                "{message}; rerun with --operation-id {operation_id} to recover the \
+                "{message}; rerun the same `run` with the same --name to recover the \
                  peer's receipt before submitting new work"
             ),
         );

@@ -9,7 +9,10 @@ use serde_json::{Value, json};
 fn linked(request: &HumanRequest, attempt: &AttemptRecord) -> bool {
     request.verified_work().is_some_and(|work| {
         work.graph == attempt.key.graph()
-            && work.node.as_deref().is_none_or(|node| node == attempt.key.node())
+            && work
+                .node
+                .as_deref()
+                .is_none_or(|node| node == attempt.key.node())
             && work.attempt_id.is_none_or(|id| id == attempt.attempt_id)
     })
 }

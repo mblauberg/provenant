@@ -3014,9 +3014,7 @@ fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> T
     // Progress is kept and the row is still owed.
     assert!(recovery.reaction_pending(input.attempt_id, &call)?);
     recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
-    assert!(
-        !recovery.reaction_pending(input.attempt_id, &call)?
-    );
+    assert!(!recovery.reaction_pending(input.attempt_id, &call)?);
     recovery.drain_reactions(input.attempt_id, &clock, &cancel, &mut step)?;
     // The graph ran once, the failed notice ran twice, and nothing ran after.
     assert_eq!(*calls.borrow(), (1, 2));

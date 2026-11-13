@@ -151,10 +151,7 @@ pub(crate) fn collect_unsettled(
             {
                 continue;
             }
-            let Some(writer) = store
-                .request(attempt.attempt_id, &call)?
-                .task.writer
-            else {
+            let Some(writer) = store.request(attempt.attempt_id, &call)?.task.writer else {
                 continue;
             };
             if std::fs::symlink_metadata(&writer.worktree).is_err() {
@@ -252,9 +249,7 @@ fn collect_owned_worktree_with(
         )?;
         return Ok(());
     }
-    let task = store
-        .request(record.attempt_id, &call)?
-        .task;
+    let task = store.request(record.attempt_id, &call)?.task;
     let Some(writer) = task.writer else {
         record_worktree_settlement(
             &store,
@@ -289,7 +284,9 @@ fn collect_owned_worktree_with(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let operation = store.attempt_operation(record.attempt_id, &call)?.operation_id;
+        let operation = store
+            .attempt_operation(record.attempt_id, &call)?
+            .operation_id;
         let graph_member =
             matching_graph_hint(&roots.state, settled.project_id, &record, &operation).is_some();
         // An unmatched graph operation retains custody without scanning other graphs.

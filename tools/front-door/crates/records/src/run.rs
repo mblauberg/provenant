@@ -72,7 +72,6 @@ impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
         CanonicalV1::record_digest("run-request", 1, self)
     }
-
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -4,9 +4,7 @@
 use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace, limits};
 #[cfg(test)]
 use provenant_core::ActorId;
-use provenant_core::{
-    AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, WallTime,
-};
+use provenant_core::{AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, WallTime};
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
