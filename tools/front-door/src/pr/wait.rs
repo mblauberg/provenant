@@ -78,6 +78,7 @@ fn observe(
         other => other,
     }
 }
+#[cfg(test)]
 fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
     let head = checks.first().map_or("", |check| check.head.as_str());
     state_for(head, checks, required, now)
@@ -539,7 +540,8 @@ fn checks_with(
 #[cfg(test)]
 #[allow(dead_code)] // The worktree driver includes this module without libtest.
 pub(super) fn verdict(checks: &[Check], now: jiff::Timestamp) -> &'static str {
-    match state(checks, &[], now) {
+    let head = checks.first().map_or("", |check| check.head.as_str());
+    match state_for(head, checks, &[], now) {
         State::Passed => "passed",
         State::Pending | State::Settling => "pending",
         State::Failed => "failed",

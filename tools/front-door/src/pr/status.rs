@@ -201,7 +201,7 @@ pub(crate) enum CiCompletion {
 }
 
 /// Decide whether CI is complete and green for exactly `head`.
-pub(crate) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required]) -> CiCompletion {
+pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required]) -> CiCompletion {
     if checks.iter().any(|check| check.head != head) {
         return CiCompletion::Unavailable;
     }
