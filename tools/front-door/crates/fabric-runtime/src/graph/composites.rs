@@ -117,7 +117,16 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
         for node in nodes {
             match &mut node.source {
                 Some(SourceBinding::Head { node }) => bind(node, &writer_aliases),
-                Some(SourceBinding::Node { node }) => bind(node, &result_aliases),
+                Some(SourceBinding::Node { node: target }) => {
+                    if let Some(writer) = result_aliases.get(target) {
+                        *target = writer.clone();
+                        // Keep the composite dependency as its settlement gate,
+                        // and retain the direct edge required by a Node source.
+                        if !node.depends_on.contains(writer) {
+                            node.depends_on.push(writer.clone());
+                        }
+                    }
+                }
                 _ => {}
             }
             if let Some(id) = &mut node.continues {

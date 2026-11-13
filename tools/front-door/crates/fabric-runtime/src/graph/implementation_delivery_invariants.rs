@@ -40,6 +40,18 @@ fn unplanned_delivery_links_resolve_to_its_exported_writer() {
     }));
     let mut continuations = 0;
     let mut head_sources = 0;
+    let boundary = expanded
+        .nodes
+        .iter()
+        .find(|node| {
+            node.composite.as_ref().is_some_and(|spec| {
+                spec.exports.iter().any(|export| {
+                    export.node == writer.id && export.outputs.contains(&OutputKind::Commit)
+                })
+            })
+        })
+        .unwrap();
+    let mut node_sources = 0;
     for node in &expanded.nodes {
         if let Some(target) = &node.continues {
             assert_eq!(target, &writer.id);
@@ -49,6 +61,13 @@ fn unplanned_delivery_links_resolve_to_its_exported_writer() {
         if let Some(SourceBinding::Head { node: target }) = &node.source {
             assert_eq!(target, &writer.id);
             head_sources += 1;
+        }
+        if let Some(SourceBinding::Node { node: target }) = &node.source
+            && target == &writer.id
+        {
+            assert!(node.depends_on.contains(&writer.id));
+            assert!(node.depends_on.contains(&boundary.id));
+            node_sources += 1;
         }
         if let Some(land) = &node.land {
             assert_eq!(land.node, writer.id);
@@ -68,5 +87,5 @@ fn unplanned_delivery_links_resolve_to_its_exported_writer() {
             }
         }
     }
-    assert!(continuations > 0 && head_sources > 0);
+    assert!(continuations > 0 && head_sources > 0 && node_sources > 0);
 }
