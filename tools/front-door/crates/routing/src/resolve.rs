@@ -798,11 +798,17 @@ fn pacing_factor_basis_points(
                 .collect();
             if missing.is_empty() {
                 format!("{detail}; Go quota source: local-ledger, coverage: partial")
+            } else if account.is_none() {
+                // Calibration is keyed by account; with none resolved there is
+                // nothing to match, so claiming it is missing would mislead.
+                format!(
+                    "{detail}; Go quota source: local-ledger, coverage: partial; no account resolved, so Go calibration was not checked"
+                )
             } else {
                 format!(
                     "{detail}; Go quota source: local-ledger, coverage: partial; Go calibration missing or stale: {} (calibration key must match account key {:?}); calibration would tighten pacing",
                     missing.join(", "),
-                    account.unwrap_or("unknown")
+                    account.unwrap_or_default()
                 )
             }
         }
