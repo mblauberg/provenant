@@ -47,13 +47,10 @@ fn status_reads_an_unregistered_project_without_creating_state() -> Result {
 #[test]
 fn board_read_only() -> Result {
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId,
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs,
     };
     use provenant_os::clock::SystemClock;
-    use provenant_run::{
-        CanonicalRequest, ExecutionContext, NewAttempt, PreparedRun, Request, RunStore,
-    };
+    use provenant_run::{CanonicalRequest, ExecutionContext, PreparedRun, Request, RunStore};
     use serde_json::json;
     let empty = TestRig::new()?.without_state()?;
     let board = call(&empty, &["console", "board"], 0)?;
@@ -84,24 +81,23 @@ fn board_read_only() -> Result {
         clock: &clock,
         cancel: &cancel,
     };
-    let task = TaskId::from_bytes([3; 16]);
-    let proposal: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
-        "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"private"),
-        "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
-        "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
+    // One launch admits one attempt, so each attempt has its own request and key.
+    let proposal = |node: &str| -> Result<CanonicalRequest> {
+        Ok(serde_json::from_value(json!({"schema_version":1,"task":{
+            "context":{"graph_id":"board-graph","node_id":node,"attempt":1},
+            "prompt_digest":provenant_records::CanonicalV1::file_digest(b"private"),
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
+            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},"parent":null}))?)
+    };
     let store = RunStore::open(&context, &request)?;
     for n in 1..=2 {
         store.create(
             &PreparedRun {
-                run_id: RunId::from_bytes([n; 16]),
+                attempt_id: AttemptId::from_bytes([n; 16]),
                 operation_id: OperationId::parse(&format!("board-{n}"))?,
                 created_at: clock.wall_now()?,
-                request: proposal.clone(),
-                attempts: vec![NewAttempt {
-                    task_id: task,
-                    attempt_id: AttemptId::from_bytes([n; 16]),
-                    prompt: "private".into(),
-                }],
+                request: proposal(&format!("node-{n}"))?,
+                prompt: "private".into(),
             },
             &request,
         )?;
@@ -115,15 +111,11 @@ fn board_read_only() -> Result {
     )?;
     other.create(
         &PreparedRun {
-            run_id: RunId::from_bytes([8; 16]),
+            attempt_id: AttemptId::from_bytes([8; 16]),
             operation_id: OperationId::parse("tree-other")?,
             created_at: clock.wall_now()?,
-            request: proposal,
-            attempts: vec![NewAttempt {
-                task_id: task,
-                attempt_id: AttemptId::from_bytes([8; 16]),
-                prompt: "private".into(),
-            }],
+            request: proposal("node-other")?,
+            prompt: "private".into(),
         },
         &request,
     )?;

@@ -149,11 +149,12 @@ fn attempt_id(submitted: &Value) -> Result<&str> {
 
 fn attempt_dir(rig: &TestRig, reference: &str) -> Result<std::path::PathBuf> {
     let (_, attempt) = reference.rsplit_once('/').ok_or("attempt reference")?;
-    fs::read_dir(rig.state.join("runs"))?
-        .flatten()
-        .map(|run| run.path().join("attempts").join(attempt))
-        .find(|path| path.is_dir())
-        .ok_or_else(|| format!("attempt directory: {reference}").into())
+    let path = rig.state.join("attempts").join(attempt);
+    if path.is_dir() {
+        Ok(path)
+    } else {
+        Err(format!("attempt directory: {reference}").into())
+    }
 }
 
 fn settled(rig: &TestRig, reference: &str) -> Result<Value> {
@@ -177,12 +178,8 @@ fn settled(rig: &TestRig, reference: &str) -> Result<Value> {
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
     let record = store.record(attempt.parse()?, &call)?;
-    let request = store.request(record.run_id, &call)?;
-    let task = request
-        .tasks
-        .iter()
-        .find(|task| task.task_id == record.task_id)
-        .ok_or("task")?;
+    let request = store.request(record.attempt_id, &call)?;
+    let task = &request.task;
     let mut lane = serde_json::to_value(provenant_cli::run::project_lane(
         &record,
         &[],
@@ -713,8 +710,8 @@ fn explain_for_tier_previews_without_creating_attempts() -> Result {
             "{result}"
         );
         assert!(
-            !rig.state.join("runs").exists(),
-            "explain created run state: {result}"
+            !rig.state.join("attempts").exists(),
+            "explain created attempt state: {result}"
         );
         assert!(
             !rig.state.join("graphs").exists(),

@@ -67,13 +67,18 @@ fn context(output: &provenant_os::exec::ExecOutcome) -> Result<String> {
 fn checkpoint_text(store: &SessionStore) -> Result<String> {
     Ok(store.read()?.ok_or("checkpoint missing")?.markdown)
 }
-/// One queued lane in the project's run store.
-fn create_lane(rig: &TestRig) -> Result<String> {
+/// One queued lane in the project's attempt store: its work key and attempt.
+struct Lane {
+    key: provenant_records::WorkKey,
+    attempt: String,
+}
+
+fn create_lane(rig: &TestRig) -> Result<Lane> {
     create_numbered_lane(rig, 0)
 }
 
-fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
-    use provenant_core::{ActorId, AttemptId, Digest, OperationId, RunId, TaskId};
+fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<Lane> {
+    use provenant_core::{ActorId, AttemptId, Digest, OperationId};
     use provenant_records::CanonicalV1;
     use provenant_run as run;
     let identity = rig.command(&["fabric", "identity", "--json"])?;
@@ -92,23 +97,24 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
         cancel: &cancel,
     };
     let store = run::RunStore::open(&context, &call)?;
-    let (run_id, task_id, attempt_id) = (
-        RunId::from_bytes([seed + 2; 16]),
-        TaskId::from_bytes([seed + 3; 16]),
-        AttemptId::from_bytes([seed + 4; 16]),
-    );
-    store.create(
+    let attempt_id = AttemptId::from_bytes([seed + 4; 16]);
+    let graph = format!("lane-{seed}");
+    let record = store.create(
         &run::PreparedRun {
-            run_id,
+            attempt_id,
             operation_id: OperationId::parse(&format!("hook-lane-{seed}"))?,
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![run::TaskRequest {
-                    context: None,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some(graph),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -117,7 +123,6 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
                     source_head: None,
                     base_ref: None,
                     profile: Default::default(),
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
                         extra: Default::default(),
@@ -131,24 +136,22 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
                     provider_timeout_seconds: 60,
                     delivery_id: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![run::NewAttempt {
-                attempt_id,
-                task_id,
-                prompt: "existing lane".into(),
-            }],
+            prompt: "existing lane".into(),
             created_at: clock.wall_now()?,
         },
         &call,
     )?;
     // Keep the writer connection alive until the lane is read.
     std::mem::forget(store);
-    Ok(format!("{run_id}/{task_id}/{attempt_id}"))
+    Ok(Lane {
+        key: record.key,
+        attempt: attempt_id.to_string(),
+    })
 }
 
 #[test]
@@ -212,17 +215,17 @@ fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
 fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;
+    let key = lane.key.to_string();
     let cli = rig.command(&["--json", "status"])?;
     assert_eq!(code(&cli), 0, "{:?}", cli.stderr.bytes);
     let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
-    let identifiers: Vec<_> = lane.split('/').collect();
     assert!(
         cli["data"]["rows"]
             .as_array()
             .is_some_and(|rows| rows.iter().any(|entry| {
                 entry["kind"] == "attempt"
-                    && entry["node_id"] == identifiers[1]
-                    && entry["attempt_id"] == identifiers[2]
+                    && entry["node_id"] == lane.key.node()
+                    && entry["attempt_id"] == lane.attempt
             })),
         "{cli}"
     );
@@ -240,7 +243,7 @@ fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
     assert!(output.stdout.bytes.len() <= 8192);
     let text = context(&output)?;
     assert!(text.contains("Lanes in flight (1"), "{text}");
-    assert!(text.contains(&lane), "{text}");
+    assert!(text.contains(&key), "{text}");
     assert!(text.contains("utility"), "{text}");
     // `pr status` may not exist yet, or may need GitHub; the PR is still named.
     assert!(text.contains("#7"), "{text}");
@@ -391,7 +394,7 @@ fn checkpoint_file(rig: &TestRig, session: &str) -> Result<PathBuf> {
 #[test]
 fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result {
     let rig = TestRig::new()?;
-    let lane = create_lane(&rig)?;
+    let lane = create_lane(&rig)?.key.to_string();
     let checkpoint = store(&rig, "keep-session")?;
     let chair = "# Chair\nAuthority: user approved #1829 only. PR #9 is mine.\n\n\n";
     save(&checkpoint, chair)?;
@@ -583,15 +586,8 @@ fn session_lane_stream_reports_inventory_rows() -> Result {
     assert_eq!(events[0]["total"], 1);
     let row = &events[1]["lane"];
     assert!(row["reason"].is_string(), "{row}");
-    assert_eq!(
-        format!(
-            "{}/{}/{}",
-            row["run_id"].as_str().ok_or("run")?,
-            row["task_id"].as_str().ok_or("task")?,
-            row["attempt_id"].as_str().ok_or("attempt")?
-        ),
-        lane
-    );
+    assert_eq!(row["key"], serde_json::to_value(&lane.key)?);
+    assert_eq!(row["attempt_id"], lane.attempt);
     Ok(())
 }
 
@@ -600,7 +596,6 @@ fn session_lane_stream_cursor_preserves_each_inventory_order() -> Result {
     let rig = TestRig::new()?;
     let oldest = create_numbered_lane(&rig, 1)?;
     let newest = create_numbered_lane(&rig, 2)?;
-    let attempt = |id: &str| id.rsplit('/').next().unwrap_or_default().to_owned();
     let read = |all: bool, cursor: Option<&str>| -> Result<Vec<Value>> {
         let mut args = vec!["status", "--session-stream", "--limit", "1", "--json"];
         if all {
@@ -645,7 +640,7 @@ fn session_lane_stream_cursor_preserves_each_inventory_order() -> Result {
         };
         assert_eq!(
             [first_id.to_owned(), second_id.to_owned()],
-            expected.map(|id| attempt(id))
+            expected.map(|lane| lane.attempt.clone())
         );
     }
     Ok(())

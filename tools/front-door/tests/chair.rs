@@ -579,9 +579,7 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
 
 #[test]
 fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
-    use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
-    };
+    use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs};
     use provenant_os::clock::SystemClock;
     use provenant_records::CanonicalV1;
     use provenant_run as run;
@@ -607,21 +605,23 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
         cancel: &cancel,
     };
     let store = run::RunStore::open(&context, &call)?;
-    let run_id = RunId::from_bytes([2; 16]);
-    let task_id = TaskId::from_bytes([3; 16]);
     let attempt_id = AttemptId::from_bytes([4; 16]);
-    store.create(
+    let record = store.create(
         &run::PreparedRun {
-            run_id,
+            attempt_id,
             operation_id: OperationId::parse("chair-snapshot")?,
             request: run::CanonicalRequest {
                 extra: Default::default(),
-                child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![run::TaskRequest {
-                    context: None,
+                task: run::TaskRequest {
+                    context: Some(provenant_records::run::WorkContext {
+                        graph_id: Some("chair-lane".into()),
+                        node_id: Some("node".into()),
+                        attempt: Some(1),
+                        ..Default::default()
+                    }),
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,
@@ -630,7 +630,6 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     source_head: None,
                     base_ref: None,
                     profile: Default::default(),
-                    task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
                         extra: Default::default(),
@@ -644,17 +643,12 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     provider_timeout_seconds: 60,
                     delivery_id: None,
                     access: Default::default(),
-                }],
-                concurrency: 1,
+                },
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: None,
             },
-            attempts: vec![run::NewAttempt {
-                attempt_id,
-                task_id,
-                prompt: "existing lane".into(),
-            }],
+            prompt: "existing lane".into(),
             created_at: clock.wall_now()?,
         },
         &call,
@@ -665,10 +659,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
     let checkpoint = value["data"]["checkpoint"].as_str().ok_or("checkpoint")?;
     let handoff: provenant_workflow::chair::Handoff =
         serde_json::from_slice(&fs::read(checkpoint)?)?;
-    assert_eq!(
-        handoff.open_lanes,
-        [format!("{run_id}/{task_id}/{attempt_id}")]
-    );
+    assert_eq!(handoff.open_lanes, [format!("{} {attempt_id}", record.key)]);
     // Keep the writer connection alive through the snapshot.
     drop(store);
     Ok(())

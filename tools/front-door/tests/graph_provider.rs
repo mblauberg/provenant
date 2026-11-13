@@ -1126,7 +1126,7 @@ fn claude_fixture() -> Result<TestRig> {
 }
 
 fn host_native_preparation_uses_the_provider_contract() -> Result {
-    use provenant_core::{AttemptId, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, Digest, OperationId};
     let rig = claude_fixture()?;
     writeln!(
         OpenOptions::new()
@@ -1172,11 +1172,9 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         ..Default::default()
     };
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt = rig.state.join(format!("attempts/{attempt_id}"));
     let paths = provenant_run::LaunchPaths {
         attempt_id,
-        run_id,
         operation_id: OperationId::parse("host-preparation")?,
         task_index: 0,
         lane_depth: 1,
@@ -1190,7 +1188,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         fs::create_dir_all(path)?;
     }
     let task: provenant_run::TaskRequest = serde_json::from_value(json!({
-        "task_id":TaskId::from_bytes([3;16]), "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
+        "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
         "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
     }))?;
     let mut absent = task.clone();
@@ -1420,8 +1418,6 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     assert!(account.join("refreshed").exists());
     let attempt = rig
         .state
-        .join("runs")
-        .join(lane["run_id"].as_str().ok_or("run")?)
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
     if pool {
@@ -1451,7 +1447,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     }
     let authority: Value =
         serde_json::from_slice(&fs::read(attempt.join("credential-authority.json"))?)?;
-    assert_eq!(authority["actor"], lane["run_id"]);
+    assert_eq!(authority["actor"], lane["attempt_id"]);
     assert_eq!(
         authority["source"]["path"],
         account.join(".credentials.json").to_str().ok_or("source")?
@@ -2025,7 +2021,7 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
         first["applied_route"]["model"], "codex/gpt-6-luna",
         "{lanes}"
     );
-    assert_ne!(first["run_id"], second["run_id"], "{lanes}");
+    assert_ne!(first["attempt_id"], second["attempt_id"], "{lanes}");
     assert!(first["superseded_by"].is_null(), "{lanes}");
     assert!(second["retry_of"].is_null(), "{lanes}");
     let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
@@ -2192,8 +2188,8 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         second["applied_route"]["model"], "codex/gpt-6.1-terra",
         "spent member must be excluded: {lanes}"
     );
-    // The graph owns retry lineage; each provider launch is a separate run.
-    assert_ne!(first["run_id"], second["run_id"], "{lanes}");
+    // The graph owns retry lineage; each provider launch is a separate attempt.
+    assert_ne!(first["attempt_id"], second["attempt_id"], "{lanes}");
     assert!(first["superseded_by"].is_null(), "{lanes}");
     assert!(second["retry_of"].is_null(), "{lanes}");
     assert_eq!(
@@ -2303,11 +2299,74 @@ fn persisted_attempt(
     )
 }
 
+/// The graph and node every persisted attempt belongs to: its work key is
+/// `persisted-graph/review#1`, which is also how the CLI names it.
+const PERSISTED_GRAPH: &str = "persisted-graph";
+const PERSISTED_NODE: &str = "review";
+
+/// CLI targets resolve through the graph's checkpoint, so record one running
+/// node whose only attempt is the persisted one.
+fn seed_graph_checkpoint(
+    state: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    actor: provenant_core::ActorId,
+    attempt: provenant_core::AttemptId,
+    directory: &std::path::Path,
+) -> Result {
+    use provenant_core::{CancelToken, Clock, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphDocument,
+        GraphExecution, GraphRoute, NodeInput, Replay,
+    };
+    struct Pending(String, String);
+    impl AttemptOwner for Pending {
+        type Error = std::io::Error;
+        fn actor(&self) -> String {
+            self.0.clone()
+        }
+        fn observe_or_start(
+            &mut self,
+            _key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            _access: AccessMode,
+            _worktree: Option<&str>,
+            _replay: Replay<'_>,
+        ) -> std::io::Result<AttemptObservation> {
+            Ok(AttemptObservation::Pending {
+                attempt_ref: Some(self.1.clone()),
+            })
+        }
+    }
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":PERSISTED_GRAPH,
+        "nodes":[{"id":PERSISTED_NODE,"access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
+    }))?;
+    let mut journal = FileJournal::open(state, project, PERSISTED_GRAPH, budget, &cancel, &clock)?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        integration_base: None,
+        review_base: None,
+        directory: directory.to_owned(),
+        document: document.clone(),
+    })?;
+    provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut Pending(actor.to_string(), format!("host/{attempt}")),
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct PersistedAttemptOptions {
     host_registry: bool,
     writer: bool,
-    extra_task: bool,
     nonterminal: bool,
     lost_before_route: bool,
     stalled_import: bool,
@@ -2323,9 +2382,7 @@ fn persisted_attempt_with(
     exit_code: i64,
     options: PersistedAttemptOptions,
 ) -> Result<(TestRig, provenant_run::AttemptRecord)> {
-    use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
-    };
+    use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs};
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::Termination;
     use provenant_os::fs::Directory;
@@ -2333,7 +2390,7 @@ fn persisted_attempt_with(
         CanonicalV1,
         run::{CanonicalRequest, HarnessProfile, RequestedRoute, RouteRecord, TaskRequest},
     };
-    use provenant_run::{ExecutionContext, NewAttempt, PreparedRun, Request, RunStore};
+    use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
     use provenant_supervisor::custody::CaptureTotals;
     use provenant_supervisor::custody::ExitObservation;
     use provenant_supervisor::custody::PublicationState;
@@ -2384,9 +2441,7 @@ fn persisted_attempt_with(
         cancel: &cancel,
     };
     let store = RunStore::open(&execution, &call)?;
-    let run_id = RunId::from_bytes([23; 16]);
     let attempt_id = AttemptId::from_bytes([24; 16]);
-    let task_id = TaskId::from_bytes([25; 16]);
     let applied = RouteRecord {
         extra: Default::default(),
         provider: Some(provider.into()),
@@ -2399,16 +2454,20 @@ fn persisted_attempt_with(
     };
     let prompt = "reply OK";
     let mut prepared = PreparedRun {
-        run_id,
+        attempt_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![TaskRequest {
-                context: None,
+            task: TaskRequest {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some(PERSISTED_GRAPH.into()),
+                    node_id: Some(PERSISTED_NODE.into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -2417,7 +2476,6 @@ fn persisted_attempt_with(
                 source_head: None,
                 base_ref: None,
                 profile: HarnessProfile::default(),
-                task_id,
                 prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                 route: RequestedRoute::Model {
                     extra: Default::default(),
@@ -2432,37 +2490,23 @@ fn persisted_attempt_with(
                 delivery_id: None,
                 deliver: None,
                 access: Default::default(),
-            }],
-            concurrency: 1,
+            },
             parent: None,
             lane_depth: None,
             parent_attempt: None,
         },
-        attempts: vec![NewAttempt {
-            task_id,
-            attempt_id,
-            prompt: prompt.into(),
-        }],
+        prompt: prompt.into(),
         created_at: clock.wall_now()?,
     };
     if options.writer {
-        prepared.request.tasks[0].writer = Some(provenant_records::run::WriterRequest {
+        prepared.request.task.writer = Some(provenant_records::run::WriterRequest {
             extra: Default::default(),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/receipt-writer"),
         });
     }
-    if options.extra_task {
-        let mut task = prepared.request.tasks[0].clone();
-        task.task_id = TaskId::from_bytes([27; 16]);
-        prepared.attempts.push(NewAttempt {
-            task_id: task.task_id,
-            attempt_id: AttemptId::from_bytes([28; 16]),
-            prompt: prompt.into(),
-        });
-        prepared.request.tasks.push(task);
-    }
     store.create(&prepared, &call)?;
+    seed_graph_checkpoint(&roots.state, project_id, actor_id, attempt_id, &rig.project)?;
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
     running.revision = 2;
@@ -2511,8 +2555,6 @@ fn persisted_attempt_with(
     let attempt_dir = roots
         .state
         .as_path()
-        .join("runs")
-        .join(run_id.to_string())
         .join("attempts")
         .join(attempt_id.to_string());
     let provider_state = attempt_dir.join("provider-state");
@@ -2521,7 +2563,6 @@ fn persisted_attempt_with(
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
-            run: run_id,
             attempt: attempt_id,
             generation: running.generation,
         },
@@ -2575,7 +2616,7 @@ fn persisted_attempt_with(
     let attempt = Directory::open_anchor(&attempt_dir)?;
     if options.stalled_import {
         use std::os::unix::fs::MetadataExt;
-        let writer = prepared.request.tasks[0].writer.as_ref().ok_or("writer")?;
+        let writer = prepared.request.task.writer.as_ref().ok_or("writer")?;
         let slot = rig
             .state
             .join("worktrees")
@@ -2686,7 +2727,7 @@ fn persisted_attempt_with(
     Ok((rig, terminal))
 }
 
-fn receipt_output_resolves_run_task_and_attempt() -> Result {
+fn receipt_output_resolves_the_work_key() -> Result {
     let (rig, terminal) = persisted_attempt(
         "codex",
         "codex/gpt-6.1-sol",
@@ -2695,20 +2736,20 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
         b"",
         0,
     )?;
-    let run = terminal.run_id.to_string();
-    let task = terminal.task_id.to_string();
+    let key = terminal.key.to_string();
     let attempt = terminal.attempt_id.to_string();
+    // The graph (one node), the node and the numbered attempt name the same one.
     let targets = [
-        run.clone(),
-        format!("{run}/{task}"),
-        format!("{run}/{task}/{attempt}"),
+        PERSISTED_GRAPH.to_owned(),
+        format!("{PERSISTED_GRAPH}/{PERSISTED_NODE}"),
+        key.clone(),
     ];
     let actor = provenant_run::fact(terminal.clone())?
         .reviewer
         .ok_or("reviewer fact")?
         .actor_id;
     let receipt = format!(
-        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), run {run}/{task}/{attempt}"
+        "Reviewer: codex/gpt-6.1-sol@unknown (openai; resolved from explicit), attempt {key} {attempt}"
     );
     let attribution =
         format!("Reviewer provenance: unknown, actor {actor}, model unknown, family unknown");
@@ -2738,8 +2779,7 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
         assert_eq!(data["data"]["reviewer_provenance"], attribution);
         assert_eq!(data["data"]["reviewer"]["provenance"], "unknown");
         assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
-        assert_eq!(data["data"]["run_id"], run);
-        assert_eq!(data["data"]["task_id"], task);
+        assert_eq!(data["data"]["key"], serde_json::to_value(&terminal.key)?);
         assert_eq!(data["data"]["attempt_id"], attempt);
         assert_eq!(data["data"]["resolved_from"], "explicit");
         assert_eq!(data["data"]["role"], "reviewer");
@@ -2747,14 +2787,10 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
     Ok(())
 }
 
-fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts() -> Result {
+fn receipt_output_classifies_writers_and_refuses_running_attempts() -> Result {
     for options in [
         PersistedAttemptOptions {
             writer: true,
-            ..Default::default()
-        },
-        PersistedAttemptOptions {
-            extra_task: true,
             ..Default::default()
         },
         PersistedAttemptOptions {
@@ -2763,7 +2799,6 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
         },
     ] {
         let writer = options.writer;
-        let ambiguous = options.extra_task;
         let (rig, record) = persisted_attempt_with(
             "codex",
             "codex/gpt-6.1-sol",
@@ -2773,13 +2808,8 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
             0,
             options,
         )?;
-        let exact = format!("{}/{}/{}", record.run_id, record.task_id, record.attempt_id);
-        let target = if ambiguous {
-            record.run_id.to_string()
-        } else {
-            exact.clone()
-        };
-        let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
+        let exact = record.key.to_string();
+        let output = rig.command(&["output", &exact, "--part", "receipt", "--json"])?;
         let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
         if writer {
             assert_eq!(code(&output), 0, "{data}");
@@ -2797,17 +2827,6 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
                 String::from_utf8(human.stdout.bytes)?,
                 format!("{line}\n{provenance}\n")
             );
-        } else if ambiguous {
-            assert_ne!(code(&output), 0, "{data}");
-            assert_eq!(data["error"]["code"], "CONFLICT");
-            assert!(
-                data["error"]["message"]
-                    .as_str()
-                    .ok_or("message")?
-                    .contains("exactly one attempt")
-            );
-            let exact_output = rig.command(&["output", &exact, "--part", "receipt", "--full"])?;
-            assert_eq!(code(&exact_output), 0);
         } else {
             assert_ne!(code(&output), 0, "{data}");
             assert_eq!(data["error"]["code"], "NONTERMINAL");
@@ -2829,18 +2848,17 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
         b"provider 500: upstream failed\n",
         1,
     )?;
-    let run = terminal.run_id.to_string();
-    let task = terminal.task_id.to_string();
     let attempt = terminal.attempt_id.to_string();
-    let target = format!("{run}/{task}/{attempt}");
-    // A run or task names its settled attempt, and the reply says which one.
-    for named in [run.clone(), format!("{run}/{task}")] {
+    let target = terminal.key.to_string();
+    // A graph or a node names its settled attempt, and the reply says which one.
+    for named in [
+        PERSISTED_GRAPH.to_owned(),
+        format!("{PERSISTED_GRAPH}/{PERSISTED_NODE}"),
+    ] {
         let output = rig.command(&["output", &named, "--part", "stderr", "--json"])?;
         let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(code(&output), 0, "{data}");
         assert_eq!(data["data"]["attempt_id"], attempt);
-        assert_eq!(data["data"]["selected"]["attempts"], 1);
-        assert_eq!(data["data"]["selected"]["rule"], "newest settled");
     }
     // A failed attempt's result names its provider error and its result path.
     let output = rig.command(&["output", &target, "--json"])?;
@@ -2862,16 +2880,14 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     // A launched attempt has a custody lock, which the wait path inspects.
     fs::write(
         rig.state
-            .join("runs")
-            .join(&run)
             .join("attempts")
             .join(&attempt)
             .join("custody.lock"),
         b"",
     )?;
     for args in [
-        vec!["status", &attempt],
-        vec!["status", &attempt, "--wait=1s"],
+        vec!["status", &target],
+        vec!["status", &target, "--wait=1s"],
     ] {
         let listing = rig.command(&args)?;
         assert_eq!(
@@ -2928,7 +2944,8 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
             ..Default::default()
         },
     )?;
-    let target = format!("{}/{}/{}", record.run_id, record.task_id, record.attempt_id);
+    let target = record.key.to_string();
+    let attempt_id = record.attempt_id;
     let output = rig.command(&["output", &target, "--part", "receipt", "--json"])?;
     let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(code(&output), 0, "{data}");
@@ -2946,7 +2963,7 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     assert_eq!(
         String::from_utf8(human.stdout.bytes)?,
         format!(
-            "Reviewer: unknown@unknown (unknown; resolved from unknown), run {target}\nReviewer provenance: unknown, actor {actor}, model unknown, family unknown\n"
+            "Reviewer: unknown@unknown (unknown; resolved from unknown), attempt {target} {attempt_id}\nReviewer provenance: unknown, actor {actor}, model unknown, family unknown\n"
         )
     );
     Ok(())
@@ -2975,12 +2992,7 @@ fn agy_denial_keeps_raw_step_out_of_terminal_diagnostics() -> Result {
             ..
         } if reason.contains("RunCommand") && !reason.contains("cat /fixture/private.txt") && !reason.contains("/fixture/private.txt")
     ));
-    let lanes = rig.command(&[
-        "status",
-        &terminal.attempt_id.to_string(),
-        "--all",
-        "--json",
-    ])?;
+    let lanes = rig.command(&["status", &terminal.key.to_string(), "--all", "--json"])?;
     assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["rows"][0];
@@ -2994,8 +3006,6 @@ fn agy_denial_keeps_raw_step_out_of_terminal_diagnostics() -> Result {
     }
     let captured = rig
         .state
-        .join("runs")
-        .join(terminal.run_id.to_string())
         .join("attempts")
         .join(terminal.attempt_id.to_string())
         .join("stdout.log");
@@ -3030,12 +3040,7 @@ fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> 
                 ..
             }
         ));
-        let lanes = rig.command(&[
-            "status",
-            &terminal.attempt_id.to_string(),
-            "--all",
-            "--json",
-        ])?;
+        let lanes = rig.command(&["status", &terminal.key.to_string(), "--all", "--json"])?;
         assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let lane = &lanes["data"]["rows"][0];
@@ -3047,7 +3052,7 @@ fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> 
             assert!(!diagnostic.contains(r#""command" permission"#), "{lanes}");
             assert!(!diagnostic.contains("jetski:"), "{lanes}");
         }
-        let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
+        let output = rig.command(&["output", &terminal.key.to_string(), "--json"])?;
         assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
         let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
         let result = output["data"]["bytes"]["data"]
@@ -3079,7 +3084,7 @@ fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> 
             ..
         }
     ));
-    let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
+    let output = rig.command(&["output", &terminal.key.to_string(), "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let result = output["data"]["bytes"]["data"]
@@ -3377,8 +3382,6 @@ fn graph_writer_restarts_fresh() -> Result {
         )?;
         let attempt_dir = rig
             .state
-            .join("runs")
-            .join(lane["run_id"].as_str().ok_or("run")?)
             .join("attempts")
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
         // The helper reads the node's current attempt. A stopped writer is
@@ -3446,7 +3449,7 @@ fn graph_writer_restarts_fresh() -> Result {
                 "{out:?}"
             );
         }
-        assert_ne!(attempts[0].run_id, attempts[1].run_id);
+        assert_ne!(attempts[0].attempt_id, attempts[1].attempt_id);
         assert_eq!(attempts[0].superseded_by, None);
         assert_eq!(attempts[1].retry_of, None);
         assert_eq!(
@@ -3728,12 +3731,9 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
         }),
         "60s",
     )?;
-    let run = lane["run_id"].as_str().ok_or("run")?;
     assert_eq!(lane["state"], "quota_limited", "{lane}");
     let attempt = rig
         .state
-        .join("runs")
-        .join(run)
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
     let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
@@ -3775,7 +3775,6 @@ fn opencode_stderr_live_quota() -> Result {
                 "route":{"adapter":"opencode","model":"opencode/opencode/glm-5.3-flash-free"}
             }),
         )?;
-        let run = lane["run_id"].as_str().ok_or("run")?;
         assert_eq!(lane["state"], expected, "{prompt_text}: {lane}");
         if expected == "succeeded" {
             assert_eq!(
@@ -3785,8 +3784,6 @@ fn opencode_stderr_live_quota() -> Result {
         }
         let attempt = rig
             .state
-            .join("runs")
-            .join(run)
             .join("attempts")
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
         let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
@@ -3890,7 +3887,6 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         )?;
         assert_eq!(code(&head), 0, "{head:?}");
         assert_eq!(head.stdout.bytes, b"edited by lane shell\n");
-        let run = lane["run_id"].as_str().ok_or("run")?;
         let id = lane["attempt_id"].as_str().ok_or("attempt")?;
         let output = rig.command(&["output", "shell-evidence/writer#1", "--json"])?;
         let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -3922,14 +3918,14 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
             human.contains(&tree.join("AGENTS.md").display().to_string()),
             "{human}"
         );
-        let attempt = rig.state.join("runs").join(run).join("attempts").join(id);
+        let attempt = rig.state.join("attempts").join(id);
         let result = fs::read_to_string(attempt.join("result.md"))?;
         assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
         assert_eq!(
             fs::read_to_string(attempt.join("stderr.log"))?,
             "shell stderr [REDACTED]\n"
         );
-        assert_no_printed_credential(&rig.state.join("runs").join(run))?;
+        assert_no_printed_credential(&attempt)?;
         cleanup.disarm();
     }
     Ok(())
@@ -4021,11 +4017,9 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
                 "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
             }),
         )?;
-        let run = lane["run_id"].as_str().ok_or("run")?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
         let id = lane["attempt_id"].as_str().ok_or("attempt")?;
-        let run_dir = rig.state.join("runs").join(run);
-        let attempt = run_dir.join("attempts").join(id);
+        let attempt = rig.state.join("attempts").join(id);
         assert_eq!(
             fs::read_to_string(attempt.join("result.md"))?,
             format!("credential [REDACTED]{DONE_FENCE}")
@@ -4037,7 +4031,7 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         let stdout = fs::read_to_string(attempt.join("stdout.log"))?;
         assert!(stdout.contains("[REDACTED]"), "{stdout}");
         assert!(!stdout.contains(r"\u0067hp_"), "{stdout}");
-        assert_no_printed_credential(&run_dir)?;
+        assert_no_printed_credential(&attempt)?;
     }
     cleanup.disarm();
     Ok(())
@@ -4312,8 +4306,6 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
     assert_eq!(lane["state"], "succeeded", "{lane}");
     let result = rig
         .state
-        .join("runs")
-        .join(lane["run_id"].as_str().ok_or("run id")?)
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt id")?)
         .join("result.md");
@@ -4491,12 +4483,12 @@ fn main() -> ExitCode {
                 output_names_the_attempt_it_reads_and_writes_or_locates_parts,
             ),
             (
-                "receipt_output_resolves_run_task_and_attempt",
-                receipt_output_resolves_run_task_and_attempt,
+                "receipt_output_resolves_the_work_key",
+                receipt_output_resolves_the_work_key,
             ),
             (
-                "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
-                receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts,
+                "receipt_output_classifies_writers_and_refuses_running_attempts",
+                receipt_output_classifies_writers_and_refuses_running_attempts,
             ),
             (
                 "opencode_usage_limit_settlement_is_bounded",
