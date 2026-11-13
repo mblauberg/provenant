@@ -26,10 +26,11 @@ pub(crate) fn recover_accepted_launch(
     operation_id: &provenant_core::OperationId,
     call: &provenant_run::Request<'_>,
     submitted: Result<
-        (provenant_run::RunRecord, Vec<provenant_run::Started>),
+        (provenant_run::AttemptRecord, Vec<provenant_run::Started>),
         provenant_cli::run::Fail,
     >,
-) -> Result<(provenant_run::RunRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail> {
+) -> Result<(provenant_run::AttemptRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail>
+{
     match submitted {
         // The CLI reports an all-refused launch batch as an error even
         // after admitting its terminal preparation records. The graph
@@ -44,7 +45,8 @@ pub(crate) fn recover_accepted_launch(
                             | provenant_run::OperationState::Terminal
                     ) =>
                 {
-                    Ok((session.store.run(operation.run_id, call)?, Vec::new()))
+                    let admitted = session.store.operation_attempt(operation_id, call)?;
+                    Ok((session.store.record(admitted, call)?, Vec::new()))
                 }
                 _ => Err(fail),
             }
@@ -511,7 +513,7 @@ impl BinaryRunOwner<'_> {
     /// [`admitter_floors`].
     fn admitter_floors_launch(
         &self,
-        tasks: &[provenant_fabric_runtime::coordination::facade::SubmittedTask],
+        task: &provenant_fabric_runtime::coordination::facade::SubmittedTask,
         attempt: Option<&provenant_fabric_runtime::graph::AttemptSpec>,
         cancel: &CancelToken,
     ) -> bool {
@@ -519,9 +521,10 @@ impl BinaryRunOwner<'_> {
             return false;
         };
         let ctx = &self.factory.context;
-        let graph = tasks
-            .iter()
-            .find_map(|task| task.context.as_ref()?.graph_id.as_deref());
+        let graph = task
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref());
         let mut store = None;
         admitter_floors(
             admitter,
@@ -596,12 +599,12 @@ impl BinaryRunOwner<'_> {
         })
         .map_err(fail_error)
     }
-    /// The attempts of a run this owner just accepted or continued.
+    /// The attempt this owner just accepted or continued.
     pub(crate) fn receipt(
         &self,
         session: &provenant_cli::run::Session,
         operation_id: provenant_core::OperationId,
-        run: &provenant_run::RunRecord,
+        attempt: &provenant_run::AttemptRecord,
         started: &[provenant_run::Started],
         call: &provenant_run::Request<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
@@ -619,11 +622,7 @@ impl BinaryRunOwner<'_> {
                 .service()
                 .lanes(
                     &provenant_run::LaneQuery {
-                        targets: vec![provenant_run::LaneTarget {
-                            run: run.run_id,
-                            task: None,
-                            attempt: None,
-                        }],
+                        targets: vec![attempt.attempt_id],
                         all: true,
                         limit: 100,
                         after,
@@ -887,30 +886,23 @@ impl BinaryRunOwner<'_> {
         else {
             return Ok(None);
         };
-        let request = session
+        let admitted = session
             .store
-            .request(operation.run_id, &call)
+            .operation_attempt(&operation.operation_id, &call)
             .map_err(run_error)?;
-        if request.tasks.is_empty()
-            || request.tasks.iter().any(|task| {
-                task.context.as_ref().is_none_or(|context| {
-                    !context.graph_template_launch
-                        || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
-                        || context.node_id.as_ref().is_none_or(|id| id.is_empty())
-                })
-            })
-        {
+        let request = session.store.request(admitted, &call).map_err(run_error)?;
+        if request.task.context.as_ref().is_none_or(|context| {
+            !context.graph_template_launch
+                || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
+                || context.node_id.as_ref().is_none_or(|id| id.is_empty())
+        }) {
             return Ok(None);
         }
         let page = session
             .service()
             .lanes(
                 &provenant_run::LaneQuery {
-                    targets: vec![provenant_run::LaneTarget {
-                        run: operation.run_id,
-                        task: None,
-                        attempt: None,
-                    }],
+                    targets: vec![admitted],
                     all: true,
                     limit: 100,
                     after: 0,
@@ -948,7 +940,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
         policy: SubmissionPolicy<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
+        use provenant_cli::run::{Submission, Submitted, worktree_access};
         let SubmissionPolicy {
             facts,
             access,
@@ -958,17 +950,16 @@ impl BinaryRunOwner<'_> {
         } = policy;
         let SubmitInput::Submit {
             operation_id,
-            tasks,
-            concurrency,
+            task,
             knobs,
             host,
             ..
         } = input;
-        if tasks.iter().any(|task| {
-            task.context
-                .as_ref()
-                .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
-        }) {
+        if task
+            .context
+            .as_ref()
+            .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
+        {
             let invalid =
                 || FacadeError::invalid(InvalidInputDetail::Field("graph context".into()));
             let session = match self.read_session(cancel) {
@@ -989,14 +980,12 @@ impl BinaryRunOwner<'_> {
             // An accepted pre-cutover operation may have no context. The sealed
             // request digest below still rejects any change to its launch inputs.
         }
-        let floored = self.admitter_floors_launch(&tasks, attempt.as_ref(), cancel);
+        let floored = self.admitter_floors_launch(&task, attempt.as_ref(), cancel);
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
             if !self.allow_remote
-                || tasks.iter().any(|task| {
-                    task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                        || task.worktree.is_some()
-                        || task.new_worktree.is_some()
-                })
+                || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                || task.worktree.is_some()
+                || task.new_worktree.is_some()
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
@@ -1037,8 +1026,7 @@ impl BinaryRunOwner<'_> {
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id: operation_id.clone(),
-                tasks,
-                concurrency,
+                task,
                 knobs,
                 host: None,
             };
@@ -1056,21 +1044,18 @@ impl BinaryRunOwner<'_> {
         }
         // Graph worktree and placement are resolved before the sealed attempt reaches this owner.
         if host.is_some_and(|host| host != self.factory.context.identity.host)
-            || tasks.iter().any(|task| task.new_worktree.is_some())
+            || task.new_worktree.is_some()
         {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "attempt placement".into(),
             )));
         }
-        let launch_directory = tasks
-            .iter()
-            .find_map(|task| {
-                task.worktree
-                    .as_deref()
-                    .map(Path::new)
-                    .filter(|path| path.is_absolute())
-                    .map(Path::to_path_buf)
-            })
+        let launch_directory = task
+            .worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .map(Path::to_path_buf)
             .or_else(|| {
                 attempt
                     .as_ref()
@@ -1078,15 +1063,14 @@ impl BinaryRunOwner<'_> {
                     .map(PathBuf::from)
             })
             .unwrap_or_else(|| self.factory.cwd.clone());
-        let mut submitted = Vec::new();
-        for (index, task) in tasks.into_iter().enumerate() {
+        let submitted = {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 false,
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;
-            submitted.push(Submitted {
+            Submitted {
                 attempt: {
                     let mut spec = attempt.clone().unwrap_or_else(|| {
                         provenant_fabric_runtime::graph::AttemptSpec {
@@ -1105,7 +1089,6 @@ impl BinaryRunOwner<'_> {
                 pinned_base: None,
                 head: task.head,
                 source_head: task.source_head,
-                task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 title: task.title,
                 route: task.route,
@@ -1114,8 +1097,8 @@ impl BinaryRunOwner<'_> {
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
                 access: access.clone(),
-            });
-        }
+            }
+        };
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let mut host_launch = match &self.factory.host_launch {
@@ -1141,8 +1124,7 @@ impl BinaryRunOwner<'_> {
                 Submission {
                     chair: self.chair.clone(),
                     operation_id: operation_id.clone(),
-                    tasks: submitted,
-                    concurrency: concurrency.map(u64::from),
+                    task: submitted,
                     knobs,
                 },
                 &call,
@@ -1172,8 +1154,8 @@ impl BinaryRunOwner<'_> {
                 "refusal notice could not be delivered; inspect the chair binding and notice configuration, then run `provenant reconcile`"
             );
         }
-        let (run, started) = submission?;
-        self.receipt(&session, operation_id, &run, &started, &call)
+        let (admitted, started) = submission?;
+        self.receipt(&session, operation_id, &admitted, &started, &call)
     }
     pub(crate) fn output(
         &mut self,

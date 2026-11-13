@@ -314,16 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_summary_refuses_an_attempt_without_work_identity() {
-        let mut record = attempt();
-        record.key = None;
-        assert!(matches!(
-            AttemptSummary::try_from(record),
-            Err(AttemptSummaryError::MissingWorkKey)
-        ));
-    }
-
-    #[test]
     fn live_wire_carries_silence_without_persisting_it() {
         let mut record = attempt();
         record.provider_silent_for_ms.0 = Some(1_800_000);

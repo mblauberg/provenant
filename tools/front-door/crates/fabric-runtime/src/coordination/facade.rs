@@ -81,9 +81,8 @@ bounded_input! {
     pub enum SubmitInput as WireSubmitInput {
         Submit {
             operation_id: OperationId,
-            tasks: Vec<SubmittedTask>,
-            #[serde(default)]
-            concurrency: Option<u16>,
+            /// One submission admits exactly one attempt.
+            task: SubmittedTask,
             #[serde(default)]
             knobs: Vec<String>,
             /// Explicit peer placement; read-only tasks only.

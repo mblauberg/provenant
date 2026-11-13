@@ -2890,11 +2890,8 @@ impl RunStore {
         let (fences, listing_error) = match self.writer_fence_listing() {
             Ok(listing) => (listing.reservations, None),
             Err(error) => {
-                for id in self.pending_reactions(run, call)? {
-                    let id = id.to_string();
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
+                if self.reaction_pending(run, call)? && !ids.contains(&run.to_string()) {
+                    ids.push(run.to_string());
                 }
                 if ids.is_empty() {
                     return Err(error);

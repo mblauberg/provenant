@@ -457,18 +457,15 @@ pub fn peer(
                     {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
-                    let SubmitInput::Submit { tasks, host, .. } = input;
+                    let SubmitInput::Submit { task, host, .. } = input;
                     if host.is_some()
-                        || tasks.iter().any(|task| {
-                            task.context
-                                .as_ref()
-                                .is_some_and(|context| context.graph_template_launch)
-                        })
-                        || tasks.iter().any(|task| {
-                            task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                                || task.worktree.is_some()
-                                || task.new_worktree.is_some()
-                        })
+                        || task
+                            .context
+                            .as_ref()
+                            .is_some_and(|context| context.graph_template_launch)
+                        || task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                        || task.worktree.is_some()
+                        || task.new_worktree.is_some()
                     {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
@@ -507,8 +504,8 @@ pub fn peer(
                         ..Default::default()
                     };
                     let mut input = input.clone();
-                    let SubmitInput::Submit { tasks, .. } = &mut input;
-                    for task in tasks {
+                    let SubmitInput::Submit { task, .. } = &mut input;
+                    {
                         let context = task
                             .context
                             .as_mut()
@@ -856,19 +853,11 @@ pub(crate) fn peer_submit_graph(
     .to_string();
     let SubmitInput::Submit {
         operation_id,
-        tasks,
-        concurrency,
+        task,
         knobs,
         ..
     } = input;
-    // Origin graph launches are single attempts. Refuse a batch rather than
-    // silently changing its completion or cancellation semantics.
-    let [task] = tasks.as_slice() else {
-        return Err(FacadeError::InvalidInput { detail: None });
-    };
-    if concurrency.is_some_and(|n| n != 1) {
-        return Err(FacadeError::InvalidInput { detail: None });
-    }
+    let task = &task;
     let digest =
         provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation_id))
             .map_err(|_| FacadeError::StateCorrupt)?;

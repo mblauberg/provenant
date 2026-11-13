@@ -432,26 +432,15 @@ impl ValidateInput for GraphInput {
 impl ValidateInput for SubmitInput {
     fn validate_input(&self, transport: WaitTransport) -> Result<(), InputError> {
         match self {
-            Self::Submit {
-                tasks,
-                concurrency,
-                knobs,
-                ..
-            } => {
-                if tasks.is_empty() || tasks.len() > 64 {
-                    return Err(field("tasks"));
-                }
-                if concurrency.is_some_and(|n| n == 0 || n > 16) {
-                    return Err(field("concurrency"));
-                }
+            Self::Submit { task, knobs, .. } => {
                 if knobs.len() > 64 {
                     return Err(field("knobs"));
                 }
                 for (index, knob) in knobs.iter().enumerate() {
                     bounded_text(knob, &format!("knobs[{index}]"), 256)?;
                 }
-                for (index, task) in tasks.iter().enumerate() {
-                    let path = format!("tasks[{index}]");
+                {
+                    let path = "task";
                     if task
                         .context
                         .as_ref()
@@ -577,16 +566,6 @@ mod tests {
         assert!(error.contains(path), "expected `{path}` in `{error}`");
     }
 
-    /// A one-task submit with this `concurrency`, as the CLI and store see it.
-    fn one_task_submit_is_valid(concurrency: u64) -> bool {
-        use super::ValidateInput;
-        serde_json::from_value::<SubmitInput>(json!({
-            "op":"submit","operation_id":"work-1","concurrency":concurrency,
-            "tasks":[{"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
-        }))
-        .is_ok_and(|input| input.validate_input(provenant_core::WaitTransport::Cli).is_ok())
-    }
-
     #[test]
     fn graph_cancel_reason_is_optional_and_bounded() {
         for value in [
@@ -621,31 +600,20 @@ mod tests {
         for title in ["line\nbreak", "tab\there", "escape\u{1b}", "unicode\u{85}"] {
             let value = json!({
                 "op":"submit", "operation_id":"work-1",
-                "tasks":[{"prompt":"do work", "title":title, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                "task":{"prompt":"do work", "title":title, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}
             });
             assert!(serde_json::from_value::<SubmitInput>(value).is_err());
             let mut input: SubmitInput = serde_json::from_value(json!({
                 "op":"submit", "operation_id":"work-1",
-                "tasks":[{"prompt":"do work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                "task":{"prompt":"do work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}
             })).unwrap();
-            let SubmitInput::Submit { tasks, .. } = &mut input;
-            tasks[0].title = Some(title.into());
+            let SubmitInput::Submit { task, .. } = &mut input;
+            task.title = Some(title.into());
             let error = input
                 .validate_input(provenant_core::WaitTransport::Cli)
                 .unwrap_err();
             assert_eq!(error.code(), "invalid_input");
-            assert_eq!(error.path, "tasks[0].title");
-        }
-    }
-
-    #[test]
-    fn concurrency_above_the_task_count_is_accepted_up_to_sixteen() {
-        // The CLI and the run store accept 16 for one task, so a peer must too.
-        for accepted in [1, 2, 16] {
-            assert!(one_task_submit_is_valid(accepted), "{accepted}");
-        }
-        for refused in [0, 17] {
-            assert!(!one_task_submit_is_valid(refused), "{refused}");
+            assert_eq!(error.path, "task.title");
         }
     }
 
@@ -679,7 +647,7 @@ mod tests {
         for bytes in [65_536, 65_537, 117 * 1024, 1_048_576] {
             let input: SubmitInput = serde_json::from_value(json!({
                 "op":"submit", "operation_id":"large-prompt",
-                "tasks":[{"prompt":"x".repeat(bytes), "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                "task":{"prompt":"x".repeat(bytes), "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}
             }))
             .unwrap();
             assert!(input.validate_input(WaitTransport::Cli).is_ok());
@@ -688,10 +656,10 @@ mod tests {
                 assert!(mcp.is_ok());
             } else {
                 let error = mcp.unwrap_err();
-                assert_eq!(error.path, "tasks[0].prompt");
+                assert_eq!(error.path, "task.prompt");
                 let projection = error.diagnostic();
                 let detail = projection.detail.as_deref().unwrap();
-                assert!(detail.contains("tasks[0].prompt"));
+                assert!(detail.contains("task.prompt"));
                 assert!(detail.contains("65536"));
                 assert!(projection.next.is_some());
                 let facade = super::super::facade::FacadeError::from(
@@ -706,9 +674,9 @@ mod tests {
             rejects::<SubmitInput>(
                 json!({
                     "op":"submit", "operation_id":"invalid-prompt",
-                    "tasks":[{"prompt":prompt, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+                    "task":{"prompt":prompt, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}
                 }),
-                "tasks[0].prompt",
+                "task.prompt",
             );
         }
     }
@@ -718,14 +686,14 @@ mod tests {
         let input = json!({
             "op":"submit",
             "operation_id":"place",
-            "tasks":[{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
+            "task":{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}
         });
         let local: SubmitInput = serde_json::from_value(input).unwrap();
         assert!(serde_json::to_value(&local).unwrap().get("host").is_none());
         let placed: SubmitInput = serde_json::from_value(json!({
             "op":"submit",
             "operation_id":"place",
-            "tasks":[{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1}],
+            "task":{"prompt":"x","route":{"kind":"named","name":"utility"},"timeout_seconds":1},
             "host":"07070707070707070707070707070707"
         }))
         .unwrap();
@@ -763,27 +731,22 @@ mod tests {
             json!({"op":"claim_acquire","scope":{"kind":"paths","paths":["p".repeat(4_097)]},"lease_seconds":1}),
             "scope.paths[0]",
         );
-        let task = json!({"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1});
-        rejects::<SubmitInput>(
-            json!({"op":"submit","operation_id":"work-1","tasks":vec![task; 65]}),
-            "tasks",
-        );
         for name in ["provider", "model", "effort"] {
             let mut route = json!({"kind":"model","provider":"codex","model":"model"});
             route[name] = json!("m".repeat(129));
             rejects::<SubmitInput>(
                 json!({
-                    "op":"submit","operation_id":"work-1","concurrency":1,
-                    "tasks":[{"prompt":"do work","route":route,"timeout_seconds":1}]
+                    "op":"submit","operation_id":"work-1",
+                    "task":{"prompt":"do work","route":route,"timeout_seconds":1}
                 }),
-                &format!("tasks[0].route.{name}"),
+                &format!("task.route.{name}"),
             );
         }
         rejects::<SubmitInput>(
-            json!({"op":"submit","operation_id":"work-1","tasks":[{
+            json!({"op":"submit","operation_id":"work-1","task":{
                 "prompt":"do work","route":{"kind":"named","name":"m".repeat(129)},"timeout_seconds":1
-            }]}),
-            "tasks[0].route.name",
+            }}),
+            "task.route.name",
         );
         rejects::<OutputInput>(
             json!({
@@ -856,7 +819,7 @@ mod tests {
     fn submission_rejects_invalid_route_shapes() {
         let valid = json!({
             "op":"submit","operation_id":"submit",
-            "tasks":[{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
+            "task":{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}
         });
         assert!(serde_json::from_value::<SubmitInput>(valid.clone()).is_ok());
         for route in [
@@ -865,7 +828,7 @@ mod tests {
             json!({"route":"utility"}),
         ] {
             let mut invalid = valid.clone();
-            invalid["tasks"][0]["route"] = route;
+            invalid["task"]["route"] = route;
             assert!(serde_json::from_value::<SubmitInput>(invalid).is_err());
         }
     }

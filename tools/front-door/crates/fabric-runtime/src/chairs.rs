@@ -92,12 +92,17 @@ mod tests {
     fn proposal() -> CanonicalRequest {
         CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
-            tasks: vec![],
-            concurrency: 1,
+            task: serde_json::from_value(serde_json::json!({
+                "prompt_digest": provenant_core::Digest::from_bytes([4; 32]),
+                "route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+                "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+                "provider_timeout_seconds": 30,
+                "delivery_id": null
+            }))
+            .unwrap(),
             parent: None,
             lane_depth: None,
             parent_attempt: None,

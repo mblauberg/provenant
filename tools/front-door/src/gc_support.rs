@@ -412,12 +412,8 @@ fn scan_terminal(
         loop {
             let page = store.lanes(&query, &call)?;
             for attempt in page.lanes {
-                let request = store.request(attempt.run_id, &call)?;
-                let task = request
-                    .tasks
-                    .iter()
-                    .find(|task| task.task_id == attempt.task_id)
-                    .ok_or("unknown lane task")?;
+                let request = store.request(attempt.attempt_id, &call)?;
+                let task = &request.task;
                 if let Some(writer) = &task.writer {
                     if !writer.worktree.is_absolute() {
                         return Err("unknown writer path".into());

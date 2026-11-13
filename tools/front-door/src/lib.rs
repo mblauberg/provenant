@@ -959,7 +959,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     state_root: parsed.roots().state_root.clone(),
                     project: parsed.project(),
                     actor: parsed.actor(),
-                    run: parsed.run(),
+                    attempt: parsed.run(),
                 };
                 let registry = provenant_cli::run::Registry {
                     roots: Some(&roots),

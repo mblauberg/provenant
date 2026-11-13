@@ -152,11 +152,8 @@ pub(crate) fn collect_unsettled(
                 continue;
             }
             let Some(writer) = store
-                .request(attempt.run_id, &call)?
-                .tasks
-                .into_iter()
-                .find(|task| task.task_id == attempt.task_id)
-                .and_then(|task| task.writer)
+                .request(attempt.attempt_id, &call)?
+                .task.writer
             else {
                 continue;
             };
@@ -171,13 +168,8 @@ pub(crate) fn collect_unsettled(
                         || receipt["state"] == "pruning"
                 });
             if unsettled {
-                let actor_id = store.run(attempt.run_id, &call)?.actor_id;
-                pending.push((
-                    attempt.run_id,
-                    attempt.attempt_id,
-                    actor_id,
-                    writer.worktree,
-                ));
+                let actor_id = store.attempt_operation(attempt.attempt_id, &call)?.actor_id;
+                pending.push((attempt.attempt_id, actor_id, writer.worktree));
             }
         }
         match page.next {
@@ -187,7 +179,7 @@ pub(crate) fn collect_unsettled(
     }
     drop(store);
     let mut removed = Vec::new();
-    for (run_id, attempt_id, actor_id, worktree) in pending {
+    for (attempt_id, actor_id, worktree) in pending {
         let settled = provenant_run::HolderContext {
             schema_version: 1,
             roots: provenant_run::RootSeed {
@@ -197,7 +189,6 @@ pub(crate) fn collect_unsettled(
             },
             project_id,
             actor_id,
-            run_id,
             attempt_id,
             host_delivery: None,
             launch: None,
@@ -262,11 +253,8 @@ fn collect_owned_worktree_with(
         return Ok(());
     }
     let task = store
-        .request(record.run_id, &call)?
-        .tasks
-        .into_iter()
-        .find(|task| task.task_id == record.task_id)
-        .ok_or("settled task missing")?;
+        .request(record.attempt_id, &call)?
+        .task;
     let Some(writer) = task.writer else {
         record_worktree_settlement(
             &store,
@@ -301,9 +289,11 @@ fn collect_owned_worktree_with(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let graph_member = matching_graph_hint(&roots.state, settled.project_id, &record).is_some();
+        let operation = store.attempt_operation(record.attempt_id, &call)?.operation_id;
+        let graph_member =
+            matching_graph_hint(&roots.state, settled.project_id, &record, &operation).is_some();
         // An unmatched graph operation retains custody without scanning other graphs.
-        if graph_member || record.operation_id.as_str().starts_with("graph-") {
+        if graph_member || operation.as_str().starts_with("graph-") {
             let reason = if graph_member {
                 "graph writer worktree retained for continuation, later rounds and explicit delivery"
             } else {

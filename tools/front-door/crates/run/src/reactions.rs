@@ -26,7 +26,6 @@ pub const NOTICE_BYTES: usize = 300;
 pub struct Reaction {
     pub schema_version: u64,
     pub attempt: AttemptId,
-    pub run: AttemptId,
     pub project: ProjectId,
     /// Sender of the notice: the actor that committed the settlement.
     pub sender: ActorId,
@@ -152,7 +151,6 @@ impl RunStore {
         Ok(Reaction {
             schema_version: 1,
             attempt: next.attempt_id,
-            run: next.attempt_id,
             project: next.project_id,
             sender: self.context.actor_id,
             notice,
@@ -195,23 +193,14 @@ impl RunStore {
         Ok(())
     }
 
-    /// Attempts of a run that still owe reactions.
-    pub fn pending_reactions(&self, run: AttemptId, call: &Request<'_>) -> Result<Vec<AttemptId>> {
+    /// Whether the attempt still owes reactions.
+    pub fn reaction_pending(&self, attempt: AttemptId, call: &Request<'_>) -> Result<bool> {
         call.check()?;
-        let ids: Vec<String> = {
-            let mut query = self.db.prepare(
-                "SELECT r.attempt FROM reactions r JOIN attempts a ON a.id=r.attempt \
-                 WHERE a.id=?1 AND r.project=?2 AND r.pending=1 ORDER BY r.rowid",
-            )?;
-            let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
-                |row| row.get(0),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        ids.into_iter()
-            .map(|id| AttemptId::parse(&id).map_err(|_| RunError::Validation("reaction attempt")))
-            .collect()
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reactions WHERE attempt=?1 AND project=?2 AND pending=1)",
+            params![attempt.to_string(), self.context.project_id.to_string()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn reaction(&self, attempt: AttemptId, call: &Request<'_>) -> Result<Option<Reaction>> {
@@ -235,7 +224,6 @@ impl RunStore {
             .reaction(reaction.attempt, call)?
             .ok_or(RunError::NotFound)?;
         if current.notice != reaction.notice
-            || current.run != reaction.run
             || (current.resolved && current.chair != reaction.chair)
             || (current.resolved && current.session != reaction.session)
         {
@@ -255,33 +243,32 @@ impl RunStore {
         })
     }
 
-    /// Run `step` on every attempt of `run` that owes reactions, under the
-    /// run's reaction lock so concurrent drains do not repeat each other (a
-    /// busy lock means another drain covers the run). `step` records progress
+    /// Run `step` on the attempt's owed reaction, under the attempt's
+    /// reaction lock so concurrent drains do not repeat each other (a busy
+    /// lock means another drain covers it). `step` records progress
     /// on the reaction it is given and calls the saver it is handed at each
     /// boundary, so work already done survives a crash. A step may outlast any
     /// one call budget, so every persistence operation here takes a fresh one.
-    /// A failed reaction stays pending for the next drain, the others still
-    /// run, and the first failure is returned.
+    /// A failed reaction stays pending for the next drain.
     pub fn drain_reactions(
         &self,
-        run: AttemptId,
+        attempt: AttemptId,
         clock: &dyn Clock,
         cancel: &CancelToken,
         step: &mut Step<'_>,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fresh = || -> Result<Request<'_>> { Ok(Request { clock, cancel }) };
-        if self.pending_reactions(run, &fresh()?)?.is_empty() {
+        if !self.reaction_pending(attempt, &fresh()?)? {
             return Ok(());
         }
-        let Some(_lock) = self.reaction_lock(run)? else {
+        let Some(_lock) = self.reaction_lock(attempt)? else {
             return Ok(());
         };
         let mut first = None;
         // Re-read under the lock: a drain that just finished leaves nothing.
-        for attempt in self.pending_reactions(run, &fresh()?)? {
+        if self.reaction_pending(attempt, &fresh()?)? {
             let Some(mut reaction) = self.reaction(attempt, &fresh()?)? else {
-                continue;
+                return Ok(());
             };
             let mut save =
                 |reaction: &Reaction| -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -302,10 +289,13 @@ impl RunStore {
         self.write(call, |tx| Self::insert_reaction(tx, reaction))
     }
 
-    /// Exclude other drains of this run. `None` when another holds it.
-    pub fn reaction_lock(&self, run: AttemptId) -> Result<Option<provenant_os::fs::LockGuard>> {
+    /// Exclude other drains of this attempt. `None` when another holds it.
+    pub fn reaction_lock(
+        &self,
+        attempt: AttemptId,
+    ) -> Result<Option<provenant_os::fs::LockGuard>> {
         use provenant_os::fs::{FsError, LockMode};
-        let directory = self.attempt_dir(run, false)?;
+        let directory = self.attempt_dir(attempt, false)?;
         match directory.try_lock(std::ffi::OsStr::new("reactions.lock"), LockMode::Exclusive) {
             Ok(lock) => Ok(Some(lock)),
             Err(FsError::LockTimeout { .. }) => Ok(None),

@@ -851,8 +851,8 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
     let mut input = ask(RequestKind::Question, "linked");
     let work = RequestWork {
         extra: Default::default(),
-        run_id: provenant_core::RunId::from_bytes([3; 16]),
-        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        graph: "lane-graph".into(),
+        node: Some("node".into()),
         attempt_id: None,
         repository: None,
         head: None,
@@ -931,8 +931,8 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     let f = Fixture::new();
     let work = RequestWork {
         extra: Default::default(),
-        run_id: provenant_core::RunId::from_bytes([3; 16]),
-        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        graph: "lane-graph".into(),
+        node: Some("node".into()),
         attempt_id: None,
         repository: None,
         head: None,
@@ -1023,8 +1023,8 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
             extra: Default::default(),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
-            task_id: None,
+            graph: "lane-graph".into(),
+            node: None,
             attempt_id: None,
             repository: None,
             head: None,
@@ -1105,8 +1105,8 @@ fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
         if let InboxInput::Ask { request, .. } = &mut input {
             request.work = Some(RequestWork {
                 extra: Default::default(),
-                run_id: provenant_core::RunId::from_bytes([3; 16]),
-                task_id: None,
+                graph: "lane-graph".into(),
+                node: None,
                 attempt_id: None,
                 repository: Some(provenant_records::AbsolutePath::new(&path).unwrap()),
                 head: None,
@@ -1146,8 +1146,8 @@ fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
             extra: Default::default(),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
-            task_id: None,
+            graph: "lane-graph".into(),
+            node: None,
             attempt_id: None,
             repository: None,
             head: None,

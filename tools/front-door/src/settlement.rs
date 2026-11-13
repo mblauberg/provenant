@@ -8,7 +8,7 @@
 //! least once, from the normal seam and from crash recovery alike; the notice,
 //! the log and the ledger row are idempotent by attempt, so the effect is
 //! exactly once.
-use provenant_core::{ActorId, CancelToken, MessageId, OperationId, ProjectId, Roots, RunId};
+use provenant_core::{ActorId, AttemptId, CancelToken, MessageId, OperationId, ProjectId, Roots};
 use provenant_fabric_store::{HostStore, Message, MessageKind, Request, Store};
 use provenant_os::clock::SystemClock;
 use provenant_run::Reaction;
@@ -199,7 +199,7 @@ pub(crate) struct Subject {
     pub state_root: PathBuf,
     pub project: ProjectId,
     pub actor: ActorId,
-    pub run: RunId,
+    pub attempt: AttemptId,
 }
 
 impl Subject {
@@ -296,7 +296,7 @@ fn drain_run_with_prices(
     let store = provenant_run::RunStore::open(&context, &call)?;
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
     let settings = config.domains.fabric.lanes.settlement;
-    store.drain_reactions(subject.run, &clock, &cancel, &mut |reaction, save| {
+    store.drain_reactions(subject.attempt, &clock, &cancel, &mut |reaction, save| {
         react(
             reaction,
             save,

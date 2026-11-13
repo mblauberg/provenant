@@ -330,9 +330,6 @@ impl BoundGraphOwner<'_> {
             operation_id: scope.operation.clone(),
             kind: provenant_run::OperationKind::Dispatch,
             request_digest: scope.digest,
-            run_id: provenant_core::RunId::from_bytes(
-                provenant_os::fs::entropy_128().map_err(|_| FacadeError::io("refusal identity"))?,
-            ),
             state: provenant_run::OperationState::Refused,
             blocked_reason: None,
             refusal: Some(diagnostic),
@@ -1114,7 +1111,7 @@ impl BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
@@ -1548,7 +1545,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
@@ -1595,7 +1592,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
@@ -1649,7 +1646,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let call = owner.call(self.cancel);
         let id = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let record = store.record(id, &call).map_err(run_error)?;
-        if record.operation_id != graph_operation("graph-attempt-operation", request.key)?
+        if store.attempt_operation(record.attempt_id, &call).map_err(run_error)?.operation_id != graph_operation("graph-attempt-operation", request.key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(request.key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(request.key.node_id.as_str())
@@ -1861,12 +1858,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &call,
             )
             .map_err(run_error)?;
-        let request = store.request(record.run_id, &call).map_err(run_error)?;
-        let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(FacadeError::StateCorrupt)?;
+        let request = store.request(record.attempt_id, &call).map_err(run_error)?;
+        let task = &request.task;
         if !explicit_base
             && self
                 .integration_base
@@ -2079,10 +2072,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let (_, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
             let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
             let attempt = session.service().status(id, &call).map_err(run_error)?;
-            body.push_str(&format!(
-                "Node {}: attempt {id}, run {}\n\n",
-                node.id, attempt.run_id
-            ));
+            body.push_str(&format!("Node {}: attempt {id} ({})\n\n", node.id, attempt.key));
             if graph_review_node(document, &node.id) {
                 // Retain each launched review route, including failed attempts
                 // before a successful retry. These are evidence, not a verdict.
@@ -2263,21 +2253,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 Ok(true)
             }
             Some(operation) => {
-                use provenant_run::{AttemptFilter, AttemptReader};
-                let attempts = store
-                    .attempts(
-                        AttemptFilter {
-                            run_id: Some(operation.run_id),
-                            task_id: None,
-                        },
-                        &call,
-                    )
-                    .map_err(run_error)?;
-                let mut found = false;
-                for fact in attempts {
-                    let fact = fact.map_err(run_error)?;
-                    let record = store.record(fact.attempt_id, &call).map_err(run_error)?;
-                    found = true;
+                let admitted = match store.operation_attempt(&operation.operation_id, &call) {
+                    Ok(admitted) => Some(admitted),
+                    Err(provenant_run::RunError::NotFound) => None,
+                    Err(error) => return Err(run_error(error)),
+                };
+                let found = admitted.is_some();
+                if let Some(admitted) = admitted {
+                    let record = store.record(admitted, &call).map_err(run_error)?;
                     if !store.custody_released(&record, &call).map_err(run_error)? {
                         return Ok(false);
                     }
@@ -2635,12 +2618,8 @@ impl BoundGraphOwner<'_> {
                 ) {
                     submission_prompt.push_str("\n\nThe previous member stopped on quota. Inspect the retained worktree and any commits, then continue the original task from that work rather than restart. Use another eligible member of the same alias.");
                 }
-                let request = store.request(previous.run_id, &call).map_err(run_error)?;
-                let previous_task = request
-                    .tasks
-                    .iter()
-                    .find(|task| task.task_id == previous.task_id)
-                    .ok_or(FacadeError::StateCorrupt)?;
+                let request = store.request(previous.attempt_id, &call).map_err(run_error)?;
+                let previous_task = &request.task;
                 let writer = provenant_run::resolve_writer(
                     self.factory.context.roots.state.as_path(),
                     writer_directory,
@@ -2684,29 +2663,17 @@ impl BoundGraphOwner<'_> {
             let mut accepted_skill_location = None;
             let mut accepted_attempt = None;
             let mut context = match &operation {
-                Some(operation) => match store.request(operation.run_id, &call) {
-                    Ok(request) => {
-                        let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
+                Some(operation) => match store
+                    .operation_attempt(&operation.operation_id, &call)
+                    .and_then(|admitted| Ok((admitted, store.request(admitted, &call)?)))
+                {
+                    Ok((admitted, request)) => {
+                        let task = &request.task;
                         if accepted {
-                            use provenant_run::{AttemptFilter, AttemptReader};
                             let session = owner.session(self.cancel)?;
-                            let mut attempts = session
-                                .store
-                                .attempts(
-                                    AttemptFilter {
-                                        run_id: Some(operation.run_id),
-                                        task_id: Some(task.task_id),
-                                    },
-                                    &call,
-                                )
-                                .map_err(run_error)?;
-                            let attempt = attempts
-                                .next()
-                                .ok_or(FacadeError::StateCorrupt)?
-                                .map_err(run_error)?;
                             let record = session
                                 .store
-                                .record(attempt.attempt_id, &call)
+                                .record(admitted, &call)
                                 .map_err(run_error)?;
                             if record.prompt.bytes > provenant_records::run::RECORD_LIMIT {
                                 return Err(FacadeError::StateCorrupt);
@@ -2717,7 +2684,7 @@ impl BoundGraphOwner<'_> {
                                 let prompt = session
                                     .store
                                     .read_output(
-                                        attempt.attempt_id,
+                                        admitted,
                                         provenant_run::ArtifactPart::Prompt,
                                         provenant_run::ByteRange {
                                             offset,
@@ -3020,15 +2987,14 @@ impl BoundGraphOwner<'_> {
             }
             let exclude = self.route_exclusions(route, node.prior_attempts, accepted);
             let base = if accepted {
+                let operation = operation.as_ref().ok_or(FacadeError::StateCorrupt)?;
+                let admitted = store
+                    .operation_attempt(&operation.operation_id, &call)
+                    .map_err(run_error)?;
                 store
-                    .request(
-                        operation.as_ref().ok_or(FacadeError::StateCorrupt)?.run_id,
-                        &call,
-                    )
+                    .request(admitted, &call)
                     .map_err(run_error)?
-                    .tasks
-                    .first()
-                    .ok_or(FacadeError::StateCorrupt)?
+                    .task
                     .base_ref
                     .clone()
             } else if review_subject_missing {
@@ -3109,7 +3075,7 @@ impl BoundGraphOwner<'_> {
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
-                tasks: vec![SubmittedTask {
+                task: SubmittedTask {
                     require_skill_location: accepted_skill_location
                         .unwrap_or(node.require_skill_location),
                     context,
@@ -3216,8 +3182,7 @@ impl BoundGraphOwner<'_> {
                     delivery_id: None,
                     deliver: delivery,
                     new_worktree: None,
-                }],
-                concurrency: Some(1),
+                },
                 knobs: if let Some(knobs) = accepted_knobs {
                     knobs
                 } else {
@@ -4844,12 +4809,10 @@ mod recovery_rebuild_tests {
 
                                 let original_request = provenant_records::run::CanonicalRequest {
                                     extra: Default::default(),
-                                    child_attempt_id_version: None,
                                     chair: None,
                                     fresh_continuation: None,
                                     schema_version: 1,
-                                    tasks: vec![original_task.clone()],
-                                    concurrency: 1,
+                                    task: original_task.clone(),
                                     parent: None,
                                     lane_depth: None,
                                     parent_attempt: None,

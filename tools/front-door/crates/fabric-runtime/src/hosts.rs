@@ -1526,8 +1526,7 @@ mod tests {
             input: facade::SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id: operation.clone(),
-                tasks: vec![task],
-                concurrency: None,
+                task,
                 knobs: Vec::new(),
                 host: None,
             },
