@@ -677,6 +677,17 @@ pub fn fixture_ignore_term() -> io::Result<()> {
     Ok(())
 }
 
+/// Start an ordinary fixture child in its own session without sanitising fds.
+#[cfg(any(test, feature = "fixture"))]
+pub fn fixture_session_on_exec(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: after fork this hook only calls setsid, which takes no pointers,
+    // allocates nothing and affects only the child process.
+    unsafe {
+        command.pre_exec(fixture_create_session);
+    }
+}
+
 /// Move only the dedicated fixture process into a new session.
 #[cfg(any(test, feature = "fixture"))]
 pub fn fixture_create_session() -> io::Result<()> {
