@@ -3319,7 +3319,13 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
-        if !sandbox.sandboxed && route.adapter == "codex" {
+        if !sandbox.sandboxed
+            && let Some((environment, fallback)) = adapter_spec
+                .filter(|spec| {
+                    spec.model_observation == provenant_records::ModelObservation::Rollout
+                })
+                .and_then(|spec| spec.default_account_directory)
+        {
             // Native Codex writes its rollout beside the selected login rather
             // than in this candidate's private state. Retain the launch-time
             // selector outside the lane-writable candidate subtree so settlement
@@ -3327,9 +3333,9 @@ pub(super) fn prepare_candidates(
             let codex_home = spec
                 .env
                 .iter()
-                .find(|(key, _)| key == "CODEX_HOME")
+                .find(|(key, _)| key == environment)
                 .map(|(_, value)| PathBuf::from(value))
-                .unwrap_or_else(|| home.join(".codex"));
+                .unwrap_or_else(|| home.join(fallback));
             spec.setup.push(SetupStep::WriteFile {
                 path: paths
                     .provider_state

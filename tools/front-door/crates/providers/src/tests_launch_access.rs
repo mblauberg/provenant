@@ -1159,7 +1159,6 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             };
             assert_eq!(env("HOME"), expected_home.as_ref());
             for (key, expected) in [
-                ("GIT_CONFIG_GLOBAL", "/dev/null"),
                 ("GIT_CONFIG_NOSYSTEM", "1"),
                 ("XDG_CONFIG_HOME", "/fixture/state/config"),
                 ("XDG_DATA_HOME", "/fixture/state/data"),
@@ -1174,6 +1173,20 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .collect();
                 assert_eq!(values, [std::ffi::OsStr::new(expected)], "{key}");
             }
+            let globals: Vec<_> = spec
+                .env
+                .iter()
+                .filter(|(key, _)| key == "GIT_CONFIG_GLOBAL")
+                .map(|(_, value)| Path::new(value))
+                .collect();
+            assert_eq!(globals.len(), 1, "one unambiguous Git config selector");
+            assert!(
+                globals[0] == Path::new("/dev/null")
+                    || spec.setup.iter().any(|step| {
+                        matches!(step, SetupStep::WriteFile { path, .. } if path == globals[0])
+                    }),
+                "Git config must be disabled or supplied by launch setup"
+            );
             let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
             assert_eq!(config_home, Path::new("/fixture/state/config"));
