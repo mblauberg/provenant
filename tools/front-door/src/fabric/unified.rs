@@ -1921,7 +1921,7 @@ mod tests {
 
     #[test]
     fn unreadable_attempt_keeps_other_status_rows() {
-        let mut rows = vec![
+        let mut rows = [
             json!({"kind":"attempt", "state":"running"}),
             json!({"kind":"graph", "state":"running"}),
         ];
