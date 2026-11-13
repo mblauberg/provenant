@@ -37,6 +37,7 @@ receives it, and a manual review applies it too. Inspection questions are in
 Say what was inspected: the dependency cone read (callers, owners, tests,
 config, migrations), the checks that ran with their results, and what was not
 reachable. Never infer coverage from a green summary. Check that criteria map
-to evidence and that no test was loosened, skipped or deleted to get a green
-run. For rendered UI, also inspect light and dark captures of changed screens
+to evidence and that no test was loosened or deleted to mask a real defect
+(pruning rigid, redundant or implementation-pinned tests with stated reasons is
+welcome). For rendered UI, also inspect light and dark captures of changed screens
 (`ui-ux-design`).

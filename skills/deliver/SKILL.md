@@ -22,8 +22,11 @@ an unknown cause, the refactor rules below for restructuring.
 
 ## Writer rules
 
-- Never edit a failing acceptance test or weaken an assertion to pass. Report
-  any changed test with its reason.
+- Never weaken an assertion to pass. When an existing test fails, decide
+  whether it caught a defect or pins implementation detail: fix the code for a
+  defect; rewrite the test as an invariant or delete it if it pins
+  implementation. Keep regression tests minimal and prune redundant tests.
+  Report every changed or removed test with its reason.
 - Update the owned docs in the same pull request; a settled decision moves to
   its durable home (`engineering-docs`).
 - Keep compatibility only for published contracts. Otherwise change the

@@ -1,14 +1,21 @@
 # Lens: tests
 
-Judge each test by the behaviour it proves and the defect it would catch.
+Judge each test by the invariant it proves and the defect it would catch. Tests
+must be designed extensibly, flexibly and reliably so future code evolution
+does not require updating tests. Prefer invariants and property-style checks at
+public boundaries over rigid tests, example snapshots or exact string/count
+assertions.
 Use the test-design judgement and boundary references for the full standard.
 Cite the exact command and result used for anything you ran.
 
 ## Findings
 
 A test finding names the production change that would pass unnoticed: a
-surviving mutant, or an untested behaviour on a reachable path. It keeps its
-normal severity.
+surviving mutant, or an uncovered boundary invariant on a reachable path. It
+keeps its normal severity. Reviewers must never demand rigid tests, exact count
+or string pins, or regression tests when an invariant at the public boundary
+suffices. Regression tests remain minimal: at most one small test only where no
+invariant covers the defect.
 
 These also stay findings, because each leaves a check proving less than it
 claims:
@@ -32,10 +39,10 @@ A finding that names no such production change is a note and not repair input.
 That covers criterion mapping, a generic untested branch, and a pin on wording,
 a count or a constant.
 
-Also notes, as prompts to prune:
+Also notes, as prompts to prune or rewrite:
 
-- A test pinned to the implementation (private call counts, internal structure)
-  that would fail on a behaviour-preserving refactor.
+- A rigid test, example snapshot, or test pinned to the implementation (private
+  call counts, internal structure) that would fail on a behaviour-preserving refactor.
 - A behaviour proved again at another level without a distinct defect, and net
   test growth with no new behaviour.
 - Near-duplicate cases that a readable table-driven test could merge.
