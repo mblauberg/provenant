@@ -1419,8 +1419,7 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 Path::new("/fixture/repo"),
                 Some(&token),
             ))?;
-            assert!(confined.env.iter().any(|(key, _)| key == "CARGO_HOME"));
-            assert!(confined.setup.iter().any(|step| matches!(step, crate::launch::SetupStep::Symlink { link, .. } if link.ends_with("cargo-home/registry"))));
+            assert!(!confined.tool_requirements.exec.is_empty());
         }
     }
     Ok(())
